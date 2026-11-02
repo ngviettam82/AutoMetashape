@@ -54,6 +54,44 @@ SUPPORTED_IMAGE_EXTS = (
 )
 
 
+def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
+    """Estimates sharpness quality for all ingested photos and disables blurry photos.
+
+    According to official Agisoft Metashape guidelines, images with a quality index below 0.5 units
+    are considered out-of-focus or motion-blurred and should be excluded to prevent alignment drift
+    and depth map noise.
+
+    Args:
+        chunk: Active Metashape.Chunk.
+        min_quality: Quality threshold below which cameras are disabled (default: 0.5).
+
+    Returns:
+        int: Count of disabled blurry cameras.
+    """
+    print(f"\n[Quality Filter] Estimating sharpness quality across {len(chunk.cameras)} cameras...", flush=True)
+    t_qual = time.time()
+    chunk.analyzeImages()
+
+    disabled_count = 0
+    for cam in chunk.cameras:
+        qual_str = cam.meta.get("Image/Quality")
+        if qual_str is not None:
+            try:
+                qual_val = float(qual_str)
+                if qual_val < min_quality:
+                    cam.enabled = False
+                    disabled_count += 1
+            except ValueError:
+                pass
+
+    active_count = sum(1 for c in chunk.cameras if c.enabled)
+    t_elapsed = time.time() - t_qual
+    print(f"  [Quality Filter] Analyzed in {t_elapsed:.1f}s: {active_count}/{len(chunk.cameras)} sharp images passed (Quality >= {min_quality:.2f}).", flush=True)
+    if disabled_count > 0:
+        print(f"  [Quality Filter] Automatically disabled {disabled_count} blurry/defocused images (< {min_quality:.2f}) to protect alignment accuracy.", flush=True)
+    return disabled_count
+
+
 def robust_bounds(sorted_vals, k: float = 3.0) -> tuple:
     """Calculates robust spatial bounding intervals using Median Absolute Deviation (MAD).
 
@@ -161,7 +199,7 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     Returns:
         True if bounding box was successfully updated; False if skipped.
     """
-    aligned_cams = [c for c in chunk.cameras if c.transform]
+    aligned_cams = [c for c in chunk.cameras if c.transform and c.enabled]
     if len(aligned_cams) < 2:
         print("  [Auto-Crop] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
@@ -269,7 +307,7 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     Returns:
         True if bounding box was successfully updated; False if skipped.
     """
-    aligned_cams = [c for c in chunk.cameras if c.transform]
+    aligned_cams = [c for c in chunk.cameras if c.transform and c.enabled]
     if len(aligned_cams) < 2:
         print("  [Auto-Crop-GPS] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
@@ -399,6 +437,7 @@ def run_reconstruction(
     custom_faces: int = 4000000,
     crop_method: str = "gps-square",
     crop_padding: float = 0.05,
+    min_quality: float = 0.5,
     pause_after_crop: bool = False,
 ):
     t_start = time.time()
@@ -442,6 +481,10 @@ def run_reconstruction(
     chunk.addPhotos(img_files)
     print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
 
+    # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
+    if min_quality > 0.0:
+        filter_image_quality(chunk, min_quality=min_quality)
+
     # Step 2: Feature Detection & Matching
     print("\n[2/6] Executing GPU Feature Matching (GPS Reference Preselection)...", flush=True)
     t_match = time.time()
@@ -460,8 +503,9 @@ def run_reconstruction(
     print("\n[3/6] Aligning Cameras & Initial Bundle Adjustment...", flush=True)
     t_align = time.time()
     chunk.alignCameras(adaptive_fitting=True)
-    aligned_count = sum(1 for c in chunk.cameras if c.transform)
-    print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{len(chunk.cameras)} cameras.", flush=True)
+    aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
+    enabled_count = sum(1 for c in chunk.cameras if c.enabled)
+    print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
 
     # Camera Optimization for Ultra Grade
     if grade == "ultra":
@@ -571,7 +615,7 @@ def run_reconstruction(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 4M Faces, TIFF Textures, GPS-Square Auto-Crop)"
+        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 4M Faces, TIFF Textures, GPS-Square Auto-Crop, Sharpness Filtering)"
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
@@ -585,10 +629,23 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
     parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
+    parser.add_argument(
+        "--min-quality",
+        type=float,
+        default=0.5,
+        help="Minimum image sharpness quality threshold (default: 0.5; photos below this are disabled to prevent alignment blur)",
+    )
+    parser.add_argument(
+        "--no-quality-filter",
+        dest="disable_quality_filter",
+        action="store_true",
+        help="Disable automatic blurry image quality estimation and filtering",
+    )
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     args = parser.parse_args()
 
     crop_method = "none" if args.no_crop else args.crop_method
+    min_quality = 0.0 if args.disable_quality_filter else args.min_quality
 
     run_reconstruction(
         images_dir=args.images,
@@ -597,5 +654,6 @@ if __name__ == "__main__":
         custom_faces=args.faces,
         crop_method=crop_method,
         crop_padding=args.crop_padding,
+        min_quality=min_quality,
         pause_after_crop=args.pause_after_crop,
     )
