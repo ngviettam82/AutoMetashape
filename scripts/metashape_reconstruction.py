@@ -21,26 +21,105 @@ import time
 import Metashape
 
 
-def calculate_percentile(sorted_list, p: float) -> float:
-    """Calculates percentile p (0.0 to 100.0) from a sorted list of numerical values."""
-    if not sorted_list:
-        return 0.0
-    k = (len(sorted_list) - 1) * (p / 100.0)
-    f = math.floor(k)
-    c = math.ceil(k)
-    if f == c:
-        return sorted_list[int(k)]
-    d0 = sorted_list[int(f)] * (c - k)
-    d1 = sorted_list[int(c)] * (k - f)
-    return d0 + d1
+def robust_bounds(sorted_vals, k: float = 3.0) -> tuple:
+    """Calculates robust spatial bounding intervals using Median Absolute Deviation (MAD).
+
+    Unlike naive percentiles or min/max, MAD offers a 50% statistical breakdown point,
+    meaning it completely rejects up to 49.9% outlier contamination (such as secondary
+    buildings, perimeter structures, or background features captured by 10-20% of cameras).
+    """
+    if not sorted_vals:
+        return 0.0, 0.0
+    n = len(sorted_vals)
+    med = sorted_vals[n // 2]
+    devs = sorted([abs(v - med) for v in sorted_vals])
+    mad = devs[n // 2]
+    # 1.4826 * MAD approximates the normal distribution standard deviation (sigma)
+    sigma = 1.4826 * mad
+    if sigma < 1e-4:
+        return sorted_vals[0], sorted_vals[-1]
+
+    # Filter values within k standard deviations of the median
+    inliers = [v for v in sorted_vals if abs(v - med) <= k * sigma]
+    if not inliers:
+        return sorted_vals[0], sorted_vals[-1]
+    return min(inliers), max(inliers)
+
+
+def solve_ray_convergence_irls(aligned_cams, iterations: int = 3) -> tuple:
+    """Solves 3D camera optical ray convergence using Iteratively Reweighted Least Squares (IRLS).
+
+    Robustly detects the primary target building and prunes outlier cameras (e.g. when 10-30%
+    of cameras focus on secondary points, takeoff paths, ground targets, or other structures).
+
+    Returns:
+        tuple: (target_center: Metashape.Vector, inlier_cams: list of (c_pos, d))
+    """
+    v_z = Metashape.Vector([0.0, 0.0, 1.0])
+    cam_data = []
+    for c in aligned_cams:
+        c_pos = c.center
+        d = (c.transform.rotation() * v_z).normalized()
+        cam_data.append((c_pos, d))
+
+    if len(cam_data) < 2:
+        return None, []
+
+    active_cams = cam_data
+    target_center = None
+
+    for it in range(iterations):
+        M = Metashape.Matrix([[0.0] * 3, [0.0] * 3, [0.0] * 3])
+        V = Metashape.Vector([0.0, 0.0, 0.0])
+
+        for c_pos, d in active_cams:
+            p00 = 1.0 - d.x * d.x
+            p01 = -d.x * d.y
+            p02 = -d.x * d.z
+            p10 = -d.y * d.x
+            p11 = 1.0 - d.y * d.y
+            p12 = -d.y * d.z
+            p20 = -d.z * d.x
+            p21 = -d.z * d.y
+            p22 = 1.0 - d.z * d.z
+
+            P = Metashape.Matrix([[p00, p01, p02], [p10, p11, p12], [p20, p21, p22]])
+            M = M + P
+            V = V + P * c_pos
+
+        try:
+            if abs(M.det()) < 1e-4:
+                break
+            target_center = M.inv() * V
+        except Exception:
+            break
+
+        # Calculate residual orthogonal distance from current centroid to every camera ray
+        residuals = []
+        for c_pos, d in cam_data:
+            diff = target_center - c_pos
+            # Orthogonal distance: |diff - (diff . d) * d|
+            proj = diff - d * (diff * d)
+            residuals.append((proj.norm(), (c_pos, d)))
+
+        residuals.sort(key=lambda x: x[0])
+        med_res = residuals[len(residuals) // 2][0]
+        # Inlier threshold: 2.5 * median residual (or at least 1.5 meters)
+        thresh = max(2.5 * med_res, 1.5)
+
+        active_cams = [item for res, item in residuals if res <= thresh]
+        if len(active_cams) < 2:
+            break
+
+    return target_center, active_cams
 
 
 def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     """Automatically crops chunk.region (bounding box) tightly around the main target structure.
 
-    Computes the least-squares 3D intersection of camera optical viewing axes to pinpoint the
-    focal centroid of the survey, filters candidate sparse tie points to eliminate distant horizon/sky
-    outliers, and sets chunk.region center and extents with a configurable safety padding.
+    Uses Robust IRLS ray convergence to lock onto the majority target structure (even when 10-30%
+    of cameras are aimed at secondary objects) and Median Absolute Deviation (MAD) spatial clustering
+    to exclude all tie points belonging to external areas.
 
     Args:
         chunk: Active Metashape.Chunk.
@@ -54,55 +133,29 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         print("  [Auto-Crop] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
 
-    print(f"\n[Auto-Crop] Calculating 3D camera optical ray convergence from {len(aligned_cams)} cameras...", flush=True)
+    print(f"\n[Auto-Crop] Calculating robust 3D camera optical ray convergence from {len(aligned_cams)} cameras...", flush=True)
 
-    # 1. Solve 3D Ray Convergence using Least-Squares Line Intersection
-    # Optical ray: L_i(t) = c_i + t * d_i (d_i is normalized forward optical axis)
-    # Projection matrix P_i = I - d_i * d_i^T
-    # Sum(P_i) * x = Sum(P_i * c_i)
-    M = Metashape.Matrix([[0.0] * 3, [0.0] * 3, [0.0] * 3])
-    V = Metashape.Vector([0.0, 0.0, 0.0])
-    v_z = Metashape.Vector([0.0, 0.0, 1.0])
-    cam_centers = []
+    # 1. Solve Robust 3D Ray Convergence using IRLS
+    target_center, inlier_cams = solve_ray_convergence_irls(aligned_cams, iterations=3)
 
-    for cam in aligned_cams:
-        c_pos = cam.center
-        cam_centers.append(c_pos)
-        d = (cam.transform.rotation() * v_z).normalized()
-
-        # Projection onto plane orthogonal to viewing ray
-        p00 = 1.0 - d.x * d.x
-        p01 = -d.x * d.y
-        p02 = -d.x * d.z
-        p10 = -d.y * d.x
-        p11 = 1.0 - d.y * d.y
-        p12 = -d.y * d.z
-        p20 = -d.z * d.x
-        p21 = -d.z * d.y
-        p22 = 1.0 - d.z * d.z
-
-        P = Metashape.Matrix([[p00, p01, p02], [p10, p11, p12], [p20, p21, p22]])
-        M = M + P
-        V = V + P * c_pos
-
-    target_center = None
-    try:
-        if abs(M.det()) > 1e-4:
-            target_center = M.inv() * V
-            print(f"  [Auto-Crop] Optical ray convergence centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
-    except Exception as e:
-        print(f"  [Auto-Crop] Optical convergence solve notice: {e}", flush=True)
-
-    if target_center is None:
+    if target_center is not None:
+        inlier_count = len(inlier_cams)
+        outlier_count = len(aligned_cams) - inlier_count
+        print(f"  [Auto-Crop] Optical ray convergence centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
+        print(f"  [Auto-Crop] Camera consensus: {inlier_count}/{len(aligned_cams)} cameras locked on main structure ({outlier_count} secondary/outlier views pruned).", flush=True)
+    else:
+        cam_centers = [c.center for c in aligned_cams]
         target_center = Metashape.Vector([
             sum(c.x for c in cam_centers) / len(cam_centers),
             sum(c.y for c in cam_centers) / len(cam_centers),
             sum(c.z for c in cam_centers) / len(cam_centers)
         ])
+        inlier_cams = [(c.center, None) for c in aligned_cams]
         print(f"  [Auto-Crop] Using camera cluster centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
 
-    # 2. Estimate survey radius and filter horizon points
-    dists = [(c - target_center).norm() for c in cam_centers]
+    # 2. Estimate survey radius from consensus inlier cameras
+    inlier_centers = [c_pos for c_pos, _ in inlier_cams]
+    dists = [(c - target_center).norm() for c in inlier_centers]
     dists.sort()
     med_dist = dists[len(dists) // 2]
     max_radius = med_dist * 0.85 if med_dist > 0 else float("inf")
@@ -139,15 +192,12 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     local_y.sort()
     local_z.sort()
 
-    # 4. Percentile clipping to reject stray outliers (sky / ground noise)
-    min_x = calculate_percentile(local_x, 2.0)
-    max_x = calculate_percentile(local_x, 98.0)
-    min_y = calculate_percentile(local_y, 2.0)
-    max_y = calculate_percentile(local_y, 98.0)
-    min_z = calculate_percentile(local_z, 1.0)
-    max_z = calculate_percentile(local_z, 99.0)
+    # 4. Robust MAD bounding: rejects secondary cluster points with 50% breakdown tolerance
+    min_x, max_x = robust_bounds(local_x, k=3.0)
+    min_y, max_y = robust_bounds(local_y, k=3.0)
+    min_z, max_z = robust_bounds(local_z, k=3.0)
 
-    # 5. Apply safety padding
+    # 5. Apply safety padding around the main structure
     span_x = (max_x - min_x) * (1.0 + 2.0 * padding)
     span_y = (max_y - min_y) * (1.0 + 2.0 * padding)
     span_z = (max_z - min_z) * (1.0 + 2.0 * padding)
@@ -169,7 +219,103 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     print(f"  [Auto-Crop] Successfully cropped region to main structure!", flush=True)
     print(f"  Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
     print(f"  Size:   ({new_size.x:.2f} x {new_size.y:.2f} x {new_size.z:.2f}) [Padding: {int(padding * 100)}%]", flush=True)
-    print(f"  Isolated Structure Tie Points: {valid_count:,} points", flush=True)
+    print(f"  Isolated Main Structure Tie Points: {valid_count:,} points", flush=True)
+    return True
+
+
+def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
+    """Crops chunk.region to the smallest enclosing square containing camera GPS (X, Y) poses,
+    with vertical bounds set by the minimum and maximum tie-point altitudes inside that square.
+
+    Ideal for grid surveys, mapping flights, property compounds, and roof scans.
+
+    Args:
+        chunk: Active Metashape.Chunk.
+        padding: Safety margin padding applied to square dimensions and height (default: 0.05 / 5%).
+
+    Returns:
+        True if bounding box was successfully updated; False if skipped.
+    """
+    aligned_cams = [c for c in chunk.cameras if c.transform]
+    if len(aligned_cams) < 2:
+        print("  [Auto-Crop-GPS] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
+        return False
+
+    print(f"\n[Auto-Crop-GPS] Computing camera horizontal envelope from {len(aligned_cams)} cameras...", flush=True)
+
+    rot = chunk.region.rot
+    rot_t = rot.t()  # World to local level coordinate frame
+
+    # 1. Transform camera poses to local horizontal frame
+    cam_local_x, cam_local_y = [], []
+    for c in aligned_cams:
+        loc = rot_t * c.center
+        cam_local_x.append(loc.x)
+        cam_local_y.append(loc.y)
+
+    cam_local_x.sort()
+    cam_local_y.sort()
+
+    # Apply robust MAD bounding to reject distant takeoff/landing outlier cameras (e.g. 10% outlier poses)
+    min_cx, max_cx = robust_bounds(cam_local_x, k=3.0)
+    min_cy, max_cy = robust_bounds(cam_local_y, k=3.0)
+
+    span_x = max_cx - min_cx
+    span_y = max_cy - min_cy
+    mid_x = (min_cx + max_cx) * 0.5
+    mid_y = (min_cy + max_cy) * 0.5
+
+    # Smallest square enclosing camera footprint (with padding)
+    side = max(span_x, span_y) * (1.0 + 2.0 * padding)
+    half_side = side * 0.5
+
+    sq_min_x = mid_x - half_side
+    sq_max_x = mid_x + half_side
+    sq_min_y = mid_y - half_side
+    sq_max_y = mid_y + half_side
+
+    # 2. Extract altitude range from tie points strictly inside the horizontal square
+    pts = chunk.tie_points.points if chunk.tie_points else []
+    if not pts:
+        print("  [Auto-Crop-GPS] No tie points available; preserving default region.", flush=True)
+        return False
+
+    inside_z = []
+    for pt in pts:
+        if not pt.valid:
+            continue
+        loc = rot_t * pt.coord[:3]
+        if sq_min_x <= loc.x <= sq_max_x and sq_min_y <= loc.y <= sq_max_y:
+            inside_z.append(loc.z)
+
+    if len(inside_z) < 50:
+        print(f"  [Auto-Crop-GPS] Insufficient tie points inside square ({len(inside_z)}); preserving default region.", flush=True)
+        return False
+
+    inside_z.sort()
+    # Robust lowest (ground) and highest (roof/spire) altitude: 1st to 99th percentile to exclude stray noise
+    n_z = len(inside_z)
+    min_z = inside_z[max(0, int(n_z * 0.01))]
+    max_z = inside_z[min(n_z - 1, int(n_z * 0.99))]
+
+    span_z = (max_z - min_z) * (1.0 + 2.0 * padding)
+    mid_z = (min_z + max_z) * 0.5
+
+    # 3. Assign new region
+    mid_local = Metashape.Vector([mid_x, mid_y, mid_z])
+    new_center = rot * mid_local
+    new_size = Metashape.Vector([side, side, span_z])
+
+    region = chunk.region
+    region.center = new_center
+    region.size = new_size
+    chunk.region = region
+
+    print(f"  [Auto-Crop-GPS] Successfully cropped region to Camera GPS Square!", flush=True)
+    print(f"  Square Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
+    print(f"  Square Extents: ({side:.2f}m x {side:.2f}m x {span_z:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Altitude Range: [{min_z:.2f}m (ground) to {max_z:.2f}m (roof)]", flush=True)
+    print(f"  Tie Points Inside Square: {len(inside_z):,} points", flush=True)
     return True
 
 
@@ -218,7 +364,7 @@ def run_reconstruction(
     output_dir: str = None,
     grade: str = "ultra",
     custom_faces: int = 10000000,
-    crop_structure: bool = True,
+    crop_method: str = "structure",
     crop_padding: float = 0.15,
     pause_after_crop: bool = False,
 ):
@@ -288,10 +434,14 @@ def run_reconstruction(
     if grade == "ultra":
         filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
 
-    # Step 3b: Automatic Bounding Box Crop to Main Target Structure
+    # Step 3b: Automatic Bounding Box Crop
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
-    if crop_structure:
+    if crop_method == "structure":
         auto_crop_to_main_structure(chunk, padding=crop_padding)
+    elif crop_method == "gps-square":
+        auto_crop_camera_gps_square(chunk, padding=crop_padding)
+    else:
+        print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
 
     # Save project checkpoint immediately after alignment and cropping
     doc.save(psx_out)
@@ -394,18 +544,25 @@ if __name__ == "__main__":
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
     parser.add_argument("--grade", choices=["high", "ultra"], default="ultra", help="Reconstruction grade preset (default: ultra)")
     parser.add_argument("--faces", type=int, default=10000000, help="Custom face count for ultra grade (default: 10000000 / 10M)")
-    parser.add_argument("--no-crop-structure", dest="crop_structure", action="store_false", help="Disable automatic bounding box crop to main structure")
-    parser.set_defaults(crop_structure=True)
-    parser.add_argument("--crop-padding", type=float, default=0.15, help="Safety margin padding factor around main structure (default: 0.15 / 15%%)")
+    parser.add_argument(
+        "--crop-method",
+        choices=["structure", "gps-square", "none"],
+        default="structure",
+        help="Bounding box crop method: 'structure' (optical ray convergence on main building walls), 'gps-square' (smallest enclosing square of camera GPS poses with tie-point altitude bounds), or 'none' (default: structure)",
+    )
+    parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
+    parser.add_argument("--crop-padding", type=float, default=0.15, help="Safety margin padding factor around bounding box (default: 0.15 / 15%%)")
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     args = parser.parse_args()
+
+    crop_method = "none" if args.no_crop else args.crop_method
 
     run_reconstruction(
         images_dir=args.images,
         output_dir=args.output,
         grade=args.grade,
         custom_faces=args.faces,
-        crop_structure=args.crop_structure,
+        crop_method=crop_method,
         crop_padding=args.crop_padding,
         pause_after_crop=args.pause_after_crop,
     )
