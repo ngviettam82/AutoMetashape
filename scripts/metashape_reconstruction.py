@@ -60,8 +60,10 @@ def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: flo
     print("  Camera optimization complete.", flush=True)
 
 
-def run_reconstruction(images_dir: str, output_dir: str, grade: str = "ultra", custom_faces: int = 10000000):
+def run_reconstruction(images_dir: str, output_dir: str = None, grade: str = "ultra", custom_faces: int = 10000000):
     t_start = time.time()
+    if not output_dir:
+        output_dir = os.path.join(images_dir, "model")
     os.makedirs(output_dir, exist_ok=True)
 
     print("=========================================================================")
@@ -80,17 +82,23 @@ def run_reconstruction(images_dir: str, output_dir: str, grade: str = "ultra", c
     chunk = doc.addChunk()
     chunk.label = "Production_Reconstruction"
 
-    # Step 1: Scan and Ingest Images
+    # Step 1: Recursively Scan and Ingest Images from Folder & Subfolders
     supported_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
-    img_files = sorted([
-        os.path.join(images_dir, f)
-        for f in os.listdir(images_dir)
-        if f.lower().endswith(supported_exts)
-    ])
-    if not img_files:
-        raise ValueError(f"No valid image files found in '{images_dir}'!")
+    img_files = []
+    abs_output = os.path.abspath(output_dir)
+    for root, _dirs, files in os.walk(images_dir):
+        # Prevent scanning files in the output directory if located inside images_dir
+        if os.path.abspath(root).startswith(abs_output):
+            continue
+        for f in files:
+            if f.lower().endswith(supported_exts):
+                img_files.append(os.path.join(root, f))
+    img_files = sorted(img_files)
 
-    print(f"\n[1/6] Ingesting {len(img_files)} images from: {images_dir}", flush=True)
+    if not img_files:
+        raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
+
+    print(f"\n[1/6] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
     chunk.addPhotos(img_files)
     print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
 
@@ -197,8 +205,8 @@ def run_reconstruction(images_dir: str, output_dir: str, grade: str = "ultra", c
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 10M Faces, TIFF Textures)")
-    parser.add_argument("--images", required=True, help="Input directory containing raw images")
-    parser.add_argument("--output", default="data/final_model", help="Output directory for 3D assets (default: data/final_model)")
+    parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
+    parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
     parser.add_argument("--grade", choices=["high", "ultra"], default="ultra", help="Reconstruction grade preset (default: ultra)")
     parser.add_argument("--faces", type=int, default=10000000, help="Custom face count for ultra grade (default: 10000000 / 10M)")
     args = parser.parse_args()
