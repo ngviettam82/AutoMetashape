@@ -1,9 +1,9 @@
-# Copyright (c) 2026, GaussianSplat Contributors.
+# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Autonomous High-Precision Photogrammetry Pipeline using Agisoft Metashape Pro.
+"""AutoMetashape: Autonomous High-Precision Photogrammetry Pipeline using Agisoft Metashape Pro.
 
 Reconstructs production-ready 3D architectural models (.obj, .mtl, .glb, .psx)
 directly from raw aerial drone or ground camera image directories on NVIDIA GPUs.

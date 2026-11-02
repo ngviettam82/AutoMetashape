@@ -1,4 +1,4 @@
-# Copyright (c) 2026, GaussianSplat Contributors.
+# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -8,10 +8,10 @@ requires = ["setuptools>=64.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "photogrammetry-workspace"
+name = "autometashape"
 version = "1.0.0"
-description = "Autonomous High-Precision 3D Photogrammetry & Architectural Reconstruction Workspace"
-authors = [{ name = "GaussianSplat Contributors" }]
+description = "AutoMetashape: Autonomous High-Precision 3D Photogrammetry Pipeline"
+authors = [{ name = "AutoMetashape Contributors" }]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 
