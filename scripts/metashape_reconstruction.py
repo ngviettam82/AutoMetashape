@@ -74,14 +74,13 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
 
     disabled_count = 0
     for cam in chunk.cameras:
-        qual_str = cam.meta.get("Image/Quality")
-        if qual_str is not None:
+        if "Image/Quality" in cam.meta:
             try:
-                qual_val = float(qual_str)
+                qual_val = float(cam.meta["Image/Quality"])
                 if qual_val < min_quality:
                     cam.enabled = False
                     disabled_count += 1
-            except ValueError:
+            except (ValueError, TypeError):
                 pass
 
     active_count = sum(1 for c in chunk.cameras if c.enabled)
