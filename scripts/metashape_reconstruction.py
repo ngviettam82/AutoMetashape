@@ -14,10 +14,163 @@ Supports both 'high' and 'ultra' reconstruction grades:
 """
 
 import argparse
+import math
 import os
 import sys
 import time
 import Metashape
+
+
+def calculate_percentile(sorted_list, p: float) -> float:
+    """Calculates percentile p (0.0 to 100.0) from a sorted list of numerical values."""
+    if not sorted_list:
+        return 0.0
+    k = (len(sorted_list) - 1) * (p / 100.0)
+    f = math.floor(k)
+    c = math.ceil(k)
+    if f == c:
+        return sorted_list[int(k)]
+    d0 = sorted_list[int(f)] * (c - k)
+    d1 = sorted_list[int(c)] * (k - f)
+    return d0 + d1
+
+
+def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
+    """Automatically crops chunk.region (bounding box) tightly around the main target structure.
+
+    Computes the least-squares 3D intersection of camera optical viewing axes to pinpoint the
+    focal centroid of the survey, filters candidate sparse tie points to eliminate distant horizon/sky
+    outliers, and sets chunk.region center and extents with a configurable safety padding.
+
+    Args:
+        chunk: Active Metashape.Chunk.
+        padding: Safety margin fraction applied around bounding box dimensions (default: 0.15 / 15%).
+
+    Returns:
+        True if bounding box was successfully updated; False if skipped.
+    """
+    aligned_cams = [c for c in chunk.cameras if c.transform]
+    if len(aligned_cams) < 2:
+        print("  [Auto-Crop] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
+        return False
+
+    print(f"\n[Auto-Crop] Calculating 3D camera optical ray convergence from {len(aligned_cams)} cameras...", flush=True)
+
+    # 1. Solve 3D Ray Convergence using Least-Squares Line Intersection
+    # Optical ray: L_i(t) = c_i + t * d_i (d_i is normalized forward optical axis)
+    # Projection matrix P_i = I - d_i * d_i^T
+    # Sum(P_i) * x = Sum(P_i * c_i)
+    M = Metashape.Matrix([[0.0] * 3, [0.0] * 3, [0.0] * 3])
+    V = Metashape.Vector([0.0, 0.0, 0.0])
+    v_z = Metashape.Vector([0.0, 0.0, 1.0])
+    cam_centers = []
+
+    for cam in aligned_cams:
+        c_pos = cam.center
+        cam_centers.append(c_pos)
+        d = (cam.transform.rotation() * v_z).normalized()
+
+        # Projection onto plane orthogonal to viewing ray
+        p00 = 1.0 - d.x * d.x
+        p01 = -d.x * d.y
+        p02 = -d.x * d.z
+        p10 = -d.y * d.x
+        p11 = 1.0 - d.y * d.y
+        p12 = -d.y * d.z
+        p20 = -d.z * d.x
+        p21 = -d.z * d.y
+        p22 = 1.0 - d.z * d.z
+
+        P = Metashape.Matrix([[p00, p01, p02], [p10, p11, p12], [p20, p21, p22]])
+        M = M + P
+        V = V + P * c_pos
+
+    target_center = None
+    try:
+        if abs(M.det()) > 1e-4:
+            target_center = M.inv() * V
+            print(f"  [Auto-Crop] Optical ray convergence centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
+    except Exception as e:
+        print(f"  [Auto-Crop] Optical convergence solve notice: {e}", flush=True)
+
+    if target_center is None:
+        target_center = Metashape.Vector([
+            sum(c.x for c in cam_centers) / len(cam_centers),
+            sum(c.y for c in cam_centers) / len(cam_centers),
+            sum(c.z for c in cam_centers) / len(cam_centers)
+        ])
+        print(f"  [Auto-Crop] Using camera cluster centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
+
+    # 2. Estimate survey radius and filter horizon points
+    dists = [(c - target_center).norm() for c in cam_centers]
+    dists.sort()
+    med_dist = dists[len(dists) // 2]
+    max_radius = med_dist * 0.85 if med_dist > 0 else float("inf")
+
+    # 3. Filter sparse tie points belonging to the main structure
+    pts = chunk.tie_points.points if chunk.tie_points else []
+    if not pts:
+        print("  [Auto-Crop] No tie points available; preserving default region.", flush=True)
+        return False
+
+    rot = chunk.region.rot
+    rot_t = rot.t()  # World to local region coordinate frame
+
+    local_x, local_y, local_z = [], [], []
+    valid_count = 0
+    for pt in pts:
+        if not pt.valid:
+            continue
+        coord = pt.coord[:3]
+        if (coord - target_center).norm() > max_radius:
+            continue
+
+        loc = rot_t * coord
+        local_x.append(loc.x)
+        local_y.append(loc.y)
+        local_z.append(loc.z)
+        valid_count += 1
+
+    if valid_count < 100:
+        print(f"  [Auto-Crop] Insufficient structure tie points ({valid_count}); preserving default region.", flush=True)
+        return False
+
+    local_x.sort()
+    local_y.sort()
+    local_z.sort()
+
+    # 4. Percentile clipping to reject stray outliers (sky / ground noise)
+    min_x = calculate_percentile(local_x, 2.0)
+    max_x = calculate_percentile(local_x, 98.0)
+    min_y = calculate_percentile(local_y, 2.0)
+    max_y = calculate_percentile(local_y, 98.0)
+    min_z = calculate_percentile(local_z, 1.0)
+    max_z = calculate_percentile(local_z, 99.0)
+
+    # 5. Apply safety padding
+    span_x = (max_x - min_x) * (1.0 + 2.0 * padding)
+    span_y = (max_y - min_y) * (1.0 + 2.0 * padding)
+    span_z = (max_z - min_z) * (1.0 + 2.0 * padding)
+
+    mid_local = Metashape.Vector([
+        (min_x + max_x) * 0.5,
+        (min_y + max_y) * 0.5,
+        (min_z + max_z) * 0.5
+    ])
+    new_center = rot * mid_local
+    new_size = Metashape.Vector([span_x, span_y, span_z])
+
+    # Assign new region
+    region = chunk.region
+    region.center = new_center
+    region.size = new_size
+    chunk.region = region
+
+    print(f"  [Auto-Crop] Successfully cropped region to main structure!", flush=True)
+    print(f"  Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
+    print(f"  Size:   ({new_size.x:.2f} x {new_size.y:.2f} x {new_size.z:.2f}) [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Isolated Structure Tie Points: {valid_count:,} points", flush=True)
+    return True
 
 
 def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: float = 15.0):
@@ -60,7 +213,15 @@ def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: flo
     print("  Camera optimization complete.", flush=True)
 
 
-def run_reconstruction(images_dir: str, output_dir: str = None, grade: str = "ultra", custom_faces: int = 10000000):
+def run_reconstruction(
+    images_dir: str,
+    output_dir: str = None,
+    grade: str = "ultra",
+    custom_faces: int = 10000000,
+    crop_structure: bool = True,
+    crop_padding: float = 0.15,
+    pause_after_crop: bool = False,
+):
     t_start = time.time()
     if not output_dir:
         output_dir = os.path.join(images_dir, "model")
@@ -127,6 +288,29 @@ def run_reconstruction(images_dir: str, output_dir: str = None, grade: str = "ul
     if grade == "ultra":
         filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
 
+    # Step 3b: Automatic Bounding Box Crop to Main Target Structure
+    psx_out = os.path.join(output_dir, "building_reconstruction.psx")
+    if crop_structure:
+        auto_crop_to_main_structure(chunk, padding=crop_padding)
+
+    # Save project checkpoint immediately after alignment and cropping
+    doc.save(psx_out)
+    print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+
+    # Optional interactive pause for manual boundary fine-tuning
+    if pause_after_crop:
+        print("\n=========================================================================")
+        print("  INTERACTIVE BOUNDING BOX INSPECTION")
+        print("  Project checkpoint saved to:")
+        print(f"  --> {psx_out}")
+        print("  You may open this project in Metashape GUI to inspect or fine-tune the")
+        print("  reconstruction box. If satisfied, save in GUI and return here.")
+        print("=========================================================================", flush=True)
+        input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
+        # Reload project if modified in external GUI
+        doc.open(psx_out)
+        chunk = doc.chunk
+
     # Step 4: Multi-View Stereo Dense Depth Maps
     depth_downscale = 1 if grade == "ultra" else 2
     print(f"\n[4/6] Computing GPU MVS Depth Maps (Downscale={depth_downscale}, MildFiltering)...", flush=True)
@@ -181,7 +365,6 @@ def run_reconstruction(images_dir: str, output_dir: str = None, grade: str = "ul
     print("=========================================================================", flush=True)
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
-    psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
     chunk.exportModel(glb_out, format=Metashape.ModelFormat.ModelFormatGLTF)
     print(f"[EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
@@ -204,11 +387,17 @@ def run_reconstruction(images_dir: str, output_dir: str = None, grade: str = "ul
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 10M Faces, TIFF Textures)")
+    parser = argparse.ArgumentParser(
+        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 10M Faces, TIFF Textures, Auto-Crop)"
+    )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
     parser.add_argument("--grade", choices=["high", "ultra"], default="ultra", help="Reconstruction grade preset (default: ultra)")
     parser.add_argument("--faces", type=int, default=10000000, help="Custom face count for ultra grade (default: 10000000 / 10M)")
+    parser.add_argument("--no-crop-structure", dest="crop_structure", action="store_false", help="Disable automatic bounding box crop to main structure")
+    parser.set_defaults(crop_structure=True)
+    parser.add_argument("--crop-padding", type=float, default=0.15, help="Safety margin padding factor around main structure (default: 0.15 / 15%%)")
+    parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     args = parser.parse_args()
 
     run_reconstruction(
@@ -216,4 +405,7 @@ if __name__ == "__main__":
         output_dir=args.output,
         grade=args.grade,
         custom_faces=args.faces,
+        crop_structure=args.crop_structure,
+        crop_padding=args.crop_padding,
+        pause_after_crop=args.pause_after_crop,
     )
