@@ -10,7 +10,7 @@ directly from raw aerial drone or ground camera image directories on NVIDIA GPUs
 Supports both 'high' and 'ultra' reconstruction grades:
 - high: High accuracy alignment, High MVS depth maps (2K), HighFaceCount (~2M faces), 1x 8K texture.
 - ultra: High accuracy alignment, Gradual Selection camera optimization, Ultra-High MVS depth maps (4K),
-         5,000,000+ custom faces, and multi-page 8K photographic mosaic texture atlas.
+         4,000,000 custom faces, and multi-page 8K photographic mosaic texture atlas.
 """
 
 import argparse
@@ -227,7 +227,7 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     """Crops chunk.region to the smallest enclosing square containing camera GPS (X, Y) poses,
     with vertical bounds set by the minimum and maximum tie-point altitudes inside that square.
 
-    Ideal for grid surveys, mapping flights, property compounds, and roof scans.
+    This is the default cropping method, minimizing manual alignment steps to virtually zero.
 
     Args:
         chunk: Active Metashape.Chunk.
@@ -363,9 +363,9 @@ def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
     grade: str = "ultra",
-    custom_faces: int = 10000000,
-    crop_method: str = "structure",
-    crop_padding: float = 0.15,
+    custom_faces: int = 4000000,
+    crop_method: str = "gps-square",
+    crop_padding: float = 0.05,
     pause_after_crop: bool = False,
 ):
     t_start = time.time()
@@ -434,12 +434,12 @@ def run_reconstruction(
     if grade == "ultra":
         filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
 
-    # Step 3b: Automatic Bounding Box Crop
+    # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
-    if crop_method == "structure":
-        auto_crop_to_main_structure(chunk, padding=crop_padding)
-    elif crop_method == "gps-square":
+    if crop_method == "gps-square":
         auto_crop_camera_gps_square(chunk, padding=crop_padding)
+    elif crop_method == "structure":
+        auto_crop_to_main_structure(chunk, padding=crop_padding)
     else:
         print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
 
@@ -477,7 +477,7 @@ def run_reconstruction(
     t_mesh = time.time()
     if grade == "ultra" and custom_faces > 0:
         face_count_arg = custom_faces
-        print(f"  Target Polygon Count: {custom_faces:,} faces", flush=True)
+        print(f"  Target Polygon Count: {custom_faces:,} faces (Ultra Grade Optimized)", flush=True)
     else:
         face_count_arg = Metashape.FaceCount.HighFaceCount
         print(f"  Target Polygon Count: HighFaceCount preset", flush=True)
@@ -538,20 +538,20 @@ def run_reconstruction(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 10M Faces, TIFF Textures, Auto-Crop)"
+        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 4M Faces, TIFF Textures, GPS-Square Auto-Crop)"
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
     parser.add_argument("--grade", choices=["high", "ultra"], default="ultra", help="Reconstruction grade preset (default: ultra)")
-    parser.add_argument("--faces", type=int, default=10000000, help="Custom face count for ultra grade (default: 10000000 / 10M)")
+    parser.add_argument("--faces", type=int, default=4000000, help="Custom face count for ultra grade (default: 4000000 / 4M)")
     parser.add_argument(
         "--crop-method",
-        choices=["structure", "gps-square", "none"],
-        default="structure",
-        help="Bounding box crop method: 'structure' (optical ray convergence on main building walls), 'gps-square' (smallest enclosing square of camera GPS poses with tie-point altitude bounds), or 'none' (default: structure)",
+        choices=["gps-square", "structure", "none"],
+        default="gps-square",
+        help="Bounding box crop method: 'gps-square' (smallest enclosing square of camera GPS poses with tie-point altitude bounds), 'structure' (optical ray convergence on main building walls), or 'none' (default: gps-square)",
     )
     parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
-    parser.add_argument("--crop-padding", type=float, default=0.15, help="Safety margin padding factor around bounding box (default: 0.15 / 15%%)")
+    parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     args = parser.parse_args()
 
