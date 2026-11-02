@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, recursively loading all images across the target folder and its subfolders, automating GPU feature matching, camera alignment, bounding box cropping (camera GPS square default or optical ray convergence), MVS depth maps, surface meshing (4M face limit default), and 8K mosaic TIFF texture baking, saving deliverables directly to a 'model/' subfolder. Use when provided an image folder or drone survey to generate a 3D model."
+description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, recursively loading all images across the target folder and its subfolders, automating GPU feature matching, camera alignment, bounding box cropping (camera GPS square default or optical ray convergence), MVS depth maps, surface meshing (4M face limit default), and 8K mosaic TIFF texture baking, saving deliverables directly to a 'model/' subfolder. Supports all native Metashape formats including drone DNG RAW, camera RAW, TIFF, EXR, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
 audience: user
 status: stable
 owners:
@@ -18,6 +18,7 @@ Autonomous end-to-end photogrammetry pipeline transforming raw image folders (dr
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture.
 - Images are located across the main folder and nested subfolders (e.g., flight batches, multi-camera rigs).
+- Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (smallest enclosing square of camera GPS poses with tie-point altitude bounds) to minimize manual steps to zero.
 - Inspecting or editing 3D models inside **Agisoft Metashape Professional**, Blender, Unreal Engine, 3ds Max, CAD, or GIS software.
@@ -33,7 +34,7 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Recursive Ingestion & EXIF Metadata<br/>(Load all images from folder & subfolders)"]
+    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Recursive Ingestion & EXIF Metadata<br/>(Loads all standard raster, drone RAW, and thermal formats)"]
     B --> C["2. GPU CUDA Feature Matching<br/>(Full 4K, GPS Preselection)"]
     C --> D["3. Camera Alignment & Optimization<br/>(Adaptive Fitting & Gradual Selection)"]
     D --> E["4. Bounding Box Cropping<br/>(gps-square Default: Camera Square + Tie-Point Altitude Bounds)"]
@@ -51,7 +52,10 @@ When given an image directory, recursively load all images across the target fol
 
 > [!NOTE]
 > The pipeline strictly defaults to:
-> - **Recursive Discovery**: Scans all subdirectories of `<path_to_images>` for `.jpg`, `.jpeg`, `.png`, `.tif`, and `.tiff`.
+> - **Comprehensive Format Ingestion**: Recursively scans all subdirectories of `<path_to_images>` for:
+>   - **Standard Raster**: `.jpg`, `.jpeg`, `.jpe`, `.png`, `.tif`, `.tiff`, `.bmp`, `.dib`, `.webp`, `.jp2`, `.j2k`, `.jpc`, `.j2c`, `.jxl`, `.exr`, `.tga`, `.dds`, `.pnm`, `.ppm`, `.pgm`, `.pbm`, `.sgi`, `.rgb`, `.bil`
+>   - **Drone & Camera RAW**: `.dng` (DJI Mavic 3 / Matrice / Phantom RTK RAW, Autel RAW), `.cr2`, `.cr3`, `.crw` (Canon), `.nef`, `.nrw` (Nikon), `.arw`, `.srf`, `.sr2` (Sony Alpha), `.iiq`, `.cap` (Phase One), `.3fr`, `.fff` (Hasselblad), `.rw2` (Panasonic), `.orf` (Olympus), `.raf` (Fujifilm), `.raw`, `.rwl` (Leica), `.pef`, `.ptx` (Pentax)
+>   - **Radiometric Thermal / Multi-Spectral**: `.seq`, `.ara` (FLIR radiometric sequences)
 > - **Output Subfolder**: Automatically creates `<path_to_images>/model/` and places all outputs there.
 > - **Auto-Cropping Default (`gps-square`)**: Calculates the smallest enclosing horizontal square of all camera GPS poses, with altitude bounded by $[\min, \max]$ tie points inside the square. This guarantees the entire building and its eaves are captured while eliminating 80% of outer background clutter.
 > - **Polygon Count (4M Faces)**: Since the reconstruction bounding box is tightly cropped to the survey area, 4,000,000 faces provide architectural fidelity equivalent to 10M–15M faces on an uncropped scene, while cutting mesh generation and texturing time in half.

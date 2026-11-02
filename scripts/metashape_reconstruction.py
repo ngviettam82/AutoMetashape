@@ -21,6 +21,39 @@ import time
 import Metashape
 
 
+# Comprehensive list of all image and camera RAW formats supported by Agisoft Metashape
+SUPPORTED_IMAGE_EXTS = (
+    # Standard raster formats
+    ".jpg", ".jpeg", ".jpe",
+    ".png",
+    ".tif", ".tiff",
+    ".bmp", ".dib",
+    ".webp",
+    ".jp2", ".j2k", ".jpc", ".j2c",
+    ".jxl",
+    ".exr",
+    ".tga",
+    ".dds",
+    ".pnm", ".ppm", ".pgm", ".pbm",
+    ".sgi", ".rgb",
+    ".bil",
+    # Camera RAW formats (DJI, Sony, Phase One, Hasselblad, Canon, Nikon, Leica, etc.)
+    ".dng",                  # Adobe DNG (DJI Mavic 3 / Matrice / Phantom RTK RAW, Autel RAW)
+    ".cr2", ".cr3", ".crw",  # Canon RAW
+    ".nef", ".nrw",          # Nikon RAW
+    ".arw", ".srf", ".sr2",  # Sony RAW
+    ".iiq", ".cap",          # Phase One aerial cameras
+    ".3fr", ".fff",          # Hasselblad aerial cameras
+    ".rw2",                  # Panasonic RAW
+    ".orf",                  # Olympus RAW
+    ".raf",                  # Fujifilm RAW
+    ".raw", ".rwl",          # Leica RAW
+    ".pef", ".ptx",          # Pentax RAW
+    # Radiometric thermal and multi-spectral formats
+    ".seq", ".ara",          # FLIR radiometric thermal sequences
+)
+
+
 def robust_bounds(sorted_vals, k: float = 3.0) -> tuple:
     """Calculates robust spatial bounding intervals using Median Absolute Deviation (MAD).
 
@@ -390,7 +423,7 @@ def run_reconstruction(
     chunk.label = "Production_Reconstruction"
 
     # Step 1: Recursively Scan and Ingest Images from Folder & Subfolders
-    supported_exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff")
+    supported_exts = SUPPORTED_IMAGE_EXTS
     img_files = []
     abs_output = os.path.abspath(output_dir)
     for root, _dirs, files in os.walk(images_dir):
