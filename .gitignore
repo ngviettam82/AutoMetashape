@@ -31,12 +31,12 @@ recordings/
 *.PNG
 *.png
 
-# Ignore raw 3D splat binary files without matching gaussian.splat directory
-data/**/*.splat
-outputs/**/*.splat
+# Ignore raw 3D splat binary files
 *.splat
-!source/
-!source/**
+**/*.splat
+
+# Agents local cache
+.agents/
 **/__pycache__/
 **/*.egg-info/
 

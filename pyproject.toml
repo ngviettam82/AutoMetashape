@@ -8,19 +8,16 @@ requires = ["setuptools>=64.0"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "gaussian-splat-workspace"
+name = "photogrammetry-workspace"
 version = "1.0.0"
-description = "Production Engineering Workspace for 3D Gaussian Splatting & Textured Meshing"
+description = "Autonomous High-Precision 3D Photogrammetry & Architectural Reconstruction Workspace"
 authors = [{ name = "GaussianSplat Contributors" }]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 
 [tool.pytest.ini_options]
 minversion = "7.0"
-testpaths = [
-    "source/extensions/gaussian.splat/test",
-    "tests"
-]
+testpaths = ["tests"]
 python_files = "test_*.py"
 
 [tool.ruff]

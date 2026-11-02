@@ -184,8 +184,8 @@ class SkillValidator:
                     errors.append("'.agents/skills.json' must contain a non-empty 'entries' list")
                 else:
                     paths = [e.get("path") for e in entries if isinstance(e, dict)]
-                    if not any(p in paths for p in ["skills/developer", "skills/domain"]):
-                        errors.append("'.agents/skills.json' missing core category paths ('skills/developer', 'skills/domain')")
+                    if not any(p in paths for p in ["skills/developer", "skills/domain", "skills/user"]):
+                        errors.append("'.agents/skills.json' missing core category paths ('skills/developer', 'skills/domain', 'skills/user')")
             except Exception as e:
                 errors.append(f"Invalid JSON in '.agents/skills.json': {e}")
 
