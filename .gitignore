@@ -1,0 +1,64 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.pyd
+*.egg-info/
+
+# C / C++ / CUDA Build artifacts
+build/
+bin/
+*.obj
+*.exe
+*.lib
+*.a
+*.pdb
+*.exp
+
+# Datasets and large transient models
+data/
+outputs/
+recordings/
+*.ply
+*.spz
+*.tar
+*.zip
+*.tif
+*.tiff
+*.JPG
+*.jpg
+*.PNG
+*.png
+
+# Ignore raw 3D splat binary files without matching gaussian.splat directory
+data/**/*.splat
+outputs/**/*.splat
+*.splat
+!source/
+!source/**
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDE / Editor artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing & Coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Agent workspace quarantine (Isaac Standard)
+.agents/*
+!.agents/skills.json
+!.agents/skills/
+!.agents/rules/
+scratch/
+*.tmp

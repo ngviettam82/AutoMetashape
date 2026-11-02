@@ -1,0 +1,6 @@
+# Copyright (c) 2026, GaussianSplat Contributors.
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+"""Subsystem unit test package."""

@@ -1,0 +1,35 @@
+# Copyright (c) 2026, GaussianSplat Contributors.
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussian-splat-workspace"
+version = "1.0.0"
+description = "Production Engineering Workspace for 3D Gaussian Splatting & Textured Meshing"
+authors = [{ name = "GaussianSplat Contributors" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = [
+    "source/extensions/gaussian.splat/test",
+    "tests"
+]
+python_files = "test_*.py"
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "D", "B"]
+ignore = ["D100", "D104"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "google"

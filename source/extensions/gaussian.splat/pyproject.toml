@@ -1,0 +1,33 @@
+# Copyright (c) 2026, GaussianSplat Contributors.
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+[build-system]
+requires = ["setuptools>=64.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gaussian-splat"
+version = "1.0.0"
+description = "End-to-end 3D Gaussian Splatting and Textured Mesh Reconstruction from Drone and Camera Imagery"
+readme = "README.md"
+authors = [{ name = "GaussianSplat Contributors" }]
+license = { text = "Apache-2.0" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.22",
+    "torch>=2.0.0",
+    "torchvision",
+    "gsplat>=1.4.0",
+    "trimesh>=4.0.0",
+    "pillow>=9.0.0",
+    "scipy>=1.10.0"
+]
+
+[project.scripts]
+gaussian-splat = "gaussian_splat.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gaussian_splat*"]
