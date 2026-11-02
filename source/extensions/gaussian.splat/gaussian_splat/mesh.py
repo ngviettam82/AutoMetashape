@@ -43,24 +43,35 @@ def estimate_normals(points: np.ndarray, k: int = 15) -> np.ndarray:
     return normals
 
 
-def create_textured_model(ply_path: str, output_dir: str, texture_res: int = 2048) -> bool:
+def create_textured_model(
+    ply_path: str,
+    output_dir: str,
+    texture_res: int = 4096,
+    pitch: float = 0.30,
+    filter_outliers: bool = True,
+) -> bool:
     """Reconstructs a watertight polygon mesh and bakes an OBJ/MTL/GLB texture atlas."""
     os.makedirs(output_dir, exist_ok=True)
     points, colors = load_ply_points(ply_path)
     if len(points) == 0:
         return False
 
-    normals = estimate_normals(points, k=15)
-    center = points.mean(axis=0)
-    outward = points - center
-    flip = (normals * outward).sum(axis=1) < 0
-    normals[flip] *= -1.0
+    if filter_outliers and len(points) > 100:
+        q25, q75 = np.percentile(points, [25, 75], axis=0)
+        iqr = q75 - q25
+        lower = q25 - 2.0 * iqr
+        upper = q75 + 2.0 * iqr
+        inliers = ((points >= lower) & (points <= upper)).all(axis=1)
+        if inliers.sum() > 50:
+            points = points[inliers]
+            if colors is not None:
+                colors = colors[inliers]
 
-    cloud = trimesh.PointCloud(vertices=points, colors=colors)
     try:
-        mesh = trimesh.convex.convex_hull(cloud)
+        mesh = trimesh.voxel.ops.points_to_marching_cubes(points, pitch=pitch)
     except Exception:
-        mesh = trimesh.voxel.ops.points_to_marching_cubes(points, pitch=1.0)
+        cloud = trimesh.PointCloud(vertices=points, colors=colors)
+        mesh = trimesh.convex.convex_hull(cloud)
 
     verts = mesh.vertices - mesh.vertices.mean(axis=0)
     theta = np.arctan2(verts[:, 1], verts[:, 0])
@@ -69,26 +80,30 @@ def create_textured_model(ply_path: str, output_dir: str, texture_res: int = 204
     v = (verts[:, 2] - z_min) / (z_max - z_min + 1e-6)
     uv = np.stack([u, v], axis=1)
 
-    tex_img = np.ones((texture_res, texture_res, 3), dtype=np.uint8) * 200
+    tex_img = np.ones((texture_res, texture_res, 3), dtype=np.uint8) * 210
     if colors is not None and len(colors) > 0:
         pt_verts = points - points.mean(axis=0)
         pt_theta = np.arctan2(pt_verts[:, 1], pt_verts[:, 0])
-        pt_u = np.clip(((pt_theta + np.pi) / (2 * np.pi) * (texture_res - 1)).astype(int), 0, texture_res - 1)
+        pt_u = np.clip(
+            ((pt_theta + np.pi) / (2 * np.pi) * (texture_res - 1)).astype(int), 0, texture_res - 1
+        )
         pt_v = np.clip(
-            ((pt_verts[:, 2] - z_min) / (z_max - z_min + 1e-6) * (texture_res - 1)).astype(int), 0, texture_res - 1
+            ((pt_verts[:, 2] - z_min) / (z_max - z_min + 1e-6) * (texture_res - 1)).astype(int),
+            0,
+            texture_res - 1,
         )
         pt_v = texture_res - 1 - pt_v
 
         rgb = colors[:, :3]
         for ui, vi, col in zip(pt_u, pt_v, rgb):
-            u_min, u_max = max(0, ui - 2), min(texture_res, ui + 3)
-            v_min, v_max = max(0, vi - 2), min(texture_res, vi + 3)
+            u_min, u_max = max(0, ui - 3), min(texture_res, ui + 4)
+            v_min, v_max = max(0, vi - 3), min(texture_res, vi + 4)
             tex_img[v_min:v_max, u_min:u_max] = col
 
         from scipy.ndimage import gaussian_filter
 
-        mask = (tex_img == 200).all(axis=2, keepdims=True)
-        blurred = gaussian_filter(tex_img.astype(float), sigma=3)
+        mask = (tex_img == 210).all(axis=2, keepdims=True)
+        blurred = gaussian_filter(tex_img.astype(float), sigma=4)
         tex_img = np.where(mask, blurred.astype(np.uint8), tex_img)
 
     texture_path = os.path.join(output_dir, "texture.jpg")

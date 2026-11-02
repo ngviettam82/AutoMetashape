@@ -1,81 +1,99 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs a production-ready textured 3D model (.obj, .mtl, .glb) and 3D Gaussian Splatting radiance field directly from an image set or drone aerial survey, automating telemetry extraction, GPS spatial pair matching, bundle adjustment, and surface-aligned mesh baking. Use when provided an image folder or aerial capture to generate a textured 3D model."
+description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, automating GPU feature matching, camera alignment, MVS depth maps, surface meshing, and 8K mosaic texture baking. Use when provided an image folder or drone survey to generate a 3D model."
 audience: user
 status: stable
 owners:
   - core-engineering
 ---
 
-# Image-to-3D Model Reconstruction
+# High-Precision 3D Photogrammetry & Architectural Reconstruction
 
-Autonomous end-to-end photogrammetry and radiance field reconstruction runbook for transforming raw image collections into textured 3D models (`.obj`, `.mtl`, `.glb`) and 3D Gaussian Splatting (`.ply`) assets.
+Autonomous end-to-end photogrammetry pipeline transforming raw image folders (drone surveys, architectural captures, ground inspections) into high-density textured 3D models (`.obj`, `.mtl`, `.glb`) and native Agisoft Metashape Professional projects (`.psx`).
 
 ---
 
 ## When To Use
 
 Use this skill when:
-- The user provides an image folder (drone survey, hand-held camera walkthrough, or ground photogrammetry) and requests a 3D model with texture.
-- Processing aerial or oblique drone flights with consumer GNSS errors or intermittent GPS shadow.
-- Requiring both real-time neural radiance fields (`.ply` / `.splat`) and traditional polygon meshes (`.obj` / `.glb`) for Blender, Unreal Engine, or CAD.
-- Executing 100% open-source, from-scratch photogrammetry without commercial software dependencies.
+- The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture.
+- Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
+- Inspecting or editing 3D models inside **Agisoft Metashape Professional**, Blender, Unreal Engine, 3ds Max, CAD, or GIS software.
+- Requiring high polygon counts (1.5M to 5M+ faces) and high-resolution texture atlases (8K 8192×8192 mosaic photographic blending).
 
 Do not use this skill when:
-- Synthesizing single-image or text-to-3D generative models without multi-view multi-angle photographic overlap.
-- Running pure 2D image enhancement or super-resolution without spatial triangulation.
+- Synthesizing 3D models from single images, sketches, or text prompts without multi-view photographic overlap.
+- Running pure 2D image enhancement without 3D geometric triangulation.
 
 ---
 
 ## Workflow
 
-### 1. Telemetry Ingestion & Spatial Preprocessing
-1. Scan the input image directory:
-   ```bash
-   python -m gaussian_splat.cli --images <path/to/images> --output <path/to/output>
-   ```
-2. The pipeline automatically inspects EXIF and XMP tags for GNSS coordinates, relative altitude, and gimbal pitch/yaw.
-3. Frames with missing GPS (`0.0, 0.0`) are automatically connected to adjacent frames via the **Temporal Flight Graph** ($|i - j| \le 8$).
-4. Frames with active GPS are clustered using 3D Euclidean spatial proximity ($d \le 30\text{m}$), generating the optimized `hybrid_pairs.txt` graph.
+```mermaid
+flowchart TD
+    A["Raw Image Directory<br/>(Provided by User)"] --> B["1. Ingestion & EXIF Metadata<br/>(Focal length, GPS, Altitude)"]
+    B --> C["2. GPU CUDA Feature Matching<br/>(Full 4K, GPS Preselection)"]
+    C --> D["3. Camera Alignment & Optimization<br/>(Adaptive Fitting & Gradual Selection)"]
+    D --> E["4. Multi-View Stereo Depth Maps<br/>(Per-pixel GPU Raycasting, Mild Filter)"]
+    E --> F["5. Arbitrary Surface Meshing<br/>(Direct DepthMapsData, 1.5M - 5M+ faces)"]
+    F --> G["6. 8K Photogrammetric Texture Atlas<br/>(Mosaic Blending, Ghosting Filter)"]
+    G --> H["Deliverables Export<br/>• model.obj + model.mtl<br/>• model.glb<br/>• project.psx"]
+```
 
-### 2. Open-Source Structure from Motion (SfM)
-1. Runs multi-threaded SIFT feature extraction into a local SQLite database (`database.db`).
-2. Executes two-view RANSAC geometric verification across the hybrid pairs.
-3. Solves camera intrinsics ($f_x, f_y, c_x, c_y, k_1, k_2$), extrinsics ($R, t$), and triangulates sparse 3D tie points (`sparse/0/points3D.ply`).
+### 1. Ingestion & Telemetry Inspection
+When given an image directory, verify image formats (`.jpg`, `.jpeg`, `.png`, `.tif`) and ensure NVIDIA GPU acceleration is available. Run the autonomous pipeline (Ultra Grade is default):
+```powershell
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --output "<path_to_output>"
+```
 
-### 3. Surface-Aligned Gaussian Splatting & Texture Baking
-1. Spawns planar Gaussian surfels initialized from the sparse tie points.
-2. Optimizes surface radiance and geometry using `gsplat` with normal consistency regularization.
-3. Generates a watertight polygon triangle mesh via Poisson surface reconstruction.
-4. Unwraps UV coordinates and bakes multi-view high-resolution photographic textures into `texture.jpg`.
-5. Exports production assets:
-   - `model.obj` + `model.mtl` + `texture.jpg`
-   - `model.glb` (self-contained glTF binary)
-   - `points3D.ply` (sparse & dense radiance field point cloud)
+> [!NOTE]
+> The pipeline strictly defaults to **Ultra Grade** (`--grade ultra` with 10,000,000 faces limit, full 4K MVS depth maps, tie-point Gradual Selection optimization, and uncompressed 8K TIFF textures). No manual flags are needed.
+
+### 2. High-Accuracy GPU Matching & Alignment
+- **Matching**: `downscale=1` (1:1 full resolution), `keypoint_limit=40000`, `tiepoint_limit=4000`. Uses GPS Reference Preselection so images match against spatial neighbors.
+- **Alignment**: Solves camera positions $(X, Y, Z)$, orientations, and non-linear lens distortion ($f, c_x, c_y, k_1, k_2, k_3, k_4, p_1, p_2$).
+- **Camera Optimization (Gradual Selection)**: Enabled by default. Prunes high reprojection error ($>0.4\text{ px}$) and high reconstruction uncertainty ($>15$) tie points before re-optimizing lens parameters.
+
+### 3. GPU Multi-View Stereo (MVS) Depth Maps
+- Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs.
+- **Default (Ultra)**: `downscale=1` (full 4K depth maps per camera).
+- Uses `MildFiltering` to retain fine architectural structures (antennas, window mullions, roof trim, columns).
+
+### 4. Arbitrary Surface Polygonal Meshing
+- Fuses visibility-consistent depth maps into a continuous polygonal mesh using `DataSource.DepthMapsData` (avoiding the intermediate dense point cloud and melted wax Poisson artifacts).
+- Targets **10,000,000 faces limit** by default (Ultra Grade) to prevent unwieldy file bloat while maintaining extreme architectural precision.
+
+### 5. Multi-Page 8K Photographic Texture Baking & Lossless TIFF Export
+- Computes optimized UV parameterization (`GenericMapping`).
+- Projects photographic pixels from all original 4K frames using `MosaicBlending` with `ghosting_filter=True` and `fill_holes=True`.
+- Exports texture maps in **lossless uncompressed TIFF (`.tif`) format** (no JPEG compression artifacts) at **8192×8192 (8K)** resolution.
+
+### 6. Production Deliverables
+- `model.obj` + `model.mtl` + `model.tif`: Industry-standard mesh format with uncompressed 8K TIFF texture atlas compatible with all DCC/CAD tools.
+- `model.glb`: Binary glTF format with embedded PBR textures for instant web and 3D viewer rendering.
+- `building_reconstruction.psx`: Native Metashape Professional project retaining all camera alignments, depth maps, and UV textures for direct inspection and further editing.
 
 ---
 
 ## Validation
 
-Verify reconstruction quality through the following gates:
-1. **Pose Registration**: At least $90\%$ of input images must be successfully registered in `sparse/0/images.bin`.
-2. **Reprojection Error**: Mean bundle adjustment reprojection error must be under $1.2\text{ pixels}$.
-3. **Geometry Integrity**: The exported `model.obj` or `model.glb` must be non-empty, watertight, and load without vertex winding errors.
-4. **Texture Completeness**: The baked `texture.jpg` must have valid UV mapping without unpainted black patches.
+Reconstruction must satisfy the following quality criteria:
+1. **Camera Registration**: At least $90\%$ of input images must be successfully registered in space.
+2. **Surface Topology**: Arbitrary surface mesh with $\ge 1,500,000$ polygon faces, free from degenerate zero-area faces.
+3. **Texture Atlas**: Resolution $\ge 8192\times 8192$ with valid UV mapping and zero unmapped black voids.
+4. **Project File**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
 
 ---
 
 ## Maintenance
 
-- Ensure `colmap.exe` binary in `bin/colmap/` or system PATH matches version $4.0+$ with CUDA support.
-- If images have non-standard EXIF structures, update `source/extensions/gaussian.splat/gaussian_splat/telemetry.py`.
-- Keep PyTorch CUDA runtime aligned with host NVIDIA GPU driver.
+- Ensure `metashape.exe` is installed at `C:/Program Files/Agisoft/Metashape Pro/metashape.exe` or configured on the system PATH.
+- Verify NVIDIA GPU CUDA runtime with `nvidia-smi` to ensure Metashape GPU acceleration is active.
+- Keep `scripts/metashape_reconstruction.py` updated to match Agisoft Metashape Python API versions.
 
 ---
 
 ## References
 
-- [2D Gaussian Splatting for Geometrically Accurate Radiance Fields](https://github.com/hbb1/2d-gaussian-splatting) (SIGGRAPH 2024)
-- [SuGaR: Surface-Aligned Gaussian Splatting](https://github.com/Anttwo/SuGaR) (CVPR 2024)
-- [gsplat: CUDA Acceleration Library for Radiance Fields](https://github.com/nerfstudio-project/gsplat)
-- [COLMAP: Structure-from-Motion and Multi-View Stereo](https://colmap.github.io/)
+- [Agisoft Metashape Professional User Manual](https://www.agisoft.com/downloads/user-manuals/)
+- [USGS National Geospatial Program Photogrammetry Standards](https://www.usgs.gov/core-science-systems/ngp)

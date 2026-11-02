@@ -37,9 +37,12 @@ outputs/**/*.splat
 *.splat
 !source/
 !source/**
+**/__pycache__/
+**/*.egg-info/
 
 # Virtual environments
 .venv/
+.venv*/
 venv/
 ENV/
 env/
