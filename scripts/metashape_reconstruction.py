@@ -438,11 +438,13 @@ def run_reconstruction(
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
     pause_after_crop: bool = False,
+    force_restart: bool = False,
 ):
     t_start = time.time()
     if not output_dir:
         output_dir = os.path.join(images_dir, "model")
     os.makedirs(output_dir, exist_ok=True)
+    psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
     print("=========================================================================")
     print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE [GRADE: {grade.upper()}]")
@@ -457,142 +459,192 @@ def run_reconstruction(
         print("[Hardware] Running on CPU.", flush=True)
 
     doc = Metashape.Document()
-    chunk = doc.addChunk()
-    chunk.label = "Production_Reconstruction"
-
-    # Step 1: Recursively Scan and Ingest Images from Folder & Subfolders
-    supported_exts = SUPPORTED_IMAGE_EXTS
-    img_files = []
-    abs_output = os.path.abspath(output_dir)
-    for root, _dirs, files in os.walk(images_dir):
-        # Prevent scanning files in the output directory if located inside images_dir
-        if os.path.abspath(root).startswith(abs_output):
-            continue
-        for f in files:
-            if f.lower().endswith(supported_exts):
-                img_files.append(os.path.join(root, f))
-    img_files = sorted(img_files)
-
-    if not img_files:
-        raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
-
-    print(f"\n[1/6] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
-    chunk.addPhotos(img_files)
-    print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
-
-    # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
-    if min_quality > 0.0:
-        filter_image_quality(chunk, min_quality=min_quality)
-
-    # Step 2: Feature Detection & Matching
-    print("\n[2/6] Executing GPU Feature Matching (GPS Reference Preselection)...", flush=True)
-    t_match = time.time()
-    chunk.matchPhotos(
-        downscale=1,  # High accuracy full-resolution
-        generic_preselection=True,
-        reference_preselection=True,
-        keypoint_limit=40000,
-        tiepoint_limit=4000,
-        mask_tiepoints=True,
-        filter_stationary_points=True,
-    )
-    print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
-
-    # Step 3: Camera Alignment
-    print("\n[3/6] Aligning Cameras & Initial Bundle Adjustment...", flush=True)
-    t_align = time.time()
-    chunk.alignCameras(adaptive_fitting=True)
-    aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
-    enabled_count = sum(1 for c in chunk.cameras if c.enabled)
-    print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
-
-    # Camera Optimization for Ultra Grade
-    if grade == "ultra":
-        filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
-
-    # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
-    psx_out = os.path.join(output_dir, "building_reconstruction.psx")
-    if crop_method == "gps-square":
-        auto_crop_camera_gps_square(chunk, padding=crop_padding)
-    elif crop_method == "structure":
-        auto_crop_to_main_structure(chunk, padding=crop_padding)
+    resumed = False
+    if not force_restart and os.path.exists(psx_out):
+        print(f"\n[Checkpoint] Found existing project: {psx_out}", flush=True)
+        try:
+            doc.open(psx_out)
+            chunk = doc.chunk
+            aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
+            if aligned_count >= 2:
+                print(f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).", flush=True)
+                print(f"  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).", flush=True)
+                resumed = True
+            else:
+                print(f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.", flush=True)
+                doc = Metashape.Document()
+                chunk = doc.addChunk()
+                chunk.label = "Production_Reconstruction"
+        except Exception as e:
+            print(f"  Failed to load checkpoint ({e}). Starting fresh project.", flush=True)
+            doc = Metashape.Document()
+            chunk = doc.addChunk()
+            chunk.label = "Production_Reconstruction"
     else:
-        print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
+        chunk = doc.addChunk()
+        chunk.label = "Production_Reconstruction"
 
-    # Save project checkpoint immediately after alignment and cropping
-    doc.save(psx_out)
-    print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+    if not resumed:
+        # Step 1: Recursively Scan and Ingest Images from Folder & Subfolders
+        supported_exts = SUPPORTED_IMAGE_EXTS
+        img_files = []
+        abs_output = os.path.abspath(output_dir)
+        for root, _dirs, files in os.walk(images_dir):
+            # Prevent scanning files in the output directory if located inside images_dir
+            if os.path.abspath(root).startswith(abs_output):
+                continue
+            for f in files:
+                if f.lower().endswith(supported_exts):
+                    img_files.append(os.path.join(root, f))
+        img_files = sorted(img_files)
 
-    # Optional interactive pause for manual boundary fine-tuning
-    if pause_after_crop:
-        print("\n=========================================================================")
-        print("  INTERACTIVE BOUNDING BOX INSPECTION")
-        print("  Project checkpoint saved to:")
-        print(f"  --> {psx_out}")
-        print("  You may open this project in Metashape GUI to inspect or fine-tune the")
-        print("  reconstruction box. If satisfied, save in GUI and return here.")
-        print("=========================================================================", flush=True)
-        input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
-        # Reload project if modified in external GUI
-        doc.open(psx_out)
-        chunk = doc.chunk
+        if not img_files:
+            raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
+
+        print(f"\n[1/6] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
+        chunk.addPhotos(img_files)
+        print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
+
+        # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
+        if min_quality > 0.0:
+            filter_image_quality(chunk, min_quality=min_quality)
+
+        # Step 2: Feature Detection & Matching
+        print("\n[2/6] Executing GPU Feature Matching (GPS Reference Preselection)...", flush=True)
+        t_match = time.time()
+        chunk.matchPhotos(
+            downscale=1,  # High accuracy full-resolution
+            generic_preselection=True,
+            reference_preselection=True,
+            keypoint_limit=40000,
+            tiepoint_limit=4000,
+            mask_tiepoints=True,
+            filter_stationary_points=True,
+        )
+        print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
+
+        # Step 3: Camera Alignment
+        print("\n[3/6] Aligning Cameras & Initial Bundle Adjustment...", flush=True)
+        t_align = time.time()
+        chunk.alignCameras(adaptive_fitting=True)
+        aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
+        enabled_count = sum(1 for c in chunk.cameras if c.enabled)
+        print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+
+        # Camera Optimization for Ultra Grade
+        if grade == "ultra":
+            filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+
+        # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
+        if crop_method == "gps-square":
+            auto_crop_camera_gps_square(chunk, padding=crop_padding)
+        elif crop_method == "structure":
+            auto_crop_to_main_structure(chunk, padding=crop_padding)
+        else:
+            print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
+
+        # Save project checkpoint immediately after alignment and cropping
+        doc.save(psx_out)
+        print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+
+        # Optional interactive pause for manual boundary fine-tuning
+        if pause_after_crop:
+            print("\n=========================================================================")
+            print("  INTERACTIVE BOUNDING BOX INSPECTION")
+            print("  Project checkpoint saved to:")
+            print(f"  --> {psx_out}")
+            print("  You may open this project in Metashape GUI to inspect or fine-tune the")
+            print("  reconstruction box. If satisfied, save in GUI and return here.")
+            print("=========================================================================", flush=True)
+            input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
+            # Reload project if modified in external GUI
+            doc.open(psx_out)
+            chunk = doc.chunk
 
     # Step 4: Multi-View Stereo Dense Depth Maps
-    depth_downscale = 1 if grade == "ultra" else 2
-    print(f"\n[4/6] Computing GPU MVS Depth Maps (Downscale={depth_downscale}, MildFiltering)...", flush=True)
-    t_depth = time.time()
-    chunk.buildDepthMaps(
-        downscale=depth_downscale,
-        filter_mode=Metashape.FilterMode.MildFiltering,
-        reuse_depth=False,
-    )
-    print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
+    has_depth_maps = chunk.depth_maps is not None
+    if has_depth_maps:
+        print(f"\n[4/6] Reusing existing MVS Depth Maps from checkpoint ({len(chunk.depth_maps)} depth maps).", flush=True)
+    else:
+        depth_downscale = 1 if grade == "ultra" else 2
+        print(f"\n[4/6] Computing GPU MVS Depth Maps (Downscale={depth_downscale}, MildFiltering)...", flush=True)
+        t_depth = time.time()
+        chunk.buildDepthMaps(
+            downscale=depth_downscale,
+            filter_mode=Metashape.FilterMode.MildFiltering,
+            reuse_depth=False,
+        )
+        print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
+        doc.save(psx_out)
+        print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
-    print(f"\n[5/6] Reconstructing Arbitrary Surface Mesh from Depth Maps...", flush=True)
-    t_mesh = time.time()
-    if grade == "ultra" and custom_faces > 0:
-        face_count_arg = custom_faces
-        print(f"  Target Polygon Count: {custom_faces:,} faces (Ultra Grade Optimized)", flush=True)
+    has_model = chunk.model is not None
+    if has_model:
+        print(f"\n[5/6] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
     else:
-        face_count_arg = Metashape.FaceCount.HighFaceCount
-        print(f"  Target Polygon Count: HighFaceCount preset", flush=True)
+        print(f"\n[5/6] Reconstructing Arbitrary Surface Mesh from Depth Maps...", flush=True)
+        t_mesh = time.time()
+        if grade == "ultra" and custom_faces > 0:
+            face_count_arg = Metashape.FaceCount.CustomFaceCount
+            face_count_custom_arg = custom_faces
+            print(f"  Target Polygon Count: {custom_faces:,} faces (Ultra Grade Optimized)", flush=True)
+        else:
+            face_count_arg = Metashape.FaceCount.HighFaceCount
+            face_count_custom_arg = 200000
+            print(f"  Target Polygon Count: HighFaceCount preset", flush=True)
 
-    chunk.buildModel(
-        surface_type=Metashape.SurfaceType.Arbitrary,
-        source_data=Metashape.DataSource.DepthMapsData,
-        interpolation=Metashape.Interpolation.EnabledInterpolation,
-        face_count=face_count_arg,
-    )
-    mesh_verts = len(chunk.model.vertices)
-    mesh_faces = len(chunk.model.faces)
-    print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
+        chunk.buildModel(
+            surface_type=Metashape.SurfaceType.Arbitrary,
+            source_data=Metashape.DataSource.DepthMapsData,
+            interpolation=Metashape.Interpolation.EnabledInterpolation,
+            face_count=face_count_arg,
+            face_count_custom=face_count_custom_arg,
+            vertex_colors=True,
+        )
+        mesh_verts = len(chunk.model.vertices)
+        mesh_faces = len(chunk.model.faces)
+        print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
+        doc.save(psx_out)
+        print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
-    tex_pages = 4 if grade == "ultra" else 1
-    print(f"\n[6/6] Baking {tex_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending)...", flush=True)
-    t_tex = time.time()
-    chunk.buildUV(
-        mapping_mode=Metashape.MappingMode.GenericMapping,
-        page_count=tex_pages,
-        texture_size=8192,
-    )
-    chunk.buildTexture(
-        blending_mode=Metashape.BlendingMode.MosaicBlending,
-        texture_size=8192,
-        fill_holes=True,
-        ghosting_filter=True,
-    )
-    print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
+    has_texture = chunk.model and hasattr(chunk.model, "textures") and len(chunk.model.textures) > 0
+    if has_texture:
+        print(f"\n[6/6] Reusing existing Texture Atlas from checkpoint ({len(chunk.model.textures)} pages).", flush=True)
+    else:
+        tex_pages = 4 if grade == "ultra" else 1
+        print(f"\n[6/6] Baking {tex_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending)...", flush=True)
+        t_tex = time.time()
+        chunk.buildUV(
+            mapping_mode=Metashape.MappingMode.GenericMapping,
+            page_count=tex_pages,
+            texture_size=8192,
+        )
+        chunk.buildTexture(
+            blending_mode=Metashape.BlendingMode.MosaicBlending,
+            texture_size=8192,
+            fill_holes=True,
+            ghosting_filter=True,
+        )
+        print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
+        doc.save(psx_out)
+        print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Production Asset Export
     print("\n=========================================================================")
     print("  EXPORTING FINAL PRODUCTION ASSETS")
-    print("=========================================================================", flush=True)
+    print("=========================================================================")
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
 
-    chunk.exportModel(glb_out, format=Metashape.ModelFormat.ModelFormatGLTF)
+    chunk.exportModel(
+        glb_out,
+        format=Metashape.ModelFormat.ModelFormatGLTF,
+        embed_texture=True,
+        save_normals=True,
+        save_colors=True,
+    )
     print(f"[EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
 
     chunk.exportModel(
@@ -641,6 +693,7 @@ if __name__ == "__main__":
         help="Disable automatic blurry image quality estimation and filtering",
     )
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
+    parser.add_argument("--force-restart", action="store_true", help="Force restart reconstruction from scratch, ignoring existing checkpoints")
     args = parser.parse_args()
 
     crop_method = "none" if args.no_crop else args.crop_method
@@ -655,4 +708,5 @@ if __name__ == "__main__":
         crop_padding=args.crop_padding,
         min_quality=min_quality,
         pause_after_crop=args.pause_after_crop,
+        force_restart=args.force_restart,
     )
