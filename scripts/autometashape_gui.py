@@ -1310,6 +1310,32 @@ class AutoMetashapeStudio:
         self._log("3. Press Ctrl+S in Metashape Pro to save your manual bounding box.", "stage")
         self._log("4. Click '▶️ Continue Reconstruction (Manual Crop Done)' below to resume 600K meshing.\n" + "═" * 70, "success")
 
+        # Visual and audio alert to notify user
+        try:
+            self.root.bell()
+            self.root.lift()
+            self.root.attributes("-topmost", True)
+            self.root.after_idle(lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
+
+        # Interactive popup notification dialog
+        folder = self.var_output_dir.get().strip() if self.active_mode == "recon" else self.var_export_out.get().strip()
+        psx = os.path.join(folder, "building_reconstruction.psx")
+
+        open_now = messagebox.askyesno(
+            "Manual Bounding Box in Metashape Pro",
+            "Camera alignment completed and saved to:\n"
+            f"{psx}\n\n"
+            "Would you like to open this project in Agisoft Metashape Pro now to adjust your bounding box?\n\n"
+            "• Click [Yes] to launch Metashape Pro automatically.\n"
+            "• In Metashape, adjust the bounding box and press Ctrl+S to save.\n"
+            "• Return here and click '▶️ Continue Reconstruction' to resume.",
+            icon="question",
+        )
+        if open_now:
+            self._on_open_metashape_gui()
+
     def _on_continue_crop_clicked(self) -> None:
         self.btn_continue_crop.pack_forget()
         self.progress_bar.start(10)

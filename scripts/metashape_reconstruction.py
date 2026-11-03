@@ -466,10 +466,30 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  4. In AutoMetashape Studio, click [▶️ Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
     print("=========================================================================", flush=True)
 
-    # 1. Interactive terminal
+    # 1. Interactive terminal with Windows notification popup
     if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+        if sys.platform == "win32":
+            try:
+                import winsound
+                winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+            except Exception:
+                pass
+            try:
+                import ctypes
+                import subprocess
+                # MB_YESNO = 4, MB_ICONQUESTION = 0x20, MB_SYSTEMMODAL = 0x1000, IDYES = 6
+                res = ctypes.windll.user32.MessageBoxW(
+                    0,
+                    f"Camera alignment completed and saved to:\n{psx_path}\n\nWould you like to open Agisoft Metashape Pro now to adjust the bounding box?",
+                    "AutoMetashape: Paused for Manual Cropping",
+                    0x00000004 | 0x00000020 | 0x00001000,
+                )
+                if res == 6:  # IDYES
+                    subprocess.Popen(["metashape.exe", psx_path], shell=True)
+            except Exception:
+                pass
         try:
-            input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
+            input("Press [Enter] to continue with GPU MVS Depth Maps and 600K Surface Meshing...")
             return
         except EOFError:
             pass
