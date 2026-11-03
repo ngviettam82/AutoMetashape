@@ -7,10 +7,13 @@
 
 Reconstructs production-ready 3D architectural models (.obj, .mtl, .glb, .psx)
 directly from raw aerial drone or ground camera image directories on NVIDIA GPUs.
-Supports both 'high' and 'ultra' reconstruction grades:
-- high: High accuracy alignment, High MVS depth maps (2K), HighFaceCount (~2M faces), 1x 8K texture.
-- ultra: High accuracy alignment, Gradual Selection camera optimization, Ultra-High MVS depth maps (4K),
-         4,000,000 custom faces, and multi-page 8K photographic mosaic texture atlas.
+Configured with production-grade defaults:
+- Image Alignment: Medium quality (downscale=2), 40,000 keypoint limit, 25,000 tiepoint limit,
+                   stationary tie points excluded, guided matching disabled, adaptive fitting enabled.
+- Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
+- Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses + tie-point altitude bounds).
+- Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 1,000,000 (1M) custom faces.
+- Texture Atlas: 8K photographic mosaic blending texture atlas.
 """
 
 import argparse
@@ -52,6 +55,28 @@ SUPPORTED_IMAGE_EXTS = (
     # Radiometric thermal and multi-spectral formats
     ".seq", ".ara",          # FLIR radiometric thermal sequences
 )
+
+ALIGN_DOWNSCALE_MAP = {
+    "highest": 0,
+    "high": 1,
+    "medium": 2,
+    "low": 4,
+    "lowest": 8,
+}
+
+DEPTH_DOWNSCALE_MAP = {
+    "ultra": 1,
+    "high": 2,
+    "medium": 4,
+    "low": 8,
+    "lowest": 16,
+}
+
+DEPTH_FILTER_MAP = {
+    "mild": Metashape.FilterMode.MildFiltering,
+    "moderate": Metashape.FilterMode.ModerateFiltering,
+    "aggressive": Metashape.FilterMode.AggressiveFiltering,
+}
 
 
 def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
@@ -432,11 +457,20 @@ def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: flo
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
-    grade: str = "ultra",
-    custom_faces: int = 4000000,
+    align_quality: str = "medium",
+    keypoint_limit: int = 40000,
+    tiepoint_limit: int = 25000,
+    filter_stationary_points: bool = True,
+    guided_matching: bool = False,
+    adaptive_fitting: bool = True,
+    depth_quality: str = "medium",
+    depth_filtering: str = "moderate",
+    custom_faces: int = 1000000,
     crop_method: str = "gps-square",
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
+    rolling_shutter: bool = True,
+    close_holes: bool = True,
     pause_after_crop: bool = False,
     force_restart: bool = False,
 ):
@@ -447,7 +481,14 @@ def run_reconstruction(
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
     print("=========================================================================")
-    print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE [GRADE: {grade.upper()}]")
+    print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE [ARCHITECTURAL GRADE]")
+    print("=========================================================================", flush=True)
+    print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
+    print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
+    print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
+    print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
+    print(f"  Target Mesh Faces:  {custom_faces:,} (1M)")
+    print(f"  Rolling Shutter:    {rolling_shutter} | Hole Closing: {close_holes}")
     print("=========================================================================", flush=True)
 
     # Enable all available NVIDIA GPUs
@@ -490,7 +531,6 @@ def run_reconstruction(
         img_files = []
         abs_output = os.path.abspath(output_dir)
         for root, _dirs, files in os.walk(images_dir):
-            # Prevent scanning files in the output directory if located inside images_dir
             if os.path.abspath(root).startswith(abs_output):
                 continue
             for f in files:
@@ -510,30 +550,36 @@ def run_reconstruction(
             filter_image_quality(chunk, min_quality=min_quality)
 
         # Step 2: Feature Detection & Matching
-        print("\n[2/6] Executing GPU Feature Matching (GPS Reference Preselection)...", flush=True)
+        align_downscale = ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)
+        print(f"\n[2/6] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
         t_match = time.time()
         chunk.matchPhotos(
-            downscale=1,  # High accuracy full-resolution
+            downscale=align_downscale,
             generic_preselection=True,
             reference_preselection=True,
-            keypoint_limit=40000,
-            tiepoint_limit=4000,
+            keypoint_limit=keypoint_limit,
+            tiepoint_limit=tiepoint_limit,
             mask_tiepoints=True,
-            filter_stationary_points=True,
+            filter_stationary_points=filter_stationary_points,
+            guided_matching=guided_matching,
         )
         print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
         # Step 3: Camera Alignment
-        print("\n[3/6] Aligning Cameras & Initial Bundle Adjustment...", flush=True)
+        print(f"\n[3/6] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
         t_align = time.time()
-        chunk.alignCameras(adaptive_fitting=True)
+        chunk.alignCameras(adaptive_fitting=adaptive_fitting)
         aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
         enabled_count = sum(1 for c in chunk.cameras if c.enabled)
         print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
 
-        # Camera Optimization for Ultra Grade
-        if grade == "ultra":
-            filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+        # Camera Optimization with Rolling Shutter Compensation & Gradual Selection
+        if rolling_shutter:
+            for s in chunk.sensors:
+                s.rolling_shutter = Metashape.Shutter.Model.Regularized
+            print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+
+        filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
 
         # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
         if crop_method == "gps-square":
@@ -557,7 +603,6 @@ def run_reconstruction(
             print("  reconstruction box. If satisfied, save in GUI and return here.")
             print("=========================================================================", flush=True)
             input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
-            # Reload project if modified in external GUI
             doc.open(psx_out)
             chunk = doc.chunk
 
@@ -566,12 +611,13 @@ def run_reconstruction(
     if has_depth_maps:
         print(f"\n[4/6] Reusing existing MVS Depth Maps from checkpoint ({len(chunk.depth_maps)} depth maps).", flush=True)
     else:
-        depth_downscale = 1 if grade == "ultra" else 2
-        print(f"\n[4/6] Computing GPU MVS Depth Maps (Downscale={depth_downscale}, MildFiltering)...", flush=True)
+        depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
+        filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
+        print(f"\n[4/6] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
         t_depth = time.time()
         chunk.buildDepthMaps(
             downscale=depth_downscale,
-            filter_mode=Metashape.FilterMode.MildFiltering,
+            filter_mode=filter_mode_arg,
             reuse_depth=False,
         )
         print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
@@ -583,16 +629,16 @@ def run_reconstruction(
     if has_model:
         print(f"\n[5/6] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
     else:
-        print(f"\n[5/6] Reconstructing Arbitrary Surface Mesh from Depth Maps...", flush=True)
+        print(f"\n[5/6] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
         t_mesh = time.time()
-        if grade == "ultra" and custom_faces > 0:
+        if custom_faces > 0:
             face_count_arg = Metashape.FaceCount.CustomFaceCount
             face_count_custom_arg = custom_faces
-            print(f"  Target Polygon Count: {custom_faces:,} faces (Ultra Grade Optimized)", flush=True)
+            print(f"  Target Polygon Count: {custom_faces:,} faces", flush=True)
         else:
-            face_count_arg = Metashape.FaceCount.HighFaceCount
+            face_count_arg = Metashape.FaceCount.MediumFaceCount
             face_count_custom_arg = 200000
-            print(f"  Target Polygon Count: HighFaceCount preset", flush=True)
+            print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
 
         chunk.buildModel(
             surface_type=Metashape.SurfaceType.Arbitrary,
@@ -602,6 +648,10 @@ def run_reconstruction(
             face_count_custom=face_count_custom_arg,
             vertex_colors=True,
         )
+        if close_holes and chunk.model:
+            chunk.model.closeHoles(level=30)
+            print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
+
         mesh_verts = len(chunk.model.vertices)
         mesh_faces = len(chunk.model.faces)
         print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
@@ -613,7 +663,7 @@ def run_reconstruction(
     if has_texture:
         print(f"\n[6/6] Reusing existing Texture Atlas from checkpoint ({len(chunk.model.textures)} pages).", flush=True)
     else:
-        tex_pages = 4 if grade == "ultra" else 1
+        tex_pages = 2
         print(f"\n[6/6] Baking {tex_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending)...", flush=True)
         t_tex = time.time()
         chunk.buildUV(
@@ -666,12 +716,21 @@ def run_reconstruction(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Autonomous Metashape 3D Reconstruction Pipeline (Default: Ultra Grade, 4M Faces, TIFF Textures, GPS-Square Auto-Crop, Sharpness Filtering)"
+        description="Autonomous Metashape 3D Reconstruction Pipeline (Medium Alignment Quality, 40K Keypoints, 25K Tiepoints, Exclude Stationary Points, Moderate Depth Filtering, 1M Faces, GPS-Square Crop)"
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
-    parser.add_argument("--grade", choices=["high", "ultra"], default="ultra", help="Reconstruction grade preset (default: ultra)")
-    parser.add_argument("--faces", type=int, default=4000000, help="Custom face count for ultra grade (default: 4000000 / 4M)")
+    parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="medium", help="Image alignment accuracy/quality (default: medium)")
+    parser.add_argument("--keypoint-limit", type=int, default=40000, help="Max keypoints per image (default: 40000)")
+    parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
+    parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
+    parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
+    parser.add_argument("--faces", type=int, default=1000000, help="Target polygon face count (default: 1000000 / 1M)")
+    parser.add_argument("--guided-matching", action="store_true", default=False, help="Enable guided image matching (default: False)")
+    parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
+    parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
+    parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", default=True, help="Disable CMOS rolling shutter regularized compensation (default: enabled)")
+    parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
     parser.add_argument(
         "--crop-method",
         choices=["gps-square", "structure", "none"],
@@ -702,11 +761,20 @@ if __name__ == "__main__":
     run_reconstruction(
         images_dir=args.images,
         output_dir=args.output,
-        grade=args.grade,
+        align_quality=args.align_quality,
+        keypoint_limit=args.keypoint_limit,
+        tiepoint_limit=args.tiepoint_limit,
+        filter_stationary_points=args.filter_stationary_points,
+        guided_matching=args.guided_matching,
+        adaptive_fitting=args.adaptive_fitting,
+        depth_quality=args.depth_quality,
+        depth_filtering=args.depth_filtering,
         custom_faces=args.faces,
         crop_method=crop_method,
         crop_padding=args.crop_padding,
         min_quality=min_quality,
+        rolling_shutter=args.rolling_shutter,
+        close_holes=args.close_holes,
         pause_after_crop=args.pause_after_crop,
         force_restart=args.force_restart,
     )
