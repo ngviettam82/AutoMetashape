@@ -639,7 +639,7 @@ def run_reconstruction(
         if not img_files:
             raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
 
-        print(f"\n[1/6] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
+        print(f"\n[1/7] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
         chunk.addPhotos(img_files)
         print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
 
@@ -649,7 +649,7 @@ def run_reconstruction(
 
         # Step 2: Feature Detection & Matching
         align_downscale = ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)
-        print(f"\n[2/6] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
+        print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
         t_match = time.time()
         chunk.matchPhotos(
             downscale=align_downscale,
@@ -664,7 +664,7 @@ def run_reconstruction(
         print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
         # Step 3: Camera Alignment
-        print(f"\n[3/6] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
+        print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
         t_align = time.time()
         chunk.alignCameras(adaptive_fitting=adaptive_fitting)
         aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
@@ -690,7 +690,7 @@ def run_reconstruction(
                 doc.open(psx_out, ignore_lock=True)
 
         if crop_method == "manual":
-            print("\n[3b/6] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
+            print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
             doc.save(psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
@@ -724,11 +724,11 @@ def run_reconstruction(
     # Step 4: Multi-View Stereo Dense Depth Maps
     has_depth_maps = chunk.depth_maps is not None
     if has_depth_maps:
-        print(f"\n[4/6] Reusing existing MVS Depth Maps from checkpoint ({len(chunk.depth_maps)} depth maps).", flush=True)
+        print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({len(chunk.depth_maps)} depth maps).", flush=True)
     else:
         depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
         filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
-        print(f"\n[4/6] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
+        print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
         t_depth = time.time()
         chunk.buildDepthMaps(
             downscale=depth_downscale,
@@ -753,9 +753,9 @@ def run_reconstruction(
 
     has_model = chunk.model is not None
     if has_model:
-        print(f"\n[5/6] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
+        print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
     else:
-        print(f"\n[5/6] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
+        print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
         t_mesh = time.time()
         if custom_faces > 0:
             face_count_arg = Metashape.FaceCount.CustomFaceCount
@@ -815,14 +815,14 @@ def run_reconstruction(
             current_pages = 1
 
     if current_pages == texture_pages and not rebake_texture:
-        print(f"\n[6/6] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
+        print(f"\n[6/7] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
     else:
         if current_pages > 0 and current_pages != texture_pages:
-            print(f"\n[6/6] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...", flush=True)
+            print(f"\n[6/7] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...", flush=True)
         elif rebake_texture:
-            print(f"\n[6/6] Force re-baking texture atlas as requested ({texture_pages} pages)...", flush=True)
+            print(f"\n[6/7] Force re-baking texture atlas as requested ({texture_pages} pages)...", flush=True)
         else:
-            print(f"\n[6/6] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
+            print(f"\n[6/7] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
 
         t_tex = time.time()
         chunk.buildUV(
@@ -845,7 +845,7 @@ def run_reconstruction(
 
     # Production Asset Export
     print("\n=========================================================================")
-    print("  EXPORTING FINAL PRODUCTION ASSETS")
+    print("  [7/7] EXPORTING FINAL PRODUCTION ASSETS (GLB, OBJ, TIFF & PSX)")
     print("=========================================================================")
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
@@ -857,7 +857,7 @@ def run_reconstruction(
         save_normals=True,
         save_colors=True,
     )
-    print(f"[EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
+    print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
 
     chunk.exportModel(
         obj_out,
@@ -867,13 +867,13 @@ def run_reconstruction(
         save_normals=True,
         save_colors=True,
     )
-    print(f"[EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+    print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
     if doc.path:
         doc.save()
     else:
         doc.save(psx_out)
-    print(f"[EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
+    print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
     total_time = (time.time() - t_start) / 60.0
     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)

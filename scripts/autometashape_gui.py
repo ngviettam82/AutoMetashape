@@ -177,46 +177,102 @@ class StudioCard(tk.Frame):
         lbl_title.pack(side=tk.LEFT)
 
         if self.subtitle_text:
-            lbl_sub = tk.Label(
+            self.lbl_sub = tk.Label(
                 header_bar,
                 text=self.subtitle_text,
                 font=("Segoe UI", 8),
                 bg=UITheme.BG_SURFACE,
                 fg=UITheme.TEXT_MUTED,
             )
-            lbl_sub.pack(side=tk.RIGHT)
+            self.lbl_sub.pack(side=tk.RIGHT)
+
+    def set_subtitle(self, text: str) -> None:
+        self.subtitle_text = text
+        if hasattr(self, "lbl_sub"):
+            self.lbl_sub.config(text=text)
 
 
 # ---------------------------------------------------------------------------
-# Horizontal Pipeline Stepper (7 Reconstruction Milestones)
+# Pipeline Milestone Definitions
+# ---------------------------------------------------------------------------
+STAGES_RECON = [
+    ("1", "Ingest", "Photos & blur filter"),
+    ("2", "Match", "GPU feature matching"),
+    ("3", "Align", "Cameras & crop"),
+    ("4", "Depth", "Dense stereopsis"),
+    ("5", "Mesh", "600K surface"),
+    ("6", "Texture", "16-page 8K atlas"),
+    ("7", "Export", "GLB, OBJ & TIFF"),
+]
+
+STAGES_EXPORT = [
+    ("1", "Project", "Load .psx project"),
+    ("2", "Verify", "Validate 3D mesh"),
+    ("3", "Texture", "Re-bake 8K atlas"),
+    ("4", "glTF", "Export binary GLB"),
+    ("5", "Wavefront", "Export OBJ & TIFF"),
+]
+
+
+# ---------------------------------------------------------------------------
+# Horizontal Pipeline Stepper (Dynamic Milestones Tracker)
 # ---------------------------------------------------------------------------
 class StudioPipelineStepper(tk.Frame):
-    """Refined milestone trajectory tracking all 7 pipeline stages."""
+    """Refined milestone trajectory tracking all pipeline stages with honest 1:1 mapping."""
 
-    STAGES = [
-        ("1", "Ingest", "Quality filter"),
-        ("2", "Align", "Bundle adjust"),
-        ("3", "Crop", "GPS boundary"),
-        ("4", "Depth", "Dense stereopsis"),
-        ("5", "Mesh", "600K surface"),
-        ("6", "Texture", "16-page 8K"),
-        ("7", "Export", "GLB & TIFF"),
-    ]
-
-    def __init__(self, parent: tk.Widget, **kwargs) -> None:
+    def __init__(
+        self,
+        parent: tk.Widget,
+        stages: list[tuple[str, str, str]] = None,
+        **kwargs,
+    ) -> None:
         super().__init__(parent, bg=UITheme.BG_SURFACE, **kwargs)
         self.stage_frames: list[tk.Frame] = []
         self.stage_indicators: list[tk.Label] = []
         self.stage_titles: list[tk.Label] = []
         self.stage_subtitles: list[tk.Label] = []
-        self._build()
 
-    def _build(self) -> None:
-        cards_row = tk.Frame(self, bg=UITheme.BG_SURFACE)
-        cards_row.pack(fill=tk.X, padx=0, pady=(0, 6))
+        self.cards_row = tk.Frame(self, bg=UITheme.BG_SURFACE)
+        self.cards_row.pack(fill=tk.X, padx=0, pady=(0, 6))
 
-        for i, (num, name, subtitle) in enumerate(self.STAGES):
-            outer = tk.Frame(cards_row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT)
+        # Status summary bar under stages
+        self.info_bar = tk.Frame(self, bg=UITheme.BG_ROOT, padx=10, pady=5)
+        self.info_bar.pack(fill=tk.X)
+
+        self.lbl_pipeline_status = tk.Label(
+            self.info_bar,
+            text="Status: Ready to reconstruct",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_SECONDARY,
+            anchor=tk.W,
+        )
+        self.lbl_pipeline_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        self.lbl_timer = tk.Label(
+            self.info_bar,
+            text="Elapsed: --:--",
+            font=("Consolas", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+        )
+        self.lbl_timer.pack(side=tk.RIGHT)
+
+        self.build_stages(stages or STAGES_RECON)
+
+    def build_stages(self, stages: list[tuple[str, str, str]]) -> None:
+        """Dynamically construct stage pill cards."""
+        self.stages = stages
+        for child in self.cards_row.winfo_children():
+            child.destroy()
+
+        self.stage_frames.clear()
+        self.stage_indicators.clear()
+        self.stage_titles.clear()
+        self.stage_subtitles.clear()
+
+        for i, (num, name, subtitle) in enumerate(self.stages):
+            outer = tk.Frame(self.cards_row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT)
             outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
             inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=6, pady=6)
@@ -259,31 +315,10 @@ class StudioPipelineStepper(tk.Frame):
             self.stage_titles.append(t)
             self.stage_subtitles.append(s)
 
-        # Status summary bar under stages
-        info_bar = tk.Frame(self, bg=UITheme.BG_ROOT, padx=10, pady=5)
-        info_bar.pack(fill=tk.X)
-
-        self.lbl_pipeline_status = tk.Label(
-            info_bar,
-            text="Status: Ready to reconstruct",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_SECONDARY,
-            anchor=tk.W,
-        )
-        self.lbl_pipeline_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-        self.lbl_timer = tk.Label(
-            info_bar,
-            text="Elapsed: --:--",
-            font=("Consolas", 8),
-            bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_MUTED,
-        )
-        self.lbl_timer.pack(side=tk.RIGHT)
+        self.reset()
 
     def reset(self) -> None:
-        for i, (num, name, subtitle) in enumerate(self.STAGES):
+        for i, (num, name, subtitle) in enumerate(self.stages):
             outer = self.stage_frames[i]
             inner = outer.winfo_children()[0]
             outer.config(bg=UITheme.BORDER)
@@ -315,8 +350,8 @@ class StudioPipelineStepper(tk.Frame):
             )
 
         if 0 <= idx < len(self.stage_frames):
-            num = self.STAGES[idx][0]
-            name = self.STAGES[idx][1]
+            num = self.stages[idx][0]
+            name = self.stages[idx][1]
             self._apply_style(
                 idx,
                 outer_bg=UITheme.ACCENT_CYAN,
@@ -326,14 +361,14 @@ class StudioPipelineStepper(tk.Frame):
                 title_color=UITheme.TEXT_PRIMARY,
                 sub_color=UITheme.ACCENT_CYAN,
             )
-            desc_text = f"Running Stage {idx+1}/7: {name}"
+            desc_text = f"Running Stage {idx+1}/{len(self.stages)}: {name}"
             if description:
                 desc_text += f" - {description}"
             self.lbl_pipeline_status.config(text=desc_text, fg=UITheme.ACCENT_CYAN)
 
     def set_paused(self, idx: int, message: str = "") -> None:
         if 0 <= idx < len(self.stage_frames):
-            num = self.STAGES[idx][0]
+            num = self.stages[idx][0]
             self._apply_style(
                 idx,
                 outer_bg=UITheme.ACCENT_AMBER,
@@ -344,7 +379,7 @@ class StudioPipelineStepper(tk.Frame):
                 sub_color=UITheme.ACCENT_AMBER_TXT,
             )
             self.lbl_pipeline_status.config(
-                text=f"Paused at Stage {idx+1}/7: {message}",
+                text=f"Paused at Stage {idx+1}/{len(self.stages)}: {message}",
                 fg=UITheme.ACCENT_AMBER_TXT,
             )
 
@@ -360,7 +395,7 @@ class StudioPipelineStepper(tk.Frame):
                 sub_color=UITheme.ACCENT_GREEN_TXT,
             )
         self.lbl_pipeline_status.config(
-            text="Complete: All 7 stages finished successfully. Deliverables ready on disk.",
+            text=f"Complete: All {len(self.stages)} stages finished successfully. Deliverables ready on disk.",
             fg=UITheme.ACCENT_GREEN_TXT,
         )
 
@@ -765,7 +800,7 @@ class AutoMetashapeStudio:
             inner,
             style="Horizontal.TProgressbar",
             mode="indeterminate",
-            length=220,
+            length=140,
         )
         self.progress_bar.pack(side=tk.LEFT, padx=(0, 16))
 
@@ -802,6 +837,9 @@ class AutoMetashapeStudio:
             (0, 0), window=self.content_frame, anchor="nw"
         )
 
+        # Full-width Stepper Card spanning entire content width
+        self._build_stepper_card(self.content_frame)
+
         # Responsive columns inside content_frame
         self.col_left = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
         self.col_right = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
@@ -812,8 +850,7 @@ class AutoMetashapeStudio:
         self._build_advanced_settings_card(self.col_left)
         self._build_export_card(self.col_left)
 
-        # Populate Right Column (Milestones & Execution Log)
-        self._build_stepper_card(self.col_right)
+        # Populate Right Column (Execution Log with matching height)
         self._build_log_card(self.col_right)
 
         # Responsive snap layout callback on window resize
@@ -829,28 +866,29 @@ class AutoMetashapeStudio:
         self.canvas.itemconfig(self.canvas_window_id, width=canvas_width)
 
         # Snap breakpoint: >= 960px -> 2 columns side-by-side; < 960px -> 1 column vertical stack
+        # Stepper is pinned to row 0 across the full width, with zero clipping on any display size
         if canvas_width >= 960:
             if self.current_layout_mode != "2col":
                 self.current_layout_mode = "2col"
-                self.col_left.pack_forget()
-                self.col_right.pack_forget()
-                self.col_left.pack(
-                    side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(14, 7), pady=6
-                )
-                self.col_right.pack(
-                    side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(7, 14), pady=6
-                )
+                self.card_stepper.grid_forget()
+                self.col_left.grid_forget()
+                self.col_right.grid_forget()
+                self.content_frame.columnconfigure(0, weight=1, uniform="col")
+                self.content_frame.columnconfigure(1, weight=1, uniform="col")
+                self.card_stepper.grid(row=0, column=0, columnspan=2, sticky="ew", padx=14, pady=(6, 4))
+                self.col_left.grid(row=1, column=0, sticky="nsew", padx=(14, 7), pady=(2, 6))
+                self.col_right.grid(row=1, column=1, sticky="nsew", padx=(7, 14), pady=(2, 6))
         else:
             if self.current_layout_mode != "1col":
                 self.current_layout_mode = "1col"
-                self.col_left.pack_forget()
-                self.col_right.pack_forget()
-                self.col_left.pack(
-                    side=tk.TOP, fill=tk.X, padx=14, pady=(6, 0)
-                )
-                self.col_right.pack(
-                    side=tk.TOP, fill=tk.X, padx=14, pady=(6, 6)
-                )
+                self.card_stepper.grid_forget()
+                self.col_left.grid_forget()
+                self.col_right.grid_forget()
+                self.content_frame.columnconfigure(0, weight=1, uniform="")
+                self.content_frame.columnconfigure(1, weight=0, uniform="")
+                self.card_stepper.grid(row=0, column=0, columnspan=1, sticky="ew", padx=14, pady=(6, 4))
+                self.col_left.grid(row=1, column=0, sticky="ew", padx=14, pady=(2, 0))
+                self.col_right.grid(row=2, column=0, sticky="ew", padx=14, pady=(6, 6))
 
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -867,7 +905,10 @@ class AutoMetashapeStudio:
 
             delta = event.delta
             if delta != 0:
-                units = int(-1 * (delta / 120))
+                if abs(delta) >= 120:
+                    units = int(-1 * (delta / 120))
+                else:
+                    units = -1 if delta > 0 else 1
                 self.canvas.yview_scroll(units, "units")
 
         self.root.bind_all("<MouseWheel>", _on_mousewheel)
@@ -1355,7 +1396,7 @@ class AutoMetashapeStudio:
             bd=0,
             highlightthickness=0,
             yscrollcommand=log_scrollbar.set,
-            height=12,
+            height=20,
         )
         self.txt_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         log_scrollbar.config(command=self.txt_log.yview)
@@ -1514,6 +1555,8 @@ class AutoMetashapeStudio:
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
             self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            self.card_stepper.set_subtitle("7-stage automated photogrammetry trajectory")
+            self.stepper.build_stages(STAGES_RECON)
             self.btn_start.config(text="Start Reconstruction", bg=UITheme.ACCENT_GREEN, fg="white")
         else:
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
@@ -1522,6 +1565,8 @@ class AutoMetashapeStudio:
             self.card_preset.pack_forget()
             self.card_adv.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
+            self.card_stepper.set_subtitle("5-stage production export & texture re-bake")
+            self.stepper.build_stages(STAGES_EXPORT)
             self.btn_start.config(text="Export Assets", bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
 
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -1778,7 +1823,7 @@ class AutoMetashapeStudio:
             cmd.extend(["--texture-pages", str(self.var_exp_pages.get())])
 
         self.stepper.reset()
-        self.stepper.set_active(5, "Re-baking 8K Textures & Exporting Assets")
+        self.stepper.set_active(0, "Loading Project & Validating Mesh")
         self.frame_crop_banner.pack_forget()
         self._spawn_worker(cmd, "Export & Re-Bake")
 
@@ -1835,26 +1880,42 @@ class AutoMetashapeStudio:
 
     def _parse_stepper(self, line: str) -> None:
         l = line.lower()
-        if "[1/6]" in line or "ingesting" in l:
-            self.root.after(0, lambda: self.stepper.set_active(0, "Ingesting photos & filtering blur"))
-        elif "[2/6]" in line or "gpu feature matching" in l:
-            self.root.after(0, lambda: self.stepper.set_active(1, "GPU Feature Matching"))
-        elif "[3/6]" in line or "aligning cameras" in l:
-            self.root.after(0, lambda: self.stepper.set_active(1, "Camera Bundle Adjustment"))
-        elif "[auto-crop]" in line or "camera gps square" in l:
-            self.root.after(0, lambda: self.stepper.set_active(2, "Locking GPS Bounding Box"))
-        elif "[pause_crop]" in l or "pause for user to adjust bounding box" in l:
-            self.root.after(0, self._on_pipeline_paused_for_crop)
-        elif "[4/6]" in line or "mvs depth maps" in l:
-            self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
-        elif "[5/6]" in line or "surface mesh" in l:
-            self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 600K Face Mesh & Closing Holes"))
-        elif "[6/6]" in line or "baking" in l or "texture atlas" in l or "[texture]" in line:
-            self.root.after(0, lambda: self.stepper.set_active(5, "Baking 16-Page 8K Texture Atlas"))
-        elif "exporting final" in l or "[export]" in line or "[1/2] exporting" in l:
-            self.root.after(0, lambda: self.stepper.set_active(6, "Exporting GLB, OBJ, 16x TIFF, PSX"))
-        elif "[success]" in l:
-            self.root.after(0, self.stepper.set_all_done)
+        if self.active_mode == "recon":
+            if "[1/7]" in line or "[1/6]" in line or "ingesting" in l:
+                self.root.after(0, lambda: self.stepper.set_active(0, "Ingesting photos & filtering blur"))
+            elif "[2/7]" in line or "[2/6]" in line or "feature matching" in l:
+                self.root.after(0, lambda: self.stepper.set_active(1, "GPU Feature Matching"))
+            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
+                self.root.after(0, lambda: self.stepper.set_active(2, "Camera Alignment & Bundle Adjustment"))
+            elif "[auto-crop]" in line or "camera gps square" in l or "optical ray convergence" in l:
+                self.root.after(0, lambda: self.stepper.set_active(2, "Alignment & Bounding Box Crop"))
+            elif "[pause_crop]" in l or "pause for user to adjust bounding box" in l:
+                self.root.after(0, self._on_pipeline_paused_for_crop)
+            elif "skipping steps 1-3" in l:
+                self.root.after(0, lambda: self.stepper.set_active(3, "Resuming at Depth Maps"))
+            elif "[4/7]" in line or "[4/6]" in line or "mvs depth maps" in l:
+                self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
+            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
+                self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 600K Face Mesh & Closing Holes"))
+            elif "[6/7]" in line or "[6/6]" in line or "baking" in l or "texture atlas" in l or "buildtexture" in l:
+                self.root.after(0, lambda: self.stepper.set_active(5, "Baking 16-Page 8K Texture Atlas"))
+            elif "[7/7]" in line or "exporting final" in l or "[export]" in line or "model.glb" in l or "model.obj" in l:
+                self.root.after(0, lambda: self.stepper.set_active(6, "Exporting GLB, OBJ, TIFF & PSX"))
+            elif "[success]" in l:
+                self.root.after(0, self.stepper.set_all_done)
+        else:
+            if "project:" in l or "autometashape: production asset export" in l:
+                self.root.after(0, lambda: self.stepper.set_active(0, "Loading Metashape Project"))
+            elif "[model info]" in l or "polygonal faces" in l:
+                self.root.after(0, lambda: self.stepper.set_active(1, "Validating 3D Mesh Geometry"))
+            elif "[texture]" in l or "baking" in l:
+                self.root.after(0, lambda: self.stepper.set_active(2, "Re-baking 8K Texture Atlas"))
+            elif "[1/2]" in line or "exporting binary gltf" in l:
+                self.root.after(0, lambda: self.stepper.set_active(3, "Exporting Binary GLB"))
+            elif "[2/2]" in line or "exporting wavefront obj" in l:
+                self.root.after(0, lambda: self.stepper.set_active(4, "Exporting Wavefront OBJ & TIFF"))
+            elif "[success]" in l:
+                self.root.after(0, self.stepper.set_all_done)
 
     def _consume_log_queue(self) -> None:
         while not self.log_queue.empty():
@@ -1866,7 +1927,7 @@ class AutoMetashapeStudio:
                     self._on_finished(success=False)
                 else:
                     tag = None
-                    if any(s in line for s in ["[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]"]):
+                    if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]", "[EXPORT]"]):
                         tag = "stage"
                     elif "[SUCCESS]" in line or "[CHECKPOINT]" in line:
                         tag = "success"
@@ -1882,7 +1943,7 @@ class AutoMetashapeStudio:
     def _on_pipeline_paused_for_crop(self) -> None:
         self.stepper.set_paused(2, "Open Metashape Pro to Crop, then click Continue")
         self.lbl_status.config(
-            text="Paused: Open Metashape Pro to Crop, then click Continue",
+            text="Paused: Crop in Metashape & click Continue",
             fg=UITheme.ACCENT_AMBER_TXT,
         )
         self.progress_bar.stop()
