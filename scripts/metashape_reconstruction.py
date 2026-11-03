@@ -824,27 +824,49 @@ def run_reconstruction(
                     filter_tie_points(c, max_reproj_error=0.4, max_uncertainty=15.0)
 
             # Register Chunks onto Anchor using Point-Based RANSAC ICP
-            anchor_chunk = max(created_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
-            ref_key = anchor_chunk.key
-            chunk_keys = [c.key for c in created_chunks]
+            aligned_chunks = [c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2]
+            if len(aligned_chunks) == 0:
+                raise RuntimeError("No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap.")
 
-            print(f"\n[Chunk Alignment] Registering {len(chunk_keys)} chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
-            doc.alignChunks(
-                chunks=chunk_keys,
-                reference=ref_key,
-                method=0,
-                fit_scale=True,
-                downscale=align_downscale,
-                keypoint_limit=keypoint_limit,
-            )
+            anchor_chunk = max(aligned_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
+            ref_key = anchor_chunk.key
+            merge_chunk_keys = [c.key for c in created_chunks]
+            align_chunk_keys = [c.key for c in aligned_chunks]
+
+            if len(aligned_chunks) >= 2:
+                print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
+                try:
+                    doc.alignChunks(
+                        chunks=align_chunk_keys,
+                        reference=ref_key,
+                        method=0,
+                        fit_scale=True,
+                        downscale=align_downscale,
+                        keypoint_limit=keypoint_limit,
+                    )
+                    print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
+                except Exception as e_align:
+                    print(f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; falling back to Camera/GPS-based registration (method=2)...", flush=True)
+                    try:
+                        doc.alignChunks(
+                            chunks=align_chunk_keys,
+                            reference=ref_key,
+                            method=2,
+                            fit_scale=False,
+                        )
+                        print("  [Chunk Alignment] Camera/GPS-based chunk alignment succeeded!", flush=True)
+                    except Exception as e_cam:
+                        print(f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.", flush=True)
+            else:
+                print(f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned cameras; skipping chunk registration.", flush=True)
 
             # Merge chunks into unified production chunk
-            print(f"\n[Chunk Merging] Merging {len(chunk_keys)} aligned chunks into unified production reconstruction chunk...", flush=True)
+            print(f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks into unified production reconstruction chunk...", flush=True)
             try:
-                doc.mergeChunks(chunks=chunk_keys, merge_tiepoints=True)
+                doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=True)
             except Exception as e_merge:
                 print(f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging with camera transforms preserved...", flush=True)
-                doc.mergeChunks(chunks=chunk_keys, merge_tiepoints=False)
+                doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=False)
 
             doc.chunk = doc.chunks[-1]
             chunk = doc.chunk

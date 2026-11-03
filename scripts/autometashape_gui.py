@@ -1830,7 +1830,7 @@ class AutoMetashapeStudio:
                         if not (os.path.abspath(full_entry).startswith(os.path.abspath(default_out))):
                             has_img = False
                             for _, _, fs in os.walk(full_entry):
-                                if any(f.lower().endswith(SUPPORTED_IMAGE_EXTS) for f in fs):
+                                if any(f.lower().endswith(tuple(SUPPORTED_IMAGE_EXTS)) for f in fs):
                                     has_img = True
                                     break
                             if has_img:
@@ -1842,15 +1842,17 @@ class AutoMetashapeStudio:
                 ext_str = ", ".join(sorted(found_exts)[:4])
                 size_str = format_file_size(total_bytes)
                 if subfolder_count > 1:
-                    self.lbl_photo_status.set(
+                    st_msg = (
                         f"{count:,} photos ({size_str}) across {subfolder_count} flights · {ext_str} · Multi-chunk alignment enabled"
                     )
                 else:
-                    self.lbl_photo_status.set(
+                    st_msg = (
                         f"{count:,} photos ({size_str}) · {ext_str} · Ready for reconstruction"
                     )
             else:
-                self.lbl_photo_status.set("No supported photos (.jpg, .dng, .tif, etc.) found in folder.")
+                st_msg = "No supported photos (.jpg, .dng, .tif, etc.) found in folder."
+
+            self.log_queue.put(f"__STATUS_PHOTO__{st_msg}")
 
         threading.Thread(target=_scan, daemon=True).start()
 
@@ -2153,7 +2155,9 @@ class AutoMetashapeStudio:
         while not self.log_queue.empty():
             try:
                 line = self.log_queue.get_nowait()
-                if line == "__TASK_DONE_SUCCESS__":
+                if line.startswith("__STATUS_PHOTO__"):
+                    self.lbl_photo_status.set(line[len("__STATUS_PHOTO__"):])
+                elif line == "__TASK_DONE_SUCCESS__":
                     self._on_finished(success=True)
                 elif line == "__TASK_DONE_CANCELLED__":
                     self._on_finished(success=False, user_cancelled=True)
