@@ -318,6 +318,13 @@ class StudioPipelineStepper(tk.Frame):
         self.reset()
 
     def reset(self) -> None:
+        self.current_active_idx = -1
+        self.is_done = False
+        self.is_paused = False
+        self.pause_idx = -1
+        self.pause_msg = ""
+        self.current_desc = ""
+
         for i, (num, name, subtitle) in enumerate(self.stages):
             outer = self.stage_frames[i]
             inner = outer.winfo_children()[0]
@@ -331,15 +338,56 @@ class StudioPipelineStepper(tk.Frame):
             self.stage_indicators[i].config(text=f"{num}.", fg=UITheme.TEXT_DIM)
             self.stage_titles[i].config(fg=UITheme.TEXT_MUTED)
             self.stage_subtitles[i].config(fg=UITheme.TEXT_DIM)
+        default_status = "Status: Ready to reconstruct" if len(self.stages) == 7 else "Status: Ready to export"
         self.lbl_pipeline_status.config(
-            text="Status: Ready to reconstruct",
+            text=default_status,
             fg=UITheme.TEXT_SECONDARY,
         )
         self.lbl_timer.config(text="Elapsed: --:--")
 
+    def get_state(self) -> dict:
+        return {
+            "stages": list(self.stages),
+            "active_idx": getattr(self, "current_active_idx", -1),
+            "is_done": getattr(self, "is_done", False),
+            "is_paused": getattr(self, "is_paused", False),
+            "pause_idx": getattr(self, "pause_idx", -1),
+            "pause_msg": getattr(self, "pause_msg", ""),
+            "desc": getattr(self, "current_desc", ""),
+            "status_text": self.lbl_pipeline_status.cget("text"),
+            "status_fg": self.lbl_pipeline_status.cget("fg"),
+            "timer_text": self.lbl_timer.cget("text"),
+        }
+
+    def restore_state(self, state: dict) -> None:
+        stages = state.get("stages", STAGES_RECON)
+        if self.stages != stages or len(self.stage_frames) != len(stages):
+            self.build_stages(stages)
+
+        if state.get("is_done"):
+            self.set_all_done()
+        elif state.get("is_paused") and state.get("pause_idx", -1) >= 0:
+            self.set_paused(state["pause_idx"], state.get("pause_msg", ""))
+        elif state.get("active_idx", -1) >= 0:
+            self.set_active(state["active_idx"], state.get("desc", ""))
+        else:
+            self.reset()
+
+        if "status_text" in state:
+            self.lbl_pipeline_status.config(
+                text=state["status_text"],
+                fg=state.get("status_fg", UITheme.TEXT_SECONDARY),
+            )
+        if "timer_text" in state:
+            self.lbl_timer.config(text=state["timer_text"])
+
     def set_active(self, idx: int, description: str = "") -> None:
         if not (0 <= idx < len(self.stage_frames)):
             return
+        self.current_active_idx = idx
+        self.current_desc = description
+        self.is_done = False
+        self.is_paused = False
 
         # 1. Past stages (< idx): mark completed with checkmark
         for i in range(idx):
@@ -387,6 +435,10 @@ class StudioPipelineStepper(tk.Frame):
     def set_paused(self, idx: int, message: str = "") -> None:
         if not (0 <= idx < len(self.stage_frames)):
             return
+        self.is_paused = True
+        self.pause_idx = idx
+        self.pause_msg = message
+        self.is_done = False
 
         for i in range(idx):
             self._apply_style(
@@ -428,6 +480,9 @@ class StudioPipelineStepper(tk.Frame):
         )
 
     def set_all_done(self) -> None:
+        self.is_done = True
+        self.is_paused = False
+        self.current_active_idx = len(self.stage_frames)
         for i in range(len(self.stage_frames)):
             self._apply_style(
                 i,
@@ -499,12 +554,41 @@ class AutoMetashapeStudio:
         self.current_process: subprocess.Popen | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.is_running = False
+        self.worker_mode: str | None = None
         self.start_time: float = 0.0
         self.active_mode = "recon"
         self.adv_expanded = False
         self.selected_preset_key = "architectural"
         self.current_layout_mode = None  # "2col" or "1col"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
+
+        # Independent tab state cache
+        self.mode_states = {
+            "recon": {
+                "stages": list(STAGES_RECON),
+                "active_idx": -1,
+                "is_done": False,
+                "is_paused": False,
+                "pause_idx": -1,
+                "pause_msg": "",
+                "desc": "",
+                "status_text": "Status: Ready to reconstruct",
+                "status_fg": UITheme.TEXT_SECONDARY,
+                "timer_text": "Elapsed: --:--",
+            },
+            "export": {
+                "stages": list(STAGES_EXPORT),
+                "active_idx": -1,
+                "is_done": False,
+                "is_paused": False,
+                "pause_idx": -1,
+                "pause_msg": "",
+                "desc": "",
+                "status_text": "Status: Ready to export",
+                "status_fg": UITheme.TEXT_SECONDARY,
+                "timer_text": "Elapsed: --:--",
+            },
+        }
 
         # Initialize Tkinter variables
         self._init_variables()
@@ -1591,7 +1675,15 @@ class AutoMetashapeStudio:
             self.var_ghosting.set(True)
 
     def _set_mode(self, mode: str) -> None:
+        if mode == self.active_mode:
+            return
+
+        # 1. Snapshot current tab's stepper state
+        if hasattr(self, "stepper"):
+            self.mode_states[self.active_mode] = self.stepper.get_state()
         self.active_mode = mode
+
+        # 2. Toggle tab buttons & left cards
         if mode == "recon":
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
@@ -1600,8 +1692,12 @@ class AutoMetashapeStudio:
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
             self.card_adv.pack(fill=tk.X, pady=(0, 6))
             self.card_stepper.set_subtitle("7-stage automated photogrammetry trajectory")
-            self.stepper.build_stages(STAGES_RECON)
-            self.btn_start.config(text="Start Reconstruction", bg=UITheme.ACCENT_GREEN, fg="white")
+            self.btn_start.config(
+                text="Start Reconstruction",
+                bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
+                fg=UITheme.TEXT_MUTED if self.is_running else "white",
+                state=tk.DISABLED if self.is_running else tk.NORMAL,
+            )
         else:
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
@@ -1610,9 +1706,16 @@ class AutoMetashapeStudio:
             self.card_adv.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
             self.card_stepper.set_subtitle("5-stage production export & texture re-bake")
-            self.stepper.build_stages(STAGES_EXPORT)
-            self.btn_start.config(text="Export Assets", bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
+            self.btn_start.config(
+                text="Export Assets",
+                bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_CYAN,
+                fg=UITheme.TEXT_MUTED if self.is_running else UITheme.BG_ROOT,
+                state=tk.DISABLED if self.is_running else tk.NORMAL,
+            )
 
+        # 3. Restore the target mode's stepper state seamlessly!
+        if hasattr(self, "stepper"):
+            self.stepper.restore_state(self.mode_states[mode])
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _check_metashape(self) -> None:
@@ -1655,6 +1758,10 @@ class AutoMetashapeStudio:
         )
         if chosen:
             self.var_psx_path.set(os.path.normpath(chosen))
+            if not self.is_running:
+                self.stepper.reset()
+                self.mode_states["export"] = self.stepper.get_state()
+                self.lbl_status.config(text="● Ready", fg=UITheme.TEXT_SECONDARY)
 
     def _browse_export_dir(self) -> None:
         chosen = filedialog.askdirectory(
@@ -1669,6 +1776,12 @@ class AutoMetashapeStudio:
         if not folder or not os.path.isdir(folder):
             self.lbl_photo_status.set("No folder selected. Click 'Browse...' to choose your raw photos folder.")
             return
+
+        # When a new project folder is loaded, reset recon progress to clean state if not currently running
+        if not self.is_running:
+            self.stepper.reset()
+            self.mode_states["recon"] = self.stepper.get_state()
+            self.lbl_status.config(text="● Ready", fg=UITheme.TEXT_SECONDARY)
 
         default_out = os.path.join(folder, "model")
         cur_out = self.var_output_dir.get().strip()
@@ -1873,8 +1986,15 @@ class AutoMetashapeStudio:
 
     def _spawn_worker(self, cmd: list[str], task_name: str) -> None:
         self.is_running = True
+        self.worker_mode = self.active_mode
         self.start_time = time.time()
-        self.btn_start.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED)
+        # Clean queue from any previous runs
+        while not self.log_queue.empty():
+            try:
+                self.log_queue.get_nowait()
+            except queue.Empty:
+                break
+        self.btn_start.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_MUTED)
         self.btn_stop.config(state=tk.NORMAL, bg=UITheme.ACCENT_RED, fg="white")
         self.progress_bar.start(10)
         self.lbl_status.config(text=f"● Running {task_name}...", fg=UITheme.ACCENT_CYAN)
@@ -1922,45 +2042,75 @@ class AutoMetashapeStudio:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _update_stepper_mode(self, mode: str, idx: int, desc: str) -> None:
+        def _apply():
+            if mode in self.mode_states:
+                st = self.mode_states[mode]
+                st["active_idx"] = idx
+                st["desc"] = desc
+                st["is_done"] = False
+                st["is_paused"] = False
+                num = st["stages"][idx][0]
+                name = st["stages"][idx][1]
+                st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
+                st["status_fg"] = UITheme.ACCENT_CYAN
+            if self.active_mode == mode:
+                self.stepper.set_active(idx, desc)
+        self.root.after(0, _apply)
+
+    def _complete_stepper_mode(self, mode: str) -> None:
+        def _apply():
+            if mode in self.mode_states:
+                st = self.mode_states[mode]
+                st["is_done"] = True
+                st["is_paused"] = False
+                st["active_idx"] = len(st["stages"])
+                st["status_text"] = f"Complete: All {len(st['stages'])} stages finished successfully. Deliverables ready on disk."
+                st["status_fg"] = UITheme.ACCENT_GREEN_TXT
+            if self.active_mode == mode:
+                self.stepper.set_all_done()
+        self.root.after(0, _apply)
+
     def _parse_stepper(self, line: str) -> None:
         l = line.lower()
-        if self.active_mode == "recon":
+        mode = self.worker_mode or self.active_mode
+        if mode == "recon":
             # Match strictly against unambiguous stage indicators to avoid false triggers from banner summaries
             if "[1/7]" in line or "[1/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(0, "Ingesting photos & filtering blur"))
+                self._update_stepper_mode("recon", 0, "Ingesting photos & filtering blur")
             elif "[2/7]" in line or "[2/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(1, "GPU Feature Matching"))
+                self._update_stepper_mode("recon", 1, "GPU Feature Matching")
             elif "[3/7]" in line or "[3/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(2, "Camera Alignment & Bundle Adjustment"))
+                self._update_stepper_mode("recon", 2, "Camera Alignment & Bundle Adjustment")
             elif "[auto-crop]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(2, "Alignment & Bounding Box Crop"))
+                self._update_stepper_mode("recon", 2, "Alignment & Bounding Box Crop")
             elif "[pause_crop]" in line:
                 self.root.after(0, self._on_pipeline_paused_for_crop)
             elif "skipping steps 1-3" in l:
-                self.root.after(0, lambda: self.stepper.set_active(3, "Resuming at Depth Maps"))
+                self._update_stepper_mode("recon", 3, "Resuming at Depth Maps")
             elif "[4/7]" in line or "[4/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
+                self._update_stepper_mode("recon", 3, "MVS Dense Stereopsis")
             elif "[5/7]" in line or "[5/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 600K Face Mesh & Closing Holes"))
+                self._update_stepper_mode("recon", 4, "Fusing 600K Face Mesh & Closing Holes")
             elif "[6/7]" in line or "[6/6]" in line:
-                self.root.after(0, lambda: self.stepper.set_active(5, "Baking 16-Page 8K Texture Atlas"))
-            elif "[7/7]" in line or "[export]" in line or "exporting final production assets" in l:
-                self.root.after(0, lambda: self.stepper.set_active(6, "Exporting GLB, OBJ, TIFF & PSX"))
-            elif "[success]" in line and "entire pipeline finished" in l:
-                self.root.after(0, self.stepper.set_all_done)
+                self._update_stepper_mode("recon", 5, "Baking 16-Page 8K Texture Atlas")
+            elif "[7/7]" in line or "[export]" in l or "exporting final production assets" in l:
+                self._update_stepper_mode("recon", 6, "Exporting GLB, OBJ, TIFF & PSX")
+            elif "[success]" in l and "entire pipeline finished" in l:
+                self._complete_stepper_mode("recon")
         else:
             if "project:" in l or "autometashape: production asset export" in l:
-                self.root.after(0, lambda: self.stepper.set_active(0, "Loading Metashape Project"))
+                self._update_stepper_mode("export", 0, "Loading Metashape Project")
             elif "[model info]" in l or "polygonal faces" in l:
-                self.root.after(0, lambda: self.stepper.set_active(1, "Validating 3D Mesh Geometry"))
-            elif "[texture]" in l or "baking" in l:
-                self.root.after(0, lambda: self.stepper.set_active(2, "Re-baking 8K Texture Atlas"))
+                self._update_stepper_mode("export", 1, "Validating 3D Mesh Geometry")
+            elif "[texture]" in l:
+                self._update_stepper_mode("export", 2, "Re-baking 8K Texture Atlas")
             elif "[1/2]" in line or "exporting binary gltf" in l:
-                self.root.after(0, lambda: self.stepper.set_active(3, "Exporting Binary GLB"))
+                self._update_stepper_mode("export", 3, "Exporting Binary GLB")
             elif "[2/2]" in line or "exporting wavefront obj" in l:
-                self.root.after(0, lambda: self.stepper.set_active(4, "Exporting Wavefront OBJ & TIFF"))
+                self._update_stepper_mode("export", 4, "Exporting Wavefront OBJ & TIFF")
             elif "[success]" in l:
-                self.root.after(0, self.stepper.set_all_done)
+                self._complete_stepper_mode("export")
 
     def _consume_log_queue(self) -> None:
         while not self.log_queue.empty():
@@ -2069,7 +2219,9 @@ class AutoMetashapeStudio:
                 self._on_finished(success=False, user_cancelled=True)
 
     def _on_finished(self, success: bool, user_cancelled: bool = False) -> None:
+        finished_mode = self.worker_mode or self.active_mode
         self.is_running = False
+        self.worker_mode = None
         self.progress_bar.stop()
         if hasattr(self, "btn_continue_crop"):
             self.btn_continue_crop.pack_forget()
@@ -2086,7 +2238,7 @@ class AutoMetashapeStudio:
         if user_cancelled:
             self.lbl_status.config(text="● Status: Cancelled by user", fg=UITheme.ACCENT_AMBER_TXT)
         elif success:
-            self.stepper.set_all_done()
+            self._complete_stepper_mode(finished_mode)
             self.lbl_status.config(text="✓ Status: Complete", fg=UITheme.ACCENT_GREEN_TXT)
             messagebox.showinfo(
                 "Completed",
