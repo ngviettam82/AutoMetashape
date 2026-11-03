@@ -102,7 +102,7 @@ class HorizontalStepper(tk.Frame):
         "2. Align",
         "3. Crop",
         "4. Depth",
-        "5. Mesh (1M)",
+        "5. Mesh (600K)",
         "6. Texture (16P)",
         "7. Export",
     ]
@@ -202,7 +202,7 @@ class AutoMetashapeStudio:
         self.var_images_dir = tk.StringVar()
         self.var_output_dir = tk.StringVar()
         self.var_align_quality = tk.StringVar(value="medium")
-        self.var_faces = tk.StringVar(value="1000000")
+        self.var_faces = tk.StringVar(value="600000")
         self.var_tex_pages = tk.StringVar(value="16")
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="medium")
@@ -515,7 +515,7 @@ class AutoMetashapeStudio:
         _make_preset(
             "architectural",
             "🏛️ Architectural Standard",
-            "16-Page 8K textures, 1M faces\nGPS crop, rolling shutter ON (Default)",
+            "16-Page 8K textures, 600K faces\nGPS crop, rolling shutter ON (Default)",
         )
         _make_preset(
             "draft",
@@ -575,7 +575,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 12), pady=3)
 
         tk.Label(grid, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_CARD, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_faces, values=["1000000", "500000", "2000000", "3000000"], width=10).grid(row=0, column=3, padx=(4, 12), pady=3)
+        ttk.Combobox(grid, textvariable=self.var_faces, values=["600000", "1000000", "500000", "2000000", "3000000"], width=10).grid(row=0, column=3, padx=(4, 12), pady=3)
 
         tk.Label(grid, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_CARD, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
@@ -594,9 +594,9 @@ class AutoMetashapeStudio:
         chk_row = tk.Frame(self.body_adv, bg=UITheme.BG_CARD)
         chk_row.pack(fill=tk.X, pady=(2, 4))
 
-        def _c(t, v):
+        def _c(t, v, parent=chk_row):
             return tk.Checkbutton(
-                chk_row,
+                parent,
                 text=t,
                 variable=v,
                 font=("Segoe UI", 8),
@@ -613,7 +613,12 @@ class AutoMetashapeStudio:
         _c("Tie-Point Cleaning", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 8))
         _c("Close Mesh Holes (L30)", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 8))
         _c("Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 8))
-        _c("Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
+        _c("Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT, padx=(0, 8))
+
+        chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_CARD)
+        chk_row2.pack(fill=tk.X, pady=(2, 4))
+        _c("⏸️ Pause After Crop (Manual Box in GUI)", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 12))
+        _c("Force Restart from Scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
         self.adv_expanded = not self.adv_expanded
@@ -890,6 +895,22 @@ class AutoMetashapeStudio:
         )
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 16))
 
+        self.btn_continue_crop = tk.Button(
+            inner,
+            text="▶️  Continue After Manual Crop",
+            font=("Segoe UI", 10, "bold"),
+            bg=UITheme.ACCENT_CYAN,
+            fg="white",
+            activebackground=UITheme.ACCENT_BLUE,
+            activeforeground="white",
+            bd=0,
+            padx=16,
+            pady=8,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._on_continue_crop_clicked,
+        )
+
         self.progress_bar = ttk.Progressbar(inner, mode="indeterminate", length=220)
         self.progress_bar.pack(side=tk.LEFT, padx=(0, 16))
 
@@ -919,7 +940,7 @@ class AutoMetashapeStudio:
 
         if key == "architectural":
             self.var_align_quality.set("medium")
-            self.var_faces.set("1000000")
+            self.var_faces.set("600000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
@@ -1199,6 +1220,7 @@ class AutoMetashapeStudio:
             try:
                 self.current_process = subprocess.Popen(
                     cmd,
+                    stdin=subprocess.PIPE,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     text=True,
@@ -1243,7 +1265,7 @@ class AutoMetashapeStudio:
         elif "[4/6]" in line or "mvs depth maps" in l:
             self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
         elif "[5/6]" in line or "surface mesh" in l:
-            self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 1M Face Mesh & Closing Holes"))
+            self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 600K Face Mesh & Closing Holes"))
         elif "[6/6]" in line or "baking" in l or "texture atlas" in l or "[texture]" in line:
             self.root.after(0, lambda: self.stepper.set_active(5, "Baking 16-Page 8K Texture Atlas"))
         elif "exporting final" in l or "[export]" in line or "[1/2] exporting" in l:
@@ -1274,6 +1296,47 @@ class AutoMetashapeStudio:
                 break
         self.root.after(80, self._consume_log_queue)
 
+    def _on_pipeline_paused_for_crop(self) -> None:
+        self.lbl_status.config(
+            text="Status: ⏸️ Paused for Manual Crop — Adjust in Metashape GUI",
+            fg=UITheme.ACCENT_AMBER,
+        )
+        self.progress_bar.stop()
+        self.btn_continue_crop.pack(side=tk.LEFT, padx=(0, 10), before=self.btn_stop)
+        self._log("\n" + "═" * 70, "warning")
+        self._log("⏸️  RECONSTRUCTION PAUSED FOR MANUAL BOUNDING BOX INSPECTION", "warning")
+        self._log("1. Click '🚀 Open in Metashape GUI' above to view the project.", "stage")
+        self._log("2. Use the 'Resize Region' / 'Rotate Region' tools in Metashape to adjust the box.", "stage")
+        self._log("3. Save the project inside Metashape GUI (File ➔ Save or Ctrl+S).", "stage")
+        self._log("4. Click '▶️ Continue After Manual Crop' below to resume depth maps & 600K meshing.\n" + "═" * 70, "success")
+
+    def _on_continue_crop_clicked(self) -> None:
+        self.btn_continue_crop.pack_forget()
+        self.progress_bar.start(10)
+        self.lbl_status.config(
+            text="Status: Resuming Reconstruction with Manual Box...",
+            fg=UITheme.ACCENT_CYAN,
+        )
+        self._log("[USER] Sent resume signal. Continuing pipeline with manual bounding box...", "stage")
+
+        # 1. Send newline to process stdin
+        if self.current_process and self.current_process.stdin:
+            try:
+                self.current_process.stdin.write("\n")
+                self.current_process.stdin.flush()
+            except Exception as e:
+                self._log(f"[Warning] stdin write: {e}", "warning")
+
+        # 2. Write sentinel file to output folder as reliable fallback
+        out_dir = self.var_output_dir.get().strip()
+        if out_dir and os.path.isdir(out_dir):
+            try:
+                sentinel = os.path.join(out_dir, ".continue_crop")
+                with open(sentinel, "w") as sf:
+                    sf.write("continue\n")
+            except Exception:
+                pass
+
     def _on_stop_clicked(self) -> None:
         if self.current_process and self.is_running:
             if messagebox.askyesno("Cancel Process", "Are you sure you want to cancel the running reconstruction?"):
@@ -1291,6 +1354,8 @@ class AutoMetashapeStudio:
     def _on_finished(self, success: bool, user_cancelled: bool = False) -> None:
         self.is_running = False
         self.progress_bar.stop()
+        if hasattr(self, "btn_continue_crop"):
+            self.btn_continue_crop.pack_forget()
         self.btn_start.config(
             state=tk.NORMAL,
             bg=UITheme.ACCENT_GREEN if self.active_mode == "recon" else UITheme.ACCENT_BLUE,

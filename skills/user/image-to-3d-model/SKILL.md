@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, recursively loading all images across the target folder and its subfolders, automating image sharpness quality assessment (disabling sub-0.5 blurry photos), Medium GPU feature matching (40K keypoints, 25K tiepoints, stationary points excluded, guided matching off, adaptive fitting on), CMOS rolling shutter compensation, bounding box cropping (camera GPS square default or optical ray convergence), Medium MVS depth maps (Moderate filtering), surface meshing (1M face limit default, hole closing), and 16-page 8K mosaic TIFF texture baking (hole filling and ghosting filter enabled), saving deliverables directly to a 'model/' subfolder. Supports all native Metashape formats including drone DNG RAW, camera RAW, TIFF, EXR, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
+description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, recursively loading all images across the target folder and its subfolders, automating image sharpness quality assessment (disabling sub-0.5 blurry photos), Medium GPU feature matching (40K keypoints, 25K tiepoints, stationary points excluded, guided matching off, adaptive fitting on), CMOS rolling shutter compensation, bounding box cropping (camera GPS square default or optical ray convergence), Medium MVS depth maps (Moderate filtering), surface meshing (600K face limit default, hole closing), and 16-page 8K mosaic TIFF texture baking (hole filling and ghosting filter enabled), saving deliverables directly to a 'model/' subfolder. Supports all native Metashape formats including drone DNG RAW, camera RAW, TIFF, EXR, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
 audience: user
 status: stable
 owners:
@@ -23,7 +23,7 @@ Use this skill when:
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (smallest enclosing square of camera GPS poses with tie-point altitude bounds) to minimize manual steps to zero.
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
 - Calibrating rolling shutter distortion on consumer drone CMOS sensors and closing localized window openings.
-- Requiring optimized meshes (1,000,000 / 1M faces limit default) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
+- Requiring optimized meshes (600,000 / 600K faces limit default) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
 
 Do not use this skill when:
 - Synthesizing 3D models from single images, sketches, or text prompts without multi-view photographic overlap.
@@ -41,13 +41,13 @@ flowchart TD
     D --> E["4. Lens Optimization & Rolling Shutter Compensation<br/>(Regularized Shutter + Gradual Selection)"]
     E --> F["5. Bounding Box Cropping<br/>(gps-square Default: Camera Square + Tie-Point Altitude Bounds)"]
     F --> G["6. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
-    G --> H["7. Arbitrary Surface Meshing<br/>(DepthMapsData, 1M Face Limit, Level 30 Hole Closing)"]
+    G --> H["7. Arbitrary Surface Meshing<br/>(DepthMapsData, 600K Face Limit, Level 30 Hole Closing)"]
     H --> I["8. 16-Page 8K Photogrammetric Texture Atlas<br/>(Mosaic Blending, Hole Filling, Ghosting Filter, Lossless TIFF)"]
     I --> J["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• building_reconstruction.psx (Editable in GUI)"]
 ```
 
 ### 1. Ingestion & Directory Convention
-When given an image directory, recursively load all images across the target folder and all subfolders. Run the autonomous pipeline without needing manual output flags (Medium alignment accuracy, 40K keypoint limit, 25K tiepoint limit, stationary points excluded, guided matching off, adaptive fitting on, rolling shutter compensation, Moderate depth filtering, 1M face limit, and `<images_dir>/model/` destination are default):
+When given an image directory, recursively load all images across the target folder and all subfolders. Run the autonomous pipeline without needing manual output flags (Medium alignment accuracy, 40K keypoint limit, 25K tiepoint limit, stationary points excluded, guided matching off, adaptive fitting on, rolling shutter compensation, Moderate depth filtering, 600K face limit, and `<images_dir>/model/` destination are default):
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>"
 ```
@@ -71,7 +71,7 @@ When given an image directory, recursively load all images across the target fol
 > - **Auto-Cropping Default (`gps-square`)**: Calculates the smallest enclosing horizontal square of all camera GPS poses, with altitude bounded by $[\min, \max]$ tie points inside the square.
 > - **Depth Maps & Meshing**:
 >   - **Quality**: `Medium` (`downscale=4`) depth maps with `ModerateFiltering`.
->   - **Polygon Count (1M Faces)**: Optimized 1,000,000 face limit for lightweight responsiveness across CAD, Blender, and web viewports.
+>   - **Polygon Count (600K Faces)**: Optimized 600,000 face limit for lightweight responsiveness across CAD, Blender, and web viewports.
 >   - **Hole Closing**: Automatically applies `closeHoles(level=30)` to seal planar window and facade openings.
 > - **Lossless Texture Atlases**: 16-page 8K (8192×8192) TIFF mosaic photographic blending with hole filling (`fill_holes=True`) and ghosting filter (`ghosting_filter=True`).
 
@@ -110,7 +110,7 @@ Metashape's default bounding box (`chunk.region`) encompasses all tie points, in
 
 ### 6. Arbitrary Surface Polygonal Meshing & Hole Closing
 - Fuses visibility-consistent depth maps into a continuous polygonal mesh using `DataSource.DepthMapsData`.
-- Targets **1,000,000 faces limit (1M)** by default to provide high detail while keeping mesh file sizes lightweight (~130 MB).
+- Targets **600,000 faces limit (600K)** by default to provide high detail while keeping mesh file sizes lightweight (~130 MB).
 - Automatically executes `chunk.model.closeHoles(level=30)` to seal window voids and planar gaps without bounding-box ballooning.
 - **Automatic GPU Driver Fallback**: Wrapped in an automated exception handler: if an internal CUDA driver exception occurs during octree meshing on next-gen architectures (such as NVIDIA Blackwell / RTX 5080), it seamlessly retries on CPU without failing the pipeline, then restores GPU acceleration for texture baking.
 
@@ -141,7 +141,7 @@ Reconstruction must satisfy the following quality criteria:
 1. **Camera Quality Filtering**: All active cameras must have sharpness quality $\ge 0.50$ (blurry frames disabled).
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
 3. **Target Bounding Box**: `chunk.region` must be tightly centered on the surveyed area, discarding $\ge 70\%$ of horizon background volume.
-4. **Surface Topology**: Arbitrary surface mesh targeting 1,000,000 polygon faces, free from degenerate zero-area faces.
+4. **Surface Topology**: Arbitrary surface mesh targeting 600,000 polygon faces, free from degenerate zero-area faces.
 5. **Texture Atlas**: Resolution $\ge 8192\times 8192$ across 16 pages with valid UV mapping, hole filling, and zero unmapped black voids.
 6. **Project File**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
 

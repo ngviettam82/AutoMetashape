@@ -12,7 +12,7 @@ Configured with production-grade defaults:
                    stationary tie points excluded, guided matching disabled, adaptive fitting enabled.
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses + tie-point altitude bounds).
-- Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 1,000,000 (1M) custom faces.
+- Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 600,000 (600K) custom faces.
 - Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
@@ -20,6 +20,7 @@ import argparse
 import math
 import os
 import sys
+import threading
 import time
 import Metashape
 
@@ -458,6 +459,65 @@ def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: flo
     print("  Camera optimization complete.", flush=True)
 
 
+def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
+    """Pauses pipeline execution to allow manual bounding box adjustment in Metashape GUI.
+
+    Supports resuming via:
+    1. Interactive terminal input [Enter].
+    2. Standard input newline piped from a parent process / GUI.
+    3. Sentinel signal file (.continue_crop) created in the output directory.
+    """
+    continue_file = os.path.join(output_dir, ".continue_crop")
+    if os.path.exists(continue_file):
+        try:
+            os.remove(continue_file)
+        except Exception:
+            pass
+
+    print("\n=========================================================================")
+    print("  [PAUSE_CROP] INTERACTIVE BOUNDING BOX INSPECTION")
+    print("  Project checkpoint saved to:")
+    print(f"  --> {psx_path}")
+    print("  You may open this project in Metashape GUI to inspect or fine-tune the")
+    print("  reconstruction box. If satisfied, save in Metashape GUI (Ctrl+S).")
+    print("  When ready, click [Continue Reconstruction] in the GUI or press [Enter].")
+    print("=========================================================================", flush=True)
+
+    # 1. Interactive terminal
+    if sys.stdin and hasattr(sys.stdin, "isatty") and sys.stdin.isatty():
+        try:
+            input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
+            return
+        except EOFError:
+            pass
+
+    # 2. GUI subprocess or non-interactive stream: background thread on stdin + file polling
+    resume_flag = [False]
+
+    def _stdin_reader():
+        try:
+            line = sys.stdin.readline()
+            if line is not None:
+                resume_flag[0] = True
+        except Exception:
+            pass
+
+    t = threading.Thread(target=_stdin_reader, daemon=True)
+    t.start()
+
+    while not resume_flag[0]:
+        if os.path.exists(continue_file):
+            try:
+                os.remove(continue_file)
+            except Exception:
+                pass
+            resume_flag[0] = True
+            break
+        time.sleep(0.5)
+
+    print("  [PAUSE_CROP] Resume signal received! Reloading modified project from disk...", flush=True)
+
+
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
@@ -470,7 +530,7 @@ def run_reconstruction(
     filter_tiepoints: bool = True,
     depth_quality: str = "medium",
     depth_filtering: str = "moderate",
-    custom_faces: int = 1000000,
+    custom_faces: int = 600000,
     texture_pages: int = 16,
     fill_holes: bool = True,
     ghosting_filter: bool = True,
@@ -497,7 +557,7 @@ def run_reconstruction(
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
     print(f"  Filter Tie Points:  {filter_tiepoints}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
-    print(f"  Target Mesh Faces:  {custom_faces:,} (1M)")
+    print(f"  Target Mesh Faces:  {custom_faces:,} (600K)")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Rolling Shutter:    {rolling_shutter} | Hole Closing: {close_holes}")
     print("=========================================================================", flush=True)
@@ -627,14 +687,7 @@ def run_reconstruction(
 
         # Optional interactive pause for manual boundary fine-tuning
         if pause_after_crop:
-            print("\n=========================================================================")
-            print("  INTERACTIVE BOUNDING BOX INSPECTION")
-            print("  Project checkpoint saved to:")
-            print(f"  --> {psx_out}")
-            print("  You may open this project in Metashape GUI to inspect or fine-tune the")
-            print("  reconstruction box. If satisfied, save in GUI and return here.")
-            print("=========================================================================", flush=True)
-            input("Press [Enter] to continue with GPU MVS Depth Maps and Surface Meshing...")
+            wait_for_user_resume(output_dir, psx_out)
             doc.open(psx_out)
             chunk = doc.chunk
 
@@ -798,7 +851,7 @@ def run_reconstruction(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Autonomous Metashape 3D Reconstruction Pipeline (Medium Alignment Quality, 40K Keypoints, 25K Tiepoints, Exclude Stationary Points, Moderate Depth Filtering, 1M Faces, GPS-Square Crop)"
+        description="Autonomous Metashape 3D Reconstruction Pipeline (Medium Alignment Quality, 40K Keypoints, 25K Tiepoints, Exclude Stationary Points, Moderate Depth Filtering, 600K Faces, GPS-Square Crop)"
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
@@ -807,7 +860,7 @@ if __name__ == "__main__":
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
-    parser.add_argument("--faces", type=int, default=1000000, help="Target polygon face count (default: 1000000 / 1M)")
+    parser.add_argument("--faces", type=int, default=600000, help="Target polygon face count (default: 600000 / 600K)")
     parser.add_argument("--guided-matching", action="store_true", default=False, help="Enable guided image matching (default: False)")
     parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
