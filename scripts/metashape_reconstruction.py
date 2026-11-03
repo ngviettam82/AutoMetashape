@@ -657,6 +657,17 @@ def run_reconstruction(
         print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
+    if chunk.model is None:
+        cand_obj = os.path.join(output_dir, "model.obj")
+        if os.path.isfile(cand_obj):
+            print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {cand_obj}. Re-linking...", flush=True)
+            chunk.importModel(path=cand_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
+            if doc.path:
+                doc.save()
+            else:
+                doc.save(psx_out)
+            print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
+
     has_model = chunk.model is not None
     if has_model:
         print(f"\n[5/6] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
@@ -706,7 +717,10 @@ def run_reconstruction(
         mesh_verts = len(chunk.model.vertices)
         mesh_faces = len(chunk.model.faces)
         print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
-        doc.save(psx_out)
+        if doc.path:
+            doc.save()
+        else:
+            doc.save(psx_out)
         print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
@@ -740,7 +754,10 @@ def run_reconstruction(
             ghosting_filter=ghosting_filter,
         )
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
-        doc.save(psx_out)
+        if doc.path:
+            doc.save()
+        else:
+            doc.save(psx_out)
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Production Asset Export
@@ -769,7 +786,10 @@ def run_reconstruction(
     )
     print(f"[EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
-    doc.save(psx_out)
+    if doc.path:
+        doc.save()
+    else:
+        doc.save(psx_out)
     print(f"[EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
     total_time = (time.time() - t_start) / 60.0

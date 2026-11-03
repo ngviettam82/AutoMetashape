@@ -27,6 +27,7 @@ def export_project_assets(
     texture_pages: int = 16,
     fill_holes: bool = True,
     ghosting_filter: bool = True,
+    import_model_path: str = None,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -71,8 +72,29 @@ def export_project_assets(
     if not chunk:
         raise ValueError(f"Project '{project_path}' contains no active chunk!")
 
-    if not chunk.model:
-        raise ValueError(f"Project '{project_path}' contains no reconstructed 3D mesh model!")
+    # Explicit or automatic model re-linking/import
+    if import_model_path and os.path.isfile(import_model_path):
+        print(f"[Import] Importing 3D mesh model from: {import_model_path}", flush=True)
+        chunk.importModel(path=import_model_path, format=Metashape.ModelFormat.ModelFormatOBJ)
+        doc.save()
+        print(f"[Import] Re-linked model saved to project: {project_path}", flush=True)
+    elif not chunk.model:
+        # Auto-recover if model.obj exists in output or project directory
+        candidates = [
+            os.path.join(output_dir, "model.obj"),
+            os.path.join(project_dir, "model.obj"),
+        ]
+        recovered = False
+        for cand in candidates:
+            if os.path.isfile(cand):
+                print(f"[Auto-Recover] Project chunk has no model, but found existing: {cand}", flush=True)
+                chunk.importModel(path=cand, format=Metashape.ModelFormat.ModelFormatOBJ)
+                doc.save()
+                print(f"[Auto-Recover] Re-linked '{cand}' into project successfully!", flush=True)
+                recovered = True
+                break
+        if not recovered:
+            raise ValueError(f"Project '{project_path}' contains no reconstructed 3D mesh model!")
 
     mesh_verts = len(chunk.model.vertices)
     mesh_faces = len(chunk.model.faces)
@@ -148,6 +170,7 @@ if __name__ == "__main__":
     parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages if re-baking (default: 16)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling if re-baking (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter if re-baking (default: enabled)")
+    parser.add_argument("--import-model", default=None, help="Optional path to external 3D model (.obj) to import/re-link into the project")
     args = parser.parse_args()
 
     export_project_assets(
@@ -158,4 +181,5 @@ if __name__ == "__main__":
         texture_pages=args.texture_pages,
         fill_holes=args.fill_holes,
         ghosting_filter=args.ghosting_filter,
+        import_model_path=args.import_model,
     )
