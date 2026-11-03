@@ -200,15 +200,15 @@ STAGES_RECON = [
     ("2", "Match", "GPU feature matching"),
     ("3", "Align", "Cameras & crop"),
     ("4", "Depth", "Dense stereopsis"),
-    ("5", "Mesh", "600K surface"),
-    ("6", "Texture", "16-page 8K atlas"),
+    ("5", "Mesh", "Surface mesh"),
+    ("6", "Texture", "Texture atlas"),
     ("7", "Export", "GLB, OBJ & TIFF"),
 ]
 
 STAGES_EXPORT = [
     ("1", "Project", "Load .psx project"),
     ("2", "Verify", "Validate 3D mesh"),
-    ("3", "Texture", "Re-bake 8K atlas"),
+    ("3", "Texture", "Re-bake atlas"),
     ("4", "glTF", "Export binary GLB"),
     ("5", "Wavefront", "Export OBJ & TIFF"),
 ]
@@ -2091,9 +2091,9 @@ class AutoMetashapeStudio:
             elif "[4/7]" in line or "[4/6]" in line:
                 self._update_stepper_mode("recon", 3, "MVS Dense Stereopsis")
             elif "[5/7]" in line or "[5/6]" in line:
-                self._update_stepper_mode("recon", 4, "Fusing 600K Face Mesh & Closing Holes")
+                self._update_stepper_mode("recon", 4, "Fusing Surface Mesh & Closing Holes")
             elif "[6/7]" in line or "[6/6]" in line:
-                self._update_stepper_mode("recon", 5, "Baking 16-Page 8K Texture Atlas")
+                self._update_stepper_mode("recon", 5, "Baking Texture Atlas")
             elif "[7/7]" in line or "[export]" in l or "exporting final production assets" in l:
                 self._update_stepper_mode("recon", 6, "Exporting GLB, OBJ, TIFF & PSX")
             elif "[success]" in l and "entire pipeline finished" in l:
@@ -2104,7 +2104,7 @@ class AutoMetashapeStudio:
             elif "[model info]" in l or "polygonal faces" in l:
                 self._update_stepper_mode("export", 1, "Validating 3D Mesh Geometry")
             elif "[texture]" in l:
-                self._update_stepper_mode("export", 2, "Re-baking 8K Texture Atlas")
+                self._update_stepper_mode("export", 2, "Re-baking Texture Atlas")
             elif "[1/2]" in line or "exporting binary gltf" in l:
                 self._update_stepper_mode("export", 3, "Exporting Binary GLB")
             elif "[2/2]" in line or "exporting wavefront obj" in l:
@@ -2151,7 +2151,7 @@ class AutoMetashapeStudio:
         self._log("1. Click 'Open in Metashape' above to open your project in Metashape Pro.", "stage")
         self._log("2. In Metashape, use 'Resize Region' / 'Rotate Region' tools to crop the building.", "stage")
         self._log("3. Press Ctrl+S in Metashape Pro to save, then close Metashape Pro.", "stage")
-        self._log("4. Click 'Continue Reconstruction' below to resume 600K meshing.\n" + "─" * 70, "success")
+        self._log("4. Click 'Continue Reconstruction' below to resume surface meshing.\n" + "─" * 70, "success")
 
         try:
             self.root.bell()
