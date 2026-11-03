@@ -45,11 +45,18 @@ def export_project_assets(
     print("=========================================================================", flush=True)
 
     doc = Metashape.Document()
+    files_dir = project_path.replace(".psx", ".files")
+    lock_file = os.path.join(files_dir, "lock")
+    if os.path.isfile(lock_file):
+        try:
+            os.remove(lock_file)
+        except Exception:
+            pass
     try:
-        doc.open(project_path)
+        doc.open(project_path, ignore_lock=True)
     except Exception:
         try:
-            doc.open(project_path, ignore_lock=True)
+            doc.open(project_path)
         except Exception as e:
             raise RuntimeError(f"Failed to open Metashape project '{project_path}': {e}")
 

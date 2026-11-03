@@ -596,7 +596,27 @@ def run_reconstruction(
     if not force_restart and os.path.exists(psx_out):
         print(f"\n[Checkpoint] Found existing project: {psx_out}", flush=True)
         try:
-            doc.open(psx_out)
+            files_dir = psx_out.replace(".psx", ".files")
+            lock_file = os.path.join(files_dir, "lock")
+            if os.path.isfile(lock_file):
+                try:
+                    os.remove(lock_file)
+                    print(f"  [Auto-Recovery] Removed stale lock file from previous session: {lock_file}", flush=True)
+                except Exception as e_lock:
+                    print(f"  [Warning] Could not remove lock file: {e_lock}", flush=True)
+            try:
+                doc.open(psx_out, ignore_lock=True)
+            except Exception:
+                doc.open(psx_out)
+            if doc.read_only:
+                print("  [Warning] Project opened in read-only mode. Forcing write access...", flush=True)
+                if os.path.isfile(lock_file):
+                    try:
+                        os.remove(lock_file)
+                        doc = Metashape.Document()
+                        doc.open(psx_out, ignore_lock=True)
+                    except Exception:
+                        pass
             chunk = doc.chunk
             aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
             if aligned_count >= 2:
@@ -684,10 +704,17 @@ def run_reconstruction(
 
         # Step 3b: Bounding Box Cropping (Default: gps-square, Optional: manual / structure / none)
         def _safe_reopen():
+            files_dir = psx_out.replace(".psx", ".files")
+            lock_file = os.path.join(files_dir, "lock")
+            if os.path.isfile(lock_file):
+                try:
+                    os.remove(lock_file)
+                except Exception:
+                    pass
             try:
-                doc.open(psx_out)
-            except Exception:
                 doc.open(psx_out, ignore_lock=True)
+            except Exception:
+                doc.open(psx_out)
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
@@ -726,9 +753,21 @@ def run_reconstruction(
                 chunk = doc.chunk
 
     # Step 4: Multi-View Stereo Dense Depth Maps
-    has_depth_maps = chunk.depth_maps is not None
+    has_depth_maps = False
+    depth_count = 0
+    if chunk.depth_maps is not None:
+        try:
+            depth_count = len(chunk.depth_maps.keys()) if hasattr(chunk.depth_maps, "keys") else 0
+            has_depth_maps = depth_count > 0
+        except Exception:
+            has_depth_maps = bool(chunk.depth_maps)
+            try:
+                depth_count = len(chunk.depth_maps.keys())
+            except Exception:
+                depth_count = 0
+
     if has_depth_maps:
-        print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({len(chunk.depth_maps)} depth maps).", flush=True)
+        print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({depth_count} depth maps).", flush=True)
     else:
         depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
         filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
