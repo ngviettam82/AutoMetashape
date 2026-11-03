@@ -112,6 +112,7 @@ Metashape's default bounding box (`chunk.region`) encompasses all tie points, in
 - Fuses visibility-consistent depth maps into a continuous polygonal mesh using `DataSource.DepthMapsData`.
 - Targets **1,000,000 faces limit (1M)** by default to provide high detail while keeping mesh file sizes lightweight (~130 MB).
 - Automatically executes `chunk.model.closeHoles(level=30)` to seal window voids and planar gaps without bounding-box ballooning.
+- **Automatic GPU Driver Fallback**: Wrapped in an automated exception handler: if an internal CUDA driver exception occurs during octree meshing on next-gen architectures (such as NVIDIA Blackwell / RTX 5080), it seamlessly retries on CPU without failing the pipeline, then restores GPU acceleration for texture baking.
 
 ### 7. 16-Page 8K Photographic Texture Baking & Lossless TIFF Export
 - Computes optimized UV parameterization (`GenericMapping` across 16 texture pages).

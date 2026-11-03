@@ -248,12 +248,16 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         inlier_cams = [(c.center, None) for c in aligned_cams]
         print(f"  [Auto-Crop] Using camera cluster centroid: ({target_center.x:.2f}, {target_center.y:.2f}, {target_center.z:.2f})", flush=True)
 
-    # 2. Estimate survey radius from consensus inlier cameras
+    # 2. Estimate survey radius from consensus inlier cameras (95th percentile with 25% safety expansion)
     inlier_centers = [c_pos for c_pos, _ in inlier_cams]
     dists = [(c - target_center).norm() for c in inlier_centers]
     dists.sort()
-    med_dist = dists[len(dists) // 2]
-    max_radius = med_dist * 0.85 if med_dist > 0 else float("inf")
+    if dists:
+        idx_95 = min(int(len(dists) * 0.95), len(dists) - 1)
+        dist_95 = dists[idx_95]
+        max_radius = dist_95 * 1.25 if dist_95 > 0 else float("inf")
+    else:
+        max_radius = float("inf")
 
     # 3. Filter sparse tie points belonging to the main structure
     pts = chunk.tie_points.points if chunk.tie_points else []
@@ -645,14 +649,33 @@ def run_reconstruction(
             face_count_custom_arg = 200000
             print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
 
-        chunk.buildModel(
-            surface_type=Metashape.SurfaceType.Arbitrary,
-            source_data=Metashape.DataSource.DepthMapsData,
-            interpolation=Metashape.Interpolation.EnabledInterpolation,
-            face_count=face_count_arg,
-            face_count_custom=face_count_custom_arg,
-            vertex_colors=True,
-        )
+        try:
+            chunk.buildModel(
+                surface_type=Metashape.SurfaceType.Arbitrary,
+                source_data=Metashape.DataSource.DepthMapsData,
+                interpolation=Metashape.Interpolation.EnabledInterpolation,
+                face_count=face_count_arg,
+                face_count_custom=face_count_custom_arg,
+                vertex_colors=True,
+            )
+        except Exception as e:
+            print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
+            print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
+            orig_gpu_mask = Metashape.app.gpu_mask
+            try:
+                Metashape.app.gpu_mask = 0  # Disable GPU acceleration for meshing
+                chunk.buildModel(
+                    surface_type=Metashape.SurfaceType.Arbitrary,
+                    source_data=Metashape.DataSource.DepthMapsData,
+                    interpolation=Metashape.Interpolation.EnabledInterpolation,
+                    face_count=face_count_arg,
+                    face_count_custom=face_count_custom_arg,
+                    vertex_colors=True,
+                )
+                print("  [Fallback] CPU surface meshing succeeded!", flush=True)
+            finally:
+                Metashape.app.gpu_mask = orig_gpu_mask  # Restore GPU for texture baking
+                print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
         if close_holes and chunk.model:
             chunk.model.closeHoles(level=30)
             print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
