@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey, recursively loading all images across the target folder and its subfolders, automating image sharpness quality assessment (disabling sub-0.5 blurry photos), Medium GPU feature matching (40K keypoints, 25K tiepoints, stationary points excluded, guided matching off, adaptive fitting on), CMOS rolling shutter compensation, bounding box cropping (camera GPS square default or optical ray convergence), Medium MVS depth maps (Moderate filtering), surface meshing (600K face limit default, hole closing), and 16-page 8K mosaic TIFF texture baking (hole filling and ghosting filter enabled), saving deliverables directly to a 'model/' subfolder. Supports all native Metashape formats including drone DNG RAW, camera RAW, TIFF, EXR, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
+description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey. Recursively scans images, routes multi-flight subfolders through independent multi-chunk Point-Based RANSAC ICP alignment, filters sub-0.5 blurry photos, applies GPU feature matching (40K keypoints, 25K tiepoints, stationary points excluded, adaptive fitting), CMOS rolling shutter compensation, bounding box cropping (camera GPS square or optical ray convergence), Medium MVS depth maps (Moderate filtering), surface meshing (600K face limit, hole closing), and 16-page 8K mosaic TIFF texture baking (hole filling, ghosting filter), saving deliverables to 'model/'. Supports all native Metashape raster, drone DNG RAW, camera RAW, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
 audience: user
 status: stable
 owners:
@@ -17,7 +17,7 @@ Autonomous end-to-end photogrammetry pipeline transforming raw image folders (dr
 
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture.
-- Images are located across the main folder and nested subfolders (e.g., flight batches, multi-camera rigs).
+- Images are located across the main folder and nested subfolders (e.g., multi-drone surveys, multi-day flights, or separate camera sessions): automatically isolates each subfolder into an independent chunk, solves separate sensor calibrations, and registers them via Point-Based RANSAC ICP to eliminate barometric altitude offsets and ghosting walls.
 - Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Automatic blurry image rejection is needed: automatically runs `chunk.analyzeImages()` and disables out-of-focus or motion-blurred photos ($<0.5$ quality index) to protect bundle adjustment accuracy.
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) to minimize manual steps to zero.
@@ -74,6 +74,27 @@ When given an image directory, recursively load all images across the target fol
 >   - **Polygon Count (600K Faces)**: Optimized 600,000 face limit for lightweight responsiveness across CAD, Blender, and web viewports.
 >   - **Hole Closing**: Automatically applies `closeHoles(level=30)` to seal planar window and facade openings.
 > - **Lossless Texture Atlases**: 16-page 8K (8192×8192) TIFF mosaic photographic blending with hole filling (`fill_holes=True`) and ghosting filter (`ghosting_filter=True`).
+
+### Multi-Flight & Multi-Drone Alignment (Multi-Chunk Point-Based ICP)
+When images are partitioned into multiple subfolders (e.g., `Flight_1` with 2,000 photos and `Flight_2` with 110 photos, or captures from different drones/dates), standard single-chunk alignment often produces **holes, vertical stepping, and duplicate ghost walls** due to:
+1. **Conflicting Lens Calibration**: Different drones (or same drone on different days) have subtle optical differences in focal length and lens distortion. Forcing them into a single sensor group corrupts the bundle adjustment.
+2. **Barometric Altitude Inconsistencies**: Consumer drone GPS altitudes often drift by 10 to 50 meters between flights (or report negative elevations), causing vertical offsets between flight models.
+3. **Stereo Depth Discrepancies**: Height and calibration offsets cause MVS stereo matching to reject overlapping walls as outliers, carving massive holes in facade geometry.
+
+To eliminate these issues completely, AutoMetashape provides automated **Multi-Chunk Alignment** (`--multi-chunk auto`, enabled by default):
+- **Automated Subfolder Ingestion**: Discovers image-bearing subfolders (excluding `model*` output directories) and assigns each to an independent Metashape chunk (`Flight_1_<name>`, `Flight_2_<name>`).
+- **Independent Calibration & Alignment**: Each flight chunk solves its own camera bundle adjustment, internal distortion parameters ($f, c_x, c_y, k_1..k_4, p_1, p_2$), and sparse tie points without cross-contamination.
+- **Point-Based RANSAC ICP Registration**: Uses `doc.alignChunks(method=0, fit_scale=True)` to register all secondary flight chunks onto the anchor flight (the flight with the largest aligned camera count). Because it aligns strictly based on physical 3D tie points and estimates scale, it completely ignores erroneous consumer GPS barometric altitudes.
+- **Unified Reconstruction Merge**: Executes `doc.mergeChunks(chunks=..., merge_tiepoints=True)` with automatic fallback to transforms preservation. The resulting unified chunk (`Production_Reconstruction`) retains distinct sensor calibration groups for each drone and proceeds through unified Depth Maps, 600K meshing, and 8K texture baking.
+
+CLI control:
+```powershell
+# Default: auto-detects multi-subfolder captures and enables multi-chunk alignment
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk auto
+
+# Force single-chunk processing (ignoring subfolder boundaries):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk disable
+```
 
 ### 2. Sharpness Quality Estimation & Blurry Image Rejection
 - Analyzes high-frequency gradient sharpness across every camera frame via `chunk.analyzeImages()`.

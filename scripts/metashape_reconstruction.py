@@ -527,6 +527,75 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  [PAUSE_CROP] Resume signal received! Reloading modified project from disk...", flush=True)
 
 
+def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> dict:
+    """Discovers images grouped by immediate subfolders under images_dir.
+
+    Excludes output directory, subfolders named 'model*', and hidden directories.
+    If multiple image-bearing subfolders are found (e.g. multi-drone or multi-flight captures),
+    returns a dictionary mapping folder names to their list of image filepaths.
+    If images only reside at the root level or in a single subfolder, returns a dictionary
+    with a single entry.
+    """
+    supported_exts = SUPPORTED_IMAGE_EXTS
+    abs_output = os.path.abspath(output_dir) if output_dir else None
+    groups = {}
+    root_images = []
+
+    try:
+        entries = sorted(os.listdir(images_dir))
+    except Exception as e:
+        raise ValueError(f"Cannot access images directory '{images_dir}': {e}")
+
+    for entry in entries:
+        full_path = os.path.join(images_dir, entry)
+        if os.path.isdir(full_path):
+            abs_sub = os.path.abspath(full_path)
+            # Skip output dir and any 'model*' export dirs
+            if entry.lower().startswith("model") or (abs_output and abs_sub.startswith(abs_output)):
+                continue
+            if entry.startswith("."):
+                continue
+
+            sub_imgs = []
+            for r, dirs, files in os.walk(full_path):
+                dirs[:] = [
+                    d for d in dirs
+                    if not d.lower().startswith("model")
+                    and not d.startswith(".")
+                    and not (abs_output and os.path.abspath(os.path.join(r, d)).startswith(abs_output))
+                ]
+                for f in files:
+                    if f.lower().endswith(supported_exts):
+                        sub_imgs.append(os.path.join(r, f))
+            if sub_imgs:
+                groups[entry] = sorted(sub_imgs)
+        elif os.path.isfile(full_path) and entry.lower().endswith(supported_exts):
+            root_images.append(full_path)
+
+    if root_images:
+        if groups:
+            groups["Root_Photos"] = sorted(root_images)
+        else:
+            groups["Main"] = sorted(root_images)
+
+    if not groups:
+        all_imgs = []
+        for r, dirs, files in os.walk(images_dir):
+            dirs[:] = [
+                d for d in dirs
+                if not d.lower().startswith("model")
+                and not d.startswith(".")
+                and not (abs_output and os.path.abspath(os.path.join(r, d)).startswith(abs_output))
+            ]
+            for f in files:
+                if f.lower().endswith(supported_exts):
+                    all_imgs.append(os.path.join(r, f))
+        if all_imgs:
+            groups["Main"] = sorted(all_imgs)
+
+    return groups
+
+
 def save_checkpoint(doc, target_path=None):
     """Safely saves Metashape document ensuring read_only is overridden and chunk is re-synchronized."""
     try:
@@ -587,6 +656,7 @@ def run_reconstruction(
     close_holes: bool = True,
     pause_after_crop: bool = False,
     force_restart: bool = False,
+    multi_chunk: str = "auto",
 ):
     t_start = time.time()
     if not output_dir:
@@ -600,7 +670,7 @@ def run_reconstruction(
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
     print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
-    print(f"  Filter Tie Points:  {filter_tiepoints}")
+    print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
     print(f"  Target Mesh Faces:  {custom_faces:,} (600K)")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
@@ -651,6 +721,16 @@ def run_reconstruction(
                 doc.read_only = False
             except Exception:
                 pass
+            # If multiple chunks exist in project, select the Production_Reconstruction chunk or anchor
+            prod_chunk = None
+            for c in doc.chunks:
+                if c.label == "Production_Reconstruction":
+                    prod_chunk = c
+                    break
+            if prod_chunk is None and len(doc.chunks) > 1:
+                prod_chunk = max(doc.chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
+            if prod_chunk is not None:
+                doc.chunk = prod_chunk
             chunk = doc.chunk
             aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
             if aligned_count >= 2:
@@ -672,69 +752,155 @@ def run_reconstruction(
         chunk.label = "Production_Reconstruction"
 
     if not resumed:
-        # Step 1: Recursively Scan and Ingest Images from Folder & Subfolders
-        supported_exts = SUPPORTED_IMAGE_EXTS
-        img_files = []
-        abs_output = os.path.abspath(output_dir)
-        for root, dirs, files in os.walk(images_dir):
-            # Prune output directory and any existing model export directories
-            dirs[:] = [
-                d for d in dirs
-                if not os.path.abspath(os.path.join(root, d)).startswith(abs_output)
-                and not d.lower().startswith("model")
-            ]
-            if os.path.abspath(root).startswith(abs_output) or os.path.basename(root).lower().startswith("model"):
-                continue
-            for f in files:
-                if f.lower().endswith(supported_exts):
-                    img_files.append(os.path.join(root, f))
-        img_files = sorted(img_files)
-
-        if not img_files:
+        # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
+        groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
+        total_photos = sum(len(imgs) for imgs in groups.values())
+        if total_photos == 0:
             raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
 
-        print(f"\n[1/7] Ingesting {len(img_files)} images found recursively across: {images_dir}", flush=True)
-        chunk.addPhotos(img_files)
-        print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
-
-        # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
-        if min_quality > 0.0:
-            filter_image_quality(chunk, min_quality=min_quality)
-
-        # Step 2: Feature Detection & Matching
         align_downscale = ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)
-        print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
-        t_match = time.time()
-        chunk.matchPhotos(
-            downscale=align_downscale,
-            generic_preselection=True,
-            reference_preselection=True,
-            keypoint_limit=keypoint_limit,
-            tiepoint_limit=tiepoint_limit,
-            mask_tiepoints=True,
-            filter_stationary_points=filter_stationary_points,
-            guided_matching=guided_matching,
-        )
-        print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
-        # Step 3: Camera Alignment
-        print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
-        t_align = time.time()
-        chunk.alignCameras(adaptive_fitting=adaptive_fitting)
-        aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
-        enabled_count = sum(1 for c in chunk.cameras if c.enabled)
-        print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+        use_multi_chunk = False
+        if multi_chunk == "force" and len(groups) >= 1:
+            use_multi_chunk = True
+        elif multi_chunk == "auto" and len(groups) > 1:
+            use_multi_chunk = True
+        elif multi_chunk == "disable":
+            use_multi_chunk = False
 
-        # Camera Optimization with Rolling Shutter Compensation & Gradual Selection
-        if rolling_shutter:
-            for s in chunk.sensors:
-                s.rolling_shutter = Metashape.Shutter.Model.Regularized
-            print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+        if use_multi_chunk:
+            print(f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos total).", flush=True)
+            print("  Ingesting each subfolder into an independent chunk for drift-free camera alignment and point-based RANSAC ICP registration...", flush=True)
 
-        if filter_tiepoints:
-            filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+            # Remove initial placeholder chunk
+            for c in list(doc.chunks):
+                if len(c.cameras) == 0:
+                    doc.remove(c)
+
+            created_chunks = []
+            for idx, (grp_name, filepaths) in enumerate(groups.items()):
+                sub_chunk = doc.addChunk()
+                sub_chunk.label = f"Flight_{idx+1}_{grp_name}"
+                print(f"\n[1/7] Ingesting Chunk {idx+1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos...", flush=True)
+                sub_chunk.addPhotos(filepaths)
+                print(f"  Loaded {len(sub_chunk.cameras):,} cameras into '{sub_chunk.label}'.", flush=True)
+
+                if min_quality > 0.0:
+                    filter_image_quality(sub_chunk, min_quality=min_quality)
+
+                if rolling_shutter:
+                    for s in sub_chunk.sensors:
+                        s.rolling_shutter = Metashape.Shutter.Model.Regularized
+                    print(f"  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation on '{sub_chunk.label}'.", flush=True)
+
+                created_chunks.append(sub_chunk)
+
+            # Step 2: Feature Detection & Matching per chunk
+            for idx, c in enumerate(created_chunks):
+                print(f"\n[2/7] GPU Feature Matching for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', {len(c.cameras):,} cameras)...", flush=True)
+                t_match = time.time()
+                c.matchPhotos(
+                    downscale=align_downscale,
+                    generic_preselection=True,
+                    reference_preselection=True,
+                    keypoint_limit=keypoint_limit,
+                    tiepoint_limit=tiepoint_limit,
+                    mask_tiepoints=True,
+                    filter_stationary_points=filter_stationary_points,
+                    guided_matching=guided_matching,
+                )
+                print(f"  Matching finished for '{c.label}' in {(time.time() - t_match)/60:.2f} min.", flush=True)
+
+            # Step 3: Camera Alignment per chunk
+            for idx, c in enumerate(created_chunks):
+                print(f"\n[3/7] Aligning Cameras for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', Adaptive Fitting: {adaptive_fitting})...", flush=True)
+                t_align = time.time()
+                c.alignCameras(adaptive_fitting=adaptive_fitting)
+                aligned_count = sum(1 for cam in c.cameras if cam.transform and cam.enabled)
+                enabled_count = sum(1 for cam in c.cameras if cam.enabled)
+                print(f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+
+                if filter_tiepoints:
+                    filter_tie_points(c, max_reproj_error=0.4, max_uncertainty=15.0)
+
+            # Register Chunks onto Anchor using Point-Based RANSAC ICP
+            anchor_chunk = max(created_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
+            ref_key = anchor_chunk.key
+            chunk_keys = [c.key for c in created_chunks]
+
+            print(f"\n[Chunk Alignment] Registering {len(chunk_keys)} chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
+            doc.alignChunks(
+                chunks=chunk_keys,
+                reference=ref_key,
+                method=0,
+                fit_scale=True,
+                downscale=align_downscale,
+                keypoint_limit=keypoint_limit,
+            )
+
+            # Merge chunks into unified production chunk
+            print(f"\n[Chunk Merging] Merging {len(chunk_keys)} aligned chunks into unified production reconstruction chunk...", flush=True)
+            try:
+                doc.mergeChunks(chunks=chunk_keys, merge_tiepoints=True)
+            except Exception as e_merge:
+                print(f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging with camera transforms preserved...", flush=True)
+                doc.mergeChunks(chunks=chunk_keys, merge_tiepoints=False)
+
+            doc.chunk = doc.chunks[-1]
+            chunk = doc.chunk
+            chunk.label = "Production_Reconstruction"
+            aligned_total = sum(1 for cam in chunk.cameras if cam.transform and cam.enabled)
+            enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
+            print(f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).", flush=True)
+
         else:
-            print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
+            # Single-chunk flow (flat directory or single image subfolder)
+            all_imgs = []
+            for imgs in groups.values():
+                all_imgs.extend(imgs)
+            all_imgs = sorted(all_imgs)
+
+            print(f"\n[1/7] Ingesting {len(all_imgs)} images found across: {images_dir}", flush=True)
+            chunk.addPhotos(all_imgs)
+            print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
+
+            # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
+            if min_quality > 0.0:
+                filter_image_quality(chunk, min_quality=min_quality)
+
+            # Step 2: Feature Detection & Matching
+            print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
+            t_match = time.time()
+            chunk.matchPhotos(
+                downscale=align_downscale,
+                generic_preselection=True,
+                reference_preselection=True,
+                keypoint_limit=keypoint_limit,
+                tiepoint_limit=tiepoint_limit,
+                mask_tiepoints=True,
+                filter_stationary_points=filter_stationary_points,
+                guided_matching=guided_matching,
+            )
+            print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
+
+            # Step 3: Camera Alignment
+            print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
+            t_align = time.time()
+            chunk.alignCameras(adaptive_fitting=adaptive_fitting)
+            aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
+            enabled_count = sum(1 for c in chunk.cameras if c.enabled)
+            print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+
+            # Camera Optimization with Rolling Shutter Compensation & Gradual Selection
+            if rolling_shutter:
+                for s in chunk.sensors:
+                    s.rolling_shutter = Metashape.Shutter.Model.Regularized
+                print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+
+            if filter_tiepoints:
+                filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+            else:
+                print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
         # Step 3b: Bounding Box Cropping (Default: gps-square, Optional: manual / structure / none)
         def _safe_reopen():
@@ -997,6 +1163,12 @@ if __name__ == "__main__":
         help="Disable automatic blurry image quality estimation and filtering",
     )
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
+    parser.add_argument(
+        "--multi-chunk",
+        choices=["auto", "force", "disable"],
+        default="auto",
+        help="Multi-chunk alignment mode: 'auto' (automatically create independent chunks for each image subfolder/flight and register them via point-based ICP), 'force', or 'disable' (default: auto)",
+    )
     parser.add_argument("--force-restart", action="store_true", help="Force restart reconstruction from scratch, ignoring existing checkpoints")
     args = parser.parse_args()
 
@@ -1027,4 +1199,5 @@ if __name__ == "__main__":
         close_holes=args.close_holes,
         pause_after_crop=args.pause_after_crop,
         force_restart=args.force_restart,
+        multi_chunk=args.multi_chunk,
     )

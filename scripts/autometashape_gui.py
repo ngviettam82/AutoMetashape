@@ -697,6 +697,7 @@ class AutoMetashapeStudio:
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="medium")
         self.var_depth_filtering = tk.StringVar(value="moderate")
+        self.var_multi_chunk = tk.StringVar(value="auto")
 
         self.var_rolling = tk.BooleanVar(value=True)
         self.var_stationary = tk.BooleanVar(value=True)
@@ -1323,6 +1324,10 @@ class AutoMetashapeStudio:
         tk.Label(grid, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
 
+        # Row 3: Multi-Chunk Mode
+        tk.Label(grid, text="Multi-Chunk:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_multi_chunk, values=["auto", "force", "disable"], state="readonly", width=10).grid(row=2, column=1, padx=(4, 14), pady=3)
+
         # Checkboxes
         chk_row1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_row1.pack(fill=tk.X, pady=(2, 4))
@@ -1817,12 +1822,33 @@ class AutoMetashapeStudio:
                         except Exception:
                             pass
 
+            subfolder_count = 0
+            try:
+                for entry in sorted(os.listdir(folder)):
+                    full_entry = os.path.join(folder, entry)
+                    if os.path.isdir(full_entry) and not entry.lower().startswith("model") and not entry.startswith("."):
+                        if not (os.path.abspath(full_entry).startswith(os.path.abspath(default_out))):
+                            has_img = False
+                            for _, _, fs in os.walk(full_entry):
+                                if any(f.lower().endswith(SUPPORTED_IMAGE_EXTS) for f in fs):
+                                    has_img = True
+                                    break
+                            if has_img:
+                                subfolder_count += 1
+            except Exception:
+                pass
+
             if count > 0:
                 ext_str = ", ".join(sorted(found_exts)[:4])
                 size_str = format_file_size(total_bytes)
-                self.lbl_photo_status.set(
-                    f"{count:,} photos ({size_str}) · {ext_str} · Ready for reconstruction"
-                )
+                if subfolder_count > 1:
+                    self.lbl_photo_status.set(
+                        f"{count:,} photos ({size_str}) across {subfolder_count} flights · {ext_str} · Multi-chunk alignment enabled"
+                    )
+                else:
+                    self.lbl_photo_status.set(
+                        f"{count:,} photos ({size_str}) · {ext_str} · Ready for reconstruction"
+                    )
             else:
                 self.lbl_photo_status.set("No supported photos (.jpg, .dng, .tif, etc.) found in folder.")
 
@@ -1953,6 +1979,8 @@ class AutoMetashapeStudio:
             cmd.append("--rebake-texture")
         if self.var_restart.get():
             cmd.append("--force-restart")
+        if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "auto":
+            cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
 
         self.stepper.reset()
         self.frame_crop_banner.pack_forget()
