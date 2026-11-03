@@ -554,6 +554,7 @@ class AutoMetashapeStudio:
         self.current_process: subprocess.Popen | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.is_running = False
+        self.user_cancelled = False
         self.worker_mode: str | None = None
         self.start_time: float = 0.0
         self.active_mode = "recon"
@@ -601,6 +602,9 @@ class AutoMetashapeStudio:
 
         # Activate default preset
         self._select_preset("architectural")
+
+        # Intercept window close for safe exit
+        self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
 
         # Verify Metashape connectivity
         self._check_metashape()
@@ -1986,6 +1990,7 @@ class AutoMetashapeStudio:
 
     def _spawn_worker(self, cmd: list[str], task_name: str) -> None:
         self.is_running = True
+        self.user_cancelled = False
         self.worker_mode = self.active_mode
         self.start_time = time.time()
         # Clean queue from any previous runs
@@ -2028,15 +2033,19 @@ class AutoMetashapeStudio:
 
                 code = self.current_process.wait()
                 elapsed = (time.time() - self.start_time) / 60.0
-                if code == 0:
+                if getattr(self, "user_cancelled", False):
+                    self.log_queue.put(f"\n[CANCELLED] Task cancelled by user safely after {elapsed:.2f} minutes.")
+                    self.log_queue.put("__TASK_DONE_CANCELLED__")
+                elif code == 0:
                     self.log_queue.put(f"\n[SUCCESS] {task_name} finished in {elapsed:.2f} minutes!")
                     self.log_queue.put("__TASK_DONE_SUCCESS__")
                 else:
                     self.log_queue.put(f"\n[ERROR] Process exited with code {code}")
                     self.log_queue.put("__TASK_DONE_ERROR__")
             except Exception as e:
-                self.log_queue.put(f"\n[EXCEPTION] Process failed: {e}")
-                self.log_queue.put("__TASK_DONE_ERROR__")
+                if not getattr(self, "user_cancelled", False):
+                    self.log_queue.put(f"\n[EXCEPTION] Process failed: {e}")
+                    self.log_queue.put("__TASK_DONE_ERROR__")
             finally:
                 self.current_process = None
 
@@ -2118,15 +2127,18 @@ class AutoMetashapeStudio:
                 line = self.log_queue.get_nowait()
                 if line == "__TASK_DONE_SUCCESS__":
                     self._on_finished(success=True)
+                elif line == "__TASK_DONE_CANCELLED__":
+                    self._on_finished(success=False, user_cancelled=True)
                 elif line == "__TASK_DONE_ERROR__":
-                    self._on_finished(success=False)
+                    if not getattr(self, "user_cancelled", False):
+                        self._on_finished(success=False, user_cancelled=False)
                 else:
                     tag = None
                     if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]", "[EXPORT]"]):
                         tag = "stage"
                     elif "[SUCCESS]" in line or "[CHECKPOINT]" in line:
                         tag = "success"
-                    elif "[WARNING]" in line or "[Hardware]" in line or "[pause_crop]" in line:
+                    elif "[WARNING]" in line or "[Hardware]" in line or "[pause_crop]" in line or "[CANCELLED]" in line:
                         tag = "warning"
                     elif "[ERROR]" in line or "[EXCEPTION]" in line:
                         tag = "error"
@@ -2204,19 +2216,54 @@ class AutoMetashapeStudio:
             except Exception:
                 pass
 
+    def _clean_project_locks(self) -> None:
+        """Removes any orphaned lock files from the active output project folder."""
+        try:
+            out_dir = self._get_active_output_dir()
+            if out_dir and os.path.isdir(out_dir):
+                for root_dir, _dirs, files in os.walk(out_dir):
+                    for f in files:
+                        if f.lower() == "lock":
+                            lock_p = os.path.join(root_dir, f)
+                            try:
+                                os.remove(lock_p)
+                                self._log(f"[SAFE-EXIT] Cleaned up project lock: {os.path.basename(lock_p)}", "stage")
+                            except Exception:
+                                pass
+        except Exception:
+            pass
+
     def _on_stop_clicked(self) -> None:
         if self.current_process and self.is_running:
-            if messagebox.askyesno("Cancel Process", "Are you sure you want to cancel the running reconstruction?"):
-                self._log("\n[USER] Terminating active process...", "warning")
+            if messagebox.askyesno("Cancel Process", "Are you sure you want to cancel the running task?"):
+                self.user_cancelled = True
+                self._log("\n[USER] Cancel requested. Safely terminating background process...", "warning")
                 try:
                     self.current_process.terminate()
-                    time.sleep(0.5)
+                    time.sleep(0.4)
                     if self.current_process.poll() is None:
                         self.current_process.kill()
-                    self._log("[USER] Process terminated.", "warning")
                 except Exception as e:
-                    self._log(f"[USER] Error terminating: {e}", "error")
+                    self._log(f"[USER] Error terminating process: {e}", "error")
+
+                self._clean_project_locks()
+                self._log("[SAFE-EXIT] Process cancelled safely. Existing checkpoints remain intact.", "stage")
                 self._on_finished(success=False, user_cancelled=True)
+
+    def _on_window_close(self) -> None:
+        if self.is_running and self.current_process:
+            if not messagebox.askyesno("Exit AutoMetashape", "A task is currently running in the background.\n\nCancel task and exit safely?"):
+                return
+            self.user_cancelled = True
+            try:
+                self.current_process.terminate()
+                time.sleep(0.3)
+                if self.current_process.poll() is None:
+                    self.current_process.kill()
+            except Exception:
+                pass
+            self._clean_project_locks()
+        self.root.destroy()
 
     def _on_finished(self, success: bool, user_cancelled: bool = False) -> None:
         finished_mode = self.worker_mode or self.active_mode
@@ -2236,7 +2283,8 @@ class AutoMetashapeStudio:
         self.btn_stop.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_MUTED)
 
         if user_cancelled:
-            self.lbl_status.config(text="● Status: Cancelled by user", fg=UITheme.ACCENT_AMBER_TXT)
+            self.lbl_status.config(text="● Status: Cancelled safely", fg=UITheme.ACCENT_AMBER_TXT)
+            self._clean_project_locks()
         elif success:
             self._complete_stepper_mode(finished_mode)
             self.lbl_status.config(text="✓ Status: Complete", fg=UITheme.ACCENT_GREEN_TXT)
