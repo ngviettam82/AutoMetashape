@@ -20,7 +20,7 @@ Use this skill when:
 - Images are located across the main folder and nested subfolders (e.g., flight batches, multi-camera rigs).
 - Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Automatic blurry image rejection is needed: automatically runs `chunk.analyzeImages()` and disables out-of-focus or motion-blurred photos ($<0.5$ quality index) to protect bundle adjustment accuracy.
-- Hands-free autonomous execution is needed: defaults to `gps-square` cropping (smallest enclosing square of camera GPS poses with tie-point altitude bounds) to minimize manual steps to zero.
+- Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) to minimize manual steps to zero.
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
 - Calibrating rolling shutter distortion on consumer drone CMOS sensors and closing localized window openings.
 - Requiring optimized meshes (600,000 / 600K faces limit default) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
@@ -89,8 +89,8 @@ When given an image directory, recursively load all images across the target fol
 ### 4. Automated Bounding Box Cropping Strategies
 Metashape's default bounding box (`chunk.region`) encompasses all tie points, including distant horizon, background trees, and surrounding streets. The pipeline provides two automated cropping strategies (`--crop-method`):
 
-#### Method 1: `gps-square` (Camera GPS Square + Tie-Point Altitude - Default)
-- **Principle**: Calculates the smallest enclosing horizontal square $(X, Y)$ containing all camera GPS positions. Then queries all tie points falling strictly inside that horizontal footprint to find the true lowest altitude ($Z_{\min}$, ground level) and highest altitude ($Z_{\max}$, roof/spire).
+#### Method 1: `gps-square` (Camera GPS Square (Horizontal Only, Vertical Uncropped) - Default)
+- **Principle**: Calculates the smallest enclosing horizontal square $(X, Y)$ containing all camera GPS positions. Preserves the full vertical ($Z$) bounds uncropped to guarantee rooftops, antennas, and foundation levels are never sliced.
 - **Outlier Immunity**: Applies robust Median Absolute Deviation (MAD) to camera positions so distant takeoff/landing spots do not inflate the square.
 - **Zero-Manual Step**: 100% guaranteed not to clip any architectural elements because the drone flew outside or above them, eliminating the need for manual bounding box adjustments.
 

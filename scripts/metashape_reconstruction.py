@@ -11,7 +11,7 @@ Configured with production-grade defaults:
 - Image Alignment: Medium quality (downscale=2), 40,000 keypoint limit, 25,000 tiepoint limit,
                    stationary tie points excluded, guided matching disabled, adaptive fitting enabled.
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
-- Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses + tie-point altitude bounds).
+- Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses with uncropped vertical bounds).
 - Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 600,000 (600K) custom faces.
 - Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
@@ -211,11 +211,11 @@ def solve_ray_convergence_irls(aligned_cams, iterations: int = 3) -> tuple:
 
 
 def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
-    """Automatically crops chunk.region (bounding box) tightly around the main target structure.
+    """Automatically crops chunk.region horizontally around the main target structure while preserving vertical bounds uncropped.
 
     Uses Robust IRLS ray convergence to lock onto the majority target structure (even when 10-30%
     of cameras are aimed at secondary objects) and Median Absolute Deviation (MAD) spatial clustering
-    to exclude all tie points belonging to external areas.
+    to isolate horizontal footprint, keeping the vertical (Z) extent uncropped to prevent any clipping of roofs or ground.
 
     Args:
         chunk: Active Metashape.Chunk.
@@ -269,7 +269,13 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     rot = chunk.region.rot
     rot_t = rot.t()  # World to local region coordinate frame
 
-    local_x, local_y, local_z = [], [], []
+    # Preserve uncropped vertical (Z) extent from default post-alignment region
+    orig_region = chunk.region
+    orig_local_center = rot_t * orig_region.center
+    orig_mid_z = orig_local_center.z
+    orig_span_z = orig_region.size.z
+
+    local_x, local_y = [], []
     valid_count = 0
     for pt in pts:
         if not pt.valid:
@@ -281,7 +287,6 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         loc = rot_t * coord
         local_x.append(loc.x)
         local_y.append(loc.y)
-        local_z.append(loc.z)
         valid_count += 1
 
     if valid_count < 100:
@@ -290,25 +295,22 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
 
     local_x.sort()
     local_y.sort()
-    local_z.sort()
 
-    # 4. Robust MAD bounding: rejects secondary cluster points with 50% breakdown tolerance
+    # 4. Robust MAD bounding: rejects secondary cluster points with 50% breakdown tolerance horizontally
     min_x, max_x = robust_bounds(local_x, k=3.0)
     min_y, max_y = robust_bounds(local_y, k=3.0)
-    min_z, max_z = robust_bounds(local_z, k=3.0)
 
-    # 5. Apply safety padding around the main structure
+    # 5. Apply safety padding horizontally; preserve vertical extent completely uncropped
     span_x = (max_x - min_x) * (1.0 + 2.0 * padding)
     span_y = (max_y - min_y) * (1.0 + 2.0 * padding)
-    span_z = (max_z - min_z) * (1.0 + 2.0 * padding)
 
     mid_local = Metashape.Vector([
         (min_x + max_x) * 0.5,
         (min_y + max_y) * 0.5,
-        (min_z + max_z) * 0.5
+        orig_mid_z,
     ])
     new_center = rot * mid_local
-    new_size = Metashape.Vector([span_x, span_y, span_z])
+    new_size = Metashape.Vector([span_x, span_y, orig_span_z])
 
     # Assign new region
     region = chunk.region
@@ -316,16 +318,17 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     region.size = new_size
     chunk.region = region
 
-    print(f"  [Auto-Crop] Successfully cropped region to main structure!", flush=True)
+    print(f"  [Auto-Crop] Successfully cropped horizontal region to main structure!", flush=True)
     print(f"  Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
-    print(f"  Size:   ({new_size.x:.2f} x {new_size.y:.2f} x {new_size.z:.2f}) [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Horizontal Size: ({span_x:.2f}m x {span_y:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Vertical Extent (Uncropped): {orig_span_z:.2f}m (Z Center: {orig_mid_z:.2f}m)", flush=True)
     print(f"  Isolated Main Structure Tie Points: {valid_count:,} points", flush=True)
     return True
 
 
 def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
-    """Crops chunk.region to the smallest enclosing square containing camera GPS (X, Y) poses,
-    with vertical bounds set by the minimum and maximum tie-point altitudes inside that square.
+    """Crops chunk.region horizontally to the smallest enclosing square of camera GPS poses,
+    preserving vertical (Z) bounds completely uncropped to protect roof and ground features.
 
     This is the default cropping method, minimizing manual alignment steps to virtually zero.
 
@@ -374,48 +377,26 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     sq_min_y = mid_y - half_side
     sq_max_y = mid_y + half_side
 
-    # 2. Extract altitude range from tie points strictly inside the horizontal square
-    pts = chunk.tie_points.points if chunk.tie_points else []
-    if not pts:
-        print("  [Auto-Crop-GPS] No tie points available; preserving default region.", flush=True)
-        return False
+    # Preserve uncropped vertical (Z) extent from default post-alignment region
+    orig_region = chunk.region
+    orig_local_center = rot_t * orig_region.center
+    orig_mid_z = orig_local_center.z
+    orig_span_z = orig_region.size.z
 
-    inside_z = []
-    for pt in pts:
-        if not pt.valid:
-            continue
-        loc = rot_t * pt.coord[:3]
-        if sq_min_x <= loc.x <= sq_max_x and sq_min_y <= loc.y <= sq_max_y:
-            inside_z.append(loc.z)
-
-    if len(inside_z) < 50:
-        print(f"  [Auto-Crop-GPS] Insufficient tie points inside square ({len(inside_z)}); preserving default region.", flush=True)
-        return False
-
-    inside_z.sort()
-    # Robust lowest (ground) and highest (roof/spire) altitude: 1st to 99th percentile to exclude stray noise
-    n_z = len(inside_z)
-    min_z = inside_z[max(0, int(n_z * 0.01))]
-    max_z = inside_z[min(n_z - 1, int(n_z * 0.99))]
-
-    span_z = (max_z - min_z) * (1.0 + 2.0 * padding)
-    mid_z = (min_z + max_z) * 0.5
-
-    # 3. Assign new region
-    mid_local = Metashape.Vector([mid_x, mid_y, mid_z])
+    # 2. Assign new region: horizontal square crop (X, Y) with uncropped vertical (Z)
+    mid_local = Metashape.Vector([mid_x, mid_y, orig_mid_z])
     new_center = rot * mid_local
-    new_size = Metashape.Vector([side, side, span_z])
+    new_size = Metashape.Vector([side, side, orig_span_z])
 
     region = chunk.region
     region.center = new_center
     region.size = new_size
     chunk.region = region
 
-    print(f"  [Auto-Crop-GPS] Successfully cropped region to Camera GPS Square!", flush=True)
+    print(f"  [Auto-Crop-GPS] Successfully cropped horizontal region to Camera GPS Square!", flush=True)
     print(f"  Square Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
-    print(f"  Square Extents: ({side:.2f}m x {side:.2f}m x {span_z:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
-    print(f"  Altitude Range: [{min_z:.2f}m (ground) to {max_z:.2f}m (roof)]", flush=True)
-    print(f"  Tie Points Inside Square: {len(inside_z):,} points", flush=True)
+    print(f"  Horizontal Footprint: ({side:.2f}m x {side:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Vertical Extent (Uncropped): {orig_span_z:.2f}m (Z Center: {orig_mid_z:.2f}m)", flush=True)
     return True
 
 
