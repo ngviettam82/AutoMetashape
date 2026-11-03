@@ -692,6 +692,7 @@ def run_reconstruction(
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
             doc.save(psx_out)
+            chunk = doc.chunk
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
             _safe_reopen()
@@ -699,6 +700,7 @@ def run_reconstruction(
         elif crop_method == "gps-square":
             auto_crop_camera_gps_square(chunk, padding=crop_padding)
             doc.save(psx_out)
+            chunk = doc.chunk
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -707,6 +709,7 @@ def run_reconstruction(
         elif crop_method == "structure":
             auto_crop_to_main_structure(chunk, padding=crop_padding)
             doc.save(psx_out)
+            chunk = doc.chunk
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -715,6 +718,7 @@ def run_reconstruction(
         else:
             print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
             doc.save(psx_out)
+            chunk = doc.chunk
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -737,9 +741,11 @@ def run_reconstruction(
         )
         print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
         doc.save(psx_out)
+        chunk = doc.chunk
         print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
+    chunk = doc.chunk
     if chunk.model is None:
         cand_obj = os.path.join(output_dir, "model.obj")
         if os.path.isfile(cand_obj):
@@ -749,6 +755,7 @@ def run_reconstruction(
                 doc.save()
             else:
                 doc.save(psx_out)
+            chunk = doc.chunk
             print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
 
     has_model = chunk.model is not None
@@ -804,6 +811,7 @@ def run_reconstruction(
             doc.save()
         else:
             doc.save(psx_out)
+        chunk = doc.chunk
         print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
@@ -841,6 +849,7 @@ def run_reconstruction(
             doc.save()
         else:
             doc.save(psx_out)
+        chunk = doc.chunk
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Production Asset Export
@@ -873,6 +882,7 @@ def run_reconstruction(
         doc.save()
     else:
         doc.save(psx_out)
+    chunk = doc.chunk
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
     total_time = (time.time() - t_start) / 60.0

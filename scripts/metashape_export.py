@@ -80,6 +80,7 @@ def export_project_assets(
         print(f"[Import] Importing 3D mesh model from: {import_model_path}", flush=True)
         chunk.importModel(path=import_model_path, format=Metashape.ModelFormat.ModelFormatOBJ)
         doc.save()
+        chunk = doc.chunk
         print(f"[Import] Re-linked model saved to project: {project_path}", flush=True)
     elif not chunk.model:
         # Auto-recover if model.obj exists in output or project directory
@@ -93,6 +94,7 @@ def export_project_assets(
                 print(f"[Auto-Recover] Project chunk has no model, but found existing: {cand}", flush=True)
                 chunk.importModel(path=cand, format=Metashape.ModelFormat.ModelFormatOBJ)
                 doc.save()
+                chunk = doc.chunk
                 print(f"[Auto-Recover] Re-linked '{cand}' into project successfully!", flush=True)
                 recovered = True
                 break
@@ -126,6 +128,7 @@ def export_project_assets(
         )
         print(f"  Texture baking completed in {(time.time() - t_tex)/60:.2f} min.", flush=True)
         doc.save()
+        chunk = doc.chunk
         print(f"  Updated project saved: {project_path}", flush=True)
 
     glb_out = os.path.join(output_dir, "model.glb")
