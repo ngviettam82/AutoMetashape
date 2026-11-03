@@ -527,6 +527,42 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  [PAUSE_CROP] Resume signal received! Reloading modified project from disk...", flush=True)
 
 
+def save_checkpoint(doc, target_path=None):
+    """Safely saves Metashape document ensuring read_only is overridden and chunk is re-synchronized."""
+    try:
+        doc.read_only = False
+    except Exception:
+        pass
+
+    try:
+        if target_path and not getattr(doc, "path", None):
+            doc.save(target_path)
+        elif target_path:
+            doc.save(target_path)
+        else:
+            doc.save()
+    except Exception as e:
+        # Fallback: force unlock and retry
+        try:
+            if target_path:
+                files_dir = target_path.replace(".psx", ".files")
+                lock_file = os.path.join(files_dir, "lock")
+                if os.path.isfile(lock_file):
+                    try:
+                        os.remove(lock_file)
+                    except Exception:
+                        pass
+            doc.read_only = False
+            if target_path:
+                doc.save(target_path)
+            else:
+                doc.save()
+        except Exception as retry_err:
+            raise OSError(f"Failed to save Metashape project: {retry_err}") from e
+
+    return doc.chunk
+
+
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
@@ -605,18 +641,16 @@ def run_reconstruction(
                 except Exception as e_lock:
                     print(f"  [Warning] Could not remove lock file: {e_lock}", flush=True)
             try:
-                doc.open(psx_out, ignore_lock=True)
+                doc.open(psx_out, read_only=False, ignore_lock=True)
             except Exception:
-                doc.open(psx_out)
-            if doc.read_only:
-                print("  [Warning] Project opened in read-only mode. Forcing write access...", flush=True)
-                if os.path.isfile(lock_file):
-                    try:
-                        os.remove(lock_file)
-                        doc = Metashape.Document()
-                        doc.open(psx_out, ignore_lock=True)
-                    except Exception:
-                        pass
+                try:
+                    doc.open(psx_out, ignore_lock=True)
+                except Exception:
+                    doc.open(psx_out)
+            try:
+                doc.read_only = False
+            except Exception:
+                pass
             chunk = doc.chunk
             aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
             if aligned_count >= 2:
@@ -712,22 +746,27 @@ def run_reconstruction(
                 except Exception:
                     pass
             try:
-                doc.open(psx_out, ignore_lock=True)
+                doc.open(psx_out, read_only=False, ignore_lock=True)
             except Exception:
-                doc.open(psx_out)
+                try:
+                    doc.open(psx_out, ignore_lock=True)
+                except Exception:
+                    doc.open(psx_out)
+            try:
+                doc.read_only = False
+            except Exception:
+                pass
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
-            doc.save(psx_out)
-            chunk = doc.chunk
+            chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
             _safe_reopen()
             chunk = doc.chunk
         elif crop_method == "gps-square":
             auto_crop_camera_gps_square(chunk, padding=crop_padding)
-            doc.save(psx_out)
-            chunk = doc.chunk
+            chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -735,8 +774,7 @@ def run_reconstruction(
                 chunk = doc.chunk
         elif crop_method == "structure":
             auto_crop_to_main_structure(chunk, padding=crop_padding)
-            doc.save(psx_out)
-            chunk = doc.chunk
+            chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -744,8 +782,7 @@ def run_reconstruction(
                 chunk = doc.chunk
         else:
             print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
-            doc.save(psx_out)
-            chunk = doc.chunk
+            chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -779,8 +816,7 @@ def run_reconstruction(
             reuse_depth=False,
         )
         print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
-        doc.save(psx_out)
-        chunk = doc.chunk
+        chunk = save_checkpoint(doc, psx_out)
         print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
@@ -790,11 +826,7 @@ def run_reconstruction(
         if os.path.isfile(cand_obj):
             print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {cand_obj}. Re-linking...", flush=True)
             chunk.importModel(path=cand_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
-            if doc.path:
-                doc.save()
-            else:
-                doc.save(psx_out)
-            chunk = doc.chunk
+            chunk = save_checkpoint(doc, psx_out)
             print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
 
     has_model = chunk.model is not None
@@ -846,11 +878,7 @@ def run_reconstruction(
         mesh_verts = len(chunk.model.vertices)
         mesh_faces = len(chunk.model.faces)
         print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
-        if doc.path:
-            doc.save()
-        else:
-            doc.save(psx_out)
-        chunk = doc.chunk
+        chunk = save_checkpoint(doc, psx_out)
         print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
@@ -884,11 +912,7 @@ def run_reconstruction(
             ghosting_filter=ghosting_filter,
         )
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
-        if doc.path:
-            doc.save()
-        else:
-            doc.save(psx_out)
-        chunk = doc.chunk
+        chunk = save_checkpoint(doc, psx_out)
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Production Asset Export
@@ -917,11 +941,7 @@ def run_reconstruction(
     )
     print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
-    if doc.path:
-        doc.save()
-    else:
-        doc.save(psx_out)
-    chunk = doc.chunk
+    chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
     total_time = (time.time() - t_start) / 60.0

@@ -53,12 +53,16 @@ def export_project_assets(
         except Exception:
             pass
     try:
-        doc.open(project_path, ignore_lock=True)
+        doc.open(project_path, read_only=False, ignore_lock=True)
     except Exception:
         try:
+            doc.open(project_path, ignore_lock=True)
+        except Exception:
             doc.open(project_path)
-        except Exception as e:
-            raise RuntimeError(f"Failed to open Metashape project '{project_path}': {e}")
+    try:
+        doc.read_only = False
+    except Exception:
+        pass
 
     # Enable all available NVIDIA / high-performance GPUs
     gpus = Metashape.app.enumGPUDevices()
