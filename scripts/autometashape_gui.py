@@ -3,19 +3,19 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""AutoMetashape Studio - Modern High-Precision Desktop Photogrammetry GUI.
+"""AutoMetashape Studio - Professional Desktop Photogrammetry GUI.
 
-A user-friendly, responsive desktop application for autonomous 3D photogrammetry.
-Designed following modern open-source UI/UX principles and studio design patterns:
-- Windows Per-Monitor v2 DPI auto-scaling and dynamic layout metrics
-- 1-2-3 Progressive Disclosure (Input -> Preset -> Start)
-- Sleek flat card architecture with VS Code/GitHub dark slate aesthetics
-- Interactive Visual Breadcrumb Stepper (7-stage pipeline milestones)
-- Interactive Preset Selection Cards with hover and active states
-- Real-time photo statistics scanner (photo count, disk size, camera RAW formats)
-- Collapsible Advanced Fine-Tuning (zero clutter by default)
-- Seamless Manual Bounding Box pause and resume workflow
-- Real-time streaming log console with syntax highlights and direct OS actions
+A high-taste, responsive desktop application for autonomous 3D photogrammetry.
+Designed following modern design-taste principles and app-screen standards:
+- Neutral deep dark ground (#0c0c0e) with quiet 1px boundaries (#27272a)
+- Colour applied strictly to data and semantic states, not chrome (<= 3% colour share)
+- Zero decorative emoji in greetings, labels, nav, or buttons
+- No floating eyebrow pill badges above titles
+- Clear typographic hierarchy with 4.5:1+ contrast across all text
+- Windows Per-Monitor v2 DPI auto-scaling and dynamic monitor-aware layout
+- 1-2-3 Progressive Disclosure (Inputs -> Preset -> Run)
+- Integrated 7-stage milestone tracker and seamless manual crop pause/resume
+- Real-time execution log with syntax highlighting and direct OS actions
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from tkinter.scrolledtext import ScrolledText
 # ---------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4) provides native scaling
+        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
         ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
     except Exception:
         try:
@@ -54,47 +54,43 @@ if sys.platform == "win32":
 
 
 # ---------------------------------------------------------------------------
-# Visual Theme Tokens (Studio Dark Slate Aesthetics)
+# Visual Theme Tokens (Design-Taste App Screen Standards)
 # ---------------------------------------------------------------------------
 class UITheme:
-    """Modern studio palette inspired by VS Code, GitHub Desktop, and Blender."""
+    """Neutral dark app-screen palette following Leonxlnx/taste-skill rules."""
 
-    # Surfaces
-    BG_ROOT = "#0d1117"             # Deep space / canvas background
-    BG_SURFACE = "#161b22"          # Surface card container
-    BG_SURFACE_ALT = "#1f2937"      # Elevated container / header
-    BG_INPUT = "#0d1117"            # Input text fields
-    BG_CARD_HOVER = "#1c2433"       # Preset card hover
-    BG_CARD_ACTIVE = "#172554"      # Preset card selected state
-    BG_CONSOLE = "#06090f"          # Terminal console deep black
+    # Ground & Surfaces (Neutral deep dark, zero blue/navy tint)
+    BG_ROOT = "#0c0c0e"             # Neutral ground
+    BG_SURFACE = "#151518"          # 1 tone step above ground
+    BG_SURFACE_RAISED = "#1c1c20"   # Raised panels / hover
+    BG_INPUT = "#101012"            # Crisp dark input field fill
+    BG_CONSOLE = "#08080a"          # Pure terminal console black
+    BG_ACTIVE = "#1e1e24"           # Active surface
 
-    # Borders
-    BORDER_SUBTLE = "#21262d"       # Default divider border
-    BORDER_CARD = "#30363d"         # Card outline
-    BORDER_HOVER = "#484f58"        # Interactive hover outline
-    BORDER_ACTIVE = "#38bdf8"       # Active sky cyan outline
-    BORDER_SUCCESS = "#238636"      # Success green outline
+    # Borders & Rules (Quiet 1px lines, no loud glowing outlines)
+    BORDER = "#27272a"              # Quiet 1px panel border
+    BORDER_CONTROL = "#36363a"      # Input / control outline
+    BORDER_HOVER = "#484850"        # Hover outline
+    BORDER_FOCUS = "#38bdf8"        # Focus outline
+    RULE = "#1e1e22"                # Subtle inner divider
 
-    # Typography
-    TEXT_WHITE = "#f0f6fc"          # High-contrast headers
-    TEXT_BODY = "#e6edf3"           # Primary body text
-    TEXT_MUTED = "#8b949e"          # Secondary descriptive labels
-    TEXT_DIM = "#6e7681"            # Dim footnotes / watermarks
+    # Typography (High contrast, neo-grotesk hierarchy)
+    TEXT_PRIMARY = "#ffffff"        # Headings & primary labels
+    TEXT_SECONDARY = "#a1a1aa"      # Form labels & descriptions
+    TEXT_MUTED = "#71717a"          # Captions, meta, and secondary notes
+    TEXT_DIM = "#52525b"            # Placeholder & disabled text
 
-    # Accents & Semantics
-    ACCENT_CYAN = "#38bdf8"         # Brand highlight / sky cyan
+    # Data Accents (Restrained semantic application)
+    ACCENT_CYAN = "#38bdf8"         # Sky cyan (for active milestone & primary CTA)
     ACCENT_CYAN_HOVER = "#0284c7"
-    ACCENT_BLUE = "#3b82f6"         # Primary blue
-    ACCENT_BLUE_HOVER = "#2563eb"
-    ACCENT_GREEN = "#238636"        # Action / Run emerald green
-    ACCENT_GREEN_HOVER = "#2ea043"
-    ACCENT_GREEN_BG = "#064e3b"     # Milestone success surface
-    ACCENT_GREEN_TXT = "#6ee7b7"    # Milestone success text
-    ACCENT_AMBER = "#d29922"        # Warning / Paused amber
-    ACCENT_AMBER_BG = "#451a03"     # Paused surface
-    ACCENT_AMBER_TXT = "#fbbf24"    # Paused text
-    ACCENT_RED = "#da3633"          # Cancel / Error red
-    ACCENT_RED_HOVER = "#b62324"
+    ACCENT_GREEN = "#247b50"        # Semantic positive / success
+    ACCENT_GREEN_BG = "#102318"     # Subtle green tint
+    ACCENT_GREEN_TXT = "#3fc07a"    # Accessible mint text
+    ACCENT_AMBER = "#d97706"        # Semantic warning / paused
+    ACCENT_AMBER_BG = "#261706"     # Subtle amber tint
+    ACCENT_AMBER_TXT = "#f59e0b"    # Accessible amber text
+    ACCENT_RED = "#dc2626"          # Semantic error / stop
+    ACCENT_RED_HOVER = "#b91c1c"
 
 
 # ---------------------------------------------------------------------------
@@ -138,23 +134,21 @@ def format_file_size(size_bytes: int) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Modern Studio Card Container
+# Studio Card Container (Quiet 1px Border, No Eyebrows)
 # ---------------------------------------------------------------------------
 class StudioCard(tk.Frame):
-    """Sleek flat container with subtle border and optional header badge."""
+    """Sleek container with quiet 1px line, zero decorative eyebrows."""
 
     def __init__(
         self,
         parent: tk.Widget,
         title: str = "",
-        badge: str = "",
-        icon: str = "",
-        accent_color: str = UITheme.ACCENT_CYAN,
+        subtitle: str = "",
         **kwargs,
     ) -> None:
         super().__init__(
             parent,
-            bg=UITheme.BORDER_CARD,
+            bg=UITheme.BORDER,
             bd=1,
             relief=tk.FLAT,
             **kwargs,
@@ -163,65 +157,52 @@ class StudioCard(tk.Frame):
         self.inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
         self.title_text = title
-        self.badge_text = badge
-        self.icon_text = icon
-        self.accent_color = accent_color
+        self.subtitle_text = subtitle
 
-        if title or icon or badge:
+        if title or subtitle:
             self._build_header()
 
         self.body = tk.Frame(self.inner, bg=UITheme.BG_SURFACE)
-        self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(6, 12))
+        self.body.pack(fill=tk.BOTH, expand=True, padx=14, pady=(4, 12))
 
     def _build_header(self) -> None:
         header_bar = tk.Frame(self.inner, bg=UITheme.BG_SURFACE)
         header_bar.pack(fill=tk.X, padx=14, pady=(10, 4))
 
-        left = tk.Frame(header_bar, bg=UITheme.BG_SURFACE)
-        left.pack(side=tk.LEFT, fill=tk.Y)
-
-        # Left accent pill bar
-        pill = tk.Frame(left, bg=self.accent_color, width=3, height=14)
-        pill.pack(side=tk.LEFT, padx=(0, 8), pady=2)
-        pill.pack_propagate(False)
-
-        title_full = f"{self.icon_text}  {self.title_text}" if self.icon_text else self.title_text
         lbl_title = tk.Label(
-            left,
-            text=title_full.strip(),
+            header_bar,
+            text=self.title_text,
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_title.pack(side=tk.LEFT)
 
-        if self.badge_text:
-            lbl_badge = tk.Label(
+        if self.subtitle_text:
+            lbl_sub = tk.Label(
                 header_bar,
-                text=self.badge_text,
+                text=self.subtitle_text,
                 font=("Segoe UI", 8),
-                bg=UITheme.BG_SURFACE_ALT,
+                bg=UITheme.BG_SURFACE,
                 fg=UITheme.TEXT_MUTED,
-                padx=8,
-                pady=2,
             )
-            lbl_badge.pack(side=tk.RIGHT)
+            lbl_sub.pack(side=tk.RIGHT)
 
 
 # ---------------------------------------------------------------------------
-# Horizontal Pipeline Stepper (7 Reconstruction Stages)
+# Horizontal Pipeline Stepper (7 Reconstruction Milestones)
 # ---------------------------------------------------------------------------
 class StudioPipelineStepper(tk.Frame):
-    """Modern horizontal trajectory component tracking all 7 pipeline milestones."""
+    """Refined milestone trajectory tracking all 7 pipeline stages."""
 
     STAGES = [
-        ("1", "Ingest", "Sharpness & Blur Check"),
-        ("2", "Align", "Camera Bundle Adjustment"),
-        ("3", "Crop", "Horizontal Boundary Box"),
-        ("4", "Depth", "MVS Dense Stereopsis"),
-        ("5", "Mesh", "600K Face Surface Fusion"),
-        ("6", "Texture", "16-Page 8K Mosaic Atlas"),
-        ("7", "Export", "GLB, OBJ, TIFF & PSX"),
+        ("1", "Ingest", "Quality filter"),
+        ("2", "Align", "Bundle adjust"),
+        ("3", "Crop", "GPS boundary"),
+        ("4", "Depth", "Dense stereopsis"),
+        ("5", "Mesh", "600K surface"),
+        ("6", "Texture", "16-page 8K"),
+        ("7", "Export", "GLB & TIFF"),
     ]
 
     def __init__(self, parent: tk.Widget, **kwargs) -> None:
@@ -237,7 +218,7 @@ class StudioPipelineStepper(tk.Frame):
         cards_row.pack(fill=tk.X, padx=0, pady=(0, 6))
 
         for i, (num, name, subtitle) in enumerate(self.STAGES):
-            outer = tk.Frame(cards_row, bg=UITheme.BORDER_CARD, bd=1, relief=tk.FLAT)
+            outer = tk.Frame(cards_row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT)
             outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
 
             inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=6, pady=6)
@@ -248,7 +229,7 @@ class StudioPipelineStepper(tk.Frame):
 
             ind = tk.Label(
                 top_row,
-                text=f"○ {num}",
+                text=f"{num}.",
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_DIM,
@@ -280,16 +261,16 @@ class StudioPipelineStepper(tk.Frame):
             self.stage_titles.append(t)
             self.stage_subtitles.append(s)
 
-        # Status summary banner under stages
+        # Status summary bar under stages
         info_bar = tk.Frame(self, bg=UITheme.BG_ROOT, padx=10, pady=5)
         info_bar.pack(fill=tk.X)
 
         self.lbl_pipeline_status = tk.Label(
             info_bar,
-            text="Pipeline Status: Waiting for user to start...",
-            font=("Segoe UI", 8, "bold"),
+            text="Status: Ready to reconstruct",
+            font=("Segoe UI", 8),
             bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_MUTED,
+            fg=UITheme.TEXT_SECONDARY,
             anchor=tk.W,
         )
         self.lbl_pipeline_status.pack(side=tk.LEFT, fill=tk.X, expand=True)
@@ -299,7 +280,7 @@ class StudioPipelineStepper(tk.Frame):
             text="Elapsed: --:--",
             font=("Consolas", 8),
             bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_DIM,
+            fg=UITheme.TEXT_MUTED,
         )
         self.lbl_timer.pack(side=tk.RIGHT)
 
@@ -307,49 +288,47 @@ class StudioPipelineStepper(tk.Frame):
         for i, (num, name, subtitle) in enumerate(self.STAGES):
             outer = self.stage_frames[i]
             inner = outer.winfo_children()[0]
-            outer.config(bg=UITheme.BORDER_CARD)
+            outer.config(bg=UITheme.BORDER)
             inner.config(bg=UITheme.BG_ROOT)
             for child in inner.winfo_children():
                 child.config(bg=UITheme.BG_ROOT)
                 if hasattr(child, "winfo_children"):
                     for sub in child.winfo_children():
                         sub.config(bg=UITheme.BG_ROOT)
-            self.stage_indicators[i].config(text=f"○ {num}", fg=UITheme.TEXT_DIM)
+            self.stage_indicators[i].config(text=f"{num}.", fg=UITheme.TEXT_DIM)
             self.stage_titles[i].config(fg=UITheme.TEXT_MUTED)
             self.stage_subtitles[i].config(fg=UITheme.TEXT_DIM)
         self.lbl_pipeline_status.config(
-            text="Pipeline Status: Ready to start",
-            fg=UITheme.TEXT_MUTED,
+            text="Status: Ready to reconstruct",
+            fg=UITheme.TEXT_SECONDARY,
         )
         self.lbl_timer.config(text="Elapsed: --:--")
 
     def set_active(self, idx: int, description: str = "") -> None:
-        # Mark all previous steps completed
         for i in range(idx):
             self._apply_style(
                 i,
-                outer_bg=UITheme.ACCENT_GREEN,
+                outer_bg=UITheme.BORDER,
                 inner_bg=UITheme.ACCENT_GREEN_BG,
-                ind_text="✓ Done",
+                ind_text="✓",
                 ind_color=UITheme.ACCENT_GREEN_TXT,
-                title_color=UITheme.TEXT_WHITE,
+                title_color=UITheme.TEXT_PRIMARY,
                 sub_color=UITheme.ACCENT_GREEN_TXT,
             )
 
-        # Mark current step active
         if 0 <= idx < len(self.stage_frames):
             num = self.STAGES[idx][0]
             name = self.STAGES[idx][1]
             self._apply_style(
                 idx,
                 outer_bg=UITheme.ACCENT_CYAN,
-                inner_bg=UITheme.BG_CARD_ACTIVE,
-                ind_text=f"▶ {num} RUNNING",
+                inner_bg="#131e2a",
+                ind_text=f"▶ {num}",
                 ind_color=UITheme.ACCENT_CYAN,
-                title_color=UITheme.TEXT_WHITE,
+                title_color=UITheme.TEXT_PRIMARY,
                 sub_color=UITheme.ACCENT_CYAN,
             )
-            desc_text = f"▶ Stage {idx+1}/7: {name}"
+            desc_text = f"Running Stage {idx+1}/7: {name}"
             if description:
                 desc_text += f" - {description}"
             self.lbl_pipeline_status.config(text=desc_text, fg=UITheme.ACCENT_CYAN)
@@ -361,13 +340,13 @@ class StudioPipelineStepper(tk.Frame):
                 idx,
                 outer_bg=UITheme.ACCENT_AMBER,
                 inner_bg=UITheme.ACCENT_AMBER_BG,
-                ind_text=f"⏸ {num} PAUSED",
+                ind_text=f"⏸ {num}",
                 ind_color=UITheme.ACCENT_AMBER_TXT,
-                title_color=UITheme.TEXT_WHITE,
+                title_color=UITheme.TEXT_PRIMARY,
                 sub_color=UITheme.ACCENT_AMBER_TXT,
             )
             self.lbl_pipeline_status.config(
-                text=f"⏸️ Stage {idx+1}/7 Paused: {message}",
+                text=f"Paused at Stage {idx+1}/7: {message}",
                 fg=UITheme.ACCENT_AMBER_TXT,
             )
 
@@ -375,15 +354,15 @@ class StudioPipelineStepper(tk.Frame):
         for i in range(len(self.stage_frames)):
             self._apply_style(
                 i,
-                outer_bg=UITheme.ACCENT_GREEN,
+                outer_bg=UITheme.BORDER,
                 inner_bg=UITheme.ACCENT_GREEN_BG,
-                ind_text="✓ Done",
+                ind_text="✓",
                 ind_color=UITheme.ACCENT_GREEN_TXT,
-                title_color=UITheme.TEXT_WHITE,
+                title_color=UITheme.TEXT_PRIMARY,
                 sub_color=UITheme.ACCENT_GREEN_TXT,
             )
         self.lbl_pipeline_status.config(
-            text="✓ All 7 Stages Completed Successfully! Deliverables saved to disk.",
+            text="Complete: All 7 stages finished successfully. Deliverables ready on disk.",
             fg=UITheme.ACCENT_GREEN_TXT,
         )
 
@@ -420,11 +399,11 @@ class StudioPipelineStepper(tk.Frame):
 # Main Application Window
 # ---------------------------------------------------------------------------
 class AutoMetashapeStudio:
-    """User-friendly, modern photogrammetry desktop studio."""
+    """Professional, taste-refined photogrammetry desktop studio."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
-        self.root.title("AutoMetashape Studio - Autonomous 3D Photogrammetry")
+        self.root.title("AutoMetashape Studio - 3D Photogrammetry")
         self.root.configure(bg=UITheme.BG_ROOT)
 
         # Scale detection & Monitor-Aware Geometry
@@ -444,7 +423,7 @@ class AutoMetashapeStudio:
         self.log_queue: queue.Queue[str] = queue.Queue()
         self.is_running = False
         self.start_time: float = 0.0
-        self.active_mode = "recon"  # "recon" or "export"
+        self.active_mode = "recon"
         self.adv_expanded = False
         self.selected_preset_key = "architectural"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
@@ -475,21 +454,17 @@ class AutoMetashapeStudio:
 
         self.scale = max(1.0, dpi / 96.0)
 
-        # Tell Tkinter to scale coordinate rendering
         try:
             self.root.tk.call("tk", "scaling", dpi / 72.0)
         except Exception:
             pass
 
-        # Compute screen work area
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
 
-        # Smart dynamic window size: comfortable default bounded by monitor
         win_w = min(1280, max(940, int(sw * 0.58)))
         win_h = min(960, max(720, int(sh * 0.84)))
 
-        # Center on screen
         pos_x = max(0, (sw - win_w) // 2)
         pos_y = max(0, (sh - win_h) // 2 - 25)
 
@@ -508,20 +483,20 @@ class AutoMetashapeStudio:
         self.style.configure(
             "TCombobox",
             fieldbackground=UITheme.BG_INPUT,
-            background=UITheme.BORDER_CARD,
-            foreground=UITheme.TEXT_WHITE,
-            darkcolor=UITheme.BORDER_SUBTLE,
-            lightcolor=UITheme.BORDER_CARD,
-            bordercolor=UITheme.BORDER_CARD,
-            arrowcolor=UITheme.ACCENT_CYAN,
+            background=UITheme.BG_SURFACE_RAISED,
+            foreground=UITheme.TEXT_PRIMARY,
+            darkcolor=UITheme.BORDER,
+            lightcolor=UITheme.BORDER,
+            bordercolor=UITheme.BORDER,
+            arrowcolor=UITheme.TEXT_SECONDARY,
             selectbackground=UITheme.ACCENT_CYAN,
             selectforeground=UITheme.BG_ROOT,
         )
         self.style.map(
             "TCombobox",
             fieldbackground=[("readonly", UITheme.BG_INPUT), ("active", UITheme.BG_INPUT)],
-            foreground=[("readonly", UITheme.TEXT_WHITE)],
-            bordercolor=[("focus", UITheme.ACCENT_CYAN)],
+            foreground=[("readonly", UITheme.TEXT_PRIMARY)],
+            bordercolor=[("focus", UITheme.BORDER_FOCUS)],
         )
 
         # TProgressbar cyan styling
@@ -529,7 +504,7 @@ class AutoMetashapeStudio:
             "Horizontal.TProgressbar",
             troughcolor=UITheme.BG_ROOT,
             background=UITheme.ACCENT_CYAN,
-            bordercolor=UITheme.BORDER_CARD,
+            bordercolor=UITheme.BORDER,
             lightcolor=UITheme.ACCENT_CYAN,
             darkcolor=UITheme.ACCENT_CYAN,
         )
@@ -537,7 +512,7 @@ class AutoMetashapeStudio:
         # Vertical.TScrollbar dark styling
         self.style.configure(
             "Vertical.TScrollbar",
-            background=UITheme.BORDER_CARD,
+            background=UITheme.BORDER,
             troughcolor=UITheme.BG_ROOT,
             bordercolor=UITheme.BG_ROOT,
             arrowcolor=UITheme.TEXT_MUTED,
@@ -577,26 +552,17 @@ class AutoMetashapeStudio:
         self.var_exp_rebake = tk.BooleanVar(value=True)
 
         self.lbl_photo_status = tk.StringVar(
-            value="No folder selected yet. Click 'Browse Folder...' to begin."
+            value="No folder selected. Click 'Browse...' to choose your raw photos folder."
         )
 
     # -----------------------------------------------------------------------
     # Main UI Layout Construction
     # -----------------------------------------------------------------------
     def _build_ui(self) -> None:
-        # Top Studio Header
         self._build_header()
-
-        # Pipeline Mode Navigation Tabs
         self._build_mode_bar()
-
-        # Manual Crop Alert Notification Banner (hidden by default)
         self._build_crop_pause_banner()
-
-        # Scrollable Main Workspace
         self._build_scrollable_workspace()
-
-        # Fixed Bottom Action Bar
         self._build_bottom_bar()
 
     def _build_header(self) -> None:
@@ -608,16 +574,16 @@ class AutoMetashapeStudio:
 
         lbl_logo = tk.Label(
             left,
-            text="⚡ AutoMetashape Studio",
-            font=("Segoe UI", 12, "bold"),
+            text="AutoMetashape Studio",
+            font=("Segoe UI", 11, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_logo.pack(side=tk.LEFT)
 
         lbl_sub = tk.Label(
             left,
-            text=" |  Autonomous Architectural 3D Photogrammetry",
+            text=" ·  Autonomous 3D Photogrammetry",
             font=("Segoe UI", 9),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_MUTED,
@@ -630,8 +596,8 @@ class AutoMetashapeStudio:
         self.lbl_metashape_badge = tk.Label(
             right,
             text="Checking Metashape Pro...",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.BG_SURFACE_ALT,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_MUTED,
             padx=10,
             pady=3,
@@ -644,40 +610,42 @@ class AutoMetashapeStudio:
 
         self.btn_tab_recon = tk.Button(
             bar,
-            text="🚀  3D Reconstruction (Raw Photos ➔ 3D Model)",
+            text="3D Reconstruction",
             font=("Segoe UI", 9, "bold"),
-            bg=UITheme.ACCENT_CYAN,
-            fg=UITheme.BG_ROOT,
-            activebackground=UITheme.ACCENT_CYAN_HOVER,
-            activeforeground="white",
-            bd=0,
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BG_ACTIVE,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=16,
-            pady=6,
-            relief=tk.FLAT,
+            pady=5,
             cursor="hand2",
             command=lambda: self._set_mode("recon"),
         )
-        self.btn_tab_recon.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_tab_recon.pack(side=tk.LEFT, padx=(0, 6))
 
         self.btn_tab_export = tk.Button(
             bar,
-            text="📦  Re-Bake Texture & Export (.psx)",
-            font=("Segoe UI", 9, "bold"),
+            text="Texture Re-Bake & Export",
+            font=("Segoe UI", 9),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_MUTED,
-            activebackground=UITheme.BG_SURFACE_ALT,
-            activeforeground=UITheme.TEXT_WHITE,
-            bd=0,
+            fg=UITheme.TEXT_SECONDARY,
+            activebackground=UITheme.BG_SURFACE_RAISED,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=16,
-            pady=6,
-            relief=tk.FLAT,
+            pady=5,
             cursor="hand2",
             command=lambda: self._set_mode("export"),
         )
         self.btn_tab_export.pack(side=tk.LEFT)
 
     def _build_crop_pause_banner(self) -> None:
-        """Prominent alert banner that appears when manual cropping is requested."""
+        """Quiet, high-contrast alert banner displayed when manual cropping is active."""
         self.frame_crop_banner = tk.Frame(
             self.root,
             bg=UITheme.ACCENT_AMBER_BG,
@@ -686,27 +654,17 @@ class AutoMetashapeStudio:
             padx=14,
             pady=8,
         )
-        # Hidden initially; packed when paused for crop
 
         inner = tk.Frame(self.frame_crop_banner, bg=UITheme.ACCENT_AMBER_BG)
         inner.pack(fill=tk.X)
-
-        lbl_icon = tk.Label(
-            inner,
-            text="⏸️",
-            font=("Segoe UI", 14),
-            bg=UITheme.ACCENT_AMBER_BG,
-            fg=UITheme.ACCENT_AMBER_TXT,
-        )
-        lbl_icon.pack(side=tk.LEFT, padx=(0, 10))
 
         text_block = tk.Frame(inner, bg=UITheme.ACCENT_AMBER_BG)
         text_block.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
         lbl_heading = tk.Label(
             text_block,
-            text="PIPELINE PAUSED FOR MANUAL BOUNDING BOX CROPPING",
-            font=("Segoe UI", 9, "bold"),
+            text="PIPELINE PAUSED: MANUAL BOUNDING BOX IN AGISOFT METASHAPE PRO",
+            font=("Segoe UI", 8, "bold"),
             bg=UITheme.ACCENT_AMBER_BG,
             fg=UITheme.ACCENT_AMBER_TXT,
             anchor=tk.W,
@@ -715,17 +673,17 @@ class AutoMetashapeStudio:
 
         lbl_instruct = tk.Label(
             text_block,
-            text="1. Open Metashape Pro  ➜  2. Adjust & save bounding box (Ctrl+S)  ➜  3. Close Metashape  ➜  4. Click Continue below",
+            text="1. Open project in Metashape Pro  ➜  2. Adjust & save bounding box (Ctrl+S)  ➜  3. Close Metashape  ➜  4. Click Continue below",
             font=("Segoe UI", 8),
             bg=UITheme.ACCENT_AMBER_BG,
-            fg=UITheme.TEXT_BODY,
+            fg=UITheme.TEXT_SECONDARY,
             anchor=tk.W,
         )
         lbl_instruct.pack(fill=tk.X)
 
         btn_launch = tk.Button(
             inner,
-            text="🚀 Open Metashape Now",
+            text="Open Metashape",
             font=("Segoe UI", 8, "bold"),
             bg=UITheme.ACCENT_AMBER,
             fg=UITheme.BG_ROOT,
@@ -764,23 +722,16 @@ class AutoMetashapeStudio:
         self.wrapper_recon = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
         self.wrapper_recon.pack(fill=tk.X, expand=True)
 
-        # Card 1: Input Photos & Deliverables Folder
         self._build_folder_card(self.wrapper_recon)
-
-        # Card 2: One-Click Presets
         self._build_presets_card(self.wrapper_recon)
-
-        # Card 3: Collapsible Advanced Pipeline Settings
         self._build_advanced_settings_card(self.wrapper_recon)
 
         # --- STANDALONE EXPORT WIDGETS ---
         self.wrapper_export = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
         self._build_export_card(self.wrapper_export)
 
-        # Card 4: Horizontal Pipeline Stepper (Visual Trajectory)
+        # Stepper & Log Card
         self._build_stepper_card(self.content_frame)
-
-        # Card 5: Real-time Execution Log & Action Bar
         self._build_log_card(self.content_frame)
 
     # -----------------------------------------------------------------------
@@ -789,10 +740,8 @@ class AutoMetashapeStudio:
     def _build_folder_card(self, parent: tk.Widget) -> None:
         card = StudioCard(
             parent,
-            title="1. INPUT PHOTOS & OUTPUT FOLDER",
-            icon="📁",
-            badge="Step 1 of 3",
-            accent_color=UITheme.ACCENT_CYAN,
+            title="1. Photos & Output Destination",
+            subtitle="Raw survey imagery and production deliverables directory",
         )
         card.pack(fill=tk.X, pady=(0, 8))
 
@@ -802,25 +751,26 @@ class AutoMetashapeStudio:
 
         lbl_img_title = tk.Label(
             row_img,
-            text="Raw Photos Directory:",
+            text="Photos Directory",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_img_title.pack(side=tk.LEFT)
 
         btn_browse_img = tk.Button(
             row_img,
-            text="📂 Browse Folder...",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.ACCENT_BLUE,
-            fg="white",
-            activebackground=UITheme.ACCENT_BLUE_HOVER,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
             activeforeground="white",
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=12,
-            pady=3,
-            relief=tk.FLAT,
+            pady=2,
             cursor="hand2",
             command=self._browse_images_dir,
         )
@@ -832,14 +782,15 @@ class AutoMetashapeStudio:
             textvariable=self.var_images_dir,
             font=("Segoe UI", 9),
             bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
             insertbackground="white",
             bd=1,
             relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
         )
         ent_img.pack(fill=tk.X, pady=(3, 4))
 
-        # Photo count & size summary pill badge
+        # Honest photo count & size summary line
         stats_frame = tk.Frame(card.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
         stats_frame.pack(fill=tk.X, pady=(0, 8))
 
@@ -848,7 +799,7 @@ class AutoMetashapeStudio:
             textvariable=self.lbl_photo_status,
             font=("Segoe UI", 8),
             bg=UITheme.BG_ROOT,
-            fg=UITheme.ACCENT_CYAN,
+            fg=UITheme.TEXT_SECONDARY,
             anchor=tk.W,
         )
         lbl_stats.pack(fill=tk.X)
@@ -859,24 +810,25 @@ class AutoMetashapeStudio:
 
         lbl_out_title = tk.Label(
             row_out,
-            text="Deliverables Destination Folder (GLB, OBJ, TIFF, PSX):",
+            text="Deliverables Destination (GLB, OBJ, TIFF, PSX)",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_out_title.pack(side=tk.LEFT)
 
         btn_browse_out = tk.Button(
             row_out,
-            text="📂 Change Destination...",
+            text="Change...",
             font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_ALT,
-            fg=UITheme.TEXT_WHITE,
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
             activebackground=UITheme.BORDER_HOVER,
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=10,
             pady=2,
-            relief=tk.FLAT,
             cursor="hand2",
             command=self._browse_output_dir,
         )
@@ -887,10 +839,11 @@ class AutoMetashapeStudio:
             textvariable=self.var_output_dir,
             font=("Segoe UI", 9),
             bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
             insertbackground="white",
             bd=1,
             relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
         )
         ent_out.pack(fill=tk.X, pady=(3, 2))
 
@@ -900,10 +853,8 @@ class AutoMetashapeStudio:
     def _build_presets_card(self, parent: tk.Widget) -> None:
         card = StudioCard(
             parent,
-            title="2. CHOOSE WORKFLOW PRESET (ONE-CLICK SETUP)",
-            icon="🎛️",
-            badge="Step 2 of 3",
-            accent_color=UITheme.ACCENT_CYAN,
+            title="2. Workflow Preset",
+            subtitle="One-click parameters for reconstruction fidelity",
         )
         card.pack(fill=tk.X, pady=(0, 8))
 
@@ -912,12 +863,11 @@ class AutoMetashapeStudio:
 
         def _make_preset(
             key: str,
-            icon_title: str,
+            title: str,
             specs: str,
             desc: str,
-            is_recommended: bool = False,
         ):
-            outer = tk.Frame(row, bg=UITheme.BORDER_CARD, bd=1, relief=tk.FLAT, cursor="hand2")
+            outer = tk.Frame(row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT, cursor="hand2")
             outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=3)
 
             inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=10, pady=8)
@@ -928,28 +878,28 @@ class AutoMetashapeStudio:
 
             t = tk.Label(
                 top,
-                text=icon_title,
+                text=title,
                 font=("Segoe UI", 9, "bold"),
                 bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_WHITE,
+                fg=UITheme.TEXT_PRIMARY,
             )
             t.pack(side=tk.LEFT)
 
             radio_badge = tk.Label(
                 top,
                 text="○ Select",
-                font=("Segoe UI", 7, "bold"),
+                font=("Segoe UI", 8),
                 bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_DIM,
+                fg=UITheme.TEXT_MUTED,
             )
             radio_badge.pack(side=tk.RIGHT)
 
             spec_lbl = tk.Label(
                 inner,
                 text=specs,
-                font=("Segoe UI", 8, "bold"),
+                font=("Segoe UI", 8),
                 bg=UITheme.BG_ROOT,
-                fg=UITheme.ACCENT_CYAN,
+                fg=UITheme.TEXT_SECONDARY,
                 anchor=tk.W,
             )
             spec_lbl.pack(fill=tk.X, pady=(4, 2))
@@ -965,7 +915,6 @@ class AutoMetashapeStudio:
             )
             d.pack(fill=tk.X)
 
-            # Store references
             self.preset_cards[key] = {
                 "outer": outer,
                 "inner": inner,
@@ -976,7 +925,6 @@ class AutoMetashapeStudio:
                 "top": top,
             }
 
-            # Click & hover bindings
             for w in [outer, inner, t, radio_badge, spec_lbl, d, top]:
                 w.bind("<Button-1>", lambda e, k=key: self._select_preset(k))
                 w.bind("<Enter>", lambda e, k=key: self._on_preset_hover(k, True))
@@ -984,22 +932,21 @@ class AutoMetashapeStudio:
 
         _make_preset(
             "architectural",
-            "🏛️ Architectural Standard",
-            "600K Faces • 16-Page 8K • GPS Crop",
-            "Production architectural balance with rolling shutter compensation and hole closing (Default).",
-            is_recommended=True,
+            "Architectural Standard (Default)",
+            "600K faces · 16-page 8K · GPS crop",
+            "Balanced production geometry with CMOS rolling shutter and mesh hole closing.",
         )
         _make_preset(
             "draft",
-            "⚡ Rapid Draft Preview",
-            "500K Faces • 4-Page 8K • Fast Low",
-            "Fast ~15-minute run for quick alignment, boundary checking, and draft geometry evaluation.",
+            "Rapid Draft Preview",
+            "500K faces · 4-page 8K · Draft align",
+            "Fast ~15-minute run for quick alignment, boundary checking, and preliminary geometry.",
         )
         _make_preset(
             "heritage",
-            "💎 Ultra Heritage Detail",
-            "2M Faces • 32-Page 8K • Ray Crop",
-            "Maximum photographic fidelity for historic landmarks, high-density stonework, and museums.",
+            "Ultra Heritage Detail",
+            "2M faces · 32-page 8K · Structure crop",
+            "High photographic fidelity for complex architectural facades, fine masonry, and monuments.",
         )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
@@ -1007,7 +954,7 @@ class AutoMetashapeStudio:
             return
         card = self.preset_cards.get(key)
         if card:
-            card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER_CARD)
+            card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER)
 
     # -----------------------------------------------------------------------
     # Step 3: Collapsible Advanced Pipeline Settings
@@ -1015,25 +962,22 @@ class AutoMetashapeStudio:
     def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
         self.card_adv = StudioCard(
             parent,
-            title="3. ADVANCED PIPELINE FINE-TUNING",
-            icon="⚙️",
-            badge="Optional",
-            accent_color=UITheme.ACCENT_CYAN,
+            title="3. Pipeline Parameters",
+            subtitle="Optional advanced calibration and processing flags",
         )
         self.card_adv.pack(fill=tk.X, pady=(0, 8))
 
-        # Toggle bar
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
 
         self.btn_toggle_adv = tk.Button(
             bar_toggle,
-            text="▶ Show Advanced Parameters (Alignment, 600K Meshing, Texture Flags)",
-            font=("Segoe UI", 8, "bold"),
+            text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)",
+            font=("Segoe UI", 8),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.ACCENT_CYAN,
             bd=0,
-            padx=4,
+            padx=2,
             pady=3,
             relief=tk.FLAT,
             cursor="hand2",
@@ -1041,7 +985,6 @@ class AutoMetashapeStudio:
         )
         self.btn_toggle_adv.pack(side=tk.LEFT)
 
-        # Hidden body frame
         self.body_adv = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
 
         grid = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
@@ -1067,7 +1010,7 @@ class AutoMetashapeStudio:
         tk.Label(grid, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
 
-        # Checkboxes Row 1
+        # Checkboxes
         chk_row1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_row1.pack(fill=tk.X, pady=(2, 4))
 
@@ -1078,72 +1021,69 @@ class AutoMetashapeStudio:
                 variable=v,
                 font=("Segoe UI", 8),
                 bg=UITheme.BG_SURFACE,
-                fg=UITheme.TEXT_WHITE,
+                fg=UITheme.TEXT_SECONDARY,
                 selectcolor=UITheme.BG_ROOT,
                 activebackground=UITheme.BG_SURFACE,
-                activeforeground=UITheme.TEXT_WHITE,
+                activeforeground=UITheme.TEXT_PRIMARY,
                 bd=0,
             )
 
-        _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 10))
+        _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 12))
+        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 12))
+        _c("Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 12))
+        _c("Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 12))
+        _c("Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 12))
         _c("Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
 
-        # Checkboxes Row 2
         chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_row2.pack(fill=tk.X, pady=(2, 4))
 
-        _c("⏸️ Pause After Crop (Inspect in Metashape Pro)", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 14))
-        _c("Force Restart from Scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
+        _c("Pause after camera alignment for manual crop", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 16))
+        _c("Force restart from scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
         self.adv_expanded = not self.adv_expanded
         if self.adv_expanded:
             self.body_adv.pack(fill=tk.X, pady=(4, 2))
-            self.btn_toggle_adv.config(text="▼ Hide Advanced Parameters")
+            self.btn_toggle_adv.config(text="▼ Hide advanced parameters")
         else:
             self.body_adv.pack_forget()
-            self.btn_toggle_adv.config(text="▶ Show Advanced Parameters (Alignment, 600K Meshing, Texture Flags)")
+            self.btn_toggle_adv.config(text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)")
 
     # -----------------------------------------------------------------------
-    # Step 4: Standalone Export Card
+    # Standalone Export Card
     # -----------------------------------------------------------------------
     def _build_export_card(self, parent: tk.Widget) -> None:
         card = StudioCard(
             parent,
-            title="STANDALONE RE-BAKE & EXPORT (.PSX)",
-            icon="📦",
-            badge="Export Mode",
-            accent_color=UITheme.ACCENT_BLUE,
+            title="Standalone Texture Re-Bake & Export",
+            subtitle="Process solved Metashape project without recomputing depth maps",
         )
         card.pack(fill=tk.X, pady=(0, 8))
 
-        # PSX File Row
         row0 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
         row0.pack(fill=tk.X, pady=(0, 2))
 
         lbl_psx = tk.Label(
             row0,
-            text="Metashape Project File (.psx):",
+            text="Metashape Project File (.psx)",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_psx.pack(side=tk.LEFT)
 
         btn_browse_psx = tk.Button(
             row0,
-            text="📂 Browse .psx...",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.ACCENT_BLUE,
-            fg="white",
-            bd=0,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=12,
             pady=2,
-            relief=tk.FLAT,
             command=self._browse_psx_file,
         )
         btn_browse_psx.pack(side=tk.RIGHT)
@@ -1154,36 +1094,37 @@ class AutoMetashapeStudio:
             textvariable=self.var_psx_path,
             font=("Segoe UI", 9),
             bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
             insertbackground="white",
             bd=1,
             relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
         )
         ent_psx.pack(fill=tk.X, pady=(2, 6))
 
-        # Destination Row
         row1 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
         row1.pack(fill=tk.X, pady=(4, 2))
 
         lbl_dest = tk.Label(
             row1,
-            text="Export Destination Folder:",
+            text="Export Destination Folder",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
         )
         lbl_dest.pack(side=tk.LEFT)
 
         btn_browse_exp = tk.Button(
             row1,
-            text="📂 Change Destination...",
+            text="Change...",
             font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_ALT,
-            fg=UITheme.TEXT_WHITE,
-            bd=0,
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=10,
             pady=2,
-            relief=tk.FLAT,
             command=self._browse_export_dir,
         )
         btn_browse_exp.pack(side=tk.RIGHT)
@@ -1193,14 +1134,14 @@ class AutoMetashapeStudio:
             textvariable=self.var_export_out,
             font=("Segoe UI", 9),
             bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
             insertbackground="white",
             bd=1,
             relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
         )
         ent_exp.pack(fill=tk.X, pady=(2, 6))
 
-        # Options Row
         row2 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
         row2.pack(fill=tk.X, pady=4)
 
@@ -1210,7 +1151,7 @@ class AutoMetashapeStudio:
             variable=self.var_exp_rebake,
             font=("Segoe UI", 8, "bold"),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_WHITE,
+            fg=UITheme.TEXT_PRIMARY,
             selectcolor=UITheme.BG_ROOT,
             bd=0,
         ).pack(side=tk.LEFT, padx=(0, 14))
@@ -1222,15 +1163,13 @@ class AutoMetashapeStudio:
         ttk.Combobox(row2, textvariable=self.var_exp_format, values=["tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
 
     # -----------------------------------------------------------------------
-    # Step 5: Stepper & Trajectory
+    # Stepper Card
     # -----------------------------------------------------------------------
     def _build_stepper_card(self, parent: tk.Widget) -> None:
         card = StudioCard(
             parent,
-            title="PIPELINE PROGRESS (7 STAGES)",
-            icon="📊",
-            badge="Milestones",
-            accent_color=UITheme.ACCENT_CYAN,
+            title="Pipeline Milestones",
+            subtitle="7-stage automated photogrammetry trajectory",
         )
         card.pack(fill=tk.X, pady=(0, 8))
 
@@ -1238,53 +1177,51 @@ class AutoMetashapeStudio:
         self.stepper.pack(fill=tk.X)
 
     # -----------------------------------------------------------------------
-    # Step 6: Console Feed & Deliverables
+    # Console Feed & Deliverables
     # -----------------------------------------------------------------------
     def _build_log_card(self, parent: tk.Widget) -> None:
         card = StudioCard(
             parent,
-            title="REAL-TIME EXECUTION LOG",
-            icon="💻",
-            badge="Console",
-            accent_color=UITheme.ACCENT_CYAN,
+            title="Execution Log",
+            subtitle="Real-time Metashape subprocess output feed",
         )
         card.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
 
-        # Console ScrolledText
         self.txt_log = ScrolledText(
             card.body,
             wrap=tk.WORD,
             bg=UITheme.BG_CONSOLE,
-            fg=UITheme.TEXT_BODY,
+            fg=UITheme.TEXT_SECONDARY,
             insertbackground="white",
             font=("Consolas", 9),
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             highlightthickness=0,
             height=10,
         )
         self.txt_log.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        # Syntax tags
         self.txt_log.tag_config("stage", foreground=UITheme.ACCENT_CYAN, font=("Consolas", 9, "bold"))
         self.txt_log.tag_config("success", foreground=UITheme.ACCENT_GREEN_TXT, font=("Consolas", 9, "bold"))
         self.txt_log.tag_config("warning", foreground=UITheme.ACCENT_AMBER_TXT)
         self.txt_log.tag_config("error", foreground="#f87171", font=("Consolas", 9, "bold"))
 
-        # Action bar under console
         action_bar = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
         action_bar.pack(fill=tk.X)
 
         self.btn_open_folder = tk.Button(
             action_bar,
-            text="📂 Open Output Folder",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.BG_SURFACE_ALT,
-            fg=UITheme.TEXT_WHITE,
+            text="Open Output Folder",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
             activebackground=UITheme.BORDER_HOVER,
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=12,
-            pady=4,
-            relief=tk.FLAT,
+            pady=3,
             cursor="hand2",
             command=self._on_open_output_folder,
         )
@@ -1292,16 +1229,16 @@ class AutoMetashapeStudio:
 
         self.btn_open_metashape = tk.Button(
             action_bar,
-            text="🚀 Open in Metashape GUI",
-            font=("Segoe UI", 8, "bold"),
-            bg="#132a1c",
-            fg="#6ee7b7",
-            activebackground="#1e462f",
-            activeforeground="white",
-            bd=0,
+            text="Open in Metashape",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=12,
-            pady=4,
-            relief=tk.FLAT,
+            pady=3,
             cursor="hand2",
             command=self._on_open_metashape_gui,
         )
@@ -1309,15 +1246,16 @@ class AutoMetashapeStudio:
 
         btn_copy = tk.Button(
             action_bar,
-            text="📋 Copy Log",
+            text="Copy Log",
             font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_ALT,
+            bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_MUTED,
             activebackground=UITheme.BORDER_HOVER,
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=10,
-            pady=4,
-            relief=tk.FLAT,
+            pady=3,
             cursor="hand2",
             command=self._copy_log,
         )
@@ -1325,15 +1263,16 @@ class AutoMetashapeStudio:
 
         btn_clear = tk.Button(
             action_bar,
-            text="🗑️ Clear",
+            text="Clear",
             font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_ALT,
+            bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_MUTED,
             activebackground=UITheme.BORDER_HOVER,
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=10,
-            pady=4,
-            relief=tk.FLAT,
+            pady=3,
             cursor="hand2",
             command=lambda: self.txt_log.delete("1.0", tk.END),
         )
@@ -1343,7 +1282,7 @@ class AutoMetashapeStudio:
     # Bottom Action Bar
     # -----------------------------------------------------------------------
     def _build_bottom_bar(self) -> None:
-        bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=64)
+        bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=60)
         bar.pack(fill=tk.X, side=tk.BOTTOM, padx=0, pady=0)
 
         inner = tk.Frame(bar, bg=UITheme.BG_SURFACE)
@@ -1351,15 +1290,15 @@ class AutoMetashapeStudio:
 
         self.btn_start = tk.Button(
             inner,
-            text="🚀  Start 3D Reconstruction",
-            font=("Segoe UI", 11, "bold"),
+            text="Start Reconstruction",
+            font=("Segoe UI", 10, "bold"),
             bg=UITheme.ACCENT_GREEN,
             fg="white",
-            activebackground=UITheme.ACCENT_GREEN_HOVER,
+            activebackground="#2ea043",
             activeforeground="white",
             bd=0,
             padx=20,
-            pady=8,
+            pady=7,
             relief=tk.FLAT,
             cursor="hand2",
             command=self._on_start_clicked,
@@ -1368,32 +1307,33 @@ class AutoMetashapeStudio:
 
         self.btn_stop = tk.Button(
             inner,
-            text="✕  Cancel Process",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE_ALT,
+            text="Cancel",
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_MUTED,
             activebackground=UITheme.ACCENT_RED,
             activeforeground="white",
-            bd=0,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
             padx=14,
-            pady=8,
+            pady=6,
             state=tk.DISABLED,
-            relief=tk.FLAT,
             command=self._on_stop_clicked,
         )
         self.btn_stop.pack(side=tk.LEFT, padx=(0, 16))
 
         self.btn_continue_crop = tk.Button(
             inner,
-            text="▶️  Continue Reconstruction (Manual Crop Done)",
-            font=("Segoe UI", 10, "bold"),
+            text="Continue Reconstruction",
+            font=("Segoe UI", 9, "bold"),
             bg=UITheme.ACCENT_CYAN,
             fg=UITheme.BG_ROOT,
             activebackground=UITheme.ACCENT_CYAN_HOVER,
             activeforeground="white",
             bd=0,
             padx=16,
-            pady=8,
+            pady=7,
             relief=tk.FLAT,
             cursor="hand2",
             command=self._on_continue_crop_clicked,
@@ -1409,10 +1349,10 @@ class AutoMetashapeStudio:
 
         self.lbl_status = tk.Label(
             inner,
-            text="● Status: Ready to reconstruct",
-            font=("Segoe UI", 9, "bold"),
+            text="● Ready",
+            font=("Segoe UI", 9),
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.ACCENT_GREEN_TXT,
+            fg=UITheme.TEXT_SECONDARY,
         )
         self.lbl_status.pack(side=tk.RIGHT)
 
@@ -1420,7 +1360,7 @@ class AutoMetashapeStudio:
     # Event Handlers & Preset Logic
     # -----------------------------------------------------------------------
     def _select_preset(self, key: str) -> None:
-        """Visual card selection logic with modern accent styling."""
+        """Visual card selection logic with quiet accent styling."""
         self.selected_preset_key = key
         for p_key, card in self.preset_cards.items():
             outer = card["outer"]
@@ -1433,18 +1373,18 @@ class AutoMetashapeStudio:
 
             if p_key == key:
                 outer.config(bg=UITheme.ACCENT_CYAN)
-                inner.config(bg=UITheme.BG_CARD_ACTIVE)
-                top.config(bg=UITheme.BG_CARD_ACTIVE)
-                t.config(bg=UITheme.BG_CARD_ACTIVE, fg=UITheme.TEXT_WHITE)
-                b.config(text="● SELECTED", bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
-                s.config(bg=UITheme.BG_CARD_ACTIVE, fg=UITheme.ACCENT_CYAN)
-                d.config(bg=UITheme.BG_CARD_ACTIVE, fg=UITheme.TEXT_BODY)
+                inner.config(bg=UITheme.BG_SURFACE_RAISED)
+                top.config(bg=UITheme.BG_SURFACE_RAISED)
+                t.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
+                b.config(text="● Selected", bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.ACCENT_CYAN)
+                s.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
+                d.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_SECONDARY)
             else:
-                outer.config(bg=UITheme.BORDER_CARD)
+                outer.config(bg=UITheme.BORDER)
                 inner.config(bg=UITheme.BG_ROOT)
                 top.config(bg=UITheme.BG_ROOT)
-                t.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_WHITE)
-                b.config(text="○ Select", bg=UITheme.BG_ROOT, fg=UITheme.TEXT_DIM)
+                t.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY)
+                b.config(text="○ Select", bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
                 s.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
                 d.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
 
@@ -1488,26 +1428,26 @@ class AutoMetashapeStudio:
     def _set_mode(self, mode: str) -> None:
         self.active_mode = mode
         if mode == "recon":
-            self.btn_tab_recon.config(bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
-            self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED)
+            self.btn_tab_recon.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
+            self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.wrapper_export.pack_forget()
             self.wrapper_recon.pack(fill=tk.X, expand=True)
-            self.btn_start.config(text="🚀  Start 3D Reconstruction", bg=UITheme.ACCENT_GREEN)
+            self.btn_start.config(text="Start Reconstruction", bg=UITheme.ACCENT_GREEN)
         else:
-            self.btn_tab_export.config(bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
-            self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED)
+            self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
+            self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.wrapper_recon.pack_forget()
             self.wrapper_export.pack(fill=tk.X, expand=True)
-            self.btn_start.config(text="📦  Re-Bake Texture & Export Assets", bg=UITheme.ACCENT_BLUE)
+            self.btn_start.config(text="Export Assets", bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
 
     def _check_metashape(self) -> None:
         if self.metashape_exe:
             self.lbl_metashape_badge.config(
-                text="● Metashape Pro Connected",
+                text="● Metashape Connected",
                 bg=UITheme.ACCENT_GREEN_BG,
                 fg=UITheme.ACCENT_GREEN_TXT,
             )
-            self._log(f"[AutoMetashape Studio] System initialized with Metashape Pro: {self.metashape_exe}", "stage")
+            self._log(f"[AutoMetashape Studio] System initialized with Metashape: {self.metashape_exe}", "stage")
         else:
             self.lbl_metashape_badge.config(
                 text="▲ Metashape Not Found",
@@ -1552,7 +1492,7 @@ class AutoMetashapeStudio:
     def _on_images_dir_changed(self, *_args) -> None:
         folder = self.var_images_dir.get().strip()
         if not folder or not os.path.isdir(folder):
-            self.lbl_photo_status.set("No folder selected yet. Click 'Browse Folder...' to begin.")
+            self.lbl_photo_status.set("No folder selected. Click 'Browse...' to choose your raw photos folder.")
             return
 
         default_out = os.path.join(folder, "model")
@@ -1560,7 +1500,7 @@ class AutoMetashapeStudio:
         if not cur_out or cur_out.endswith("model"):
             self.var_output_dir.set(default_out)
 
-        self.lbl_photo_status.set("🔍 Scanning directory and subfolders for supported photos...")
+        self.lbl_photo_status.set("Scanning directory and subfolders for supported photos...")
 
         def _scan():
             count = 0
@@ -1589,10 +1529,10 @@ class AutoMetashapeStudio:
                 ext_str = ", ".join(sorted(found_exts)[:4])
                 size_str = format_file_size(total_bytes)
                 self.lbl_photo_status.set(
-                    f"✓ Found {count:,} photos ({size_str}) • Formats: {ext_str} • Ready for reconstruction"
+                    f"{count:,} photos ({size_str}) · {ext_str} · Ready for reconstruction"
                 )
             else:
-                self.lbl_photo_status.set("⚠️ No supported photos (.jpg, .dng, .tif, etc.) found in folder!")
+                self.lbl_photo_status.set("No supported photos (.jpg, .dng, .tif, etc.) found in folder.")
 
         threading.Thread(target=_scan, daemon=True).start()
 
@@ -1759,7 +1699,7 @@ class AutoMetashapeStudio:
     def _spawn_worker(self, cmd: list[str], task_name: str) -> None:
         self.is_running = True
         self.start_time = time.time()
-        self.btn_start.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_ALT)
+        self.btn_start.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED)
         self.btn_stop.config(state=tk.NORMAL, bg=UITheme.ACCENT_RED, fg="white")
         self.progress_bar.start(10)
         self.lbl_status.config(text=f"● Running {task_name}...", fg=UITheme.ACCENT_CYAN)
@@ -1856,23 +1796,21 @@ class AutoMetashapeStudio:
     def _on_pipeline_paused_for_crop(self) -> None:
         self.stepper.set_paused(2, "Open Metashape Pro to Crop, then click Continue")
         self.lbl_status.config(
-            text="⏸️ Paused: Open Metashape Pro to Crop, then click Continue",
+            text="Paused: Open Metashape Pro to Crop, then click Continue",
             fg=UITheme.ACCENT_AMBER_TXT,
         )
         self.progress_bar.stop()
 
-        # Reveal alert banner & continue button
         self.frame_crop_banner.pack(fill=tk.X, padx=14, pady=(0, 6), before=self.wrapper_recon.master)
         self.btn_continue_crop.pack(side=tk.LEFT, padx=(0, 10), before=self.btn_stop)
 
-        self._log("\n" + "═" * 70, "warning")
-        self._log("⏸️  PIPELINE PAUSED: MANUAL CROPPING IN AGISOFT METASHAPE PRO", "warning")
-        self._log("1. Click '🚀 Open in Metashape GUI' above to open your project in Metashape Pro.", "stage")
+        self._log("\n" + "─" * 70, "warning")
+        self._log("PIPELINE PAUSED: MANUAL CROPPING IN AGISOFT METASHAPE PRO", "warning")
+        self._log("1. Click 'Open in Metashape' above to open your project in Metashape Pro.", "stage")
         self._log("2. In Metashape, use 'Resize Region' / 'Rotate Region' tools to crop the building.", "stage")
-        self._log("3. Press Ctrl+S in Metashape Pro to save, then CLOSE Metashape Pro.", "stage")
-        self._log("4. Click '▶️ Continue Reconstruction (Manual Crop Done)' below to resume 600K meshing.\n" + "═" * 70, "success")
+        self._log("3. Press Ctrl+S in Metashape Pro to save, then close Metashape Pro.", "stage")
+        self._log("4. Click 'Continue Reconstruction' below to resume 600K meshing.\n" + "─" * 70, "success")
 
-        # Audio/visual alert
         try:
             self.root.bell()
             self.root.lift()
@@ -1881,7 +1819,6 @@ class AutoMetashapeStudio:
         except Exception:
             pass
 
-        # Interactive popup notification
         folder = self._get_active_output_dir()
         psx = os.path.join(folder, "building_reconstruction.psx")
 
@@ -1891,8 +1828,8 @@ class AutoMetashapeStudio:
             f"{psx}\n\n"
             "Would you like to open this project in Agisoft Metashape Pro now to adjust your bounding box?\n\n"
             "• Click [Yes] to launch Metashape Pro automatically.\n"
-            "• In Metashape, adjust the bounding box, press Ctrl+S to save, then CLOSE Metashape Pro.\n"
-            "• Return here and click '▶️ Continue Reconstruction' to resume.",
+            "• In Metashape, adjust the bounding box, press Ctrl+S to save, then close Metashape Pro.\n"
+            "• Return here and click 'Continue Reconstruction' to resume.",
             icon="question",
         )
         if open_now:
@@ -1903,13 +1840,12 @@ class AutoMetashapeStudio:
         self.frame_crop_banner.pack_forget()
         self.progress_bar.start(10)
         self.lbl_status.config(
-            text="● Resuming Reconstruction with Manual Box...",
+            text="● Resuming reconstruction with manual box...",
             fg=UITheme.ACCENT_CYAN,
         )
         self.stepper.set_active(3, "Resuming MVS Depth Maps...")
         self._log("[USER] Sent resume signal. Continuing pipeline with manual bounding box...", "stage")
 
-        # 1. Send newline to stdin
         if self.current_process and self.current_process.stdin:
             try:
                 self.current_process.stdin.write("\n")
@@ -1917,7 +1853,6 @@ class AutoMetashapeStudio:
             except Exception as e:
                 self._log(f"[Warning] stdin write: {e}", "warning")
 
-        # 2. Write sentinel file as resilient fallback
         out_dir = self._get_active_output_dir()
         if out_dir and os.path.isdir(out_dir):
             try:
@@ -1951,18 +1886,19 @@ class AutoMetashapeStudio:
 
         self.btn_start.config(
             state=tk.NORMAL,
-            bg=UITheme.ACCENT_GREEN if self.active_mode == "recon" else UITheme.ACCENT_BLUE,
+            bg=UITheme.ACCENT_GREEN if self.active_mode == "recon" else UITheme.ACCENT_CYAN,
+            fg="white" if self.active_mode == "recon" else UITheme.BG_ROOT,
         )
-        self.btn_stop.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_ALT, fg=UITheme.TEXT_MUTED)
+        self.btn_stop.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_MUTED)
 
         if user_cancelled:
             self.lbl_status.config(text="● Status: Cancelled by user", fg=UITheme.ACCENT_AMBER_TXT)
         elif success:
             self.stepper.set_all_done()
-            self.lbl_status.config(text="✓ Status: Completed Successfully!", fg=UITheme.ACCENT_GREEN_TXT)
+            self.lbl_status.config(text="✓ Status: Complete", fg=UITheme.ACCENT_GREEN_TXT)
             messagebox.showinfo(
                 "Completed",
-                "Reconstruction finished successfully!\nDeliverables are saved in your output folder.",
+                "Reconstruction finished successfully.\nDeliverables are saved in your output folder.",
             )
         else:
             self.lbl_status.config(text="▲ Status: Process Failed (See Log)", fg="#f87171")
