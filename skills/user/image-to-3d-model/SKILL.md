@@ -43,7 +43,7 @@ flowchart TD
     F --> G["6. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
     G --> H["7. Arbitrary Surface Meshing<br/>(DepthMapsData, 1M Face Limit, Level 30 Hole Closing)"]
     H --> I["8. 8K Photogrammetric Texture Atlas<br/>(Mosaic Blending, Lossless TIFF Export)"]
-    I --> J["Deliverables Saved to <images_dir>/model/<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• building_reconstruction.psx"]
+    I --> J["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• building_reconstruction.psx (Editable in GUI)"]
 ```
 
 ### 1. Ingestion & Directory Convention
@@ -58,7 +58,7 @@ When given an image directory, recursively load all images across the target fol
 >   - **Standard Raster**: `.jpg`, `.jpeg`, `.jpe`, `.png`, `.tif`, `.tiff`, `.bmp`, `.dib`, `.webp`, `.jp2`, `.j2k`, `.jpc`, `.j2c`, `.jxl`, `.exr`, `.tga`, `.dds`, `.pnm`, `.ppm`, `.pgm`, `.pbm`, `.sgi`, `.rgb`, `.bil`
 >   - **Drone & Camera RAW**: `.dng` (DJI Mavic 3 / Matrice / Phantom RTK RAW, Autel RAW), `.cr2`, `.cr3`, `.crw` (Canon), `.nef`, `.nrw` (Nikon), `.arw`, `.srf`, `.sr2` (Sony Alpha), `.iiq`, `.cap` (Phase One), `.3fr`, `.fff` (Hasselblad), `.rw2` (Panasonic), `.orf` (Olympus), `.raf` (Fujifilm), `.raw`, `.rwl` (Leica), `.pef`, `.ptx` (Pentax)
 >   - **Radiometric Thermal / Multi-Spectral**: `.seq`, `.ara` (FLIR radiometric sequences)
-> - **Output Subfolder**: Automatically creates `<path_to_images>/model/` and places all outputs there.
+> - **Dedicated Output Subfolder**: Automatically creates `<path_to_images>/model/` and places all outputs there, including the native `.psx` project for manual inspection and modification.
 > - **Image Quality Assessment (`min_quality=0.5`)**: Calculates gradient edge sharpness across all frames. Any photos suffering from motion blur or lens defocus ($<0.50$ index) are automatically disabled before feature matching.
 > - **Feature Matching Settings**:
 >   - **Align Quality**: `Medium` (`downscale=2`) for balanced memory and robust feature tracking across drone flight sets.
@@ -118,11 +118,19 @@ Metashape's default bounding box (`chunk.region`) encompasses all tie points, in
 - Projects photographic pixels from original frames using `MosaicBlending` with `ghosting_filter=True` and `fill_holes=True`.
 - Exports texture maps in **lossless uncompressed TIFF (`.tif`) format** at **8192×8192 (8K)** resolution across 2 pages.
 
-### 8. Production Deliverables
-All deliverables are automatically placed into `<path_to_images>/model/`:
+### 8. Dedicated Deliverables Folder & GUI Modification Workflow
+All deliverables and project files are automatically placed directly into `<path_to_images>/model/`:
 - `model.obj` + `model.mtl` + `model.tif`: Industry-standard mesh format with uncompressed 8K TIFF texture atlas compatible with all DCC/CAD tools.
 - `model.glb`: Binary glTF format with embedded PBR textures for instant web and 3D viewer rendering.
-- `building_reconstruction.psx` + `building_reconstruction.files/`: Native Metashape Professional project retaining all camera alignments, depth maps, and UV textures for direct inspection and further editing.
+- `building_reconstruction.psx` + `building_reconstruction.files/`: Native Metashape Professional project retaining all camera alignments, depth maps, and UV textures.
+
+> [!TIP]
+> **Direct GUI Inspection & Mesh Modification**:
+> The native Metashape project (`building_reconstruction.psx`) is saved inside the `model/` folder at every milestone. You can double-click and open it directly in the **Agisoft Metashape GUI** at any time to:
+> - Visually inspect camera alignments, tie points, and dense geometry.
+> - Use selection tools to delete stray terrain, cars, or background vegetation.
+> - Sculpt, smooth, or close custom holes on the mesh.
+> - Once satisfied, save (`Ctrl+S`) in the GUI. You can then instantly re-export updated 3D models using the companion `photogrammetry-export` skill (`scripts/metashape_export.py`) without re-running matching or depth maps!
 
 ---
 
