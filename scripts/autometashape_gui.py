@@ -338,6 +338,10 @@ class StudioPipelineStepper(tk.Frame):
         self.lbl_timer.config(text="Elapsed: --:--")
 
     def set_active(self, idx: int, description: str = "") -> None:
+        if not (0 <= idx < len(self.stage_frames)):
+            return
+
+        # 1. Past stages (< idx): mark completed with checkmark
         for i in range(idx):
             self._apply_style(
                 i,
@@ -349,39 +353,79 @@ class StudioPipelineStepper(tk.Frame):
                 sub_color=UITheme.ACCENT_GREEN_TXT,
             )
 
-        if 0 <= idx < len(self.stage_frames):
-            num = self.stages[idx][0]
-            name = self.stages[idx][1]
+        # 2. Current stage (== idx): mark active with cyan indicator
+        num = self.stages[idx][0]
+        name = self.stages[idx][1]
+        self._apply_style(
+            idx,
+            outer_bg=UITheme.ACCENT_CYAN,
+            inner_bg="#131e2a",
+            ind_text=f"▶ {num}",
+            ind_color=UITheme.ACCENT_CYAN,
+            title_color=UITheme.TEXT_PRIMARY,
+            sub_color=UITheme.ACCENT_CYAN,
+        )
+
+        # 3. Future stages (> idx): strictly reset to pending (num., muted text)
+        for i in range(idx + 1, len(self.stage_frames)):
+            f_num = self.stages[i][0]
             self._apply_style(
-                idx,
-                outer_bg=UITheme.ACCENT_CYAN,
-                inner_bg="#131e2a",
-                ind_text=f"▶ {num}",
-                ind_color=UITheme.ACCENT_CYAN,
-                title_color=UITheme.TEXT_PRIMARY,
-                sub_color=UITheme.ACCENT_CYAN,
+                i,
+                outer_bg=UITheme.BORDER,
+                inner_bg=UITheme.BG_ROOT,
+                ind_text=f"{f_num}.",
+                ind_color=UITheme.TEXT_DIM,
+                title_color=UITheme.TEXT_MUTED,
+                sub_color=UITheme.TEXT_DIM,
             )
-            desc_text = f"Running Stage {idx+1}/{len(self.stages)}: {name}"
-            if description:
-                desc_text += f" - {description}"
-            self.lbl_pipeline_status.config(text=desc_text, fg=UITheme.ACCENT_CYAN)
+
+        desc_text = f"Running Stage {idx+1}/{len(self.stages)}: {name}"
+        if description:
+            desc_text += f" - {description}"
+        self.lbl_pipeline_status.config(text=desc_text, fg=UITheme.ACCENT_CYAN)
 
     def set_paused(self, idx: int, message: str = "") -> None:
-        if 0 <= idx < len(self.stage_frames):
-            num = self.stages[idx][0]
+        if not (0 <= idx < len(self.stage_frames)):
+            return
+
+        for i in range(idx):
             self._apply_style(
-                idx,
-                outer_bg=UITheme.ACCENT_AMBER,
-                inner_bg=UITheme.ACCENT_AMBER_BG,
-                ind_text=f"⏸ {num}",
-                ind_color=UITheme.ACCENT_AMBER_TXT,
+                i,
+                outer_bg=UITheme.BORDER,
+                inner_bg=UITheme.ACCENT_GREEN_BG,
+                ind_text="✓",
+                ind_color=UITheme.ACCENT_GREEN_TXT,
                 title_color=UITheme.TEXT_PRIMARY,
-                sub_color=UITheme.ACCENT_AMBER_TXT,
+                sub_color=UITheme.ACCENT_GREEN_TXT,
             )
-            self.lbl_pipeline_status.config(
-                text=f"Paused at Stage {idx+1}/{len(self.stages)}: {message}",
-                fg=UITheme.ACCENT_AMBER_TXT,
+
+        num = self.stages[idx][0]
+        self._apply_style(
+            idx,
+            outer_bg=UITheme.ACCENT_AMBER,
+            inner_bg=UITheme.ACCENT_AMBER_BG,
+            ind_text=f"⏸ {num}",
+            ind_color=UITheme.ACCENT_AMBER_TXT,
+            title_color=UITheme.TEXT_PRIMARY,
+            sub_color=UITheme.ACCENT_AMBER_TXT,
+        )
+
+        for i in range(idx + 1, len(self.stage_frames)):
+            f_num = self.stages[i][0]
+            self._apply_style(
+                i,
+                outer_bg=UITheme.BORDER,
+                inner_bg=UITheme.BG_ROOT,
+                ind_text=f"{f_num}.",
+                ind_color=UITheme.TEXT_DIM,
+                title_color=UITheme.TEXT_MUTED,
+                sub_color=UITheme.TEXT_DIM,
             )
+
+        self.lbl_pipeline_status.config(
+            text=f"Paused at Stage {idx+1}/{len(self.stages)}: {message}",
+            fg=UITheme.ACCENT_AMBER_TXT,
+        )
 
     def set_all_done(self) -> None:
         for i in range(len(self.stage_frames)):
@@ -1881,27 +1925,28 @@ class AutoMetashapeStudio:
     def _parse_stepper(self, line: str) -> None:
         l = line.lower()
         if self.active_mode == "recon":
-            if "[1/7]" in line or "[1/6]" in line or "ingesting" in l:
+            # Match strictly against unambiguous stage indicators to avoid false triggers from banner summaries
+            if "[1/7]" in line or "[1/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(0, "Ingesting photos & filtering blur"))
-            elif "[2/7]" in line or "[2/6]" in line or "feature matching" in l:
+            elif "[2/7]" in line or "[2/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(1, "GPU Feature Matching"))
-            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
+            elif "[3/7]" in line or "[3/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(2, "Camera Alignment & Bundle Adjustment"))
-            elif "[auto-crop]" in line or "camera gps square" in l or "optical ray convergence" in l:
+            elif "[auto-crop]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(2, "Alignment & Bounding Box Crop"))
-            elif "[pause_crop]" in l or "pause for user to adjust bounding box" in l:
+            elif "[pause_crop]" in line:
                 self.root.after(0, self._on_pipeline_paused_for_crop)
             elif "skipping steps 1-3" in l:
                 self.root.after(0, lambda: self.stepper.set_active(3, "Resuming at Depth Maps"))
-            elif "[4/7]" in line or "[4/6]" in line or "mvs depth maps" in l:
+            elif "[4/7]" in line or "[4/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
-            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
+            elif "[5/7]" in line or "[5/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(4, "Fusing 600K Face Mesh & Closing Holes"))
-            elif "[6/7]" in line or "[6/6]" in line or "baking" in l or "texture atlas" in l or "buildtexture" in l:
+            elif "[6/7]" in line or "[6/6]" in line:
                 self.root.after(0, lambda: self.stepper.set_active(5, "Baking 16-Page 8K Texture Atlas"))
-            elif "[7/7]" in line or "exporting final" in l or "[export]" in line or "model.glb" in l or "model.obj" in l:
+            elif "[7/7]" in line or "[export]" in line or "exporting final production assets" in l:
                 self.root.after(0, lambda: self.stepper.set_active(6, "Exporting GLB, OBJ, TIFF & PSX"))
-            elif "[success]" in l:
+            elif "[success]" in line and "entire pipeline finished" in l:
                 self.root.after(0, self.stepper.set_all_done)
         else:
             if "project:" in l or "autometashape: production asset export" in l:
