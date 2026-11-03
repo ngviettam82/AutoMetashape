@@ -35,8 +35,6 @@ recordings/
 *.splat
 **/*.splat
 
-# Agents local cache
-.agents/
 **/__pycache__/
 **/*.egg-info/
 
