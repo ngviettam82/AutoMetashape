@@ -211,6 +211,7 @@ class AutoMetashapeStudio:
         # Feature Toggles
         self.var_rolling = tk.BooleanVar(value=True)
         self.var_stationary = tk.BooleanVar(value=True)
+        self.var_filter_tiepoints = tk.BooleanVar(value=True)
         self.var_close_holes = tk.BooleanVar(value=True)
         self.var_fill_holes = tk.BooleanVar(value=True)
         self.var_ghosting = tk.BooleanVar(value=True)
@@ -608,7 +609,8 @@ class AutoMetashapeStudio:
             )
 
         _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 8))
-        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 8))
+        _c("Exclude Stationary", self.var_stationary).pack(side=tk.LEFT, padx=(0, 8))
+        _c("Tie-Point Cleaning", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 8))
         _c("Close Mesh Holes (L30)", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 8))
         _c("Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 8))
         _c("Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
@@ -1022,8 +1024,13 @@ class AutoMetashapeStudio:
         # Scan photos
         def _scan():
             count = 0
-            for root, _dirs, files in os.walk(folder):
-                if os.path.abspath(root).startswith(os.path.abspath(default_out)):
+            for root, dirs, files in os.walk(folder):
+                dirs[:] = [
+                    d for d in dirs
+                    if not os.path.abspath(os.path.join(root, d)).startswith(os.path.abspath(default_out))
+                    and not d.lower().startswith("model")
+                ]
+                if os.path.abspath(root).startswith(os.path.abspath(default_out)) or os.path.basename(root).lower().startswith("model"):
                     continue
                 for f in files:
                     if os.path.splitext(f)[1].lower() in SUPPORTED_IMAGE_EXTS:
@@ -1122,6 +1129,8 @@ class AutoMetashapeStudio:
             self.var_depth_filtering.get(),
         ]
 
+        if not self.var_filter_tiepoints.get():
+            cmd.append("--no-filter-tiepoints")
         if not self.var_rolling.get():
             cmd.append("--no-rolling-shutter")
         if not self.var_stationary.get():

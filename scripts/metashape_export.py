@@ -49,6 +49,24 @@ def export_project_assets(
     except Exception as e:
         raise RuntimeError(f"Failed to open Metashape project '{project_path}': {e}")
 
+    # Enable all available NVIDIA / high-performance GPUs
+    gpus = Metashape.app.enumGPUDevices()
+    nvidia_mask = 0
+    active_gpu_names = []
+    for i, g in enumerate(gpus):
+        vendor = g.get("vendor", "").lower()
+        name = g.get("name", "").lower()
+        if "nvidia" in vendor or "geforce" in name or "rtx" in name:
+            nvidia_mask |= (1 << i)
+            active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
+
+    if nvidia_mask:
+        Metashape.app.gpu_mask = nvidia_mask
+        print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {nvidia_mask})", flush=True)
+    elif gpus:
+        Metashape.app.gpu_mask = (1 << len(gpus)) - 1
+        print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
+
     chunk = doc.chunk
     if not chunk:
         raise ValueError(f"Project '{project_path}' contains no active chunk!")
