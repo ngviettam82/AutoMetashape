@@ -7,10 +7,12 @@
 
 A high-taste, responsive desktop application for autonomous 3D photogrammetry.
 Designed following modern design-taste principles and app-screen standards:
+- Responsive snap-scale grid layout (two-column master-detail on desktop, single-column stack on compact)
+- Global smooth mouse-wheel & touchpad scrolling across all surfaces
+- Full-width canvas utilization eliminating dead whitespace and clipped controls
 - Neutral deep dark ground (#0c0c0e) with quiet 1px boundaries (#27272a)
 - Colour applied strictly to data and semantic states, not chrome (<= 3% colour share)
 - Zero decorative emoji in greetings, labels, nav, or buttons
-- No floating eyebrow pill badges above titles
 - Clear typographic hierarchy with 4.5:1+ contrast across all text
 - Windows Per-Monitor v2 DPI auto-scaling and dynamic monitor-aware layout
 - 1-2-3 Progressive Disclosure (Inputs -> Preset -> Run)
@@ -21,7 +23,6 @@ Designed following modern design-taste principles and app-screen standards:
 from __future__ import annotations
 
 import ctypes
-import math
 import os
 import queue
 import re
@@ -39,15 +40,12 @@ from tkinter.scrolledtext import ScrolledText
 # ---------------------------------------------------------------------------
 if sys.platform == "win32":
     try:
-        # DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 (-4)
         ctypes.windll.user32.SetProcessDpiAwarenessContext(-4)
     except Exception:
         try:
-            # PROCESS_PER_MONITOR_DPI_AWARE (2)
             ctypes.windll.shcore.SetProcessDpiAwareness(2)
         except Exception:
             try:
-                # PROCESS_SYSTEM_DPI_AWARE (1)
                 ctypes.windll.shcore.SetProcessDpiAwareness(1)
             except Exception:
                 pass
@@ -239,7 +237,7 @@ class StudioPipelineStepper(tk.Frame):
             t = tk.Label(
                 inner,
                 text=name,
-                font=("Segoe UI", 9, "bold"),
+                font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_MUTED,
                 anchor=tk.W,
@@ -399,7 +397,7 @@ class StudioPipelineStepper(tk.Frame):
 # Main Application Window
 # ---------------------------------------------------------------------------
 class AutoMetashapeStudio:
-    """Professional, taste-refined photogrammetry desktop studio."""
+    """Professional, responsive photogrammetry desktop studio with snap-scale layout."""
 
     def __init__(self, root: tk.Tk) -> None:
         self.root = root
@@ -426,6 +424,7 @@ class AutoMetashapeStudio:
         self.active_mode = "recon"
         self.adv_expanded = False
         self.selected_preset_key = "architectural"
+        self.current_layout_mode = None  # "2col" or "1col"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
 
         # Initialize Tkinter variables
@@ -433,6 +432,9 @@ class AutoMetashapeStudio:
 
         # Build UI layout
         self._build_ui()
+
+        # Bind global mousewheel for smooth canvas scrolling
+        self._bind_global_mousewheel()
 
         # Activate default preset
         self._select_preset("architectural")
@@ -462,14 +464,14 @@ class AutoMetashapeStudio:
         sw = self.root.winfo_screenwidth()
         sh = self.root.winfo_screenheight()
 
-        win_w = min(1280, max(940, int(sw * 0.58)))
-        win_h = min(960, max(720, int(sh * 0.84)))
+        win_w = min(1360, max(1000, int(sw * 0.65)))
+        win_h = min(980, max(740, int(sh * 0.86)))
 
         pos_x = max(0, (sw - win_w) // 2)
         pos_y = max(0, (sh - win_h) // 2 - 25)
 
         self.root.geometry(f"{win_w}x{win_h}+{pos_x}+{pos_y}")
-        self.root.minsize(min(880, sw - 40), min(640, sh - 60))
+        self.root.minsize(min(920, sw - 40), min(660, sh - 60))
 
     def _init_ttk_styles(self) -> None:
         """Configure native TTK Clam theme for dark slate widgets."""
@@ -479,7 +481,6 @@ class AutoMetashapeStudio:
         except Exception:
             pass
 
-        # TCombobox dark styling
         self.style.configure(
             "TCombobox",
             fieldbackground=UITheme.BG_INPUT,
@@ -499,7 +500,6 @@ class AutoMetashapeStudio:
             bordercolor=[("focus", UITheme.BORDER_FOCUS)],
         )
 
-        # TProgressbar cyan styling
         self.style.configure(
             "Horizontal.TProgressbar",
             troughcolor=UITheme.BG_ROOT,
@@ -509,7 +509,6 @@ class AutoMetashapeStudio:
             darkcolor=UITheme.ACCENT_CYAN,
         )
 
-        # Vertical.TScrollbar dark styling
         self.style.configure(
             "Vertical.TScrollbar",
             background=UITheme.BORDER,
@@ -523,7 +522,6 @@ class AutoMetashapeStudio:
         )
 
     def _init_variables(self) -> None:
-        # Reconstruction Variables
         self.var_images_dir = tk.StringVar()
         self.var_output_dir = tk.StringVar()
         self.var_align_quality = tk.StringVar(value="medium")
@@ -533,7 +531,6 @@ class AutoMetashapeStudio:
         self.var_depth_quality = tk.StringVar(value="medium")
         self.var_depth_filtering = tk.StringVar(value="moderate")
 
-        # Feature Toggles
         self.var_rolling = tk.BooleanVar(value=True)
         self.var_stationary = tk.BooleanVar(value=True)
         self.var_filter_tiepoints = tk.BooleanVar(value=True)
@@ -544,7 +541,6 @@ class AutoMetashapeStudio:
         self.var_rebake = tk.BooleanVar(value=False)
         self.var_restart = tk.BooleanVar(value=False)
 
-        # Standalone Export Variables
         self.var_psx_path = tk.StringVar()
         self.var_export_out = tk.StringVar()
         self.var_exp_format = tk.StringVar(value="tiff")
@@ -559,15 +555,24 @@ class AutoMetashapeStudio:
     # Main UI Layout Construction
     # -----------------------------------------------------------------------
     def _build_ui(self) -> None:
+        # 1. Top Header Bar (Full width top)
         self._build_header()
+
+        # 2. Mode Selector Bar (Full width top)
         self._build_mode_bar()
+
+        # 3. Manual Crop Pause Banner (Full width top, hidden initially)
         self._build_crop_pause_banner()
-        self._build_scrollable_workspace()
+
+        # 4. Bottom Action Bar (Packed FIRST with side=tk.BOTTOM so it spans 100% full width)
         self._build_bottom_bar()
 
+        # 5. Center Scrollable Workspace (Packed in the remaining center space)
+        self._build_scrollable_workspace()
+
     def _build_header(self) -> None:
-        header = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=48)
-        header.pack(fill=tk.X, padx=0, pady=(0, 2))
+        header = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=44)
+        header.pack(side=tk.TOP, fill=tk.X, padx=0, pady=(0, 2))
 
         left = tk.Frame(header, bg=UITheme.BG_SURFACE)
         left.pack(side=tk.LEFT, padx=16, pady=8)
@@ -606,7 +611,7 @@ class AutoMetashapeStudio:
 
     def _build_mode_bar(self) -> None:
         bar = tk.Frame(self.root, bg=UITheme.BG_ROOT, pady=6)
-        bar.pack(fill=tk.X, padx=14)
+        bar.pack(side=tk.TOP, fill=tk.X, padx=14)
 
         self.btn_tab_recon = tk.Button(
             bar,
@@ -698,592 +703,9 @@ class AutoMetashapeStudio:
         )
         btn_launch.pack(side=tk.RIGHT, padx=4)
 
-    def _build_scrollable_workspace(self) -> None:
-        canvas = tk.Canvas(self.root, bg=UITheme.BG_ROOT, bd=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(self.root, orient=tk.VERTICAL, command=canvas.yview)
-        self.content_frame = tk.Frame(canvas, bg=UITheme.BG_ROOT)
-
-        self.content_frame.bind(
-            "<Configure>",
-            lambda e: canvas.configure(scrollregion=canvas.bbox("all")),
-        )
-        win = canvas.create_window((0, 0), window=self.content_frame, anchor="nw")
-
-        def _resize_canvas(event):
-            canvas.itemconfig(win, width=event.width)
-
-        canvas.bind("<Configure>", _resize_canvas)
-        canvas.configure(yscrollcommand=scrollbar.set)
-
-        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(14, 0), pady=(0, 4))
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y, padx=(0, 4))
-
-        # --- RECONSTRUCTION WORKFLOW WIDGETS ---
-        self.wrapper_recon = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
-        self.wrapper_recon.pack(fill=tk.X, expand=True)
-
-        self._build_folder_card(self.wrapper_recon)
-        self._build_presets_card(self.wrapper_recon)
-        self._build_advanced_settings_card(self.wrapper_recon)
-
-        # --- STANDALONE EXPORT WIDGETS ---
-        self.wrapper_export = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
-        self._build_export_card(self.wrapper_export)
-
-        # Stepper & Log Card
-        self._build_stepper_card(self.content_frame)
-        self._build_log_card(self.content_frame)
-
-    # -----------------------------------------------------------------------
-    # Step 1: Input Photos & Output Folder Card
-    # -----------------------------------------------------------------------
-    def _build_folder_card(self, parent: tk.Widget) -> None:
-        card = StudioCard(
-            parent,
-            title="1. Photos & Output Destination",
-            subtitle="Raw survey imagery and production deliverables directory",
-        )
-        card.pack(fill=tk.X, pady=(0, 8))
-
-        # Raw Images Row
-        row_img = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row_img.pack(fill=tk.X, pady=(0, 2))
-
-        lbl_img_title = tk.Label(
-            row_img,
-            text="Photos Directory",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        )
-        lbl_img_title.pack(side=tk.LEFT)
-
-        btn_browse_img = tk.Button(
-            row_img,
-            text="Browse...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=2,
-            cursor="hand2",
-            command=self._browse_images_dir,
-        )
-        btn_browse_img.pack(side=tk.RIGHT)
-
-        self.var_images_dir.trace_add("write", self._on_images_dir_changed)
-        ent_img = tk.Entry(
-            card.body,
-            textvariable=self.var_images_dir,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_img.pack(fill=tk.X, pady=(3, 4))
-
-        # Honest photo count & size summary line
-        stats_frame = tk.Frame(card.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
-        stats_frame.pack(fill=tk.X, pady=(0, 8))
-
-        lbl_stats = tk.Label(
-            stats_frame,
-            textvariable=self.lbl_photo_status,
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_SECONDARY,
-            anchor=tk.W,
-        )
-        lbl_stats.pack(fill=tk.X)
-
-        # Output Folder Row
-        row_out = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row_out.pack(fill=tk.X, pady=(0, 2))
-
-        lbl_out_title = tk.Label(
-            row_out,
-            text="Deliverables Destination (GLB, OBJ, TIFF, PSX)",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        )
-        lbl_out_title.pack(side=tk.LEFT)
-
-        btn_browse_out = tk.Button(
-            row_out,
-            text="Change...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            cursor="hand2",
-            command=self._browse_output_dir,
-        )
-        btn_browse_out.pack(side=tk.RIGHT)
-
-        ent_out = tk.Entry(
-            card.body,
-            textvariable=self.var_output_dir,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_out.pack(fill=tk.X, pady=(3, 2))
-
-    # -----------------------------------------------------------------------
-    # Step 2: Quality Presets Card
-    # -----------------------------------------------------------------------
-    def _build_presets_card(self, parent: tk.Widget) -> None:
-        card = StudioCard(
-            parent,
-            title="2. Workflow Preset",
-            subtitle="One-click parameters for reconstruction fidelity",
-        )
-        card.pack(fill=tk.X, pady=(0, 8))
-
-        row = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row.pack(fill=tk.X)
-
-        def _make_preset(
-            key: str,
-            title: str,
-            specs: str,
-            desc: str,
-        ):
-            outer = tk.Frame(row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT, cursor="hand2")
-            outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=3)
-
-            inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=10, pady=8)
-            inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
-
-            top = tk.Frame(inner, bg=UITheme.BG_ROOT)
-            top.pack(fill=tk.X)
-
-            t = tk.Label(
-                top,
-                text=title,
-                font=("Segoe UI", 9, "bold"),
-                bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_PRIMARY,
-            )
-            t.pack(side=tk.LEFT)
-
-            radio_badge = tk.Label(
-                top,
-                text="○ Select",
-                font=("Segoe UI", 8),
-                bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_MUTED,
-            )
-            radio_badge.pack(side=tk.RIGHT)
-
-            spec_lbl = tk.Label(
-                inner,
-                text=specs,
-                font=("Segoe UI", 8),
-                bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_SECONDARY,
-                anchor=tk.W,
-            )
-            spec_lbl.pack(fill=tk.X, pady=(4, 2))
-
-            d = tk.Label(
-                inner,
-                text=desc,
-                font=("Segoe UI", 8),
-                bg=UITheme.BG_ROOT,
-                fg=UITheme.TEXT_MUTED,
-                justify=tk.LEFT,
-                anchor=tk.W,
-            )
-            d.pack(fill=tk.X)
-
-            self.preset_cards[key] = {
-                "outer": outer,
-                "inner": inner,
-                "title": t,
-                "badge": radio_badge,
-                "spec": spec_lbl,
-                "desc": d,
-                "top": top,
-            }
-
-            for w in [outer, inner, t, radio_badge, spec_lbl, d, top]:
-                w.bind("<Button-1>", lambda e, k=key: self._select_preset(k))
-                w.bind("<Enter>", lambda e, k=key: self._on_preset_hover(k, True))
-                w.bind("<Leave>", lambda e, k=key: self._on_preset_hover(k, False))
-
-        _make_preset(
-            "architectural",
-            "Architectural Standard (Default)",
-            "600K faces · 16-page 8K · GPS crop",
-            "Balanced production geometry with CMOS rolling shutter and mesh hole closing.",
-        )
-        _make_preset(
-            "draft",
-            "Rapid Draft Preview",
-            "500K faces · 4-page 8K · Draft align",
-            "Fast ~15-minute run for quick alignment, boundary checking, and preliminary geometry.",
-        )
-        _make_preset(
-            "heritage",
-            "Ultra Heritage Detail",
-            "2M faces · 32-page 8K · Structure crop",
-            "High photographic fidelity for complex architectural facades, fine masonry, and monuments.",
-        )
-
-    def _on_preset_hover(self, key: str, is_hover: bool) -> None:
-        if key == self.selected_preset_key:
-            return
-        card = self.preset_cards.get(key)
-        if card:
-            card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER)
-
-    # -----------------------------------------------------------------------
-    # Step 3: Collapsible Advanced Pipeline Settings
-    # -----------------------------------------------------------------------
-    def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
-        self.card_adv = StudioCard(
-            parent,
-            title="3. Pipeline Parameters",
-            subtitle="Optional advanced calibration and processing flags",
-        )
-        self.card_adv.pack(fill=tk.X, pady=(0, 8))
-
-        bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
-        bar_toggle.pack(fill=tk.X)
-
-        self.btn_toggle_adv = tk.Button(
-            bar_toggle,
-            text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.ACCENT_CYAN,
-            bd=0,
-            padx=2,
-            pady=3,
-            relief=tk.FLAT,
-            cursor="hand2",
-            command=self._toggle_advanced,
-        )
-        self.btn_toggle_adv.pack(side=tk.LEFT)
-
-        self.body_adv = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
-
-        grid = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        grid.pack(fill=tk.X, pady=(6, 8))
-
-        # Row 1: Align, Faces, Pages
-        tk.Label(grid, text="Align Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_faces, values=["600000", "1000000", "500000", "2000000", "3000000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
-
-        # Row 2: Crop, Depth Quality, Depth Filtering
-        tk.Label(grid, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "structure", "manual", "none"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
-
-        # Checkboxes
-        chk_row1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_row1.pack(fill=tk.X, pady=(2, 4))
-
-        def _c(t, v, parent=chk_row1):
-            return tk.Checkbutton(
-                parent,
-                text=t,
-                variable=v,
-                font=("Segoe UI", 8),
-                bg=UITheme.BG_SURFACE,
-                fg=UITheme.TEXT_SECONDARY,
-                selectcolor=UITheme.BG_ROOT,
-                activebackground=UITheme.BG_SURFACE,
-                activeforeground=UITheme.TEXT_PRIMARY,
-                bd=0,
-            )
-
-        _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 12))
-        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 12))
-        _c("Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 12))
-        _c("Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 12))
-        _c("Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 12))
-        _c("Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
-
-        chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_row2.pack(fill=tk.X, pady=(2, 4))
-
-        _c("Pause after camera alignment for manual crop", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 16))
-        _c("Force restart from scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
-
-    def _toggle_advanced(self) -> None:
-        self.adv_expanded = not self.adv_expanded
-        if self.adv_expanded:
-            self.body_adv.pack(fill=tk.X, pady=(4, 2))
-            self.btn_toggle_adv.config(text="▼ Hide advanced parameters")
-        else:
-            self.body_adv.pack_forget()
-            self.btn_toggle_adv.config(text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)")
-
-    # -----------------------------------------------------------------------
-    # Standalone Export Card
-    # -----------------------------------------------------------------------
-    def _build_export_card(self, parent: tk.Widget) -> None:
-        card = StudioCard(
-            parent,
-            title="Standalone Texture Re-Bake & Export",
-            subtitle="Process solved Metashape project without recomputing depth maps",
-        )
-        card.pack(fill=tk.X, pady=(0, 8))
-
-        row0 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row0.pack(fill=tk.X, pady=(0, 2))
-
-        lbl_psx = tk.Label(
-            row0,
-            text="Metashape Project File (.psx)",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        )
-        lbl_psx.pack(side=tk.LEFT)
-
-        btn_browse_psx = tk.Button(
-            row0,
-            text="Browse...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=2,
-            command=self._browse_psx_file,
-        )
-        btn_browse_psx.pack(side=tk.RIGHT)
-
-        self.var_psx_path.trace_add("write", self._on_psx_path_changed)
-        ent_psx = tk.Entry(
-            card.body,
-            textvariable=self.var_psx_path,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_psx.pack(fill=tk.X, pady=(2, 6))
-
-        row1 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row1.pack(fill=tk.X, pady=(4, 2))
-
-        lbl_dest = tk.Label(
-            row1,
-            text="Export Destination Folder",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        )
-        lbl_dest.pack(side=tk.LEFT)
-
-        btn_browse_exp = tk.Button(
-            row1,
-            text="Change...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            command=self._browse_export_dir,
-        )
-        btn_browse_exp.pack(side=tk.RIGHT)
-
-        ent_exp = tk.Entry(
-            card.body,
-            textvariable=self.var_export_out,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_exp.pack(fill=tk.X, pady=(2, 6))
-
-        row2 = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        row2.pack(fill=tk.X, pady=4)
-
-        tk.Checkbutton(
-            row2,
-            text="Re-Bake Texture Atlas",
-            variable=self.var_exp_rebake,
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-            selectcolor=UITheme.BG_ROOT,
-            bd=0,
-        ).pack(side=tk.LEFT, padx=(0, 14))
-
-        tk.Label(row2, text="Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
-        ttk.Combobox(row2, textvariable=self.var_exp_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=6).pack(side=tk.LEFT, padx=(4, 14))
-
-        tk.Label(row2, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
-        ttk.Combobox(row2, textvariable=self.var_exp_format, values=["tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
-
-    # -----------------------------------------------------------------------
-    # Stepper Card
-    # -----------------------------------------------------------------------
-    def _build_stepper_card(self, parent: tk.Widget) -> None:
-        card = StudioCard(
-            parent,
-            title="Pipeline Milestones",
-            subtitle="7-stage automated photogrammetry trajectory",
-        )
-        card.pack(fill=tk.X, pady=(0, 8))
-
-        self.stepper = StudioPipelineStepper(card.body)
-        self.stepper.pack(fill=tk.X)
-
-    # -----------------------------------------------------------------------
-    # Console Feed & Deliverables
-    # -----------------------------------------------------------------------
-    def _build_log_card(self, parent: tk.Widget) -> None:
-        card = StudioCard(
-            parent,
-            title="Execution Log",
-            subtitle="Real-time Metashape subprocess output feed",
-        )
-        card.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
-
-        self.txt_log = ScrolledText(
-            card.body,
-            wrap=tk.WORD,
-            bg=UITheme.BG_CONSOLE,
-            fg=UITheme.TEXT_SECONDARY,
-            insertbackground="white",
-            font=("Consolas", 9),
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            highlightthickness=0,
-            height=10,
-        )
-        self.txt_log.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
-
-        self.txt_log.tag_config("stage", foreground=UITheme.ACCENT_CYAN, font=("Consolas", 9, "bold"))
-        self.txt_log.tag_config("success", foreground=UITheme.ACCENT_GREEN_TXT, font=("Consolas", 9, "bold"))
-        self.txt_log.tag_config("warning", foreground=UITheme.ACCENT_AMBER_TXT)
-        self.txt_log.tag_config("error", foreground="#f87171", font=("Consolas", 9, "bold"))
-
-        action_bar = tk.Frame(card.body, bg=UITheme.BG_SURFACE)
-        action_bar.pack(fill=tk.X)
-
-        self.btn_open_folder = tk.Button(
-            action_bar,
-            text="Open Output Folder",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=3,
-            cursor="hand2",
-            command=self._on_open_output_folder,
-        )
-        self.btn_open_folder.pack(side=tk.LEFT, padx=(0, 8))
-
-        self.btn_open_metashape = tk.Button(
-            action_bar,
-            text="Open in Metashape",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=3,
-            cursor="hand2",
-            command=self._on_open_metashape_gui,
-        )
-        self.btn_open_metashape.pack(side=tk.LEFT, padx=(0, 8))
-
-        btn_copy = tk.Button(
-            action_bar,
-            text="Copy Log",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_MUTED,
-            activebackground=UITheme.BORDER_HOVER,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=3,
-            cursor="hand2",
-            command=self._copy_log,
-        )
-        btn_copy.pack(side=tk.RIGHT)
-
-        btn_clear = tk.Button(
-            action_bar,
-            text="Clear",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_MUTED,
-            activebackground=UITheme.BORDER_HOVER,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=3,
-            cursor="hand2",
-            command=lambda: self.txt_log.delete("1.0", tk.END),
-        )
-        btn_clear.pack(side=tk.RIGHT, padx=4)
-
-    # -----------------------------------------------------------------------
-    # Bottom Action Bar
-    # -----------------------------------------------------------------------
     def _build_bottom_bar(self) -> None:
-        bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=60)
-        bar.pack(fill=tk.X, side=tk.BOTTOM, padx=0, pady=0)
+        bar = tk.Frame(self.root, bg=UITheme.BG_SURFACE, height=58)
+        bar.pack(side=tk.BOTTOM, fill=tk.X, padx=0, pady=0)
 
         inner = tk.Frame(bar, bg=UITheme.BG_SURFACE)
         inner.pack(fill=tk.X, padx=16, pady=10)
@@ -1355,6 +777,664 @@ class AutoMetashapeStudio:
             fg=UITheme.TEXT_SECONDARY,
         )
         self.lbl_status.pack(side=tk.RIGHT)
+
+    def _build_scrollable_workspace(self) -> None:
+        """Construct full-width scrollable container with snap-scale two-column / single-column responsive layout."""
+        self.center_frame = tk.Frame(self.root, bg=UITheme.BG_ROOT)
+        self.center_frame.pack(side=tk.TOP, fill=tk.BOTH, expand=True)
+
+        self.scrollbar = ttk.Scrollbar(self.center_frame, orient=tk.VERTICAL)
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.canvas = tk.Canvas(
+            self.center_frame,
+            bg=UITheme.BG_ROOT,
+            bd=0,
+            highlightthickness=0,
+            yscrollcommand=self.scrollbar.set,
+        )
+        self.canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.scrollbar.config(command=self.canvas.yview)
+
+        # Content container inside canvas
+        self.content_frame = tk.Frame(self.canvas, bg=UITheme.BG_ROOT)
+        self.canvas_window_id = self.canvas.create_window(
+            (0, 0), window=self.content_frame, anchor="nw"
+        )
+
+        # Responsive columns inside content_frame
+        self.col_left = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
+        self.col_right = tk.Frame(self.content_frame, bg=UITheme.BG_ROOT)
+
+        # Populate Left Column (Configuration & Parameters)
+        self._build_folder_card(self.col_left)
+        self._build_presets_card(self.col_left)
+        self._build_advanced_settings_card(self.col_left)
+        self._build_export_card(self.col_left)
+
+        # Populate Right Column (Milestones & Execution Log)
+        self._build_stepper_card(self.col_right)
+        self._build_log_card(self.col_right)
+
+        # Responsive snap layout callback on window resize
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+        self.content_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")),
+        )
+
+    def _on_canvas_configure(self, event: tk.Event) -> None:
+        """Snap-scale UI layout based on available canvas width."""
+        canvas_width = event.width
+        self.canvas.itemconfig(self.canvas_window_id, width=canvas_width)
+
+        # Snap breakpoint: >= 960px -> 2 columns side-by-side; < 960px -> 1 column vertical stack
+        if canvas_width >= 960:
+            if self.current_layout_mode != "2col":
+                self.current_layout_mode = "2col"
+                self.col_left.pack_forget()
+                self.col_right.pack_forget()
+                self.col_left.pack(
+                    side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(14, 7), pady=6
+                )
+                self.col_right.pack(
+                    side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(7, 14), pady=6
+                )
+        else:
+            if self.current_layout_mode != "1col":
+                self.current_layout_mode = "1col"
+                self.col_left.pack_forget()
+                self.col_right.pack_forget()
+                self.col_left.pack(
+                    side=tk.TOP, fill=tk.X, padx=14, pady=(6, 0)
+                )
+                self.col_right.pack(
+                    side=tk.TOP, fill=tk.X, padx=14, pady=(6, 6)
+                )
+
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _bind_global_mousewheel(self) -> None:
+        """Enable mouse-wheel & touchpad scrolling across all widgets."""
+        def _on_mousewheel(event: tk.Event) -> None:
+            # Let the log text box handle its own scroll if mouse is over it
+            try:
+                w = event.widget
+                if str(w).startswith(str(self.txt_log)):
+                    return
+            except Exception:
+                pass
+
+            delta = event.delta
+            if delta != 0:
+                units = int(-1 * (delta / 120))
+                self.canvas.yview_scroll(units, "units")
+
+        self.root.bind_all("<MouseWheel>", _on_mousewheel)
+        self.root.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
+        self.root.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
+
+    # -----------------------------------------------------------------------
+    # Step 1: Input Photos & Output Folder Card
+    # -----------------------------------------------------------------------
+    def _build_folder_card(self, parent: tk.Widget) -> None:
+        self.card_folder = StudioCard(
+            parent,
+            title="1. Photos & Output Destination",
+            subtitle="Survey photos & model export path",
+        )
+        self.card_folder.pack(fill=tk.X, pady=(0, 6))
+
+        # Raw Images Row
+        row_img = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
+        row_img.pack(fill=tk.X, pady=(0, 2))
+
+        lbl_img_title = tk.Label(
+            row_img,
+            text="Photos Directory",
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+        )
+        lbl_img_title.pack(side=tk.LEFT)
+
+        btn_browse_img = tk.Button(
+            row_img,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=12,
+            pady=2,
+            cursor="hand2",
+            command=self._browse_images_dir,
+        )
+        btn_browse_img.pack(side=tk.RIGHT)
+
+        self.var_images_dir.trace_add("write", self._on_images_dir_changed)
+        ent_img = tk.Entry(
+            self.card_folder.body,
+            textvariable=self.var_images_dir,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_INPUT,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
+        )
+        ent_img.pack(fill=tk.X, pady=(3, 4))
+
+        # Photo count & size summary line
+        stats_frame = tk.Frame(self.card_folder.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
+        stats_frame.pack(fill=tk.X, pady=(0, 8))
+
+        lbl_stats = tk.Label(
+            stats_frame,
+            textvariable=self.lbl_photo_status,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_SECONDARY,
+            anchor=tk.W,
+        )
+        lbl_stats.pack(fill=tk.X)
+
+        # Output Folder Row
+        row_out = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
+        row_out.pack(fill=tk.X, pady=(0, 2))
+
+        lbl_out_title = tk.Label(
+            row_out,
+            text="Deliverables Destination (GLB, OBJ, TIFF, PSX)",
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+        )
+        lbl_out_title.pack(side=tk.LEFT)
+
+        btn_browse_out = tk.Button(
+            row_out,
+            text="Change...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._browse_output_dir,
+        )
+        btn_browse_out.pack(side=tk.RIGHT)
+
+        ent_out = tk.Entry(
+            self.card_folder.body,
+            textvariable=self.var_output_dir,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_INPUT,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
+        )
+        ent_out.pack(fill=tk.X, pady=(3, 2))
+
+    # -----------------------------------------------------------------------
+    # Step 2: Quality Presets Card
+    # -----------------------------------------------------------------------
+    def _build_presets_card(self, parent: tk.Widget) -> None:
+        self.card_preset = StudioCard(
+            parent,
+            title="2. Workflow Preset",
+            subtitle="One-click parameters for reconstruction fidelity",
+        )
+        self.card_preset.pack(fill=tk.X, pady=(0, 6))
+
+        container = tk.Frame(self.card_preset.body, bg=UITheme.BG_SURFACE)
+        container.pack(fill=tk.X)
+
+        def _make_preset(
+            key: str,
+            title: str,
+            specs: str,
+            desc: str,
+        ):
+            outer = tk.Frame(container, bg=UITheme.BORDER, bd=1, relief=tk.FLAT, cursor="hand2")
+            outer.pack(fill=tk.X, pady=3)
+
+            inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=10, pady=8)
+            inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
+
+            top = tk.Frame(inner, bg=UITheme.BG_ROOT)
+            top.pack(fill=tk.X)
+
+            t = tk.Label(
+                top,
+                text=title,
+                font=("Segoe UI", 9, "bold"),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_PRIMARY,
+            )
+            t.pack(side=tk.LEFT)
+
+            radio_badge = tk.Label(
+                top,
+                text="○ Select",
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_MUTED,
+            )
+            radio_badge.pack(side=tk.RIGHT)
+
+            spec_lbl = tk.Label(
+                inner,
+                text=specs,
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_SECONDARY,
+                anchor=tk.W,
+            )
+            spec_lbl.pack(fill=tk.X, pady=(2, 1))
+
+            d = tk.Label(
+                inner,
+                text=desc,
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_MUTED,
+                justify=tk.LEFT,
+                anchor=tk.W,
+            )
+            d.pack(fill=tk.X)
+
+            self.preset_cards[key] = {
+                "outer": outer,
+                "inner": inner,
+                "title": t,
+                "badge": radio_badge,
+                "spec": spec_lbl,
+                "desc": d,
+                "top": top,
+            }
+
+            for w in [outer, inner, t, radio_badge, spec_lbl, d, top]:
+                w.bind("<Button-1>", lambda e, k=key: self._select_preset(k))
+                w.bind("<Enter>", lambda e, k=key: self._on_preset_hover(k, True))
+                w.bind("<Leave>", lambda e, k=key: self._on_preset_hover(k, False))
+
+        _make_preset(
+            "architectural",
+            "Architectural Standard (Default)",
+            "600K faces · 16-page 8K · GPS crop",
+            "Balanced production geometry with CMOS rolling shutter and mesh hole closing.",
+        )
+        _make_preset(
+            "draft",
+            "Rapid Draft Preview",
+            "500K faces · 4-page 8K · Draft align",
+            "Fast ~15-minute run for quick alignment, boundary checking, and preliminary geometry.",
+        )
+        _make_preset(
+            "heritage",
+            "Ultra Heritage Detail",
+            "2M faces · 32-page 8K · Structure crop",
+            "High photographic fidelity for complex architectural facades, fine masonry, and monuments.",
+        )
+
+    def _on_preset_hover(self, key: str, is_hover: bool) -> None:
+        if key == self.selected_preset_key:
+            return
+        card = self.preset_cards.get(key)
+        if card:
+            card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER)
+
+    # -----------------------------------------------------------------------
+    # Step 3: Collapsible Advanced Pipeline Settings
+    # -----------------------------------------------------------------------
+    def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
+        self.card_adv = StudioCard(
+            parent,
+            title="3. Pipeline Parameters",
+            subtitle="Optional advanced calibration and processing flags",
+        )
+        self.card_adv.pack(fill=tk.X, pady=(0, 6))
+
+        bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
+        bar_toggle.pack(fill=tk.X)
+
+        self.btn_toggle_adv = tk.Button(
+            bar_toggle,
+            text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.ACCENT_CYAN,
+            bd=0,
+            padx=2,
+            pady=3,
+            relief=tk.FLAT,
+            cursor="hand2",
+            command=self._toggle_advanced,
+        )
+        self.btn_toggle_adv.pack(side=tk.LEFT)
+
+        self.body_adv = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
+
+        grid = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid.pack(fill=tk.X, pady=(6, 8))
+
+        # Row 1: Align, Faces, Pages
+        tk.Label(grid, text="Align Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_faces, values=["600000", "1000000", "500000", "2000000", "3000000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+
+        tk.Label(grid, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
+
+        # Row 2: Crop, Depth Quality, Depth Filtering
+        tk.Label(grid, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "structure", "manual", "none"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
+
+        tk.Label(grid, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
+
+        # Checkboxes
+        chk_row1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_row1.pack(fill=tk.X, pady=(2, 4))
+
+        def _c(t, v, parent=chk_row1):
+            return tk.Checkbutton(
+                parent,
+                text=t,
+                variable=v,
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_SURFACE,
+                fg=UITheme.TEXT_SECONDARY,
+                selectcolor=UITheme.BG_ROOT,
+                activebackground=UITheme.BG_SURFACE,
+                activeforeground=UITheme.TEXT_PRIMARY,
+                bd=0,
+            )
+
+        _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 10))
+        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 10))
+        _c("Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 10))
+        _c("Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT)
+
+        chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_row2.pack(fill=tk.X, pady=(2, 4))
+        _c("Texture Hole Filling", self.var_fill_holes, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
+        _c("Ghosting Filter", self.var_ghosting, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
+        _c("Force restart from scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
+
+        chk_row3 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_row3.pack(fill=tk.X, pady=(2, 4))
+        _c("Pause after camera alignment for manual crop", self.var_pause_crop, parent=chk_row3).pack(side=tk.LEFT)
+
+    def _toggle_advanced(self) -> None:
+        self.adv_expanded = not self.adv_expanded
+        if self.adv_expanded:
+            self.body_adv.pack(fill=tk.X, pady=(4, 2))
+            self.btn_toggle_adv.config(text="▼ Hide advanced parameters")
+        else:
+            self.body_adv.pack_forget()
+            self.btn_toggle_adv.config(text="▶ Show advanced parameters (mesh density, camera optimization, texture atlas)")
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    # -----------------------------------------------------------------------
+    # Standalone Export Card
+    # -----------------------------------------------------------------------
+    def _build_export_card(self, parent: tk.Widget) -> None:
+        self.card_export = StudioCard(
+            parent,
+            title="Standalone Texture Re-Bake & Export",
+            subtitle="Process solved Metashape project without recomputing depth maps",
+        )
+        # Initially hidden in recon mode
+        if self.active_mode != "export":
+            self.card_export.pack_forget()
+
+        row0 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row0.pack(fill=tk.X, pady=(0, 2))
+
+        lbl_psx = tk.Label(
+            row0,
+            text="Metashape Project File (.psx)",
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+        )
+        lbl_psx.pack(side=tk.LEFT)
+
+        btn_browse_psx = tk.Button(
+            row0,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=12,
+            pady=2,
+            command=self._browse_psx_file,
+        )
+        btn_browse_psx.pack(side=tk.RIGHT)
+
+        self.var_psx_path.trace_add("write", self._on_psx_path_changed)
+        ent_psx = tk.Entry(
+            self.card_export.body,
+            textvariable=self.var_psx_path,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_INPUT,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
+        )
+        ent_psx.pack(fill=tk.X, pady=(2, 6))
+
+        row1 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row1.pack(fill=tk.X, pady=(4, 2))
+
+        lbl_dest = tk.Label(
+            row1,
+            text="Export Destination Folder",
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+        )
+        lbl_dest.pack(side=tk.LEFT)
+
+        btn_browse_exp = tk.Button(
+            row1,
+            text="Change...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=2,
+            command=self._browse_export_dir,
+        )
+        btn_browse_exp.pack(side=tk.RIGHT)
+
+        ent_exp = tk.Entry(
+            self.card_export.body,
+            textvariable=self.var_export_out,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_INPUT,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER_CONTROL,
+        )
+        ent_exp.pack(fill=tk.X, pady=(2, 6))
+
+        row2 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row2.pack(fill=tk.X, pady=4)
+
+        tk.Checkbutton(
+            row2,
+            text="Re-Bake Texture Atlas",
+            variable=self.var_exp_rebake,
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            selectcolor=UITheme.BG_ROOT,
+            bd=0,
+        ).pack(side=tk.LEFT, padx=(0, 14))
+
+        tk.Label(row2, text="Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row2, textvariable=self.var_exp_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=6).pack(side=tk.LEFT, padx=(4, 14))
+
+        tk.Label(row2, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row2, textvariable=self.var_exp_format, values=["tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
+
+    # -----------------------------------------------------------------------
+    # Stepper Card
+    # -----------------------------------------------------------------------
+    def _build_stepper_card(self, parent: tk.Widget) -> None:
+        self.card_stepper = StudioCard(
+            parent,
+            title="Pipeline Milestones",
+            subtitle="7-stage automated photogrammetry trajectory",
+        )
+        self.card_stepper.pack(fill=tk.X, pady=(0, 6))
+
+        self.stepper = StudioPipelineStepper(self.card_stepper.body)
+        self.stepper.pack(fill=tk.X)
+
+    # -----------------------------------------------------------------------
+    # Console Feed & Deliverables
+    # -----------------------------------------------------------------------
+    def _build_log_card(self, parent: tk.Widget) -> None:
+        self.card_log = StudioCard(
+            parent,
+            title="Execution Log",
+            subtitle="Real-time Metashape subprocess output feed",
+        )
+        self.card_log.pack(fill=tk.BOTH, expand=True, pady=(0, 6))
+
+        # Dark-themed console container with dark TTK scrollbar
+        log_container = tk.Frame(
+            self.card_log.body,
+            bg=UITheme.BG_CONSOLE,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+        )
+        log_container.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        log_scrollbar = ttk.Scrollbar(log_container, orient=tk.VERTICAL)
+        log_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self.txt_log = tk.Text(
+            log_container,
+            wrap=tk.WORD,
+            bg=UITheme.BG_CONSOLE,
+            fg=UITheme.TEXT_SECONDARY,
+            insertbackground="white",
+            font=("Consolas", 9),
+            bd=0,
+            highlightthickness=0,
+            yscrollcommand=log_scrollbar.set,
+            height=12,
+        )
+        self.txt_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        log_scrollbar.config(command=self.txt_log.yview)
+
+        self.txt_log.tag_config("stage", foreground=UITheme.ACCENT_CYAN, font=("Consolas", 9, "bold"))
+        self.txt_log.tag_config("success", foreground=UITheme.ACCENT_GREEN_TXT, font=("Consolas", 9, "bold"))
+        self.txt_log.tag_config("warning", foreground=UITheme.ACCENT_AMBER_TXT)
+        self.txt_log.tag_config("error", foreground="#f87171", font=("Consolas", 9, "bold"))
+
+        action_bar = tk.Frame(self.card_log.body, bg=UITheme.BG_SURFACE)
+        action_bar.pack(fill=tk.X)
+
+        self.btn_open_folder = tk.Button(
+            action_bar,
+            text="Open Output Folder",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=12,
+            pady=3,
+            cursor="hand2",
+            command=self._on_open_output_folder,
+        )
+        self.btn_open_folder.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_open_metashape = tk.Button(
+            action_bar,
+            text="Open in Metashape",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=12,
+            pady=3,
+            cursor="hand2",
+            command=self._on_open_metashape_gui,
+        )
+        self.btn_open_metashape.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_copy = tk.Button(
+            action_bar,
+            text="Copy Log",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._copy_log,
+        )
+        btn_copy.pack(side=tk.RIGHT)
+
+        btn_clear = tk.Button(
+            action_bar,
+            text="Clear",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BORDER_HOVER,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=lambda: self.txt_log.delete("1.0", tk.END),
+        )
+        btn_clear.pack(side=tk.RIGHT, padx=4)
 
     # -----------------------------------------------------------------------
     # Event Handlers & Preset Logic
@@ -1430,15 +1510,21 @@ class AutoMetashapeStudio:
         if mode == "recon":
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.wrapper_export.pack_forget()
-            self.wrapper_recon.pack(fill=tk.X, expand=True)
-            self.btn_start.config(text="Start Reconstruction", bg=UITheme.ACCENT_GREEN)
+            self.card_export.pack_forget()
+            self.card_folder.pack(fill=tk.X, pady=(0, 6))
+            self.card_preset.pack(fill=tk.X, pady=(0, 6))
+            self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            self.btn_start.config(text="Start Reconstruction", bg=UITheme.ACCENT_GREEN, fg="white")
         else:
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.wrapper_recon.pack_forget()
-            self.wrapper_export.pack(fill=tk.X, expand=True)
+            self.card_folder.pack_forget()
+            self.card_preset.pack_forget()
+            self.card_adv.pack_forget()
+            self.card_export.pack(fill=tk.X, pady=(0, 6))
             self.btn_start.config(text="Export Assets", bg=UITheme.ACCENT_CYAN, fg=UITheme.BG_ROOT)
+
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     def _check_metashape(self) -> None:
         if self.metashape_exe:
@@ -1801,7 +1887,7 @@ class AutoMetashapeStudio:
         )
         self.progress_bar.stop()
 
-        self.frame_crop_banner.pack(fill=tk.X, padx=14, pady=(0, 6), before=self.wrapper_recon.master)
+        self.frame_crop_banner.pack(side=tk.TOP, fill=tk.X, padx=14, pady=(0, 6), before=self.center_frame)
         self.btn_continue_crop.pack(side=tk.LEFT, padx=(0, 10), before=self.btn_stop)
 
         self._log("\n" + "─" * 70, "warning")
