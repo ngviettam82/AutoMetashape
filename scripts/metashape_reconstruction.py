@@ -462,7 +462,7 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  Instructions:", flush=True)
     print("  1. Open this project in Agisoft Metashape Pro GUI.", flush=True)
     print("  2. Use 'Resize Region' and 'Rotate Region' tools to frame the target structure.", flush=True)
-    print("  3. Save the project inside Metashape Pro (Ctrl+S).", flush=True)
+    print("  3. Save the project inside Metashape Pro (Ctrl+S) and CLOSE Metashape Pro.", flush=True)
     print("  4. In AutoMetashape Studio, click [▶️ Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
     print("=========================================================================", flush=True)
 
@@ -478,14 +478,20 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
                 import ctypes
                 import subprocess
                 # MB_YESNO = 4, MB_ICONQUESTION = 0x20, MB_SYSTEMMODAL = 0x1000, IDYES = 6
+                metashape_bin = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "metashape.exe"))
+                if not os.path.isfile(metashape_bin):
+                    metashape_bin = r"C:\Program Files\Agisoft\Metashape Pro\metashape.exe"
+                if not os.path.isfile(metashape_bin):
+                    metashape_bin = "metashape.exe"
+
                 res = ctypes.windll.user32.MessageBoxW(
                     0,
-                    f"Camera alignment completed and saved to:\n{psx_path}\n\nWould you like to open Agisoft Metashape Pro now to adjust the bounding box?",
+                    f"Camera alignment completed and saved to:\n{psx_path}\n\nWould you like to open Agisoft Metashape Pro now to adjust the bounding box?\n\n(Remember to save and CLOSE Metashape Pro before pressing Enter!)",
                     "AutoMetashape: Paused for Manual Cropping",
                     0x00000004 | 0x00000020 | 0x00001000,
                 )
                 if res == 6:  # IDYES
-                    subprocess.Popen(["metashape.exe", psx_path], shell=True)
+                    subprocess.Popen([metashape_bin, psx_path])
             except Exception:
                 pass
         try:
@@ -677,12 +683,18 @@ def run_reconstruction(
             print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
         # Step 3b: Bounding Box Cropping (Default: gps-square, Optional: manual / structure / none)
+        def _safe_reopen():
+            try:
+                doc.open(psx_out)
+            except Exception:
+                doc.open(psx_out, ignore_lock=True)
+
         if crop_method == "manual":
             print("\n[3b/6] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
             doc.save(psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
-            doc.open(psx_out)
+            _safe_reopen()
             chunk = doc.chunk
         elif crop_method == "gps-square":
             auto_crop_camera_gps_square(chunk, padding=crop_padding)
@@ -690,7 +702,7 @@ def run_reconstruction(
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
-                doc.open(psx_out)
+                _safe_reopen()
                 chunk = doc.chunk
         elif crop_method == "structure":
             auto_crop_to_main_structure(chunk, padding=crop_padding)
@@ -698,7 +710,7 @@ def run_reconstruction(
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
-                doc.open(psx_out)
+                _safe_reopen()
                 chunk = doc.chunk
         else:
             print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
@@ -706,7 +718,7 @@ def run_reconstruction(
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
-                doc.open(psx_out)
+                _safe_reopen()
                 chunk = doc.chunk
 
     # Step 4: Multi-View Stereo Dense Depth Maps

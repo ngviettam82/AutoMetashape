@@ -1069,8 +1069,18 @@ class AutoMetashapeStudio:
             if not self.var_export_out.get().strip():
                 self.var_export_out.set(os.path.dirname(psx))
 
+    def _get_active_output_dir(self) -> str:
+        if self.active_mode == "recon":
+            out = self.var_output_dir.get().strip()
+            if not out:
+                img_dir = self.var_images_dir.get().strip()
+                if img_dir:
+                    out = os.path.join(img_dir, "model")
+            return out
+        return self.var_export_out.get().strip()
+
     def _on_open_output_folder(self) -> None:
-        folder = self.var_output_dir.get().strip() if self.active_mode == "recon" else self.var_export_out.get().strip()
+        folder = self._get_active_output_dir()
         if folder and os.path.isdir(folder):
             os.startfile(folder)
         else:
@@ -1081,7 +1091,7 @@ class AutoMetashapeStudio:
             messagebox.showerror("Error", "Metashape Pro executable not configured.")
             return
 
-        folder = self.var_output_dir.get().strip() if self.active_mode == "recon" else self.var_export_out.get().strip()
+        folder = self._get_active_output_dir()
         psx = os.path.join(folder, "building_reconstruction.psx") if self.active_mode == "recon" else self.var_psx_path.get().strip()
 
         if psx and os.path.isfile(psx):
@@ -1262,6 +1272,8 @@ class AutoMetashapeStudio:
             self.root.after(0, lambda: self.stepper.set_active(1, "Camera Bundle Adjustment"))
         elif "[auto-crop]" in line or "camera gps square" in l:
             self.root.after(0, lambda: self.stepper.set_active(2, "Locking GPS Bounding Box"))
+        elif "[pause_crop]" in l:
+            self.root.after(0, lambda: self.stepper.set_active(2, "Paused: Manual Crop in Metashape"))
         elif "[4/6]" in line or "mvs depth maps" in l:
             self.root.after(0, lambda: self.stepper.set_active(3, "MVS Dense Stereopsis"))
         elif "[5/6]" in line or "surface mesh" in l:
@@ -1307,7 +1319,7 @@ class AutoMetashapeStudio:
         self._log("⏸️  PIPELINE PAUSED: MANUAL CROPPING IN AGISOFT METASHAPE PRO", "warning")
         self._log("1. Click '🚀 Open in Metashape GUI' above to open your project in Metashape Pro.", "stage")
         self._log("2. In Metashape, use 'Resize Region' / 'Rotate Region' tools to crop the building.", "stage")
-        self._log("3. Press Ctrl+S in Metashape Pro to save your manual bounding box.", "stage")
+        self._log("3. Press Ctrl+S in Metashape Pro to save, then CLOSE Metashape Pro.", "stage")
         self._log("4. Click '▶️ Continue Reconstruction (Manual Crop Done)' below to resume 600K meshing.\n" + "═" * 70, "success")
 
         # Visual and audio alert to notify user
@@ -1320,7 +1332,7 @@ class AutoMetashapeStudio:
             pass
 
         # Interactive popup notification dialog
-        folder = self.var_output_dir.get().strip() if self.active_mode == "recon" else self.var_export_out.get().strip()
+        folder = self._get_active_output_dir()
         psx = os.path.join(folder, "building_reconstruction.psx")
 
         open_now = messagebox.askyesno(
@@ -1329,7 +1341,7 @@ class AutoMetashapeStudio:
             f"{psx}\n\n"
             "Would you like to open this project in Agisoft Metashape Pro now to adjust your bounding box?\n\n"
             "• Click [Yes] to launch Metashape Pro automatically.\n"
-            "• In Metashape, adjust the bounding box and press Ctrl+S to save.\n"
+            "• In Metashape, adjust the bounding box, press Ctrl+S to save, then CLOSE Metashape Pro.\n"
             "• Return here and click '▶️ Continue Reconstruction' to resume.",
             icon="question",
         )
@@ -1354,7 +1366,7 @@ class AutoMetashapeStudio:
                 self._log(f"[Warning] stdin write: {e}", "warning")
 
         # 2. Write sentinel file to output folder as reliable fallback
-        out_dir = self.var_output_dir.get().strip()
+        out_dir = self._get_active_output_dir()
         if out_dir and os.path.isdir(out_dir):
             try:
                 sentinel = os.path.join(out_dir, ".continue_crop")
