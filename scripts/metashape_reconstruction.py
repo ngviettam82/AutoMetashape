@@ -467,6 +467,7 @@ def run_reconstruction(
     filter_stationary_points: bool = True,
     guided_matching: bool = False,
     adaptive_fitting: bool = True,
+    filter_tiepoints: bool = True,
     depth_quality: str = "medium",
     depth_filtering: str = "moderate",
     custom_faces: int = 1000000,
@@ -494,16 +495,29 @@ def run_reconstruction(
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
     print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
+    print(f"  Filter Tie Points:  {filter_tiepoints}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
     print(f"  Target Mesh Faces:  {custom_faces:,} (1M)")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Rolling Shutter:    {rolling_shutter} | Hole Closing: {close_holes}")
     print("=========================================================================", flush=True)
 
-    # Enable all available NVIDIA GPUs
-    Metashape.app.gpu_mask = 1
+    # Enable all available NVIDIA / high-performance GPUs
     gpus = Metashape.app.enumGPUDevices()
-    if gpus:
+    nvidia_mask = 0
+    active_gpu_names = []
+    for i, g in enumerate(gpus):
+        vendor = g.get("vendor", "").lower()
+        name = g.get("name", "").lower()
+        if "nvidia" in vendor or "geforce" in name or "rtx" in name:
+            nvidia_mask |= (1 << i)
+            active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
+
+    if nvidia_mask:
+        Metashape.app.gpu_mask = nvidia_mask
+        print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {nvidia_mask})", flush=True)
+    elif gpus:
+        Metashape.app.gpu_mask = (1 << len(gpus)) - 1
         print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
     else:
         print("[Hardware] Running on CPU.", flush=True)
@@ -539,8 +553,14 @@ def run_reconstruction(
         supported_exts = SUPPORTED_IMAGE_EXTS
         img_files = []
         abs_output = os.path.abspath(output_dir)
-        for root, _dirs, files in os.walk(images_dir):
-            if os.path.abspath(root).startswith(abs_output):
+        for root, dirs, files in os.walk(images_dir):
+            # Prune output directory and any existing model export directories
+            dirs[:] = [
+                d for d in dirs
+                if not os.path.abspath(os.path.join(root, d)).startswith(abs_output)
+                and not d.lower().startswith("model")
+            ]
+            if os.path.abspath(root).startswith(abs_output) or os.path.basename(root).lower().startswith("model"):
                 continue
             for f in files:
                 if f.lower().endswith(supported_exts):
@@ -588,7 +608,10 @@ def run_reconstruction(
                 s.rolling_shutter = Metashape.Shutter.Model.Regularized
             print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
 
-        filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+        if filter_tiepoints:
+            filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+        else:
+            print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
         # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
         if crop_method == "gps-square":
@@ -768,6 +791,13 @@ if __name__ == "__main__":
     parser.add_argument("--guided-matching", action="store_true", default=False, help="Enable guided image matching (default: False)")
     parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
+    parser.add_argument(
+        "--no-filter-tiepoints",
+        dest="filter_tiepoints",
+        action="store_false",
+        default=True,
+        help="Disable Gradual Selection tie-point filtering and camera re-optimization (keeps all aligned tie points intact)",
+    )
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", default=True, help="Disable CMOS rolling shutter regularized compensation (default: enabled)")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
     parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages (default: 16)")
@@ -810,6 +840,7 @@ if __name__ == "__main__":
         filter_stationary_points=args.filter_stationary_points,
         guided_matching=args.guided_matching,
         adaptive_fitting=args.adaptive_fitting,
+        filter_tiepoints=args.filter_tiepoints,
         depth_quality=args.depth_quality,
         depth_filtering=args.depth_filtering,
         custom_faces=args.faces,
