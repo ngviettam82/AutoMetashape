@@ -581,8 +581,8 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
 
         # Row 2: Crop, Depth Quality, Depth Filtering
-        tk.Label(grid, text="Auto-Crop:", font=("Segoe UI", 8), bg=UITheme.BG_CARD, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "structure", "none"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 12), pady=3)
+        tk.Label(grid, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_CARD, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "structure", "manual", "none"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 12), pady=3)
 
         tk.Label(grid, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_CARD, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 12), pady=3)
@@ -617,7 +617,7 @@ class AutoMetashapeStudio:
 
         chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_CARD)
         chk_row2.pack(fill=tk.X, pady=(2, 4))
-        _c("⏸️ Pause After Crop (Manual Box in GUI)", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 12))
+        _c("⏸️ Pause After Crop (Inspect in Metashape Pro)", self.var_pause_crop, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 12))
         _c("Force Restart from Scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
@@ -897,7 +897,7 @@ class AutoMetashapeStudio:
 
         self.btn_continue_crop = tk.Button(
             inner,
-            text="▶️  Continue After Manual Crop",
+            text="▶️  Continue Reconstruction (Manual Crop Done)",
             font=("Segoe UI", 10, "bold"),
             bg=UITheme.ACCENT_CYAN,
             fg="white",
@@ -1298,17 +1298,17 @@ class AutoMetashapeStudio:
 
     def _on_pipeline_paused_for_crop(self) -> None:
         self.lbl_status.config(
-            text="Status: ⏸️ Paused for Manual Crop — Adjust in Metashape GUI",
+            text="Status: ⏸️ Paused — Open Metashape Pro to Crop, then click Continue",
             fg=UITheme.ACCENT_AMBER,
         )
         self.progress_bar.stop()
         self.btn_continue_crop.pack(side=tk.LEFT, padx=(0, 10), before=self.btn_stop)
         self._log("\n" + "═" * 70, "warning")
-        self._log("⏸️  RECONSTRUCTION PAUSED FOR MANUAL BOUNDING BOX INSPECTION", "warning")
-        self._log("1. Click '🚀 Open in Metashape GUI' above to view the project.", "stage")
-        self._log("2. Use the 'Resize Region' / 'Rotate Region' tools in Metashape to adjust the box.", "stage")
-        self._log("3. Save the project inside Metashape GUI (File ➔ Save or Ctrl+S).", "stage")
-        self._log("4. Click '▶️ Continue After Manual Crop' below to resume depth maps & 600K meshing.\n" + "═" * 70, "success")
+        self._log("⏸️  PIPELINE PAUSED: MANUAL CROPPING IN AGISOFT METASHAPE PRO", "warning")
+        self._log("1. Click '🚀 Open in Metashape GUI' above to open your project in Metashape Pro.", "stage")
+        self._log("2. In Metashape, use 'Resize Region' / 'Rotate Region' tools to crop the building.", "stage")
+        self._log("3. Press Ctrl+S in Metashape Pro to save your manual bounding box.", "stage")
+        self._log("4. Click '▶️ Continue Reconstruction (Manual Crop Done)' below to resume 600K meshing.\n" + "═" * 70, "success")
 
     def _on_continue_crop_clicked(self) -> None:
         self.btn_continue_crop.pack_forget()

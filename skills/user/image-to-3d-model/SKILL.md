@@ -99,9 +99,21 @@ Metashape's default bounding box (`chunk.region`) encompasses all tie points, in
 - **Outlier Immunity**: Prunes outlier viewing angles (e.g. when 10–20% of cameras focus on secondary points), locking firmly onto the main structure walls.
 - **Best For**: Pure orbit flights and tight building facade scans where you want the box cropped directly onto the exterior walls.
 
+#### Method 3: `manual` (Manual Bounding Box in Metashape Pro)
+- **Principle**: Skips automatic cropping completely. Saves the `.psx` project after camera alignment and pauses execution.
+- **Workflow**:
+  1. Open the project in Agisoft Metashape Pro GUI (via the '🚀 Open in Metashape GUI' button in AutoMetashape Studio or directly).
+  2. Use the 'Resize Region' and 'Rotate Region' tools in Metashape to manually frame your target structure.
+  3. Save the project inside Metashape Pro (Ctrl+S).
+  4. Return to the AutoMetashape Studio GUI and click '▶️ Continue Reconstruction (Manual Crop Done)' (or press Enter in terminal).
+  5. The pipeline reloads your manual bounding box and proceeds with GPU Depth Maps and 600K meshing.
+
 ```powershell
 # Run with Optical Ray Convergence (tight wall crop):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --crop-method structure
+
+# Run with Manual Bounding Box in Metashape Pro:
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --crop-method manual
 ```
 
 ### 5. GPU Multi-View Stereo (MVS) Depth Maps

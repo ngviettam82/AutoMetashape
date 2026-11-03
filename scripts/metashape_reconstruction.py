@@ -474,13 +474,15 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
         except Exception:
             pass
 
-    print("\n=========================================================================")
-    print("  [PAUSE_CROP] INTERACTIVE BOUNDING BOX INSPECTION")
-    print("  Project checkpoint saved to:")
-    print(f"  --> {psx_path}")
-    print("  You may open this project in Metashape GUI to inspect or fine-tune the")
-    print("  reconstruction box. If satisfied, save in Metashape GUI (Ctrl+S).")
-    print("  When ready, click [Continue Reconstruction] in the GUI or press [Enter].")
+    print("\n=========================================================================", flush=True)
+    print("  [PAUSE_CROP] PAUSED FOR MANUAL BOUNDING BOX IN AGISOFT METASHAPE PRO", flush=True)
+    print("  Project checkpoint saved to:", flush=True)
+    print(f"  --> {psx_path}", flush=True)
+    print("  Instructions:", flush=True)
+    print("  1. Open this project in Agisoft Metashape Pro GUI.", flush=True)
+    print("  2. Use 'Resize Region' and 'Rotate Region' tools to frame the target structure.", flush=True)
+    print("  3. Save the project inside Metashape Pro (Ctrl+S).", flush=True)
+    print("  4. In AutoMetashape Studio, click [▶️ Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
     print("=========================================================================", flush=True)
 
     # 1. Interactive terminal
@@ -673,23 +675,38 @@ def run_reconstruction(
         else:
             print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
-        # Step 3b: Automatic Bounding Box Crop (Default: gps-square)
-        if crop_method == "gps-square":
-            auto_crop_camera_gps_square(chunk, padding=crop_padding)
-        elif crop_method == "structure":
-            auto_crop_to_main_structure(chunk, padding=crop_padding)
-        else:
-            print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
-
-        # Save project checkpoint immediately after alignment and cropping
-        doc.save(psx_out)
-        print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
-
-        # Optional interactive pause for manual boundary fine-tuning
-        if pause_after_crop:
+        # Step 3b: Bounding Box Cropping (Default: gps-square, Optional: manual / structure / none)
+        if crop_method == "manual":
+            print("\n[3b/6] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
+            doc.save(psx_out)
+            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
             doc.open(psx_out)
             chunk = doc.chunk
+        elif crop_method == "gps-square":
+            auto_crop_camera_gps_square(chunk, padding=crop_padding)
+            doc.save(psx_out)
+            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+            if pause_after_crop:
+                wait_for_user_resume(output_dir, psx_out)
+                doc.open(psx_out)
+                chunk = doc.chunk
+        elif crop_method == "structure":
+            auto_crop_to_main_structure(chunk, padding=crop_padding)
+            doc.save(psx_out)
+            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+            if pause_after_crop:
+                wait_for_user_resume(output_dir, psx_out)
+                doc.open(psx_out)
+                chunk = doc.chunk
+        else:
+            print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
+            doc.save(psx_out)
+            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+            if pause_after_crop:
+                wait_for_user_resume(output_dir, psx_out)
+                doc.open(psx_out)
+                chunk = doc.chunk
 
     # Step 4: Multi-View Stereo Dense Depth Maps
     has_depth_maps = chunk.depth_maps is not None
@@ -879,9 +896,9 @@ if __name__ == "__main__":
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
     parser.add_argument(
         "--crop-method",
-        choices=["gps-square", "structure", "none"],
+        choices=["gps-square", "structure", "manual", "none"],
         default="gps-square",
-        help="Bounding box crop method: 'gps-square' (smallest enclosing square of camera GPS poses with tie-point altitude bounds), 'structure' (optical ray convergence on main building walls), or 'none' (default: gps-square)",
+        help="Bounding box crop method: 'gps-square' (auto: smallest enclosing square of camera GPS poses), 'structure' (auto: optical ray convergence on main walls), 'manual' (skip auto-crop and pause for user to crop manually in Metashape Pro), or 'none' (default: gps-square)",
     )
     parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
     parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
