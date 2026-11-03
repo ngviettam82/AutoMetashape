@@ -23,6 +23,10 @@ def export_project_assets(
     project_path: str,
     output_dir: str = None,
     texture_format: str = "tiff",
+    rebake_texture: bool = False,
+    texture_pages: int = 16,
+    fill_holes: bool = True,
+    ghosting_filter: bool = True,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -55,6 +59,31 @@ def export_project_assets(
     mesh_verts = len(chunk.model.vertices)
     mesh_faces = len(chunk.model.faces)
     print(f"[Model Info] Geometry: {mesh_verts:,} vertices, {mesh_faces:,} polygonal faces.", flush=True)
+
+    # Optional / Conditional texture re-baking
+    current_pages = 0
+    if hasattr(chunk.model, "textures") and chunk.model.textures:
+        current_pages = len(chunk.model.textures)
+    elif hasattr(chunk.model, "texture") and chunk.model.texture():
+        current_pages = 1
+
+    if rebake_texture or current_pages == 0:
+        print(f"\n[Texture] Baking {texture_pages}x 8192x8192 (8K) Texture Atlas (Mosaic Blending, Fill Holes: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
+        t_tex = time.time()
+        chunk.buildUV(
+            mapping_mode=Metashape.MappingMode.GenericMapping,
+            page_count=texture_pages,
+            texture_size=8192,
+        )
+        chunk.buildTexture(
+            blending_mode=Metashape.BlendingMode.MosaicBlending,
+            texture_size=8192,
+            fill_holes=fill_holes,
+            ghosting_filter=ghosting_filter,
+        )
+        print(f"  Texture baking completed in {(time.time() - t_tex)/60:.2f} min.", flush=True)
+        doc.save()
+        print(f"  Updated project saved: {project_path}", flush=True)
 
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
@@ -97,10 +126,18 @@ if __name__ == "__main__":
     parser.add_argument("--project", required=True, help="Path to existing Metashape project file (.psx)")
     parser.add_argument("--output", default=None, help="Output directory for exported 3D assets (default: same folder as .psx)")
     parser.add_argument("--texture-format", choices=["tiff", "jpeg"], default="tiff", help="Texture atlas format (default: tiff)")
+    parser.add_argument("--rebake-texture", action="store_true", default=False, help="Re-bake UV parameterization and 8K texture atlas before export")
+    parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages if re-baking (default: 16)")
+    parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling if re-baking (default: enabled)")
+    parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter if re-baking (default: enabled)")
     args = parser.parse_args()
 
     export_project_assets(
         project_path=args.project,
         output_dir=args.output,
         texture_format=args.texture_format,
+        rebake_texture=args.rebake_texture,
+        texture_pages=args.texture_pages,
+        fill_holes=args.fill_holes,
+        ghosting_filter=args.ghosting_filter,
     )

@@ -1,6 +1,6 @@
 ---
 name: photogrammetry-export
-description: "Exports photogrammetric 3D reconstructions into production formats including GLB with embedded PBR textures, Wavefront OBJ with 8K TIFF textures, and native Metashape projects with metric georeferencing. Use when exporting, converting, or packaging 3D photogrammetry models from an existing or GUI-modified project."
+description: "Exports photogrammetric 3D reconstructions into production formats including GLB with embedded PBR textures, Wavefront OBJ with 16-page 8K TIFF textures, and native Metashape projects with metric georeferencing. Supports standalone texture re-baking without recomputing depth maps. Use when exporting, converting, or packaging 3D photogrammetry models from an existing or GUI-modified project."
 audience: user
 status: stable
 owners:
@@ -47,6 +47,12 @@ Run export operations directly against the existing project file:
 - **Binary glTF (`.glb`)**: `format=Metashape.ModelFormat.ModelFormatGLTF`, `embed_texture=True`, `save_normals=True`, `save_colors=True`.
 - **Wavefront OBJ (`.obj`)**: `format=Metashape.ModelFormat.ModelFormatOBJ`, `texture_format=Metashape.ImageFormat.ImageFormatTIFF`, `save_texture=True`.
 - **Destination**: Defaults to the folder containing the `.psx` project, keeping all deliverables co-located.
+
+### 3. Optional Fast Texture Re-Baking
+To re-bake UV mapping and 16-page 8K texture atlas directly from the solved mesh without re-running camera alignment or depth maps:
+```powershell
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py --project "<path_to_project>/building_reconstruction.psx" --rebake-texture --texture-pages 16
+```
 
 ---
 

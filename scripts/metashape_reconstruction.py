@@ -13,7 +13,7 @@ Configured with production-grade defaults:
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses + tie-point altitude bounds).
 - Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 1,000,000 (1M) custom faces.
-- Texture Atlas: 8K photographic mosaic blending texture atlas.
+- Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
 import argparse
@@ -466,6 +466,10 @@ def run_reconstruction(
     depth_quality: str = "medium",
     depth_filtering: str = "moderate",
     custom_faces: int = 1000000,
+    texture_pages: int = 16,
+    fill_holes: bool = True,
+    ghosting_filter: bool = True,
+    rebake_texture: bool = False,
     crop_method: str = "gps-square",
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
@@ -488,6 +492,7 @@ def run_reconstruction(
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
     print(f"  Target Mesh Faces:  {custom_faces:,} (1M)")
+    print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Rolling Shutter:    {rolling_shutter} | Hole Closing: {close_holes}")
     print("=========================================================================", flush=True)
 
@@ -659,23 +664,34 @@ def run_reconstruction(
         print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
-    has_texture = chunk.model and hasattr(chunk.model, "textures") and len(chunk.model.textures) > 0
-    if has_texture:
-        print(f"\n[6/6] Reusing existing Texture Atlas from checkpoint ({len(chunk.model.textures)} pages).", flush=True)
+    current_pages = 0
+    if chunk.model:
+        if hasattr(chunk.model, "textures") and chunk.model.textures:
+            current_pages = len(chunk.model.textures)
+        elif hasattr(chunk.model, "texture") and chunk.model.texture():
+            current_pages = 1
+
+    if current_pages == texture_pages and not rebake_texture:
+        print(f"\n[6/6] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
     else:
-        tex_pages = 2
-        print(f"\n[6/6] Baking {tex_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending)...", flush=True)
+        if current_pages > 0 and current_pages != texture_pages:
+            print(f"\n[6/6] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...", flush=True)
+        elif rebake_texture:
+            print(f"\n[6/6] Force re-baking texture atlas as requested ({texture_pages} pages)...", flush=True)
+        else:
+            print(f"\n[6/6] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
+
         t_tex = time.time()
         chunk.buildUV(
             mapping_mode=Metashape.MappingMode.GenericMapping,
-            page_count=tex_pages,
+            page_count=texture_pages,
             texture_size=8192,
         )
         chunk.buildTexture(
             blending_mode=Metashape.BlendingMode.MosaicBlending,
             texture_size=8192,
-            fill_holes=True,
-            ghosting_filter=True,
+            fill_holes=fill_holes,
+            ghosting_filter=ghosting_filter,
         )
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
         doc.save(psx_out)
@@ -731,6 +747,10 @@ if __name__ == "__main__":
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", default=True, help="Disable CMOS rolling shutter regularized compensation (default: enabled)")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
+    parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages (default: 16)")
+    parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
+    parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
+    parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
     parser.add_argument(
         "--crop-method",
         choices=["gps-square", "structure", "none"],
@@ -770,6 +790,10 @@ if __name__ == "__main__":
         depth_quality=args.depth_quality,
         depth_filtering=args.depth_filtering,
         custom_faces=args.faces,
+        texture_pages=args.texture_pages,
+        fill_holes=args.fill_holes,
+        ghosting_filter=args.ghosting_filter,
+        rebake_texture=args.rebake_texture,
         crop_method=crop_method,
         crop_padding=args.crop_padding,
         min_quality=min_quality,
