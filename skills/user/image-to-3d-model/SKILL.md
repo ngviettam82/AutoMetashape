@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Automatically isolates multi-drone subfolders through independent chunk Point-Based RANSAC ICP alignment, filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
+description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Automatically isolates multi-drone subfolders through independent chunk Camera/GPS registration (method=2) with Point-Based RANSAC ICP fallback, filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
 audience: user
 status: stable
 owners:
@@ -17,7 +17,7 @@ Autonomous end-to-end photogrammetry pipeline transforming raw image folders (dr
 
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture or a 2D orthomosaic map.
-- Images are located across the main folder and nested subfolders (e.g., multi-drone surveys, multi-day flights, or separate camera sessions): automatically isolates each subfolder into an independent chunk, solves separate sensor calibrations, and registers them via Point-Based RANSAC ICP to eliminate barometric altitude offsets and ghosting walls.
+- Images are located across the main folder and nested subfolders (e.g., multi-drone surveys, multi-day flights, or separate camera sessions): automatically isolates each subfolder into an independent chunk, solves separate sensor calibrations, and registers them via Camera/GPS-based alignment (method=2) with Point-Based RANSAC ICP fallback to eliminate barometric altitude offsets and ghosting walls without symmetric inversions.
 - Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Automatic blurry image rejection is needed: automatically runs `chunk.analyzeImages()` and disables out-of-focus or motion-blurred photos ($<0.5$ quality index) to protect bundle adjustment accuracy.
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) for buildings, or `--no-crop` for complete aerial terrain surveys.
@@ -38,7 +38,7 @@ flowchart TD
     A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Recursive Ingestion & EXIF Metadata<br/>(Loads standard raster, drone RAW, and thermal formats)"]
     B --> C["2. Image Sharpness Estimation & Filtering<br/>(chunk.analyzeImages: auto-disables blurry photos < 0.5)"]
     C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Adaptive Fitting)"]
-    D --> E["4. Multi-Flight Chunk Registration<br/>(Point-Based RANSAC ICP with Camera/GPS Fallback)"]
+    D --> E["4. Multi-Flight Chunk Registration<br/>(Camera/GPS method=2 with Point-Based ICP Fallback)"]
     E --> F["5. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     F --> G["6. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
     G --> H["7. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 5M Faces, Level 30 Hole Closing)"]
@@ -103,8 +103,8 @@ When images are partitioned into multiple subfolders (e.g., `Flight_1` with 2,00
 To eliminate these issues completely, AutoMetashape provides automated **Multi-Chunk Alignment** (`--multi-chunk auto`, enabled by default):
 - **Automated Subfolder Ingestion**: Discovers image-bearing subfolders (excluding `model*` output directories) and assigns each to an independent Metashape chunk (`Flight_1_<name>`, `Flight_2_<name>`).
 - **Independent Calibration & Alignment**: Each flight chunk solves its own camera bundle adjustment, internal distortion parameters ($f, c_x, c_y, k_1..k_4, p_1, p_2$), and sparse tie points without cross-contamination.
-- **Point-Based RANSAC ICP Registration**: Uses `doc.alignChunks(method=0, fit_scale=True)` to register all secondary flight chunks onto the anchor flight (the flight with the largest aligned camera count). Because it aligns strictly based on physical 3D tie points and estimates scale, it completely ignores erroneous consumer GPS barometric altitudes.
-- **Camera/GPS Fallback**: If point-based ICP fails due to minimal sparse point overlap, automatically falls back to camera position reference alignment (`doc.alignChunks(method=1)`).
+- **Camera/GPS-Based Registration (`method=2`)**: Uses `doc.alignChunks(method=2, fit_scale=False)` as the primary registration strategy to register secondary flight chunks onto the anchor flight using camera reference coordinates. Because it relies on absolute georeferenced coordinates, it is completely immune to 180-degree rotation and opposite-facade flipping on symmetric architectural structures.
+- **Point-Based RANSAC ICP Fallback (`method=0`)**: If camera-based registration fails, automatically falls back to point-based ICP (`doc.alignChunks(method=0, fit_scale=True)`).
 - **Unified Reconstruction Merge**: Executes `doc.mergeChunks(chunks=..., merge_tiepoints=True)` with automatic fallback to transforms preservation. The resulting unified chunk (`Production_Reconstruction`) retains distinct sensor calibration groups for each drone and proceeds through unified Depth Maps, meshing, and 8K texture baking.
 
 CLI control:

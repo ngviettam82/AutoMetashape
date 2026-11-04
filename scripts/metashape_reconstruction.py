@@ -657,6 +657,7 @@ def run_reconstruction(
     pause_after_crop: bool = False,
     resume: bool = False,
     multi_chunk: str = "auto",
+    chunk_align_method: str = "camera",
     preset: str = None,
     build_orthomosaic: bool = None,
 ):
@@ -693,7 +694,8 @@ def run_reconstruction(
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
     print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
-    print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()}")
+    align_meth_label = chunk_align_method.upper() if chunk_align_method else "CAMERA"
+    print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()} (Method: {align_meth_label})")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
     if custom_faces >= 1_000_000:
         if custom_faces % 1_000_000 == 0:
@@ -866,7 +868,12 @@ def run_reconstruction(
                 if filter_tiepoints:
                     filter_tie_points(c, max_reproj_error=0.4, max_uncertainty=15.0)
 
-            # Register Chunks onto Anchor using Point-Based RANSAC ICP
+                try:
+                    c.updateTransform()
+                except Exception:
+                    pass
+
+            # Register Chunks onto Anchor using Camera/GPS-Based Registration (method=2)
             aligned_chunks = [c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2]
             if len(aligned_chunks) == 0:
                 raise RuntimeError("No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap.")
@@ -877,19 +884,34 @@ def run_reconstruction(
             align_chunk_keys = [c.key for c in aligned_chunks]
 
             if len(aligned_chunks) >= 2:
-                print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
-                try:
-                    doc.alignChunks(
-                        chunks=align_chunk_keys,
-                        reference=ref_key,
-                        method=0,
-                        fit_scale=True,
-                        downscale=align_downscale,
-                        keypoint_limit=keypoint_limit,
-                    )
-                    print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
-                except Exception as e_align:
-                    print(f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; falling back to Camera/GPS-based registration (method=2)...", flush=True)
+                align_mode = chunk_align_method.lower() if chunk_align_method else "camera"
+                if align_mode == "point":
+                    print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
+                    try:
+                        doc.alignChunks(
+                            chunks=align_chunk_keys,
+                            reference=ref_key,
+                            method=0,
+                            fit_scale=True,
+                            downscale=align_downscale,
+                            keypoint_limit=keypoint_limit,
+                        )
+                        print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
+                    except Exception as e_align:
+                        print(f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; falling back to Camera/GPS-based registration (method=2)...", flush=True)
+                        try:
+                            doc.alignChunks(
+                                chunks=align_chunk_keys,
+                                reference=ref_key,
+                                method=2,
+                                fit_scale=False,
+                            )
+                            print("  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True)
+                        except Exception as e_cam:
+                            print(f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.", flush=True)
+                else:
+                    # Default: method=2 (Camera/GPS based) - immune to symmetric building 180-degree flip
+                    print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Camera/GPS-based registration (method=2)...", flush=True)
                     try:
                         doc.alignChunks(
                             chunks=align_chunk_keys,
@@ -897,9 +919,21 @@ def run_reconstruction(
                             method=2,
                             fit_scale=False,
                         )
-                        print("  [Chunk Alignment] Camera/GPS-based chunk alignment succeeded!", flush=True)
+                        print("  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True)
                     except Exception as e_cam:
-                        print(f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.", flush=True)
+                        print(f"  [Chunk Alignment] Camera-based registration raised '{e_cam}'; falling back to Point-Based RANSAC ICP (method=0)...", flush=True)
+                        try:
+                            doc.alignChunks(
+                                chunks=align_chunk_keys,
+                                reference=ref_key,
+                                method=0,
+                                fit_scale=True,
+                                downscale=align_downscale,
+                                keypoint_limit=keypoint_limit,
+                            )
+                            print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
+                        except Exception as e_align:
+                            print(f"  [Chunk Alignment] Point-based alignment raised '{e_align}'; proceeding with native camera transforms.", flush=True)
             else:
                 print(f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned cameras; skipping chunk registration.", flush=True)
 
@@ -914,6 +948,10 @@ def run_reconstruction(
             doc.chunk = doc.chunks[-1]
             chunk = doc.chunk
             chunk.label = "Production_Reconstruction"
+            try:
+                chunk.updateTransform()
+            except Exception:
+                pass
             aligned_total = sum(1 for cam in chunk.cameras if cam.transform and cam.enabled)
             enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
             print(f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).", flush=True)
@@ -1292,7 +1330,13 @@ if __name__ == "__main__":
         "--multi-chunk",
         choices=["auto", "force", "disable"],
         default="auto",
-        help="Multi-chunk alignment mode: 'auto' (automatically create independent chunks for each image subfolder/flight and register them via point-based ICP), 'force', or 'disable' (default: auto)",
+        help="Multi-chunk alignment mode: 'auto' (automatically create independent chunks for each image subfolder/flight and register them via Camera/GPS or point-based ICP), 'force', or 'disable' (default: auto)",
+    )
+    parser.add_argument(
+        "--chunk-align-method",
+        choices=["camera", "point"],
+        default="camera",
+        help="Chunk alignment method for multi-chunk mode: 'camera' (method=2, Camera/GPS-based, robust against symmetric structure inversion) or 'point' (method=0, Point-based RANSAC ICP) (default: camera)",
     )
     parser.add_argument(
         "--resume",
@@ -1346,6 +1390,7 @@ if __name__ == "__main__":
         pause_after_crop=args.pause_after_crop,
         resume=args.resume,
         multi_chunk=args.multi_chunk,
+        chunk_align_method=args.chunk_align_method,
         preset=args.preset,
         build_orthomosaic=build_orthomosaic,
     )

@@ -4,7 +4,7 @@
 - **Query**: "Here is my drone image folder at `data/survey/building_a` containing multiple flight subfolders. Reconstruct a 3D model with 16-page 8K textures."
 - **Expected behavior**:
   - Automatically identifies separate flight subfolders, initializes independent chunks per flight, and calibrates sensors independently.
-  - Registers flight chunks using Point-Based RANSAC ICP (`doc.alignChunks(method=0)`) with automatic Camera/GPS fallback.
+  - Registers flight chunks using Camera/GPS-based registration (`doc.alignChunks(method=2)`) with automatic Point-Based RANSAC ICP fallback.
   - Automatically calculates `gps-square` horizontal bounding box while preserving full vertical elevation range.
   - Builds CUDA MVS depth maps and fuses into 600,000 polygon faces with Level-30 planar hole closing.
   - Bakes a 16-page 8K ($16 \times 8192 \times 8192$) lossless TIFF texture atlas with mosaic blending, hole filling, and ghosting suppression.
