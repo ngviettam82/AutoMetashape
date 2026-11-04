@@ -18,13 +18,13 @@ All skills must conform to:
 
 ## Catalog
 
-Developer skills:
+### Developer Skills
 
 - `developer/coding-style/`: Enforces repository coding conventions, SPDX license headers, line limits, and formatting hygiene across Python, C++, CUDA, and Rust code.
 - `developer/pr-workflow/`: Enforces atomic commits, conventional commit syntax, DCO sign-offs, and presubmit validation pipelines.
 - `developer/test-audit/`: Audits unit and integration test suites against junk patterns, enforces mutation resistance, and guarantees authoring quality gates across pytest and CTest.
 
-User skills:
+### User Skills
 
-- `user/image-to-3d-model/`: Reconstructs a production-grade textured 3D mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or drone survey with automated quality assessment and GPU acceleration.
-- `user/photogrammetry-export/`: Exports photogrammetric 3D reconstructions into production formats including GLB with embedded PBR textures, Wavefront OBJ with 8K TIFF textures, and native Metashape projects with metric georeferencing.
+- `user/image-to-3d-model/`: Reconstructs high-precision 3D textured models (`.obj`, `.mtl`, `.glb`), GeoTIFF orthomosaics (`.tif`, `.tfw`), and native Agisoft Metashape projects (`.psx`) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Automatically isolates multi-drone subfolders through independent chunk Point-Based RANSAC ICP alignment.
+- `user/photogrammetry-export/`: Exports photogrammetric 3D reconstructions into production formats including GLB with embedded PBR textures, Wavefront OBJ with 16-page 8K TIFF textures, and native Metashape projects with metric georeferencing. Supports standalone texture re-baking without recomputing depth maps.

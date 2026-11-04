@@ -1,6 +1,6 @@
 # Contributing Guide
 
-Welcome to GaussianSplat. All contributions, human and autonomous, must adhere to these standards.
+Welcome to AutoMetashape. All contributions, human and autonomous, must adhere to these standards.
 
 ---
 
@@ -30,7 +30,7 @@ Autonomous agents operating on this repository must observe:
 - **Python**: Enforced via Ruff (`pyproject.toml`). Line length is 120 columns. Google docstrings required.
 - **Licensing**: All new files must contain the Apache-2.0 SPDX header:
   ```python
-  # Copyright (c) 2026, GaussianSplat Contributors.
+  # Copyright (c) 2026, AutoMetashape Contributors.
   # All rights reserved.
   #
   # SPDX-License-Identifier: Apache-2.0
@@ -39,13 +39,10 @@ Autonomous agents operating on this repository must observe:
 
 ---
 
-## 4. Unit Testing
+## 4. Testing & Validation
 
-- Unit tests reside co-located with subsystems in `source/extensions/*/test/`.
-- Run pytest:
-  ```bash
-  python -m pytest source/extensions/gaussian.splat/test
-  ```
+- All skills must pass validation via `python tools/skills/cli.py check`.
+- License compliance is verified via `python tools/check_licenses.py`.
 - Tests must pass the 4-question gate defined in `skills/developer/test-audit/SKILL.md`.
 
 ---
@@ -55,3 +52,4 @@ Autonomous agents operating on this repository must observe:
 - **Compile / Setup**: Run `build.bat` (Windows) or `./build.sh` (Linux).
 - **Format Code**: Run `format_code.bat` (Windows) or `./format_code.sh` (Linux).
 - **Skill Validation**: Run `python tools/skills/cli.py check`.
+- **License Check**: Run `python tools/check_licenses.py`.

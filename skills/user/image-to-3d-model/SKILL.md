@@ -9,21 +9,21 @@ owners:
 
 # High-Precision 3D Photogrammetry & Architectural Reconstruction
 
-Autonomous end-to-end photogrammetry pipeline transforming raw image folders (drone surveys, architectural captures, ground inspections) into high-density textured 3D models (`.obj`, `.mtl`, `.glb`) and native Agisoft Metashape Professional projects (`.psx`).
+Autonomous end-to-end photogrammetry pipeline transforming raw image folders (drone surveys, architectural captures, ground inspections) into high-density textured 3D models (`.obj`, `.mtl`, `.glb`), GeoTIFF orthomosaic maps (`.tif`, `.tfw`), and native Agisoft Metashape Professional projects (`.psx`).
 
 ---
 
 ## When To Use
 
 Use this skill when:
-- The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture.
+- The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture or a 2D orthomosaic map.
 - Images are located across the main folder and nested subfolders (e.g., multi-drone surveys, multi-day flights, or separate camera sessions): automatically isolates each subfolder into an independent chunk, solves separate sensor calibrations, and registers them via Point-Based RANSAC ICP to eliminate barometric altitude offsets and ghosting walls.
 - Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Automatic blurry image rejection is needed: automatically runs `chunk.analyzeImages()` and disables out-of-focus or motion-blurred photos ($<0.5$ quality index) to protect bundle adjustment accuracy.
-- Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) to minimize manual steps to zero.
+- Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) for buildings, or `--no-crop` for complete aerial terrain surveys.
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
 - Calibrating rolling shutter distortion on consumer drone CMOS sensors and closing localized window openings.
-- Requiring optimized meshes (600,000 / 600K faces limit default) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
+- Requiring optimized meshes (600K faces for buildings, 5M faces for terrain maps) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
 
 Do not use this skill when:
 - Synthesizing 3D models from single images, sketches, or text prompts without multi-view photographic overlap.
@@ -35,15 +35,16 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Recursive Ingestion & EXIF Metadata<br/>(Loads all standard raster, drone RAW, and thermal formats)"]
+    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Recursive Ingestion & EXIF Metadata<br/>(Loads standard raster, drone RAW, and thermal formats)"]
     B --> C["2. Image Sharpness Estimation & Filtering<br/>(chunk.analyzeImages: auto-disables blurry photos < 0.5)"]
-    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Exclude Stationary, Guided Off, Adaptive Fitting)"]
-    D --> E["4. Lens Optimization & Rolling Shutter Compensation<br/>(Regularized Shutter + Gradual Selection)"]
-    E --> F["5. Bounding Box Cropping<br/>(gps-square Default: Camera Square + Tie-Point Altitude Bounds)"]
+    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Adaptive Fitting)"]
+    D --> E["4. Multi-Flight Chunk Registration<br/>(Point-Based RANSAC ICP with Camera/GPS Fallback)"]
+    E --> F["5. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     F --> G["6. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
-    G --> H["7. Arbitrary Surface Meshing<br/>(DepthMapsData, 600K Face Limit, Level 30 Hole Closing)"]
-    H --> I["8. 16-Page 8K Photogrammetric Texture Atlas<br/>(Mosaic Blending, Hole Filling, Ghosting Filter, Lossless TIFF)"]
-    I --> J["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• building_reconstruction.psx (Editable in GUI)"]
+    G --> H["7. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 5M Faces, Level 30 Hole Closing)"]
+    H --> I["8. Photogrammetric Texture Atlas<br/>(Building: 16-page 8K | Map: 4-page 8K, Lossless TIFF)"]
+    I --> J["9. GeoTIFF Orthomosaic<br/>(Map Preset or --ortho: orthomosaic.tif + tfw)"]
+    J --> K["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• orthomosaic.tif (Map)<br/>• building_reconstruction.psx (Editable in GUI)"]
 ```
 
 ### 1. Ingestion & Workflow Presets
@@ -58,9 +59,16 @@ AutoMetashape provides two purpose-built workflow presets:
 # Map Preset (5M faces, 4-page 8K, no crop, GeoTIFF orthomosaic):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --preset map
 
+# Explicit Parameter Override (overrides preset defaults):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --preset map --faces 2500000 --texture-pages 8
+
 # Resume from existing project checkpoint (default restarts fresh from scratch):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --resume
 ```
+
+> [!NOTE]
+> **Parameter Override Precedence**:
+> When an explicit CLI argument (or GUI input) is provided for `--faces`, `--texture-pages`, `--crop-method`, or `--ortho`, it takes immediate precedence over the preset default values.
 
 > [!NOTE]
 > The pipeline strictly defaults to:
@@ -81,9 +89,10 @@ AutoMetashape provides two purpose-built workflow presets:
 > - **Auto-Cropping Default (`gps-square`)**: Calculates the smallest enclosing horizontal square of all camera GPS poses, with altitude bounded by $[\min, \max]$ tie points inside the square.
 > - **Depth Maps & Meshing**:
 >   - **Quality**: `Medium` (`downscale=4`) depth maps with `ModerateFiltering`.
->   - **Polygon Count (600K Faces)**: Optimized 600,000 face limit for lightweight responsiveness across CAD, Blender, and web viewports.
+>   - **Polygon Count**: 600,000 faces limit for Building preset; 5,000,000 faces limit for Map preset.
 >   - **Hole Closing**: Automatically applies `closeHoles(level=30)` to seal planar window and facade openings.
 > - **Lossless Texture Atlases**: 16-page 8K (8192×8192) TIFF mosaic photographic blending with hole filling (`fill_holes=True`) and ghosting filter (`ghosting_filter=True`).
+> - **GeoTIFF Orthomosaic**: Surface mesh-projected mosaic blending with BigTIFF LZW compression, ESRI `.tfw` world file, stored directly in `.psx` chunk.
 
 ### Multi-Flight & Multi-Drone Alignment (Multi-Chunk Point-Based ICP)
 When images are partitioned into multiple subfolders (e.g., `Flight_1` with 2,000 photos and `Flight_2` with 110 photos, or captures from different drones/dates), standard single-chunk alignment often produces **holes, vertical stepping, and duplicate ghost walls** due to:
@@ -95,7 +104,8 @@ To eliminate these issues completely, AutoMetashape provides automated **Multi-C
 - **Automated Subfolder Ingestion**: Discovers image-bearing subfolders (excluding `model*` output directories) and assigns each to an independent Metashape chunk (`Flight_1_<name>`, `Flight_2_<name>`).
 - **Independent Calibration & Alignment**: Each flight chunk solves its own camera bundle adjustment, internal distortion parameters ($f, c_x, c_y, k_1..k_4, p_1, p_2$), and sparse tie points without cross-contamination.
 - **Point-Based RANSAC ICP Registration**: Uses `doc.alignChunks(method=0, fit_scale=True)` to register all secondary flight chunks onto the anchor flight (the flight with the largest aligned camera count). Because it aligns strictly based on physical 3D tie points and estimates scale, it completely ignores erroneous consumer GPS barometric altitudes.
-- **Unified Reconstruction Merge**: Executes `doc.mergeChunks(chunks=..., merge_tiepoints=True)` with automatic fallback to transforms preservation. The resulting unified chunk (`Production_Reconstruction`) retains distinct sensor calibration groups for each drone and proceeds through unified Depth Maps, 600K meshing, and 8K texture baking.
+- **Camera/GPS Fallback**: If point-based ICP fails due to minimal sparse point overlap, automatically falls back to camera position reference alignment (`doc.alignChunks(method=1)`).
+- **Unified Reconstruction Merge**: Executes `doc.mergeChunks(chunks=..., merge_tiepoints=True)` with automatic fallback to transforms preservation. The resulting unified chunk (`Production_Reconstruction`) retains distinct sensor calibration groups for each drone and proceeds through unified Depth Maps, meshing, and 8K texture baking.
 
 CLI control:
 ```powershell
@@ -118,63 +128,51 @@ CLI control:
 - **Gradual Selection**: Prunes high reprojection error ($>0.4\text{ px}$) and high reconstruction uncertainty ($>15$) tie points before re-optimizing lens parameters (disable via `--no-filter-tiepoints` to benchmark raw uncleaned bundle adjustment).
 
 ### 4. Automated Bounding Box Cropping Strategies
-Metashape's default bounding box (`chunk.region`) encompasses all tie points, including distant horizon, background trees, and surrounding streets. The pipeline provides two automated cropping strategies (`--crop-method`):
+The pipeline provides three automated cropping strategies (`--crop-method`):
 
-#### Method 1: `gps-square` (Camera GPS Square (Horizontal Only, Vertical Uncropped) - Default)
+#### Method 1: `gps-square` (Camera GPS Square (Horizontal Only, Vertical Uncropped) - Default for Building)
 - **Principle**: Calculates the smallest enclosing horizontal square $(X, Y)$ containing all camera GPS positions. Preserves the full vertical ($Z$) bounds uncropped to guarantee rooftops, antennas, and foundation levels are never sliced.
 - **Outlier Immunity**: Applies robust Median Absolute Deviation (MAD) to camera positions so distant takeoff/landing spots do not inflate the square.
-- **Zero-Manual Step**: 100% guaranteed not to clip any architectural elements because the drone flew outside or above them, eliminating the need for manual bounding box adjustments.
+- **Zero-Manual Step**: 100% guaranteed not to clip any architectural elements because the drone flew outside or above them.
 
-#### Method 2: `structure` (Optical Ray Convergence)
+#### Method 2: `none` (No Bounding Box Crop - Default for Map)
+- **Principle**: Retains the entire surveyed spatial extent, preserving boundary roads, terrain edges, perimeter vegetation, and all survey landmarks without clipping.
+
+#### Method 3: `structure` (Optical Ray Convergence)
 - **Principle**: Computes the least-squares 3D line-of-sight intersection of all camera optical viewing axes using Iteratively Reweighted Least Squares (IRLS).
-- **Outlier Immunity**: Prunes outlier viewing angles (e.g. when 10–20% of cameras focus on secondary points), locking firmly onto the main structure walls.
-- **Best For**: Pure orbit flights and tight building facade scans where you want the box cropped directly onto the exterior walls.
+- **Outlier Immunity**: Prunes outlier viewing angles, locking firmly onto the main structure walls. Best for orbit flights and facade captures without GPS.
 
-#### Method 3: `manual` (Manual Bounding Box in Metashape Pro)
-- **Principle**: Skips automatic cropping completely. Saves the `.psx` project after camera alignment and pauses execution.
-- **Workflow**:
-  1. Open the project in Agisoft Metashape Pro GUI (via the '🚀 Open in Metashape GUI' button in AutoMetashape Studio or directly).
-  2. Use the 'Resize Region' and 'Rotate Region' tools in Metashape to manually frame your target structure.
-  3. Save the project inside Metashape Pro (Ctrl+S).
-  4. Return to the AutoMetashape Studio GUI and click '▶️ Continue Reconstruction (Manual Crop Done)' (or press Enter in terminal).
-  5. The pipeline reloads your manual bounding box and proceeds with GPU Depth Maps and 600K meshing.
-
-```powershell
-# Run with Optical Ray Convergence (tight wall crop):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --crop-method structure
-
-# Run with Manual Bounding Box in Metashape Pro:
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --crop-method manual
-```
+#### Method 4: `manual` (Manual Bounding Box in Metashape Pro)
+- **Principle**: Saves `.psx` project after camera alignment and pauses. The user adjusts the region box in Metashape Pro GUI, saves (`Ctrl+S`), and clicks continue in AutoMetashape Studio.
 
 ### 5. GPU Multi-View Stereo (MVS) Depth Maps
-- Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs strictly within the cropped bounding box.
-- **Default**: `Medium` quality (`downscale=4`) with `ModerateFiltering` to filter high-frequency sensor noise while preserving structural wall boundaries.
+- Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs strictly within the designated bounding box.
+- **Default**: `Medium` quality (`downscale=4`) with `ModerateFiltering` to filter high-frequency sensor noise while preserving sharp architectural edges.
 
 ### 6. Arbitrary Surface Polygonal Meshing & Hole Closing
 - Fuses visibility-consistent depth maps into a continuous polygonal mesh using `DataSource.DepthMapsData`.
-- Targets **600,000 faces limit (600K)** by default to provide high detail while keeping mesh file sizes lightweight (~130 MB).
-- Automatically executes `chunk.model.closeHoles(level=30)` to seal window voids and planar gaps without bounding-box ballooning.
-- **Automatic GPU Driver Fallback**: Wrapped in an automated exception handler: if an internal CUDA driver exception occurs during octree meshing on next-gen architectures (such as NVIDIA Blackwell / RTX 5080), it seamlessly retries on CPU without failing the pipeline, then restores GPU acceleration for texture baking.
+- Targets **600,000 faces (600K)** by default for Building preset; **5,000,000 faces (5M)** for Map preset.
+- Automatically executes `chunk.model.closeHoles(level=30)` to seal window voids and planar gaps.
+- **Automatic GPU Driver Fallback**: Wrapped in an automated exception handler: if an internal CUDA driver exception occurs during octree meshing on next-gen architectures, it seamlessly retries on CPU without failing the pipeline, then restores GPU acceleration for texture baking.
 
-### 7. 16-Page 8K Photographic Texture Baking & Lossless TIFF Export
-- Computes optimized UV parameterization (`GenericMapping` across 16 texture pages).
+### 7. Photogrammetric Texture Baking & Lossless TIFF Export
+- Computes optimized UV parameterization (`GenericMapping` across 16 texture pages for Building, 4 pages for Map).
 - Projects photographic pixels from original frames using `MosaicBlending` with `ghosting_filter=True` and `fill_holes=True`.
-- Exports texture maps in **lossless uncompressed TIFF (`.tif`) format** at **8192×8192 (8K)** resolution across 16 texture atlas pages ($16 \times 8192 \times 8192$).
+- Exports texture maps in **lossless uncompressed TIFF (`.tif`) format** at **8192×8192 (8K)** resolution.
 
-### 8. Dedicated Deliverables Folder & GUI Modification Workflow
+### 8. GeoTIFF Orthomosaic Generation & Export (Step 7b)
+- Enabled automatically in Map preset or via `--ortho`.
+- Builds orthomosaic using `chunk.buildOrthomosaic(surface_data=ModelData, blending_mode=MosaicBlending)`.
+- Exports a geo-referenced BigTIFF raster with LZW compression and ESRI world file (`orthomosaic.tif` + `orthomosaic.tfw`).
+- Saves orthomosaic directly inside the native `.psx` project for instant viewing in Metashape Pro GUI.
+- Protected by non-fatal exception guard to guarantee mesh and texture deliverables are preserved even if projection coordinate errors occur.
+
+### 9. Dedicated Deliverables Folder & GUI Modification Workflow
 All deliverables and project files are automatically placed directly into `<path_to_images>/model/`:
 - `model.obj` + `model.mtl` + `model.tif`: Industry-standard mesh format with uncompressed 8K TIFF texture atlas compatible with all DCC/CAD tools.
 - `model.glb`: Binary glTF format with embedded PBR textures for instant web and 3D viewer rendering.
-- `building_reconstruction.psx` + `building_reconstruction.files/`: Native Metashape Professional project retaining all camera alignments, depth maps, and UV textures.
-
-> [!TIP]
-> **Direct GUI Inspection & Mesh Modification**:
-> The native Metashape project (`building_reconstruction.psx`) is saved inside the `model/` folder at every milestone. You can double-click and open it directly in the **Agisoft Metashape GUI** at any time to:
-> - Visually inspect camera alignments, tie points, and dense geometry.
-> - Use selection tools to delete stray terrain, cars, or background vegetation.
-> - Sculpt, smooth, or close custom holes on the mesh.
-> - Once satisfied, save (`Ctrl+S`) in the GUI. You can then instantly re-export updated 3D models using the companion `photogrammetry-export` skill (`scripts/metashape_export.py`) without re-running matching or depth maps!
+- `orthomosaic.tif` + `orthomosaic.tfw`: High-resolution GeoTIFF orthomosaic with coordinate world file (Map preset).
+- `building_reconstruction.psx` + `building_reconstruction.files/`: Native Metashape Professional project retaining all camera alignments, depth maps, UV textures, and orthomosaic layers.
 
 ---
 
@@ -183,10 +181,11 @@ All deliverables and project files are automatically placed directly into `<path
 Reconstruction must satisfy the following quality criteria:
 1. **Camera Quality Filtering**: All active cameras must have sharpness quality $\ge 0.50$ (blurry frames disabled).
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
-3. **Target Bounding Box**: `chunk.region` must be tightly centered on the surveyed area, discarding $\ge 70\%$ of horizon background volume.
-4. **Surface Topology**: Arbitrary surface mesh targeting 600,000 polygon faces, free from degenerate zero-area faces.
-5. **Texture Atlas**: Resolution $\ge 8192\times 8192$ across 16 pages with valid UV mapping, hole filling, and zero unmapped black voids.
-6. **Project File**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
+3. **Target Bounding Box**: `chunk.region` must be appropriately configured (`gps-square` tightly enclosing structures, or uncropped for terrain mapping).
+4. **Surface Topology**: Arbitrary surface mesh targeting specified face count (600K or 5M), free from degenerate zero-area faces.
+5. **Texture Atlas**: Resolution $\ge 8192\times 8192$ with valid UV mapping, hole filling, and zero unmapped black voids.
+6. **Orthomosaic (Map Mode)**: GeoTIFF file exported with accompanying `.tfw` world file and valid spatial resolution.
+7. **Project File**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
 
 ---
 

@@ -12,14 +12,21 @@ We gratefully acknowledge the following upstream projects:
 
 ---
 
-## 2. gsplat (Berkeley / Nerfstudio)
+## 2. Agisoft Metashape Professional Python API
+- **Upstream**: [Agisoft Metashape](https://www.agisoft.com/)
+- **License**: Commercial / Proprietary API runtime
+- **Notice**: Multi-view stereo depth maps, camera bundle adjustment, rolling shutter compensation, mosaic texture blending, and GeoTIFF orthomosaic export.
+
+---
+
+## 3. gsplat (Berkeley / Nerfstudio)
 - **Upstream**: [nerfstudio-project/gsplat](https://github.com/nerfstudio-project/gsplat)
 - **License**: Apache-2.0
 - **Notice**: Differentiable 2D/3D Gaussian rasterization and CUDA kernel optimizations.
 
 ---
 
-## 3. 2D Gaussian Splatting (2DGS)
+## 4. 2D Gaussian Splatting (2DGS)
 - **Upstream**: [hbb1/2d-gaussian-splatting](https://github.com/hbb1/2d-gaussian-splatting)
 - **Authors**: Binbin Huang, Zehao Yu, Anpei Chen, Andreas Geiger, Shenghua Gao (ETH Zurich)
 - **License**: Apache-2.0
@@ -27,7 +34,7 @@ We gratefully acknowledge the following upstream projects:
 
 ---
 
-## 4. SuGaR: Surface-Aligned Gaussian Splatting
+## 5. SuGaR: Surface-Aligned Gaussian Splatting
 - **Upstream**: [Anttwo/SuGaR](https://github.com/Anttwo/SuGaR)
 - **Authors**: Antoine Guédon, Vincent Lepetit (LIGM, Ecole des Ponts ParisTech)
 - **License**: Apache-2.0
@@ -35,7 +42,7 @@ We gratefully acknowledge the following upstream projects:
 
 ---
 
-## 5. COLMAP
+## 6. COLMAP
 - **Upstream**: [colmap/colmap](https://github.com/colmap/colmap)
 - **Authors**: Johannes L. Schönberger, Jan-Michael Frahm
 - **License**: BSD-3-Clause

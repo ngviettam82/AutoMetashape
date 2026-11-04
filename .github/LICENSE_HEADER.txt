@@ -1,4 +1,4 @@
-Copyright (c) 2026, GaussianSplat Contributors.
+Copyright (c) 2026, AutoMetashape Contributors.
 All rights reserved.
 
 SPDX-License-Identifier: Apache-2.0
