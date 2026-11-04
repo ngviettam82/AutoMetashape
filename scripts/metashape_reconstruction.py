@@ -644,12 +644,12 @@ def run_reconstruction(
     filter_tiepoints: bool = True,
     depth_quality: str = "medium",
     depth_filtering: str = "moderate",
-    custom_faces: int = 600000,
-    texture_pages: int = 16,
+    custom_faces: int = None,
+    texture_pages: int = None,
     fill_holes: bool = True,
     ghosting_filter: bool = True,
     rebake_texture: bool = False,
-    crop_method: str = "gps-square",
+    crop_method: str = None,
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
     rolling_shutter: bool = True,
@@ -658,7 +658,7 @@ def run_reconstruction(
     resume: bool = False,
     multi_chunk: str = "auto",
     preset: str = None,
-    build_orthomosaic: bool = False,
+    build_orthomosaic: bool = None,
 ):
     t_start = time.time()
     if not output_dir:
