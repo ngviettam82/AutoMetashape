@@ -74,11 +74,13 @@ All production deliverables are automatically placed in `C:/path/to/your/images/
 - **⚡ Parameter Override Precedence**:
   - User-specified flags (`--faces`, `--texture-pages`, `--crop-method`, `--ortho`) take absolute precedence over preset defaults (e.g. `--preset map --faces 2500000 --texture-pages 8`).
 
-### 2. Multi-Flight & Multi-Drone Alignment (Point-Based RANSAC ICP)
+### 2. Multi-Flight & Multi-Drone Alignment (Camera/GPS Registration & Point ICP)
 - Standard photogrammetry often fails or produces duplicate ghost walls when combining multiple drone flights or separate cameras due to barometric GPS altitude drift (10–50m elevation offsets) and varying lens distortion.
 - AutoMetashape automatically detects nested flight subfolders (`flight_1/`, `flight_2/`, `oblique/`, `nadir/`), assigns each to an independent chunk, and solves sensor calibrations independently.
-- Automatically aligns secondary flight chunks to the anchor flight using **Point-Based RANSAC ICP** (`doc.alignChunks(method=0, fit_scale=True)`), completely ignoring faulty barometric GPS elevations.
-- Resilient fallback to Camera/GPS reference alignment if sparse tie point overlap is low.
+- **Camera/GPS-Based Registration (`method=2`, Default)**: Aligns secondary flight chunks to the anchor flight using camera reference coordinates, completely preventing 180-degree rotation flips on symmetric architectural structures.
+- **Point-Based RANSAC ICP Fallback (`method=0`)**: If camera reference coordinates are unavailable or degraded, automatically falls back to point-based ICP (`fit_scale=True`).
+- Configurable via `--chunk-align-method camera` (default) or `--chunk-align-method point`, also selectable in the desktop GUI studio.
+
 - Merges into a unified production reconstruction while maintaining separate sensor groups for each camera/drone.
 
 ### 3. Execution Lifecycle & Resilient Recovery
@@ -124,7 +126,7 @@ Recursively scans image folders and nested directories for all supported formats
 flowchart TD
     A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Ingestion & Quality Filtering<br/>(chunk.analyzeImages: auto-disables blurry photos < 0.5)"]
     B --> C["2. Camera Alignment & Bundle Adjustment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Adaptive Fitting)"]
-    C --> D["3. Multi-Flight Chunk Registration<br/>(Point-Based RANSAC ICP with Camera/GPS Fallback)"]
+    C --> D["3. Multi-Flight Chunk Registration<br/>(Camera/GPS method=2 with Point-Based ICP Fallback)"]
     D --> E["4. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     E --> F["5. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
     F --> G["6. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 5M Faces, Level 30 Hole Closing)"]
