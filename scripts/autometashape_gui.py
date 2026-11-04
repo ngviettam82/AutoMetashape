@@ -1254,8 +1254,8 @@ class AutoMetashapeStudio:
         _make_preset(
             "map",
             "Aerial Map & Orthomosaic",
-            "2M faces · 4-page 8K · No crop · Ortho TIFF",
-            "Full-extent mapping without cropping: 2M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
+            "5M faces · 4-page 8K · No crop · Ortho TIFF",
+            "Full-extent mapping without cropping: 5M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
         )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
@@ -1304,7 +1304,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_faces, values=["600000", "1000000", "500000", "2000000", "3000000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+        ttk.Combobox(grid, textvariable=self.var_faces, values=["500000", "600000", "1000000", "2000000", "3000000", "5000000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
 
         tk.Label(grid, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
@@ -1657,7 +1657,7 @@ class AutoMetashapeStudio:
             self.var_ortho.set(False)
         elif key == "map":
             self.var_align_quality.set("medium")
-            self.var_faces.set("2000000")
+            self.var_faces.set("5000000")
             self.var_tex_pages.set("4")
             self.var_crop.set("none")
             self.var_depth_quality.set("medium")

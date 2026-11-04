@@ -669,7 +669,7 @@ def run_reconstruction(
     # Preset configuration handling
     if preset == "map":
         crop_method = "none"
-        custom_faces = 2000000
+        custom_faces = 5000000
         texture_pages = 4
         build_orthomosaic = True
     elif preset == "building":
@@ -684,7 +684,8 @@ def run_reconstruction(
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
     print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
-    print(f"  Target Mesh Faces:  {custom_faces:,} ({custom_faces//1000}K)")
+    face_label = f"{custom_faces // 1_000_000}M" if custom_faces >= 1_000_000 and custom_faces % 1_000_000 == 0 else f"{custom_faces // 1000}K"
+    print(f"  Target Mesh Faces:  {custom_faces:,} ({face_label})")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}")
     print(f"  Orthomosaic:        {'ENABLED (GeoTIFF + .psx)' if build_orthomosaic else 'DISABLED'}")
@@ -1249,7 +1250,7 @@ if __name__ == "__main__":
         "--preset",
         choices=["building", "map"],
         default=None,
-        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
+        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (5M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
     )
     parser.add_argument(
         "--no-crop",
