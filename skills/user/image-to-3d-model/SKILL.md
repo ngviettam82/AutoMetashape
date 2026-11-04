@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Automatically isolates multi-drone subfolders through independent chunk Camera/GPS registration (method=2) with Point-Based RANSAC ICP fallback, filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
+description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Defaults to robust single-chunk global bundle adjustment (--multi-chunk disable) with optional multi-chunk alignment (--multi-chunk auto). Filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
 audience: user
 status: stable
 owners:
@@ -17,7 +17,7 @@ Autonomous end-to-end photogrammetry pipeline transforming raw image folders (dr
 
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests a 3D model with realistic photographic texture or a 2D orthomosaic map.
-- Images are located across the main folder and nested subfolders (e.g., multi-drone surveys, multi-day flights, or separate camera sessions): automatically isolates each subfolder into an independent chunk, solves separate sensor calibrations, and registers them via Camera/GPS-based alignment (method=2) with Point-Based RANSAC ICP fallback to eliminate barometric altitude offsets and ghosting walls without symmetric inversions.
+- Images are located across the main folder and nested subfolders: recursively loads all images into a single global bundle adjustment by default (--multi-chunk disable) to guarantee seamless, drift-free alignment and eliminate chunk merging artifacts, with optional multi-chunk isolation (--multi-chunk auto).
 - Image inputs include any Metashape-supported format: standard raster formats (`.jpg`, `.png`, `.tif`, `.webp`, `.jp2`, `.jxl`, `.exr`), drone and camera RAW formats (`.dng`, `.cr2`, `.cr3`, `.nef`, `.arw`, `.iiq`, `.3fr`), or radiometric thermal formats (`.seq`, `.ara`).
 - Automatic blurry image rejection is needed: automatically runs `chunk.analyzeImages()` and disables out-of-focus or motion-blurred photos ($<0.5$ quality index) to protect bundle adjustment accuracy.
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) for buildings, or `--no-crop` for complete aerial terrain surveys.
@@ -100,7 +100,7 @@ When images are partitioned into multiple subfolders (e.g., `Flight_1` with 2,00
 2. **Barometric Altitude Inconsistencies**: Consumer drone GPS altitudes often drift by 10 to 50 meters between flights (or report negative elevations), causing vertical offsets between flight models.
 3. **Stereo Depth Discrepancies**: Height and calibration offsets cause MVS stereo matching to reject overlapping walls as outliers, carving massive holes in facade geometry.
 
-To eliminate these issues completely, AutoMetashape provides automated **Multi-Chunk Alignment** (`--multi-chunk auto`, enabled by default):
+To prevent false alignment and merge distortion, AutoMetashape defaults to **Single-Chunk Processing** (`--multi-chunk disable`), aggregating all photos from all subfolders into one global bundle adjustment. Multi-chunk alignment is available as an opt-in mode (`--multi-chunk auto`):
 - **Automated Subfolder Ingestion**: Discovers image-bearing subfolders (excluding `model*` output directories) and assigns each to an independent Metashape chunk (`Flight_1_<name>`, `Flight_2_<name>`).
 - **Independent Calibration & Alignment**: Each flight chunk solves its own camera bundle adjustment, internal distortion parameters ($f, c_x, c_y, k_1..k_4, p_1, p_2$), and sparse tie points without cross-contamination.
 - **Camera/GPS-Based Registration (`method=2`)**: Uses `doc.alignChunks(method=2, fit_scale=False)` as the primary registration strategy to register secondary flight chunks onto the anchor flight using camera reference coordinates. Because it relies on absolute georeferenced coordinates, it is completely immune to 180-degree rotation and opposite-facade flipping on symmetric architectural structures.
@@ -109,11 +109,11 @@ To eliminate these issues completely, AutoMetashape provides automated **Multi-C
 
 CLI control:
 ```powershell
-# Default: auto-detects multi-subfolder captures and enables multi-chunk alignment
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk auto
+# Default: single-chunk global bundle adjustment across all subfolders
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>"
 
-# Force single-chunk processing (ignoring subfolder boundaries):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk disable
+# Opt-in: enable multi-chunk subfolder alignment
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk auto
 ```
 
 ### Multi-Project Sequential Batch Processing (Agent Loop)
@@ -125,7 +125,7 @@ When a parent directory contains multiple independent survey projects (e.g., `Su
   1. **Enumerate & Inspect**: List all project subdirectories in the parent folder, verifying image counts and format types.
   2. **Process Sequentially (One Project at a Time)**:
      - Run `scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset <building|map>`.
-     - Let AutoMetashape handle any internal flight subfolders automatically via multi-chunk alignment.
+     - AutoMetashape recursively loads all subfolder images into a single global bundle adjustment by default, ensuring zero chunk-merging false alignment.
   3. **Verification Gate**:
      - Check `<project>/model/` contains: `model.obj`, `model.mtl`, 8K `model.tif`, `model.glb`, and `building_reconstruction.psx`.
      - If Map mode was selected, verify `orthomosaic.tif` and `orthomosaic.tfw` exist.

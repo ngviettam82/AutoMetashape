@@ -656,7 +656,7 @@ def run_reconstruction(
     close_holes: bool = True,
     pause_after_crop: bool = False,
     resume: bool = False,
-    multi_chunk: str = "auto",
+    multi_chunk: str = "disable",
     chunk_align_method: str = "camera",
     preset: str = None,
     build_orthomosaic: bool = None,
@@ -1329,8 +1329,8 @@ if __name__ == "__main__":
     parser.add_argument(
         "--multi-chunk",
         choices=["auto", "force", "disable"],
-        default="auto",
-        help="Multi-chunk alignment mode: 'auto' (automatically create independent chunks for each image subfolder/flight and register them via Camera/GPS or point-based ICP), 'force', or 'disable' (default: auto)",
+        default="disable",
+        help="Multi-chunk alignment mode: 'disable' (default: load all images into a single unified chunk for global bundle adjustment), 'auto' (create independent chunks for each image subfolder/flight and register them), or 'force'",
     )
     parser.add_argument(
         "--chunk-align-method",

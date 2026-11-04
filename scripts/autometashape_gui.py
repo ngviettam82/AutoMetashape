@@ -697,7 +697,7 @@ class AutoMetashapeStudio:
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="medium")
         self.var_depth_filtering = tk.StringVar(value="moderate")
-        self.var_multi_chunk = tk.StringVar(value="auto")
+        self.var_multi_chunk = tk.StringVar(value="disable")
         self.var_chunk_align_method = tk.StringVar(value="camera")
 
         self.var_rolling = tk.BooleanVar(value=True)
@@ -1322,7 +1322,7 @@ class AutoMetashapeStudio:
 
         # Row 3: Multi-Chunk Mode & Chunk Alignment Method
         tk.Label(grid, text="Multi-Chunk:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=2, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_multi_chunk, values=["auto", "force", "disable"], state="readonly", width=10).grid(row=2, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid, textvariable=self.var_multi_chunk, values=["disable", "auto", "force"], state="readonly", width=10).grid(row=2, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid, text="Chunk Align:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=2, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_chunk_align_method, values=["camera", "point"], state="readonly", width=8).grid(row=2, column=3, padx=(4, 14), pady=3)
@@ -1975,7 +1975,7 @@ class AutoMetashapeStudio:
             cmd.append("--ortho")
         if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("building", "map"):
             cmd.extend(["--preset", self.selected_preset_key])
-        if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "auto":
+        if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "disable":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":
             cmd.extend(["--chunk-align-method", self.var_chunk_align_method.get()])

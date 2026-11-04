@@ -3,8 +3,8 @@
 ### Scenario 1: Multi-Drone Architectural Building Reconstruction
 - **Query**: "Here is my drone image folder at `data/survey/building_a` containing multiple flight subfolders. Reconstruct a 3D model with 16-page 8K textures."
 - **Expected behavior**:
-  - Automatically identifies separate flight subfolders, initializes independent chunks per flight, and calibrates sensors independently.
-  - Registers flight chunks using Camera/GPS-based registration (`doc.alignChunks(method=2)`) with automatic Point-Based RANSAC ICP fallback.
+  - Automatically loads all photos across subfolders into unified global bundle adjustment (default `--multi-chunk disable` ensures zero chunk-merging false alignment artifacts).
+
   - Automatically calculates `gps-square` horizontal bounding box while preserving full vertical elevation range.
   - Builds CUDA MVS depth maps and fuses into 600,000 polygon faces with Level-30 planar hole closing.
   - Bakes a 16-page 8K ($16 \times 8192 \times 8192$) lossless TIFF texture atlas with mosaic blending, hole filling, and ghosting suppression.
@@ -40,10 +40,10 @@
 - **Query**: "There is a folder at `D:/Surveys/Batch_March`, containing subfolders that are each an independent project. Loop workflow for each project using the default building config, process every project, and check every project that has been done to see if there is any wrong. Must process each project one at a time, then once the project is done and verified to be correct, process the next project, until all projects are done. List this folder for the projects."
 - **Expected behavior**:
   - Enumerate all immediate subfolders inside `D:/Surveys/Batch_March` and present a structured list of detected projects with photo counts to the user.
-  - Sequentially process Project 1 with `scripts/metashape_reconstruction.py --images "D:/Surveys/Batch_March/<Project_1>"`. If `Project_1` contains multiple flight subfolders, AutoMetashape automatically applies multi-chunk alignment internally.
+  - Sequentially process Project 1 with `scripts/metashape_reconstruction.py --images "D:/Surveys/Batch_March/<Project_1>"`. All subfolder images within `Project_1` are solved in a single global bundle adjustment by default (`--multi-chunk disable`), avoiding chunk merging errors.
   - Verify Project 1 deliverables: confirm `model.obj`, `model.mtl`, 16-page 8K `model.tif`, `model.glb`, and `building_reconstruction.psx` exist and are non-empty; verify registration $\ge 90\%$.
   - Only after Project 1 verification passes, advance to Project 2 and repeat.
   - After all projects finish, output a comprehensive summary table with deliverable paths and quality metrics.
 - **Pass/fail criteria**:
-  - Pass: All projects processed sequentially; each project verified before moving to the next; internal flight subfolders handled via multi-chunk alignment; zero project collisions.
+  - Pass: All projects processed sequentially; each project verified before moving to the next; subfolder photos aligned in global bundle adjustment; zero project collisions.
   - Fail: Passing the batch root folder directly into `--images` (which erroneously fuses separate projects together); proceeding to next project without verifying the current one; unhandled project crash halting subsequent projects without diagnosis.
