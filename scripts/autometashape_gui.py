@@ -2123,6 +2123,8 @@ class AutoMetashapeStudio:
                 self._update_stepper_mode("recon", 4, "Fusing Surface Mesh & Closing Holes")
             elif "[6/7]" in line or "[6/6]" in line:
                 self._update_stepper_mode("recon", 5, "Baking Texture Atlas")
+            elif "[7b/7]" in line or "generating orthomosaic" in l or "geotiff orthomosaic" in l:
+                self._update_stepper_mode("recon", 6, "Building & Exporting GeoTIFF Orthomosaic")
             elif "[7/7]" in line or "[export]" in l or "exporting final production assets" in l:
                 self._update_stepper_mode("recon", 6, "Exporting GLB, OBJ, TIFF & PSX")
             elif "[success]" in l and "entire pipeline finished" in l:
@@ -2156,7 +2158,7 @@ class AutoMetashapeStudio:
                         self._on_finished(success=False, user_cancelled=False)
                 else:
                     tag = None
-                    if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]", "[EXPORT]"]):
+                    if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7]", "[7b/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]", "[EXPORT]"]):
                         tag = "stage"
                     elif "[SUCCESS]" in line or "[CHECKPOINT]" in line:
                         tag = "success"

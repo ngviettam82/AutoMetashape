@@ -666,14 +666,25 @@ def run_reconstruction(
     os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
-    # Preset configuration handling
+    # Preset configuration handling (only applied if parameters are not explicitly set)
     if preset == "map":
-        crop_method = "none"
-        custom_faces = 5000000
-        texture_pages = 4
-        build_orthomosaic = True
-    elif preset == "building":
-        pass
+        if crop_method is None:
+            crop_method = "none"
+        if custom_faces is None:
+            custom_faces = 5000000
+        if texture_pages is None:
+            texture_pages = 4
+        if build_orthomosaic is None:
+            build_orthomosaic = True
+    else:
+        if crop_method is None:
+            crop_method = "gps-square"
+        if custom_faces is None:
+            custom_faces = 600000
+        if texture_pages is None:
+            texture_pages = 16
+        if build_orthomosaic is None:
+            build_orthomosaic = False
 
     print("=========================================================================")
     preset_label = f" [{preset.upper()} PRESET]" if preset else ""
@@ -684,7 +695,15 @@ def run_reconstruction(
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
     print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
-    face_label = f"{custom_faces // 1_000_000}M" if custom_faces >= 1_000_000 and custom_faces % 1_000_000 == 0 else f"{custom_faces // 1000}K"
+    if custom_faces >= 1_000_000:
+        if custom_faces % 1_000_000 == 0:
+            face_label = f"{custom_faces // 1_000_000}M"
+        elif custom_faces % 100_000 == 0:
+            face_label = f"{custom_faces / 1_000_000:.1f}M"
+        else:
+            face_label = f"{custom_faces // 1000}K"
+    else:
+        face_label = f"{custom_faces // 1000}K"
     print(f"  Target Mesh Faces:  {custom_faces:,} ({face_label})")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}")
@@ -1155,40 +1174,43 @@ def run_reconstruction(
 
     # Step 7b: Orthomosaic Generation & GeoTIFF Export (Map Preset or --ortho)
     if build_orthomosaic:
-        has_ortho = chunk.orthomosaic is not None
-        if not has_ortho:
-            print(f"\n[7b/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
-            t_ortho = time.time()
-            proj = Metashape.OrthoProjection()
-            if chunk.crs:
-                proj.crs = chunk.crs
-            chunk.buildOrthomosaic(
-                surface_data=Metashape.DataSource.ModelData,
-                blending_mode=Metashape.BlendingMode.MosaicBlending,
-                fill_holes=fill_holes,
-                ghosting_filter=ghosting_filter,
-                projection=proj,
-            )
-            print(f"  [7b/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
-            chunk = save_checkpoint(doc, psx_out)
-            print(f"  [7b/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
-        else:
-            print(f"\n[7b/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+        try:
+            has_ortho = chunk.orthomosaic is not None
+            if not has_ortho:
+                print(f"\n[7b/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
+                t_ortho = time.time()
+                proj = Metashape.OrthoProjection()
+                if chunk.crs:
+                    proj.crs = chunk.crs
+                chunk.buildOrthomosaic(
+                    surface_data=Metashape.DataSource.ModelData,
+                    blending_mode=Metashape.BlendingMode.MosaicBlending,
+                    fill_holes=fill_holes,
+                    ghosting_filter=ghosting_filter,
+                    projection=proj,
+                )
+                print(f"  [7b/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+                chunk = save_checkpoint(doc, psx_out)
+                print(f"  [7b/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
+            else:
+                print(f"\n[7b/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
-        ortho_out = os.path.join(output_dir, "orthomosaic.tif")
-        print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
-        comp = Metashape.ImageCompression()
-        comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
-        comp.tiff_big = True
-        chunk.exportRaster(
-            path=ortho_out,
-            source_data=Metashape.DataSource.OrthomosaicData,
-            image_format=Metashape.ImageFormat.ImageFormatTIFF,
-            image_compression=comp,
-            save_world=True,
-            save_alpha=True,
-        )
-        print(f"  [7b/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+            ortho_out = os.path.join(output_dir, "orthomosaic.tif")
+            print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=ortho_out,
+                source_data=Metashape.DataSource.OrthomosaicData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+                save_alpha=True,
+            )
+            print(f"  [7b/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_ortho:
+            print(f"  [7b/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing with final project save...", flush=True)
 
     chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
@@ -1208,7 +1230,7 @@ if __name__ == "__main__":
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
-    parser.add_argument("--faces", type=int, default=600000, help="Target polygon face count (default: 600000 / 600K)")
+    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 600,000 for building, 5,000,000 for map)")
     parser.add_argument("--guided-matching", action="store_true", default=False, help="Enable guided image matching (default: False)")
     parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
@@ -1221,15 +1243,15 @@ if __name__ == "__main__":
     )
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", default=True, help="Disable CMOS rolling shutter regularized compensation (default: enabled)")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
-    parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages (default: 16)")
+    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 16 for building, 4 for map)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
     parser.add_argument(
         "--crop-method",
         choices=["gps-square", "structure", "manual", "none"],
-        default="gps-square",
-        help="Bounding box crop method: 'gps-square' (auto: smallest enclosing square of camera GPS poses), 'structure' (auto: optical ray convergence on main walls), 'manual' (skip auto-crop and pause for user to crop manually in Metashape Pro), or 'none' (default: gps-square)",
+        default=None,
+        help="Bounding box crop method: 'gps-square' (default for building), 'structure', 'manual', or 'none' (default for map)",
     )
     parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
     parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
@@ -1285,9 +1307,19 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    crop_method = "none" if args.no_crop else args.crop_method
+    is_map = args.preset == "map"
+    faces = args.faces if args.faces is not None else (5000000 if is_map else 600000)
+    texture_pages = args.texture_pages if args.texture_pages is not None else (4 if is_map else 16)
+
+    if args.no_crop:
+        crop_method = "none"
+    elif args.crop_method is not None:
+        crop_method = args.crop_method
+    else:
+        crop_method = "none" if is_map else "gps-square"
+
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
-    build_orthomosaic = args.build_orthomosaic or (args.preset == "map")
+    build_orthomosaic = args.build_orthomosaic or is_map
 
     run_reconstruction(
         images_dir=args.images,
@@ -1301,8 +1333,8 @@ if __name__ == "__main__":
         filter_tiepoints=args.filter_tiepoints,
         depth_quality=args.depth_quality,
         depth_filtering=args.depth_filtering,
-        custom_faces=args.faces,
-        texture_pages=args.texture_pages,
+        custom_faces=faces,
+        texture_pages=texture_pages,
         fill_holes=args.fill_holes,
         ghosting_filter=args.ghosting_filter,
         rebake_texture=args.rebake_texture,
