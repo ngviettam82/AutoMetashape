@@ -655,8 +655,10 @@ def run_reconstruction(
     rolling_shutter: bool = True,
     close_holes: bool = True,
     pause_after_crop: bool = False,
-    force_restart: bool = False,
+    resume: bool = False,
     multi_chunk: str = "auto",
+    preset: str = None,
+    build_orthomosaic: bool = False,
 ):
     t_start = time.time()
     if not output_dir:
@@ -664,17 +666,29 @@ def run_reconstruction(
     os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
+    # Preset configuration handling
+    if preset == "map":
+        crop_method = "none"
+        custom_faces = 2000000
+        texture_pages = 4
+        build_orthomosaic = True
+    elif preset == "building":
+        pass
+
     print("=========================================================================")
-    print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE [ARCHITECTURAL GRADE]")
+    preset_label = f" [{preset.upper()} PRESET]" if preset else ""
+    print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE{preset_label}")
     print("=========================================================================", flush=True)
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
     print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
     print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
     print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()}")
     print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
-    print(f"  Target Mesh Faces:  {custom_faces:,} (600K)")
+    print(f"  Target Mesh Faces:  {custom_faces:,} ({custom_faces//1000}K)")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
-    print(f"  Rolling Shutter:    {rolling_shutter} | Hole Closing: {close_holes}")
+    print(f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}")
+    print(f"  Orthomosaic:        {'ENABLED (GeoTIFF + .psx)' if build_orthomosaic else 'DISABLED'}")
+    print(f"  Execution Mode:     {'RESUME CHECKPOINT' if resume else 'RESTART FROM SCRATCH (DEFAULT)'}")
     print("=========================================================================", flush=True)
 
     # Enable all available NVIDIA / high-performance GPUs
@@ -699,8 +713,8 @@ def run_reconstruction(
 
     doc = Metashape.Document()
     resumed = False
-    if not force_restart and os.path.exists(psx_out):
-        print(f"\n[Checkpoint] Found existing project: {psx_out}", flush=True)
+    if resume and os.path.exists(psx_out):
+        print(f"\n[Checkpoint] Found existing project (--resume specified): {psx_out}", flush=True)
         try:
             files_dir = psx_out.replace(".psx", ".files")
             lock_file = os.path.join(files_dir, "lock")
@@ -748,6 +762,15 @@ def run_reconstruction(
             chunk = doc.addChunk()
             chunk.label = "Production_Reconstruction"
     else:
+        if not resume and os.path.exists(psx_out):
+            print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--resume not specified). Overwriting previous run in: {output_dir}", flush=True)
+            files_dir = psx_out.replace(".psx", ".files")
+            lock_file = os.path.join(files_dir, "lock")
+            if os.path.isfile(lock_file):
+                try:
+                    os.remove(lock_file)
+                except Exception:
+                    pass
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
@@ -1129,6 +1152,43 @@ def run_reconstruction(
     )
     print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
+    # Step 7b: Orthomosaic Generation & GeoTIFF Export (Map Preset or --ortho)
+    if build_orthomosaic:
+        has_ortho = chunk.orthomosaic is not None
+        if not has_ortho:
+            print(f"\n[7b/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
+            t_ortho = time.time()
+            proj = Metashape.OrthoProjection()
+            if chunk.crs:
+                proj.crs = chunk.crs
+            chunk.buildOrthomosaic(
+                surface_data=Metashape.DataSource.ModelData,
+                blending_mode=Metashape.BlendingMode.MosaicBlending,
+                fill_holes=fill_holes,
+                ghosting_filter=ghosting_filter,
+                projection=proj,
+            )
+            print(f"  [7b/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+            chunk = save_checkpoint(doc, psx_out)
+            print(f"  [7b/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
+        else:
+            print(f"\n[7b/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+
+        ortho_out = os.path.join(output_dir, "orthomosaic.tif")
+        print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+        comp = Metashape.ImageCompression()
+        comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+        comp.tiff_big = True
+        chunk.exportRaster(
+            path=ortho_out,
+            source_data=Metashape.DataSource.OrthomosaicData,
+            image_format=Metashape.ImageFormat.ImageFormatTIFF,
+            image_compression=comp,
+            save_world=True,
+            save_alpha=True,
+        )
+        print(f"  [7b/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+
     chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
@@ -1186,16 +1246,47 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     parser.add_argument(
+        "--preset",
+        choices=["building", "map"],
+        default=None,
+        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
+    )
+    parser.add_argument(
+        "--no-crop",
+        dest="no_crop",
+        action="store_true",
+        help="Disable bounding box cropping (reconstruct full uncropped scene)",
+    )
+    parser.add_argument(
+        "--ortho",
+        "--build-orthomosaic",
+        dest="build_orthomosaic",
+        action="store_true",
+        default=False,
+        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: False, enabled automatically in 'map' preset)",
+    )
+    parser.add_argument(
         "--multi-chunk",
         choices=["auto", "force", "disable"],
         default="auto",
         help="Multi-chunk alignment mode: 'auto' (automatically create independent chunks for each image subfolder/flight and register them via point-based ICP), 'force', or 'disable' (default: auto)",
     )
-    parser.add_argument("--force-restart", action="store_true", help="Force restart reconstruction from scratch, ignoring existing checkpoints")
+    parser.add_argument(
+        "--resume",
+        action="store_true",
+        default=False,
+        help="Resume reconstruction from existing project checkpoint if available (default: False; restarts from scratch by default)",
+    )
+    parser.add_argument(
+        "--force-restart",
+        action="store_true",
+        help="Deprecated: restart from scratch is now the default; use --resume to resume from checkpoint",
+    )
     args = parser.parse_args()
 
     crop_method = "none" if args.no_crop else args.crop_method
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
+    build_orthomosaic = args.build_orthomosaic or (args.preset == "map")
 
     run_reconstruction(
         images_dir=args.images,
@@ -1220,6 +1311,8 @@ if __name__ == "__main__":
         rolling_shutter=args.rolling_shutter,
         close_holes=args.close_holes,
         pause_after_crop=args.pause_after_crop,
-        force_restart=args.force_restart,
+        resume=args.resume,
         multi_chunk=args.multi_chunk,
+        preset=args.preset,
+        build_orthomosaic=build_orthomosaic,
     )

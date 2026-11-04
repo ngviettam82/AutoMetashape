@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs a high-precision, production-grade 3D textured mesh (.obj, .mtl, .glb) and native Agisoft Metashape project (.psx) from an image folder or aerial drone survey. Recursively scans images, routes multi-flight subfolders through independent multi-chunk Point-Based RANSAC ICP alignment, filters sub-0.5 blurry photos, applies GPU feature matching (40K keypoints, 25K tiepoints, stationary points excluded, adaptive fitting), CMOS rolling shutter compensation, bounding box cropping (camera GPS square or optical ray convergence), Medium MVS depth maps (Moderate filtering), surface meshing (600K face limit, hole closing), and 16-page 8K mosaic TIFF texture baking (hole filling, ghosting filter), saving deliverables to 'model/'. Supports all native Metashape raster, drone DNG RAW, camera RAW, and thermal imagery. Use when provided an image folder or drone survey to generate a 3D model."
+description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (2M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Automatically isolates multi-drone subfolders through independent chunk Point-Based RANSAC ICP alignment, filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
 audience: user
 status: stable
 owners:
@@ -46,10 +46,20 @@ flowchart TD
     I --> J["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• building_reconstruction.psx (Editable in GUI)"]
 ```
 
-### 1. Ingestion & Directory Convention
-When given an image directory, recursively load all images across the target folder and all subfolders. Run the autonomous pipeline without needing manual output flags (Medium alignment accuracy, 40K keypoint limit, 25K tiepoint limit, stationary points excluded, guided matching off, adaptive fitting on, rolling shutter compensation, Moderate depth filtering, 600K face limit, and `<images_dir>/model/` destination are default):
+### 1. Ingestion & Workflow Presets
+AutoMetashape provides two purpose-built workflow presets:
+1. **Building Preset (`--preset building`, Default)**: Optimized for architectural structures and vertical facades. Uses GPS-square horizontal bounding box cropping, 600K polygon face budget, and a 16-page 8K lossless texture atlas.
+2. **Map Preset (`--preset map`)**: Optimized for aerial site surveys, terrain mapping, and orthophoto generation. Reconstructs the full uncropped scene (`--no-crop`), generates a high-density 2,000,000 (2M) face terrain mesh, a 4-page 8K texture atlas, and exports a geo-referenced Orthomosaic GeoTIFF (`orthomosaic.tif` + `.tfw`) saved directly inside the native Metashape project.
+
 ```powershell
+# Building Preset (Default):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>"
+
+# Map Preset (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --preset map
+
+# Resume from existing project checkpoint (default restarts fresh from scratch):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --resume
 ```
 
 > [!NOTE]

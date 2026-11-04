@@ -559,7 +559,7 @@ class AutoMetashapeStudio:
         self.start_time: float = 0.0
         self.active_mode = "recon"
         self.adv_expanded = False
-        self.selected_preset_key = "architectural"
+        self.selected_preset_key = "building"
         self.current_layout_mode = None  # "2col" or "1col"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
 
@@ -601,7 +601,7 @@ class AutoMetashapeStudio:
         self._bind_global_mousewheel()
 
         # Activate default preset
-        self._select_preset("architectural")
+        self._select_preset("building")
 
         # Intercept window close for safe exit
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -707,7 +707,8 @@ class AutoMetashapeStudio:
         self.var_ghosting = tk.BooleanVar(value=True)
         self.var_pause_crop = tk.BooleanVar(value=False)
         self.var_rebake = tk.BooleanVar(value=False)
-        self.var_restart = tk.BooleanVar(value=False)
+        self.var_resume = tk.BooleanVar(value=False)
+        self.var_ortho = tk.BooleanVar(value=False)
 
         self.var_psx_path = tk.StringVar()
         self.var_export_out = tk.StringVar()
@@ -1245,22 +1246,16 @@ class AutoMetashapeStudio:
                 w.bind("<Leave>", lambda e, k=key: self._on_preset_hover(k, False))
 
         _make_preset(
-            "architectural",
-            "Architectural Standard (Default)",
+            "building",
+            "Building Reconstruction (Default)",
             "600K faces · 16-page 8K · GPS crop",
-            "Balanced production geometry with CMOS rolling shutter and mesh hole closing.",
+            "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
         )
         _make_preset(
-            "draft",
-            "Rapid Draft Preview",
-            "500K faces · 4-page 8K · Draft align",
-            "Fast ~15-minute run for quick alignment, boundary checking, and preliminary geometry.",
-        )
-        _make_preset(
-            "heritage",
-            "Ultra Heritage Detail",
-            "2M faces · 32-page 8K · Structure crop",
-            "High photographic fidelity for complex architectural facades, fine masonry, and monuments.",
+            "map",
+            "Aerial Map & Orthomosaic",
+            "2M faces · 4-page 8K · No crop · Ortho TIFF",
+            "Full-extent mapping without cropping: 2M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
         )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
@@ -1316,7 +1311,7 @@ class AutoMetashapeStudio:
 
         # Row 2: Crop, Depth Quality, Depth Filtering
         tk.Label(grid, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "structure", "manual", "none"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "none", "structure", "manual"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
@@ -1355,10 +1350,11 @@ class AutoMetashapeStudio:
         chk_row2.pack(fill=tk.X, pady=(2, 4))
         _c("Texture Hole Filling", self.var_fill_holes, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
         _c("Ghosting Filter", self.var_ghosting, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Force restart from scratch", self.var_restart, parent=chk_row2).pack(side=tk.LEFT)
+        _c("Generate Orthomosaic GeoTIFF", self.var_ortho, parent=chk_row2).pack(side=tk.LEFT)
 
         chk_row3 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_row3.pack(fill=tk.X, pady=(2, 4))
+        _c("Resume from checkpoint (skip completed steps)", self.var_resume, parent=chk_row3).pack(side=tk.LEFT, padx=(0, 10))
         _c("Pause after camera alignment for manual crop", self.var_pause_crop, parent=chk_row3).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
@@ -1646,7 +1642,7 @@ class AutoMetashapeStudio:
                 s.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
                 d.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
 
-        if key == "architectural":
+        if key == "building":
             self.var_align_quality.set("medium")
             self.var_faces.set("600000")
             self.var_tex_pages.set("16")
@@ -1658,30 +1654,20 @@ class AutoMetashapeStudio:
             self.var_close_holes.set(True)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
-        elif key == "draft":
-            self.var_align_quality.set("low")
-            self.var_faces.set("500000")
-            self.var_tex_pages.set("4")
-            self.var_crop.set("gps-square")
-            self.var_depth_quality.set("low")
-            self.var_depth_filtering.set("mild")
-            self.var_rolling.set(False)
-            self.var_stationary.set(True)
-            self.var_close_holes.set(True)
-            self.var_fill_holes.set(True)
-            self.var_ghosting.set(False)
-        elif key == "heritage":
-            self.var_align_quality.set("high")
+            self.var_ortho.set(False)
+        elif key == "map":
+            self.var_align_quality.set("medium")
             self.var_faces.set("2000000")
-            self.var_tex_pages.set("32")
-            self.var_crop.set("structure")
-            self.var_depth_quality.set("high")
+            self.var_tex_pages.set("4")
+            self.var_crop.set("none")
+            self.var_depth_quality.set("medium")
             self.var_depth_filtering.set("moderate")
             self.var_rolling.set(True)
             self.var_stationary.set(True)
             self.var_close_holes.set(True)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
+            self.var_ortho.set(True)
 
     def _set_mode(self, mode: str) -> None:
         if mode == self.active_mode:
@@ -1979,8 +1965,12 @@ class AutoMetashapeStudio:
             cmd.append("--pause-after-crop")
         if self.var_rebake.get():
             cmd.append("--rebake-texture")
-        if self.var_restart.get():
-            cmd.append("--force-restart")
+        if self.var_resume.get():
+            cmd.append("--resume")
+        if self.var_ortho.get():
+            cmd.append("--ortho")
+        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("building", "map"):
+            cmd.extend(["--preset", self.selected_preset_key])
         if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "auto":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
 
