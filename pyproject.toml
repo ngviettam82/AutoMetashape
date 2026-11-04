@@ -9,7 +9,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "autometashape"
-version = "1.1.0"
+version = "1.2.0"
 description = "AutoMetashape: Autonomous High-Precision 3D Photogrammetry Pipeline"
 authors = [{ name = "AutoMetashape Contributors" }]
 license = { text = "Apache-2.0" }
