@@ -34,3 +34,16 @@
 - **Pass/fail criteria**:
   - Pass: Optical ray convergence successfully centers region; `--resume` skips previously completed stages; `.glb` and `.obj` generated.
   - Fail: Crashing due to missing GPS; `--resume` re-running all stages from scratch; clipping target monument geometry.
+
+
+### Scenario 4: Sequential Multi-Project Batch Loop with Per-Project Verification Gate
+- **Query**: "There is a folder at `D:/Surveys/Batch_March`, containing subfolders that are each an independent project. Loop workflow for each project using the default building config, process every project, and check every project that has been done to see if there is any wrong. Must process each project one at a time, then once the project is done and verified to be correct, process the next project, until all projects are done. List this folder for the projects."
+- **Expected behavior**:
+  - Enumerate all immediate subfolders inside `D:/Surveys/Batch_March` and present a structured list of detected projects with photo counts to the user.
+  - Sequentially process Project 1 with `scripts/metashape_reconstruction.py --images "D:/Surveys/Batch_March/<Project_1>"`. If `Project_1` contains multiple flight subfolders, AutoMetashape automatically applies multi-chunk alignment internally.
+  - Verify Project 1 deliverables: confirm `model.obj`, `model.mtl`, 16-page 8K `model.tif`, `model.glb`, and `building_reconstruction.psx` exist and are non-empty; verify registration $\ge 90\%$.
+  - Only after Project 1 verification passes, advance to Project 2 and repeat.
+  - After all projects finish, output a comprehensive summary table with deliverable paths and quality metrics.
+- **Pass/fail criteria**:
+  - Pass: All projects processed sequentially; each project verified before moving to the next; internal flight subfolders handled via multi-chunk alignment; zero project collisions.
+  - Fail: Passing the batch root folder directly into `--images` (which erroneously fuses separate projects together); proceeding to next project without verifying the current one; unhandled project crash halting subsequent projects without diagnosis.

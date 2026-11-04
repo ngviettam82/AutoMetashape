@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, AETHER Project Developers.
+# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -30,14 +30,14 @@ EXCLUDED_DIRS = {
     ".eggs",
 }
 
-PYTHON_HEADER = """# Copyright (c) 2026, AETHER Project Developers.
+PYTHON_HEADER = """# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
 
 """
 
-CPP_HEADER = """// Copyright (c) 2026, AETHER Project Developers.
+CPP_HEADER = """// Copyright (c) 2026, AutoMetashape Contributors.
 // All rights reserved.
 //
 // SPDX-License-Identifier: Apache-2.0

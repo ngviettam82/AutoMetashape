@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 
-# Copyright (c) 2026, AETHER Project Developers.
+# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
 
 """
-Agent Skills Toolchain CLI (AETHER-SWARM & Isaac Lab Architecture)
+Agent Skills Toolchain CLI (AutoMetashape & Isaac Lab Architecture)
 
 Supports:
 - check:  Comprehensive validation of frontmatter, 5 mandatory headings, link integrity,
@@ -279,7 +279,7 @@ class SkillValidator:
                 errs.append(f"Broken relative markdown link to '{clean_path}'")
 
         # 7. Backticked Repo Paths Verification
-        backtick_matches = re.findall(r"`((?:source|aether|skills|tools|docs|scripts|tests|\.agents)/[a-zA-Z0-9_./-]+)`", body)
+        backtick_matches = re.findall(r"`((?:source|skills|tools|docs|scripts|tests|\.agents)/[a-zA-Z0-9_./-]+)`", body)
         for b_path in backtick_matches:
             target_f = (self.repo_root / b_path).resolve()
             if not target_f.exists():
@@ -428,7 +428,7 @@ description: Concise operational description of {slug}. Use when performing {slu
 audience: {resolved_audience}
 status: experimental
 owners:
-  - "@aether-maintainers"
+  - "@autometashape-maintainers"
 ---
 
 # {slug.replace('-', ' ').title()}

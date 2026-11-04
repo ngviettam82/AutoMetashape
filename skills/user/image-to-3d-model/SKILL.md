@@ -116,6 +116,25 @@ CLI control:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --multi-chunk disable
 ```
 
+### Multi-Project Sequential Batch Processing (Agent Loop)
+When a parent directory contains multiple independent survey projects (e.g., `Surveys/Project_A/`, `Surveys/Project_B/`, `Surveys/Project_C/`):
+- **Structural Boundary**:
+  - Subfolders **within** a project directory (e.g. `Project_A/Flight_1`, `Project_A/Flight_2`) are multiple flights of the *same* physical structure. The pipeline's multi-chunk engine automatically aligns and merges them.
+  - Sibling subfolders in a parent directory are **distinct physical projects**. Do not pass the parent directory to `--images` directly, as that would attempt to merge unrelated sites into one coordinate space.
+- **Agent Workflow Protocol**:
+  1. **Enumerate & Inspect**: List all project subdirectories in the parent folder, verifying image counts and format types.
+  2. **Process Sequentially (One Project at a Time)**:
+     - Run `scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset <building|map>`.
+     - Let AutoMetashape handle any internal flight subfolders automatically via multi-chunk alignment.
+  3. **Verification Gate**:
+     - Check `<project>/model/` contains: `model.obj`, `model.mtl`, 8K `model.tif`, `model.glb`, and `building_reconstruction.psx`.
+     - If Map mode was selected, verify `orthomosaic.tif` and `orthomosaic.tfw` exist.
+     - Inspect console output: verify active cameras aligned $\ge 90\%$ and confirm 0 unhandled exceptions.
+  4. **Progressive Advancement**:
+     - Only after Project $N$ is verified correct, proceed to Project $N+1$.
+     - Output a real-time progress update after each completed project.
+  5. **Final Batch Summary**: Present a Markdown table documenting each project's image count, aligned cameras, face count, and deliverable paths.
+
 ### 2. Sharpness Quality Estimation & Blurry Image Rejection
 - Analyzes high-frequency gradient sharpness across every camera frame via `chunk.analyzeImages()`.
 - Official Agisoft standard: photos with quality $<0.50$ are considered blurred.

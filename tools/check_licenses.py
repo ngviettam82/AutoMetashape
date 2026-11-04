@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Copyright (c) 2026, AETHER Project Developers.
+# Copyright (c) 2026, AutoMetashape Contributors.
 # All rights reserved.
 #
 # SPDX-License-Identifier: Apache-2.0
@@ -10,7 +10,7 @@ Modeled after NVIDIA Isaac Lab's license compliance gate.
 
 Validates:
 1. Source file SPDX headers (SPDX-License-Identifier: Apache-2.0).
-2. Copyright sovereignty (assigned to AETHER Project Developers, zero NVIDIA claiming).
+2. Copyright sovereignty (assigned to AutoMetashape Contributors, zero NVIDIA claiming).
 3. Existence and integrity of LICENSE and THIRD_PARTY_NOTICES.md.
 """
 
@@ -105,7 +105,7 @@ def check_license_files() -> list[str]:
 
 def main() -> int:
     print("=========================================================================")
-    print("  AETHER-SWARM: License Compliance & SPDX Audit (Isaac Lab Standard)")
+    print("  AutoMetashape: License Compliance & SPDX Audit (Isaac Lab Standard)")
     print("=========================================================================")
 
     all_errors = []
