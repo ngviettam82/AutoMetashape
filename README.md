@@ -1,7 +1,7 @@
 # AutoMetashape
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
-[![Release](https://img.shields.io/badge/Release-v1.2.0-green.svg)](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.2.0)
+[![Release](https://img.shields.io/badge/Release-v1.3.0-green.svg)](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.3.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-informational.svg)](https://www.python.org/)
 [![Hardware](https://img.shields.io/badge/CUDA-Accelerated-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
 [![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
@@ -13,12 +13,12 @@ Available both as an interactive desktop studio application (**AutoMetashape Stu
 
 ---
 
-## Download v1.2.0
+## Download v1.3.0
 
-Download the standalone v1.2.0 release package directly from GitHub Releases:
+Download the standalone v1.3.0 release package directly from GitHub Releases:
 
-📦 **[AutoMetashape-v1.2.0.zip](https://github.com/ngviettam82/AutoMetashape/releases/download/v1.2.0/AutoMetashape-v1.2.0.zip)**  
-Release details and release notes: [GitHub Release v1.2.0](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.2.0)
+📦 **[AutoMetashape-v1.3.0.zip](https://github.com/ngviettam82/AutoMetashape/releases/download/v1.3.0/AutoMetashape-v1.3.0.zip)**  
+Release details and release notes: [GitHub Release v1.3.0](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.3.0)
 
 ---
 
