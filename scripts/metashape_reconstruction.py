@@ -9,7 +9,7 @@ Reconstructs production-ready 3D architectural models (.obj, .mtl, .glb, .psx)
 directly from raw aerial drone or ground camera image directories on NVIDIA GPUs.
 Configured with production-grade defaults:
 - Image Alignment: Medium quality (downscale=2), 40,000 keypoint limit, 25,000 tiepoint limit,
-                   stationary tie points excluded, guided matching disabled, adaptive fitting enabled.
+                   stationary tie points excluded, guided matching enabled, adaptive fitting enabled.
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses with uncropped vertical bounds).
 - Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 600,000 (600K) custom faces.
@@ -639,7 +639,7 @@ def run_reconstruction(
     keypoint_limit: int = 40000,
     tiepoint_limit: int = 25000,
     filter_stationary_points: bool = True,
-    guided_matching: bool = False,
+    guided_matching: bool = True,
     adaptive_fitting: bool = True,
     filter_tiepoints: bool = True,
     depth_quality: str = "medium",
@@ -1269,7 +1269,19 @@ if __name__ == "__main__":
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
     parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 600,000 for building, 5,000,000 for map)")
-    parser.add_argument("--guided-matching", action="store_true", default=False, help="Enable guided image matching (default: False)")
+    parser.add_argument(
+        "--guided-matching",
+        dest="guided_matching",
+        action="store_true",
+        default=True,
+        help="Enable guided image matching (default: True, finds additional tie points on high-resolution imagery)",
+    )
+    parser.add_argument(
+        "--no-guided-matching",
+        dest="guided_matching",
+        action="store_false",
+        help="Disable guided image matching",
+    )
     parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
     parser.add_argument(

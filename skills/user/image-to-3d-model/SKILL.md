@@ -83,7 +83,7 @@ AutoMetashape provides two purpose-built workflow presets:
 >   - **Keypoint Limit**: `40000` keypoints per image.
 >   - **Tiepoint Limit**: `25000` tiepoints per image (expanded tie-point network for rich geometric overlap).
 >   - **Exclude Stationary Tie Points**: `filter_stationary_points=True` (rejects sensor dust, propeller artifacts, and stationary drone noise).
->   - **Guided Matching**: `guided_matching=False` (disabled to prevent false-positive matches on repetitive building patterns).
+>   - **Guided Matching**: `guided_matching=True` (enabled by default; discovers additional high-confidence tie points on fine architectural features; disable via `--no-guided-matching`).
 >   - **Adaptive Fitting**: `adaptive_fitting=True` (dynamically fits non-linear optical distortion coefficients).
 > - **Rolling Shutter Compensation**: Enables `sensor.rolling_shutter = Metashape.Shutter.Model.Regularized` to eliminate layered wall stepping caused by moving drone CMOS sensors.
 > - **Auto-Cropping Default (`gps-square`)**: Calculates the smallest enclosing horizontal square of all camera GPS poses, with altitude bounded by $[\min, \max]$ tie points inside the square.
@@ -141,7 +141,7 @@ When a parent directory contains multiple independent survey projects (e.g., `Su
 - Cameras with quality $<0.50$ are automatically disabled (`camera.enabled = False`) to prevent bad tie-point triangulation, sensor blur, and depth map distortion.
 
 ### 3. GPU Matching, Alignment & Rolling Shutter Optimization
-- **Matching**: `downscale=2` (Medium), `keypoint_limit=40000`, `tiepoint_limit=25000`, `filter_stationary_points=True`, `guided_matching=False`. Uses GPS Reference Preselection so images match against spatial neighbors.
+- **Matching**: `downscale=2` (Medium), `keypoint_limit=40000`, `tiepoint_limit=25000`, `filter_stationary_points=True`, `guided_matching=True`. Uses GPS Reference Preselection so images match against spatial neighbors.
 - **Alignment**: Solves camera positions $(X, Y, Z)$, orientations, and non-linear lens distortion with `adaptive_fitting=True`.
 - **Rolling Shutter Compensation**: `sensor.rolling_shutter = Metashape.Shutter.Model.Regularized` models the velocity readout of drone CMOS cameras, cutting reprojection errors by up to 30% and eliminating double walls.
 - **Gradual Selection**: Prunes high reprojection error ($>0.4\text{ px}$) and high reconstruction uncertainty ($>15$) tie points before re-optimizing lens parameters (disable via `--no-filter-tiepoints` to benchmark raw uncleaned bundle adjustment).

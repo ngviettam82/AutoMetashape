@@ -125,7 +125,7 @@ Recursively scans image folders and nested directories for all supported formats
 ```mermaid
 flowchart TD
     A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Ingestion & Quality Filtering<br/>(chunk.analyzeImages: auto-disables blurry photos < 0.5)"]
-    B --> C["2. Camera Alignment & Bundle Adjustment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Adaptive Fitting)"]
+    B --> C["2. Camera Alignment & Bundle Adjustment<br/>(Medium Quality, 40K Keypoints, 25K Tiepoints, Guided Matching, Adaptive Fitting)"]
     C --> D["3. Camera Bundle Adjustment<br/>(Single-Chunk Default | Multi-Chunk Opt-In)"]
     D --> E["4. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     E --> F["5. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]

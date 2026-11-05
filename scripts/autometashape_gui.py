@@ -692,6 +692,8 @@ class AutoMetashapeStudio:
         self.var_images_dir = tk.StringVar()
         self.var_output_dir = tk.StringVar()
         self.var_align_quality = tk.StringVar(value="medium")
+        self.var_keypoint_limit = tk.StringVar(value="40000")
+        self.var_tiepoint_limit = tk.StringVar(value="25000")
         self.var_faces = tk.StringVar(value="600000")
         self.var_tex_pages = tk.StringVar(value="16")
         self.var_crop = tk.StringVar(value="gps-square")
@@ -700,8 +702,10 @@ class AutoMetashapeStudio:
         self.var_multi_chunk = tk.StringVar(value="disable")
         self.var_chunk_align_method = tk.StringVar(value="camera")
 
+        self.var_guided = tk.BooleanVar(value=True)
         self.var_rolling = tk.BooleanVar(value=True)
         self.var_stationary = tk.BooleanVar(value=True)
+        self.var_adaptive_fitting = tk.BooleanVar(value=True)
         self.var_filter_tiepoints = tk.BooleanVar(value=True)
         self.var_close_holes = tk.BooleanVar(value=True)
         self.var_fill_holes = tk.BooleanVar(value=True)
@@ -1297,45 +1301,40 @@ class AutoMetashapeStudio:
 
         self.body_adv = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
 
-        grid = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        grid.pack(fill=tk.X, pady=(6, 8))
+        def _make_sec_header(parent_widget: tk.Widget, badge: str, title: str, top_pad: int = 8) -> None:
+            hdr = tk.Frame(parent_widget, bg=UITheme.BG_SURFACE)
+            hdr.pack(fill=tk.X, pady=(top_pad, 4))
 
-        # Row 1: Align, Faces, Pages
-        tk.Label(grid, text="Align Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+            badge_lbl = tk.Label(
+                hdr,
+                text=badge,
+                font=("Segoe UI", 7, "bold"),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.ACCENT_CYAN,
+                padx=6,
+                pady=1,
+                bd=1,
+                relief=tk.SOLID,
+            )
+            badge_lbl.pack(side=tk.LEFT, padx=(0, 6))
 
-        tk.Label(grid, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_faces, values=["500000", "600000", "1000000", "2000000", "3000000", "5000000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+            title_lbl = tk.Label(
+                hdr,
+                text=title,
+                font=("Segoe UI", 8, "bold"),
+                bg=UITheme.BG_SURFACE,
+                fg=UITheme.TEXT_PRIMARY,
+            )
+            title_lbl.pack(side=tk.LEFT)
 
-        tk.Label(grid, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=5, padx=4, pady=3)
+            line = tk.Frame(hdr, bg=UITheme.RULE, height=1)
+            line.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(8, 0), pady=4)
 
-        # Row 2: Crop, Depth Quality, Depth Filtering
-        tk.Label(grid, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_crop, values=["gps-square", "none", "structure", "manual"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
-
-        # Row 3: Multi-Chunk Mode & Chunk Alignment Method
-        tk.Label(grid, text="Multi-Chunk:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=2, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_multi_chunk, values=["disable", "auto", "force"], state="readonly", width=10).grid(row=2, column=1, padx=(4, 14), pady=3)
-
-        tk.Label(grid, text="Chunk Align:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=2, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid, textvariable=self.var_chunk_align_method, values=["camera", "point"], state="readonly", width=8).grid(row=2, column=3, padx=(4, 14), pady=3)
-
-        # Checkboxes
-        chk_row1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_row1.pack(fill=tk.X, pady=(2, 4))
-
-        def _c(t, v, parent=chk_row1):
+        def _c(parent_widget: tk.Widget, text: str, var: tk.Variable) -> tk.Checkbutton:
             return tk.Checkbutton(
-                parent,
-                text=t,
-                variable=v,
+                parent_widget,
+                text=text,
+                variable=var,
                 font=("Segoe UI", 8),
                 bg=UITheme.BG_SURFACE,
                 fg=UITheme.TEXT_SECONDARY,
@@ -1345,21 +1344,101 @@ class AutoMetashapeStudio:
                 bd=0,
             )
 
-        _c("CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT)
+        # -------------------------------------------------------------------
+        # Process 1: Align & Feature Matching
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "ALIGN", "1. Feature Matching & Camera Alignment", top_pad=6)
 
-        chk_row2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_row2.pack(fill=tk.X, pady=(2, 4))
-        _c("Texture Hole Filling", self.var_fill_holes, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Ghosting Filter", self.var_ghosting, parent=chk_row2).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Generate Orthomosaic GeoTIFF", self.var_ortho, parent=chk_row2).pack(side=tk.LEFT)
+        grid_align = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid_align.pack(fill=tk.X, pady=(2, 4))
 
-        chk_row3 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_row3.pack(fill=tk.X, pady=(2, 4))
-        _c("Resume from checkpoint (skip completed steps)", self.var_resume, parent=chk_row3).pack(side=tk.LEFT, padx=(0, 10))
-        _c("Pause after camera alignment for manual crop", self.var_pause_crop, parent=chk_row3).pack(side=tk.LEFT)
+        tk.Label(grid_align, text="Align Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid_align, text="Keypoint Limit:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_keypoint_limit, values=["40000", "20000", "60000", "80000", "100000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+
+        tk.Label(grid_align, text="Tiepoint Limit:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_tiepoint_limit, values=["25000", "10000", "40000", "50000", "0"], width=8).grid(row=0, column=5, padx=4, pady=3)
+
+        tk.Label(grid_align, text="Multi-Chunk:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_multi_chunk, values=["disable", "auto", "force"], state="readonly", width=10).grid(row=1, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid_align, text="Chunk Align:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_chunk_align_method, values=["camera", "point"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
+
+        chk_align_1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_align_1.pack(fill=tk.X, pady=(2, 2))
+        _c(chk_align_1, "Guided Image Matching", self.var_guided).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_align_1, "Exclude Stationary Points", self.var_stationary).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_align_1, "Adaptive Camera Fitting", self.var_adaptive_fitting).pack(side=tk.LEFT)
+
+        chk_align_2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_align_2.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_align_2, "CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_align_2, "Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 2: Bounding Box & Region
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "REGION", "2. Bounding Box & Region", top_pad=8)
+
+        grid_region = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid_region.pack(fill=tk.X, pady=(2, 2))
+
+        tk.Label(grid_region, text="Bounding Box:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_region, textvariable=self.var_crop, values=["gps-square", "none", "structure", "manual"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        chk_region = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_region.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_region, "Pause after camera alignment for manual crop", self.var_pause_crop).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 3: Build Model (Depth Maps & Mesh)
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "MODEL", "3. Build Model (Depth Maps & Mesh)", top_pad=8)
+
+        grid_model = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid_model.pack(fill=tk.X, pady=(2, 2))
+
+        tk.Label(grid_model, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_model, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid_model, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_model, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+
+        tk.Label(grid_model, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_model, textvariable=self.var_faces, values=["500000", "600000", "1000000", "2000000", "3000000", "5000000"], width=8).grid(row=0, column=5, padx=4, pady=3)
+
+        chk_model = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_model.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_model, "Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 4: Texture Atlas & Orthomosaic Export
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "TEXTURE", "4. Texture Atlas & Orthomosaic Export", top_pad=8)
+
+        grid_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid_tex.pack(fill=tk.X, pady=(2, 2))
+
+        tk.Label(grid_tex, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_tex, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        chk_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_tex.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_tex, "Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_tex, "Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_tex, "Generate Orthomosaic GeoTIFF", self.var_ortho).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 5: Checkpoint & Lifecycle
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "LIFECYCLE", "5. Checkpoint & Lifecycle", top_pad=8)
+
+        chk_lifecycle = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_lifecycle.pack(fill=tk.X, pady=(2, 6))
+        _c(chk_lifecycle, "Resume from checkpoint (skip completed steps)", self.var_resume).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
         self.adv_expanded = not self.adv_expanded
@@ -1648,26 +1727,34 @@ class AutoMetashapeStudio:
 
         if key == "building":
             self.var_align_quality.set("medium")
+            self.var_keypoint_limit.set("40000")
+            self.var_tiepoint_limit.set("25000")
             self.var_faces.set("600000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
             self.var_depth_filtering.set("moderate")
+            self.var_guided.set(True)
             self.var_rolling.set(True)
             self.var_stationary.set(True)
+            self.var_adaptive_fitting.set(True)
             self.var_close_holes.set(True)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_ortho.set(False)
         elif key == "map":
             self.var_align_quality.set("medium")
+            self.var_keypoint_limit.set("40000")
+            self.var_tiepoint_limit.set("25000")
             self.var_faces.set("5000000")
             self.var_tex_pages.set("4")
             self.var_crop.set("none")
             self.var_depth_quality.set("medium")
             self.var_depth_filtering.set("moderate")
+            self.var_guided.set(True)
             self.var_rolling.set(True)
             self.var_stationary.set(True)
+            self.var_adaptive_fitting.set(True)
             self.var_close_holes.set(True)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
@@ -1953,6 +2040,14 @@ class AutoMetashapeStudio:
             self.var_depth_filtering.get(),
         ]
 
+        if hasattr(self, "var_guided") and not self.var_guided.get():
+            cmd.append("--no-guided-matching")
+        if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip() != "40000":
+            cmd.extend(["--keypoint-limit", self.var_keypoint_limit.get().strip()])
+        if hasattr(self, "var_tiepoint_limit") and self.var_tiepoint_limit.get().strip() != "25000":
+            cmd.extend(["--tiepoint-limit", self.var_tiepoint_limit.get().strip()])
+        if hasattr(self, "var_adaptive_fitting") and not self.var_adaptive_fitting.get():
+            cmd.append("--no-adaptive-fitting")
         if not self.var_filter_tiepoints.get():
             cmd.append("--no-filter-tiepoints")
         if not self.var_rolling.get():
