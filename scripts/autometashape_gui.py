@@ -714,6 +714,20 @@ class AutoMetashapeStudio:
         self.var_rebake = tk.BooleanVar(value=False)
         self.var_resume = tk.BooleanVar(value=False)
         self.var_ortho = tk.BooleanVar(value=False)
+        self.var_build_point_cloud = tk.BooleanVar(value=False)
+        self.var_export_point_cloud = tk.BooleanVar(value=False)
+        self.var_pc_format = tk.StringVar(value="laz")
+        self.var_classify_ground = tk.BooleanVar(value=False)
+        self.var_classify_points = tk.BooleanVar(value=False)
+        self.var_build_dem = tk.BooleanVar(value=False)
+        self.var_export_dem = tk.BooleanVar(value=False)
+        self.var_export_report = tk.BooleanVar(value=True)
+
+        self.var_exp_point_cloud = tk.BooleanVar(value=False)
+        self.var_exp_pc_format = tk.StringVar(value="laz")
+        self.var_exp_dem = tk.BooleanVar(value=False)
+        self.var_exp_ortho = tk.BooleanVar(value=False)
+        self.var_exp_report = tk.BooleanVar(value=False)
 
         self.var_psx_path = tk.StringVar()
         self.var_export_out = tk.StringVar()
@@ -1251,6 +1265,12 @@ class AutoMetashapeStudio:
                 w.bind("<Leave>", lambda e, k=key: self._on_preset_hover(k, False))
 
         _make_preset(
+            "auto",
+            "Autonomous Survey (Learned Parameters)",
+            "Dynamic faces · Adaptive atlas · Telemetry-inferred crop",
+            "Auto-profiles image telemetry, GPS bounding box, and flight geometry to dynamically infer the optimal face count, texture pages, and bounding box.",
+        )
+        _make_preset(
             "building",
             "Building Reconstruction (Default)",
             "600K faces · 16-page 8K · GPS crop",
@@ -1415,9 +1435,37 @@ class AutoMetashapeStudio:
         _c(chk_model, "Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
-        # Process 4: Texture Atlas & Orthomosaic Export
+        # Process 4: Dense Point Cloud & Classification
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "TEXTURE", "4. Texture Atlas & Orthomosaic Export", top_pad=8)
+        _make_sec_header(self.body_adv, "POINT CLOUD", "4. Dense Point Cloud & Classification", top_pad=8)
+
+        chk_pc1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_pc1.pack(fill=tk.X, pady=(2, 2))
+        _c(chk_pc1, "Build Dense Point Cloud", self.var_build_point_cloud).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_pc1, "Export Point Cloud", self.var_export_point_cloud).pack(side=tk.LEFT, padx=(0, 10))
+
+        tk.Label(chk_pc1, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT, padx=(4, 2))
+        ttk.Combobox(chk_pc1, textvariable=self.var_pc_format, values=["laz", "las", "ply", "e57", "xyz"], state="readonly", width=6).pack(side=tk.LEFT)
+
+        chk_pc2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_pc2.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_pc2, "Classify Ground Points", self.var_classify_ground).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_pc2, "Classify Points (Multiclass AI)", self.var_classify_points).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 5: Elevation (DEM) & Orthomosaic
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "ELEVATION", "5. Elevation Model (DEM) & Orthomosaic", top_pad=8)
+
+        chk_dem = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_dem.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_dem, "Generate Orthomosaic GeoTIFF", self.var_ortho).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_dem, "Generate Digital Elevation Model (DEM)", self.var_build_dem).pack(side=tk.LEFT)
+
+        # -------------------------------------------------------------------
+        # Process 6: Texture Atlas
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "TEXTURE", "6. Texture Atlas", top_pad=8)
 
         grid_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         grid_tex.pack(fill=tk.X, pady=(2, 2))
@@ -1428,16 +1476,16 @@ class AutoMetashapeStudio:
         chk_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_tex.pack(fill=tk.X, pady=(2, 4))
         _c(chk_tex, "Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_tex, "Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_tex, "Generate Orthomosaic GeoTIFF", self.var_ortho).pack(side=tk.LEFT)
+        _c(chk_tex, "Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
-        # Process 5: Checkpoint & Lifecycle
+        # Process 7: Quality Report & Lifecycle
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "LIFECYCLE", "5. Checkpoint & Lifecycle", top_pad=8)
+        _make_sec_header(self.body_adv, "REPORT", "7. Quality Report & Lifecycle", top_pad=8)
 
         chk_lifecycle = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_lifecycle.pack(fill=tk.X, pady=(2, 6))
+        _c(chk_lifecycle, "Export Calibration & Quality PDF Report", self.var_export_report).pack(side=tk.LEFT, padx=(0, 10))
         _c(chk_lifecycle, "Resume from checkpoint (skip completed steps)", self.var_resume).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
@@ -1725,7 +1773,28 @@ class AutoMetashapeStudio:
                 s.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
                 d.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
 
-        if key == "building":
+        if key == "auto":
+            self.var_align_quality.set("medium")
+            self.var_keypoint_limit.set("40000")
+            self.var_tiepoint_limit.set("25000")
+            self.var_faces.set("600000")
+            self.var_tex_pages.set("16")
+            self.var_crop.set("gps-square")
+            self.var_depth_quality.set("medium")
+            self.var_depth_filtering.set("moderate")
+            self.var_guided.set(True)
+            self.var_rolling.set(True)
+            self.var_stationary.set(True)
+            self.var_adaptive_fitting.set(True)
+            self.var_close_holes.set(True)
+            self.var_fill_holes.set(True)
+            self.var_ghosting.set(True)
+            self.var_ortho.set(False)
+            self.var_build_dem.set(False)
+            self.var_build_point_cloud.set(False)
+            self.var_classify_ground.set(False)
+            self.var_export_report.set(True)
+        elif key == "building":
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
@@ -2068,7 +2137,21 @@ class AutoMetashapeStudio:
             cmd.append("--resume")
         if self.var_ortho.get():
             cmd.append("--ortho")
-        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("building", "map"):
+        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
+            cmd.append("--build-point-cloud")
+        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
+            cmd.append("--export-point-cloud")
+        if hasattr(self, "var_pc_format") and self.var_pc_format.get() != "laz":
+            cmd.extend(["--point-cloud-format", self.var_pc_format.get()])
+        if hasattr(self, "var_classify_ground") and self.var_classify_ground.get():
+            cmd.append("--classify-ground")
+        if hasattr(self, "var_classify_points") and self.var_classify_points.get():
+            cmd.append("--classify-points")
+        if hasattr(self, "var_build_dem") and self.var_build_dem.get():
+            cmd.append("--build-dem")
+        if hasattr(self, "var_export_report") and not self.var_export_report.get():
+            cmd.append("--no-report")
+        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("auto", "building", "map"):
             cmd.extend(["--preset", self.selected_preset_key])
         if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "disable":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
@@ -2103,6 +2186,16 @@ class AutoMetashapeStudio:
         if self.var_exp_rebake.get():
             cmd.append("--rebake-texture")
             cmd.extend(["--texture-pages", str(self.var_exp_pages.get())])
+        if hasattr(self, "var_exp_point_cloud") and self.var_exp_point_cloud.get():
+            cmd.append("--export-point-cloud")
+        if hasattr(self, "var_exp_pc_format") and self.var_exp_pc_format.get():
+            cmd.extend(["--point-cloud-format", self.var_exp_pc_format.get()])
+        if hasattr(self, "var_exp_dem") and self.var_exp_dem.get():
+            cmd.append("--export-dem")
+        if hasattr(self, "var_exp_ortho") and self.var_exp_ortho.get():
+            cmd.append("--export-orthomosaic")
+        if hasattr(self, "var_exp_report") and self.var_exp_report.get():
+            cmd.append("--export-report")
 
         self.stepper.reset()
         self.stepper.set_active(0, "Loading Project & Validating Mesh")

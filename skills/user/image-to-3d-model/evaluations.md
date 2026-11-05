@@ -47,3 +47,26 @@
 - **Pass/fail criteria**:
   - Pass: All projects processed sequentially; each project verified before moving to the next; subfolder photos aligned in global bundle adjustment; zero project collisions.
   - Fail: Passing the batch root folder directly into `--images` (which erroneously fuses separate projects together); proceeding to next project without verifying the current one; unhandled project crash halting subsequent projects without diagnosis.
+
+
+### Scenario 5: Autonomous Survey Telemetry Profiling & Parameter Inference
+- **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; analyze the photos, learn the flight geometry and camera parameters, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
+- **Expected behavior**:
+  - Uses `--preset auto` (or `--profile`), inspecting image telemetry, GPS distribution, altitude span, sensor megapixel count, and shutter tags.
+  - Correctly classifies survey category (e.g. nadir terrain survey or oblique architectural flight).
+  - Dynamically configures keypoint limits, tiepoint budgets, bounding box crop strategy (`none` vs `gps-square` vs `structure`), mesh face budget, and texture page count.
+  - Enables `buildPointCloud` (`.laz`), `buildDem` (`dem.tif`), `buildOrthomosaic` (`orthomosaic.tif`), and exports an executive PDF quality report (`report.pdf`).
+- **Pass/fail criteria**:
+  - Pass: Profiling inspects telemetry correctly; executes pipeline with dynamically learned parameters; deliverables include `point_cloud.laz`, `dem.tif`, `orthomosaic.tif`, `report.pdf`, `model.glb`, `model.obj`, and `building_reconstruction.psx`.
+  - Fail: Blindly falling back to rigid manual presets; failing to extract EXIF telemetry; crashing during point cloud or DEM generation.
+
+### Scenario 6: Dense Point Cloud Generation & Ground Point Classification
+- **Query**: "Process this drone photogrammetry dataset at `data/survey/forest_clearing` to generate a 3D point cloud with automatic bare-earth ground classification and export it to compressed LAZ format."
+- **Expected behavior**:
+  - Runs with `--build-point-cloud --point-cloud-format laz --classify-ground`.
+  - Generates dense point cloud from depth maps with RGB vertex colors and confidence indices.
+  - Executes `chunk.point_cloud.classifyGroundPoints(max_angle=15.0, max_distance=1.0, cell_size=50.0)`.
+  - Exports georeferenced point cloud to `model/point_cloud.laz` with embedded classification, confidence, colors, and normal vectors.
+- **Pass/fail criteria**:
+  - Pass: `point_cloud.laz` is exported and non-empty; ground points classified into ASPRS Class 2 (Ground); project checkpoint saved.
+  - Fail: Point cloud missing; ground classification skipped; unhandled exception during export.

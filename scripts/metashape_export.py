@@ -19,6 +19,15 @@ import time
 import Metashape
 
 
+POINT_CLOUD_FORMAT_MAP = {
+    "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
+    "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
+    "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
+    "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
+    "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
+}
+
+
 def export_project_assets(
     project_path: str,
     output_dir: str = None,
@@ -28,6 +37,12 @@ def export_project_assets(
     fill_holes: bool = True,
     ghosting_filter: bool = True,
     import_model_path: str = None,
+    export_point_cloud: bool = False,
+    point_cloud_format: str = "laz",
+    export_dem: bool = False,
+    export_orthomosaic: bool = False,
+    export_report: bool = False,
+    report_title: str = None,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -173,6 +188,75 @@ def export_project_assets(
     obj_size = os.path.getsize(obj_out) / (1024 * 1024)
     print(f"  Saved: {obj_out} ({obj_size:.2f} MB) in {(time.time() - t_obj):.1f}s.", flush=True)
 
+    # 3. Optional Dense Point Cloud Export
+    if export_point_cloud and chunk.point_cloud and chunk.point_cloud.point_count > 0:
+        pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
+        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+        pc_out = os.path.join(output_dir, f"point_cloud{pc_ext}")
+        print(f"\n[Point Cloud] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
+        chunk.exportPointCloud(
+            path=pc_out,
+            format=pc_fmt,
+            source_data=Metashape.DataSource.PointCloudData,
+            save_point_color=True,
+            save_point_normal=True,
+            save_point_confidence=True,
+            save_point_classification=True,
+        )
+        print(f"  Saved Point Cloud: {pc_out} ({os.path.getsize(pc_out)/(1024*1024):.2f} MB)", flush=True)
+
+    # 4. Optional DEM Export
+    if export_dem:
+        has_dem = getattr(chunk, "elevation", None) is not None
+        if has_dem:
+            dem_out = os.path.join(output_dir, "dem.tif")
+            print(f"\n[DEM] Exporting GeoTIFF Elevation Model to: {dem_out}...", flush=True)
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=dem_out,
+                source_data=Metashape.DataSource.ElevationData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+            )
+            print(f"  Saved DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+        else:
+            print("\n[DEM] Note: Project contains no built elevation model; skipping DEM export.", flush=True)
+
+    # 5. Optional Orthomosaic Export
+    if export_orthomosaic:
+        if chunk.orthomosaic is not None:
+            ortho_out = os.path.join(output_dir, "orthomosaic.tif")
+            print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=ortho_out,
+                source_data=Metashape.DataSource.OrthomosaicData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+                save_alpha=True,
+            )
+            print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+        else:
+            print("\n[Orthomosaic] Note: Project contains no built orthomosaic; skipping export.", flush=True)
+
+    # 6. Optional Executive PDF Report Export
+    if export_report:
+        report_out = os.path.join(output_dir, "report.pdf")
+        print(f"\n[Report] Exporting Calibration & Quality PDF Report to: {report_out}...", flush=True)
+        rep_title = report_title or "AutoMetashape Quality & Calibration Report"
+        chunk.exportReport(
+            path=report_out,
+            title=rep_title,
+            description="AutoMetashape Production Export",
+        )
+        print(f"  Saved Report: {report_out} ({os.path.getsize(report_out)/(1024*1024):.2f} MB)", flush=True)
+
     print("\n[SUCCESS] Production assets exported successfully!", flush=True)
 
 
@@ -188,6 +272,12 @@ if __name__ == "__main__":
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling if re-baking (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter if re-baking (default: enabled)")
     parser.add_argument("--import-model", default=None, help="Optional path to external 3D model (.obj) to import/re-link into the project")
+    parser.add_argument("--export-point-cloud", action="store_true", default=False, help="Export dense point cloud file")
+    parser.add_argument("--point-cloud-format", choices=["laz", "las", "ply", "e57", "xyz"], default="laz", help="Format for exported dense point cloud (default: laz)")
+    parser.add_argument("--export-dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
+    parser.add_argument("--export-orthomosaic", action="store_true", default=False, help="Export GeoTIFF Orthomosaic (orthomosaic.tif)")
+    parser.add_argument("--export-report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report")
+    parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
     args = parser.parse_args()
 
     export_project_assets(
@@ -199,4 +289,10 @@ if __name__ == "__main__":
         fill_holes=args.fill_holes,
         ghosting_filter=args.ghosting_filter,
         import_model_path=args.import_model,
+        export_point_cloud=args.export_point_cloud,
+        point_cloud_format=args.point_cloud_format,
+        export_dem=args.export_dem,
+        export_orthomosaic=args.export_orthomosaic,
+        export_report=args.export_report,
+        report_title=args.report_title,
     )

@@ -79,6 +79,242 @@ DEPTH_FILTER_MAP = {
     "aggressive": Metashape.FilterMode.AggressiveFiltering,
 }
 
+POINT_CLOUD_FORMAT_MAP = {
+    "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
+    "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
+    "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
+    "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
+    "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
+}
+
+
+def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """Calculates orthodromic surface distance between two WGS84 GPS coordinates in meters."""
+    r_earth = 6371000.0
+    phi1 = math.radians(lat1)
+    phi2 = math.radians(lat2)
+    delta_phi = math.radians(lat2 - lat1)
+    delta_lambda = math.radians(lon2 - lon1)
+    a = math.sin(delta_phi / 2.0)**2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0)**2
+    c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
+    return r_earth * c
+
+
+def extract_image_telemetry(img_path: str) -> dict:
+    """Extracts camera model, focal length, image resolution, and GPS telemetry from image headers."""
+    meta = {
+        "width": 0,
+        "height": 0,
+        "make": "",
+        "model": "",
+        "focal_length": None,
+        "lat": None,
+        "lon": None,
+        "alt": None,
+        "has_gps": False,
+    }
+    try:
+        from PIL import Image, ExifTags
+        with Image.open(img_path) as im:
+            meta["width"], meta["height"] = im.size
+            exif_raw = im.getexif()
+            if exif_raw:
+                for k, v in exif_raw.items():
+                    tag_name = ExifTags.TAGS.get(k, k)
+                    if tag_name == "Make" and isinstance(v, str):
+                        meta["make"] = v.strip()
+                    elif tag_name == "Model" and isinstance(v, str):
+                        meta["model"] = v.strip()
+                    elif tag_name == "FocalLength":
+                        try:
+                            meta["focal_length"] = float(v)
+                        except (ValueError, TypeError):
+                            pass
+
+                gps_ifd = None
+                if hasattr(ExifTags, "IFD") and hasattr(ExifTags.IFD, "GPSInfo"):
+                    try:
+                        gps_ifd = exif_raw.get_ifd(ExifTags.IFD.GPSInfo)
+                    except Exception:
+                        pass
+                if not gps_ifd and 34853 in exif_raw:
+                    gps_ifd = exif_raw[34853]
+
+                if gps_ifd:
+                    def _to_deg(val):
+                        try:
+                            return float(val[0]) + float(val[1]) / 60.0 + float(val[2]) / 3600.0
+                        except Exception:
+                            return None
+
+                    lat_ref = gps_ifd.get(1, "N")
+                    lat_val = gps_ifd.get(2)
+                    lon_ref = gps_ifd.get(3, "E")
+                    lon_val = gps_ifd.get(4)
+                    alt_val = gps_ifd.get(6)
+
+                    if lat_val and lon_val:
+                        lat = _to_deg(lat_val)
+                        lon = _to_deg(lon_val)
+                        if lat is not None and lon is not None:
+                            if lat_ref == "S":
+                                lat = -lat
+                            if lon_ref == "W":
+                                lon = -lon
+                            meta["lat"] = lat
+                            meta["lon"] = lon
+                            meta["has_gps"] = True
+
+                    if alt_val is not None:
+                        try:
+                            meta["alt"] = float(alt_val)
+                        except Exception:
+                            pass
+    except Exception:
+        pass
+    return meta
+
+
+def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
+    """Profiles photogrammetry survey dataset by inspecting telemetry, GPS bounds, and sensor optics."""
+    groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
+    all_imgs = []
+    for imgs in groups.values():
+        all_imgs.extend(imgs)
+    all_imgs = sorted(all_imgs)
+
+    total_photos = len(all_imgs)
+    if total_photos == 0:
+        return {"photo_count": 0, "error": "No images found"}
+
+    step = max(1, total_photos // sample_size)
+    sampled = [all_imgs[i] for i in range(0, total_photos, step)][:sample_size]
+
+    lats, lons, alts = [], [], []
+    cameras_detected = set()
+    widths, heights = [], []
+
+    for path in sampled:
+        t = extract_image_telemetry(path)
+        if t["has_gps"]:
+            lats.append(t["lat"])
+            lons.append(t["lon"])
+            if t["alt"] is not None:
+                alts.append(t["alt"])
+        if t["model"]:
+            cameras_detected.add(f"{t['make']} {t['model']}".strip())
+        if t["width"] > 0:
+            widths.append(t["width"])
+            heights.append(t["height"])
+
+    gps_count = len(lats)
+    gps_ratio = gps_count / len(sampled) if sampled else 0.0
+    has_gps = gps_ratio >= 0.70
+
+    span_m = 0.0
+    alt_span_m = 0.0
+    if has_gps and len(lats) >= 2:
+        min_lat, max_lat = min(lats), max(lats)
+        min_lon, max_lon = min(lons), max(lons)
+        lat_dist = calculate_haversine_meters(min_lat, min_lon, max_lat, min_lon)
+        lon_dist = calculate_haversine_meters(min_lat, min_lon, min_lat, max_lon)
+        span_m = max(lat_dist, lon_dist)
+        if len(alts) >= 2:
+            alt_span_m = max(alts) - min(alts)
+
+    avg_mp = 12.0
+    if widths and heights:
+        avg_mp = (sum(w * h for w, h in zip(widths, heights)) / len(widths)) / 1_000_000.0
+
+    camera_str = " ".join(cameras_detected).lower()
+    rolling_shutter_recommended = any(k in camera_str for k in ["fc3582", "fc3411", "mavic", "air", "mini", "fc220", "fc3170"])
+
+    return {
+        "photo_count": total_photos,
+        "sample_count": len(sampled),
+        "gps_ratio": gps_ratio,
+        "has_gps": has_gps,
+        "horizontal_span_m": span_m,
+        "alt_span_m": alt_span_m,
+        "avg_megapixels": avg_mp,
+        "cameras_detected": list(cameras_detected),
+        "rolling_shutter_recommended": rolling_shutter_recommended,
+    }
+
+
+def infer_optimal_parameters(profile: dict) -> dict:
+    """Dynamically infers optimal photogrammetric pipeline parameters based on survey profiling."""
+    photo_count = profile.get("photo_count", 0)
+    has_gps = profile.get("has_gps", False)
+    span_m = profile.get("horizontal_span_m", 0.0)
+    alt_span_m = profile.get("alt_span_m", 0.0)
+    rolling_recommended = profile.get("rolling_shutter_recommended", True)
+    avg_mp = profile.get("avg_megapixels", 12.0)
+
+    # Classification
+    if has_gps and span_m >= 140.0 and alt_span_m <= 65.0:
+        survey_category = "nadir_terrain_mapping"
+        crop_method = "none"
+        custom_faces = min(max(photo_count * 2500, 1000000), 2000000)
+        texture_pages = 4
+        build_orthomosaic = True
+        build_dem = True
+        build_point_cloud = True
+        classify_ground = True
+        close_holes = False
+        depth_filtering = "aggressive"
+    elif has_gps and (span_m < 140.0 or alt_span_m > 40.0):
+        survey_category = "oblique_architecture"
+        crop_method = "gps-square"
+        custom_faces = min(max(photo_count * 2000, 400000), 1200000)
+        texture_pages = 16
+        build_orthomosaic = False
+        build_dem = False
+        build_point_cloud = False
+        classify_ground = False
+        close_holes = True
+        depth_filtering = "moderate"
+    else:
+        survey_category = "terrestrial_close_range"
+        crop_method = "structure"
+        custom_faces = min(max(photo_count * 1500, 300000), 800000)
+        texture_pages = 16
+        build_orthomosaic = False
+        build_dem = False
+        build_point_cloud = False
+        classify_ground = False
+        close_holes = True
+        depth_filtering = "moderate"
+
+    align_quality = "medium"
+    keypoint_limit = 60000 if avg_mp >= 30.0 else 40000
+    tiepoint_limit = 25000
+    guided_matching = True
+    adaptive_fitting = True
+    filter_stationary_points = True if survey_category != "terrestrial_close_range" else False
+
+    return {
+        "survey_category": survey_category,
+        "align_quality": align_quality,
+        "keypoint_limit": keypoint_limit,
+        "tiepoint_limit": tiepoint_limit,
+        "guided_matching": guided_matching,
+        "adaptive_fitting": adaptive_fitting,
+        "filter_stationary_points": filter_stationary_points,
+        "rolling_shutter": rolling_recommended,
+        "crop_method": crop_method,
+        "depth_quality": "medium",
+        "depth_filtering": depth_filtering,
+        "custom_faces": custom_faces,
+        "texture_pages": texture_pages,
+        "close_holes": close_holes,
+        "build_orthomosaic": build_orthomosaic,
+        "build_dem": build_dem,
+        "build_point_cloud": build_point_cloud,
+        "classify_ground": classify_ground,
+        "export_report": True,
+    }
+
 
 def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
     """Estimates sharpness quality for all ingested photos and disables blurry photos.
@@ -658,8 +894,19 @@ def run_reconstruction(
     resume: bool = False,
     multi_chunk: str = "disable",
     chunk_align_method: str = "camera",
-    preset: str = None,
+    preset: str = "auto",
+    auto_params: bool = False,
     build_orthomosaic: bool = None,
+    build_dem: bool = None,
+    export_dem: bool = False,
+    build_point_cloud: bool = None,
+    export_point_cloud: bool = False,
+    point_cloud_format: str = "laz",
+    classify_ground: bool = None,
+    classify_points: bool = False,
+    filter_point_confidence: int = None,
+    export_report: bool = True,
+    report_title: str = None,
 ):
     t_start = time.time()
     if not output_dir:
@@ -667,8 +914,51 @@ def run_reconstruction(
     os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
-    # Preset configuration handling (only applied if parameters are not explicitly set)
-    if preset == "map":
+    # -----------------------------------------------------------------------
+    # Preset & Autonomous Parameter Resolution
+    # -----------------------------------------------------------------------
+    inferred_profile = None
+    is_auto = (preset == "auto") or auto_params or (preset is None and crop_method is None and custom_faces is None)
+    if is_auto:
+        print("=========================================================================")
+        print("  AUTOMETASHAPE: AUTONOMOUS SURVEY PROFILING & LEARNED PARAMETERS")
+        print("=========================================================================", flush=True)
+        try:
+            profile = profile_dataset(images_dir, output_dir=output_dir)
+            inferred = infer_optimal_parameters(profile)
+            inferred_profile = profile
+            print(f"  [Survey Profile] Ingested {profile.get('photo_count', 0)} photos across survey directory.")
+            print(f"  [Survey Profile] GPS Georeferenced: {profile.get('has_gps')} (Span: {profile.get('horizontal_span_m', 0.0):.1f}m, Alt Span: {profile.get('alt_span_m', 0.0):.1f}m)")
+            cams_str = ', '.join(profile.get('cameras_detected', [])) or 'Standard Sensor'
+            print(f"  [Survey Profile] Camera Model: {cams_str}")
+            print(f"  [Survey Profile] Classified Geometry: {inferred['survey_category'].upper()}")
+            print(f"  [Learned Baseline] Inferred: Crop={inferred['crop_method'].upper()}, Faces={inferred['custom_faces']:,}, Pages={inferred['texture_pages']}, Rolling Shutter={inferred['rolling_shutter']}")
+            print(f"  [Learned Baseline] Deliverables: DEM={inferred['build_dem']}, Ortho={inferred['build_orthomosaic']}, Point Cloud={inferred['build_point_cloud']}")
+
+            if crop_method is None:
+                crop_method = inferred["crop_method"]
+            if custom_faces is None:
+                custom_faces = inferred["custom_faces"]
+            if texture_pages is None:
+                texture_pages = inferred["texture_pages"]
+            if build_orthomosaic is None:
+                build_orthomosaic = inferred["build_orthomosaic"]
+            if build_dem is None:
+                build_dem = inferred["build_dem"]
+            if build_point_cloud is None:
+                build_point_cloud = inferred["build_point_cloud"]
+            if classify_ground is None:
+                classify_ground = inferred["classify_ground"]
+            if rolling_shutter is None:
+                rolling_shutter = inferred["rolling_shutter"]
+            if close_holes is None:
+                close_holes = inferred["close_holes"]
+            if depth_filtering is None:
+                depth_filtering = inferred["depth_filtering"]
+        except Exception as e_prof:
+            print(f"  [Survey Profile] Note: Telemetry analysis ({e_prof}); using standard architectural defaults.", flush=True)
+
+    elif preset == "map":
         if crop_method is None:
             crop_method = "none"
         if custom_faces is None:
@@ -677,7 +967,15 @@ def run_reconstruction(
             texture_pages = 4
         if build_orthomosaic is None:
             build_orthomosaic = True
-    else:
+        if build_dem is None:
+            build_dem = True
+        if build_point_cloud is None:
+            build_point_cloud = True
+        if classify_ground is None:
+            classify_ground = True
+        if close_holes is None:
+            close_holes = False
+    elif preset == "building":
         if crop_method is None:
             crop_method = "gps-square"
         if custom_faces is None:
@@ -686,9 +984,35 @@ def run_reconstruction(
             texture_pages = 16
         if build_orthomosaic is None:
             build_orthomosaic = False
+        if build_dem is None:
+            build_dem = False
+        if build_point_cloud is None:
+            build_point_cloud = False
+        if classify_ground is None:
+            classify_ground = False
+        if close_holes is None:
+            close_holes = True
+
+    # Final safety fallbacks
+    if crop_method is None:
+        crop_method = "gps-square"
+    if custom_faces is None:
+        custom_faces = 600000
+    if texture_pages is None:
+        texture_pages = 16
+    if build_orthomosaic is None:
+        build_orthomosaic = False
+    if build_dem is None:
+        build_dem = False
+    if build_point_cloud is None:
+        build_point_cloud = False
+    if classify_ground is None:
+        classify_ground = False
+    if close_holes is None:
+        close_holes = True
 
     print("=========================================================================")
-    preset_label = f" [{preset.upper()} PRESET]" if preset else ""
+    preset_label = f" [{preset.upper()} PRESET]" if preset else (" [AUTONOMOUS INFERENCE]" if is_auto else "")
     print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE{preset_label}")
     print("=========================================================================", flush=True)
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
@@ -709,7 +1033,9 @@ def run_reconstruction(
     print(f"  Target Mesh Faces:  {custom_faces:,} ({face_label})")
     print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
     print(f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}")
-    print(f"  Orthomosaic:        {'ENABLED (GeoTIFF + .psx)' if build_orthomosaic else 'DISABLED'}")
+    print(f"  Dense Point Cloud:  {'ENABLED' if build_point_cloud else 'DISABLED'} (Classify Ground: {classify_ground})")
+    print(f"  Elevation (DEM):    {'ENABLED' if build_dem else 'DISABLED'} | Orthomosaic: {'ENABLED' if build_orthomosaic else 'DISABLED'}")
+    print(f"  Quality PDF Report: {'ENABLED' if export_report else 'DISABLED'}")
     print(f"  Execution Mode:     {'RESUME CHECKPOINT' if resume else 'RESTART FROM SCRATCH (DEFAULT)'}")
     print("=========================================================================", flush=True)
 
@@ -757,7 +1083,6 @@ def run_reconstruction(
                 doc.read_only = False
             except Exception:
                 pass
-            # If multiple chunks exist in project, select the Production_Reconstruction chunk or anchor
             prod_chunk = None
             for c in doc.chunks:
                 if c.label == "Production_Reconstruction":
@@ -817,7 +1142,6 @@ def run_reconstruction(
             print(f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos total).", flush=True)
             print("  Ingesting each subfolder into an independent chunk for drift-free camera alignment and point-based RANSAC ICP registration...", flush=True)
 
-            # Remove initial placeholder chunk
             for c in list(doc.chunks):
                 if len(c.cameras) == 0:
                     doc.remove(c)
@@ -873,7 +1197,6 @@ def run_reconstruction(
                 except Exception:
                     pass
 
-            # Register Chunks onto Anchor using Camera/GPS-Based Registration (method=2)
             aligned_chunks = [c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2]
             if len(aligned_chunks) == 0:
                 raise RuntimeError("No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap.")
@@ -910,7 +1233,6 @@ def run_reconstruction(
                         except Exception as e_cam:
                             print(f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.", flush=True)
                 else:
-                    # Default: method=2 (Camera/GPS based) - immune to symmetric building 180-degree flip
                     print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Camera/GPS-based registration (method=2)...", flush=True)
                     try:
                         doc.alignChunks(
@@ -937,7 +1259,6 @@ def run_reconstruction(
             else:
                 print(f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned cameras; skipping chunk registration.", flush=True)
 
-            # Merge chunks into unified production chunk
             print(f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks into unified production reconstruction chunk...", flush=True)
             try:
                 doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=True)
@@ -957,7 +1278,6 @@ def run_reconstruction(
             print(f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).", flush=True)
 
         else:
-            # Single-chunk flow (flat directory or single image subfolder)
             all_imgs = []
             for imgs in groups.values():
                 all_imgs.extend(imgs)
@@ -967,11 +1287,9 @@ def run_reconstruction(
             chunk.addPhotos(all_imgs)
             print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
 
-            # Step 1b: Image Sharpness Quality Estimation & Blurry Image Filtering
             if min_quality > 0.0:
                 filter_image_quality(chunk, min_quality=min_quality)
 
-            # Step 2: Feature Detection & Matching
             print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
             t_match = time.time()
             chunk.matchPhotos(
@@ -986,7 +1304,6 @@ def run_reconstruction(
             )
             print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
-            # Step 3: Camera Alignment
             print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
             t_align = time.time()
             chunk.alignCameras(adaptive_fitting=adaptive_fitting)
@@ -994,7 +1311,6 @@ def run_reconstruction(
             enabled_count = sum(1 for c in chunk.cameras if c.enabled)
             print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
 
-            # Camera Optimization with Rolling Shutter Compensation & Gradual Selection
             if rolling_shutter:
                 for s in chunk.sensors:
                     s.rolling_shutter = Metashape.Shutter.Model.Regularized
@@ -1005,7 +1321,6 @@ def run_reconstruction(
             else:
                 print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
-        # Step 3b: Bounding Box Cropping (Default: gps-square, Optional: manual / structure / none)
         def _safe_reopen():
             files_dir = psx_out.replace(".psx", ".files")
             lock_file = os.path.join(files_dir, "lock")
@@ -1088,6 +1403,42 @@ def run_reconstruction(
         chunk = save_checkpoint(doc, psx_out)
         print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
+    # Step 4b: Dense Point Cloud Generation & Classification
+    if build_point_cloud:
+        has_point_cloud = chunk.point_cloud is not None and chunk.point_cloud.point_count > 0
+        if has_point_cloud:
+            print(f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).", flush=True)
+        else:
+            print(f"\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
+            t_pc = time.time()
+            chunk.buildPointCloud(
+                source_data=Metashape.DataSource.DepthMapsData,
+                point_colors=True,
+                point_confidence=True,
+                keep_depth=True,
+            )
+            pc_count = chunk.point_cloud.point_count if chunk.point_cloud else 0
+            print(f"  Point cloud completed in {(time.time() - t_pc)/60:.2f} min! Density: {pc_count:,} 3D points.", flush=True)
+
+            if filter_point_confidence and chunk.point_cloud:
+                print(f"  Filtering low-confidence points (< {filter_point_confidence})...", flush=True)
+                chunk.point_cloud.setConfidenceFilter(filter_point_confidence, 255)
+                chunk.point_cloud.removeSelectedPoints()
+                chunk.point_cloud.resetFilters()
+
+            if classify_ground and chunk.point_cloud:
+                print("  Executing automatic ground point classification (max_angle=15°, max_distance=1.0m, cell_size=50m)...", flush=True)
+                chunk.point_cloud.classifyGroundPoints(max_angle=15.0, max_distance=1.0, cell_size=50.0)
+                print("  Ground classification completed.", flush=True)
+
+            if classify_points and chunk.point_cloud:
+                print("  Executing multiclass AI semantic point classification...", flush=True)
+                chunk.point_cloud.classifyPoints()
+                print("  Multiclass point classification completed.", flush=True)
+
+            chunk = save_checkpoint(doc, psx_out)
+            print(f"[CHECKPOINT] Saved dense point cloud checkpoint to: {psx_out}", flush=True)
+
     # Step 5: High-Precision Arbitrary Surface Meshing
     chunk = doc.chunk
     if chunk.model is None:
@@ -1127,7 +1478,7 @@ def run_reconstruction(
             print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
             orig_gpu_mask = Metashape.app.gpu_mask
             try:
-                Metashape.app.gpu_mask = 0  # Disable GPU acceleration for meshing
+                Metashape.app.gpu_mask = 0
                 chunk.buildModel(
                     surface_type=Metashape.SurfaceType.Arbitrary,
                     source_data=Metashape.DataSource.DepthMapsData,
@@ -1138,7 +1489,7 @@ def run_reconstruction(
                 )
                 print("  [Fallback] CPU surface meshing succeeded!", flush=True)
             finally:
-                Metashape.app.gpu_mask = orig_gpu_mask  # Restore GPU for texture baking
+                Metashape.app.gpu_mask = orig_gpu_mask
                 print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
         if close_holes and chunk.model:
             chunk.model.closeHoles(level=30)
@@ -1186,7 +1537,7 @@ def run_reconstruction(
 
     # Production Asset Export
     print("\n=========================================================================")
-    print("  [7/7] EXPORTING FINAL PRODUCTION ASSETS (GLB, OBJ, TIFF & PSX)")
+    print("  [7/7] EXPORTING PRODUCTION ASSETS (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
     print("=========================================================================")
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
@@ -1210,12 +1561,50 @@ def run_reconstruction(
     )
     print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
-    # Step 7b: Orthomosaic Generation & GeoTIFF Export (Map Preset or --ortho)
+    # Step 7b: Digital Elevation Model (DEM) Generation & GeoTIFF Export
+    if build_dem:
+        try:
+            has_dem = getattr(chunk, "elevation", None) is not None
+            if not has_dem:
+                print(f"\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
+                t_dem = time.time()
+                proj = Metashape.OrthoProjection()
+                if chunk.crs:
+                    proj.crs = chunk.crs
+                dem_source = Metashape.DataSource.PointCloudData if (chunk.point_cloud and chunk.point_cloud.point_count > 0) else Metashape.DataSource.DepthMapsData
+                chunk.buildDem(
+                    source_data=dem_source,
+                    interpolation=Metashape.Interpolation.EnabledInterpolation,
+                    projection=proj,
+                )
+                print(f"  [7b/7] DEM generation completed in {(time.time() - t_dem)/60:.2f} min.", flush=True)
+                chunk = save_checkpoint(doc, psx_out)
+                print(f"  [7b/7] [CHECKPOINT] Saved DEM inside project: {psx_out}", flush=True)
+            else:
+                print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
+
+            dem_out = os.path.join(output_dir, "dem.tif")
+            print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF DEM to: {dem_out}...", flush=True)
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=dem_out,
+                source_data=Metashape.DataSource.ElevationData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+            )
+            print(f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_dem:
+            print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
+
+    # Step 7c: Orthomosaic Generation & GeoTIFF Export
     if build_orthomosaic:
         try:
             has_ortho = chunk.orthomosaic is not None
             if not has_ortho:
-                print(f"\n[7b/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
+                print(f"\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
                 t_ortho = time.time()
                 proj = Metashape.OrthoProjection()
                 if chunk.crs:
@@ -1227,14 +1616,14 @@ def run_reconstruction(
                     ghosting_filter=ghosting_filter,
                     projection=proj,
                 )
-                print(f"  [7b/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+                print(f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
-                print(f"  [7b/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
+                print(f"  [7c/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
             else:
-                print(f"\n[7b/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+                print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
             ortho_out = os.path.join(output_dir, "orthomosaic.tif")
-            print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+            print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
             comp.tiff_big = True
@@ -1246,9 +1635,42 @@ def run_reconstruction(
                 save_world=True,
                 save_alpha=True,
             )
-            print(f"  [7b/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+            print(f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
         except Exception as e_ortho:
-            print(f"  [7b/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing with final project save...", flush=True)
+            print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
+
+    # Step 7d: Dense Point Cloud Export
+    if export_point_cloud or (build_point_cloud and export_point_cloud is not False):
+        if chunk.point_cloud and chunk.point_cloud.point_count > 0:
+            pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
+            pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+            pc_out = os.path.join(output_dir, f"point_cloud{pc_ext}")
+            print(f"\n[7d/7] [EXPORT] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
+            chunk.exportPointCloud(
+                path=pc_out,
+                format=pc_fmt,
+                source_data=Metashape.DataSource.PointCloudData,
+                save_point_color=True,
+                save_point_normal=True,
+                save_point_confidence=True,
+                save_point_classification=True,
+            )
+            print(f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} ({os.path.getsize(pc_out)/(1024*1024):.2f} MB)", flush=True)
+
+    # Step 7e: Executive PDF Quality & Calibration Report
+    if export_report:
+        try:
+            report_out = os.path.join(output_dir, "report.pdf")
+            print(f"\n[7e/7] [EXPORT] Exporting Official Calibration & Quality PDF Report to: {report_out}...", flush=True)
+            rep_title = report_title or "AutoMetashape Processing & Calibration Report"
+            chunk.exportReport(
+                path=report_out,
+                title=rep_title,
+                description="AutoMetashape Autonomous Photogrammetry Pipeline",
+            )
+            print(f"  [7e/7] [EXPORT] Saved Quality Report: {report_out} ({os.path.getsize(report_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_rep:
+            print(f"  [7e/7] [WARNING] PDF Report export encountered an issue: {e_rep}. Continuing...", flush=True)
 
     chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
@@ -1259,16 +1681,24 @@ def run_reconstruction(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Autonomous Metashape 3D Reconstruction Pipeline (Medium Alignment Quality, 40K Keypoints, 25K Tiepoints, Exclude Stationary Points, Moderate Depth Filtering, 600K Faces, GPS-Square Crop)"
+        description="AutoMetashape: Autonomous High-Precision Photogrammetry Pipeline (Survey Profiling, Point Cloud, Mesh & Orthomosaic)"
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
+    parser.add_argument("--profile", action="store_true", help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing")
+    parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
+    parser.add_argument(
+        "--preset",
+        choices=["auto", "building", "map"],
+        default="auto",
+        help="Reconstruction preset: 'auto' (learned from telemetry), 'building' (600K faces, 16-page 8K, GPS crop), or 'map' (2M faces, 4-page 8K, uncropped terrain, DEM & Ortho)",
+    )
     parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="medium", help="Image alignment accuracy/quality (default: medium)")
     parser.add_argument("--keypoint-limit", type=int, default=40000, help="Max keypoints per image (default: 40000)")
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
-    parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
-    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 600,000 for building, 2,000,000 for map)")
+    parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
+    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: inferred or 600,000 for building, 2,000,000 for map)")
     parser.add_argument(
         "--guided-matching",
         dest="guided_matching",
@@ -1291,9 +1721,10 @@ if __name__ == "__main__":
         default=True,
         help="Disable Gradual Selection tie-point filtering and camera re-optimization (keeps all aligned tie points intact)",
     )
-    parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", default=True, help="Disable CMOS rolling shutter regularized compensation (default: enabled)")
+    parser.add_argument("--rolling-shutter", dest="rolling_shutter", action="store_true", default=None, help="Force enable CMOS rolling shutter compensation")
+    parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
-    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 16 for building, 4 for map)")
+    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: inferred or 16 for building, 4 for map)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
@@ -1301,7 +1732,7 @@ if __name__ == "__main__":
         "--crop-method",
         choices=["gps-square", "structure", "manual", "none"],
         default=None,
-        help="Bounding box crop method: 'gps-square' (default for building), 'structure', 'manual', or 'none' (default for map)",
+        help="Bounding box crop method: 'gps-square', 'structure', 'manual', or 'none' (default: inferred)",
     )
     parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
     parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
@@ -1319,25 +1750,35 @@ if __name__ == "__main__":
     )
     parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
     parser.add_argument(
-        "--preset",
-        choices=["building", "map"],
-        default=None,
-        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
-    )
-    parser.add_argument(
         "--no-crop",
         dest="no_crop",
         action="store_true",
         help="Disable bounding box cropping (reconstruct full uncropped scene)",
     )
+    # Point Cloud Options
+    parser.add_argument("--build-point-cloud", action="store_true", default=None, help="Generate dense point cloud from depth maps")
+    parser.add_argument("--export-point-cloud", action="store_true", default=False, help="Export dense point cloud file")
+    parser.add_argument("--point-cloud-format", choices=["laz", "las", "ply", "e57", "xyz"], default="laz", help="Format for exported dense point cloud (default: laz)")
+    parser.add_argument("--classify-ground", action="store_true", default=None, help="Classify ground vs non-ground points in dense point cloud")
+    parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")
+    parser.add_argument("--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold")
+    # DEM / Elevation Options
+    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM)")
+    parser.add_argument("--export-dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
+    # Orthomosaic Options
     parser.add_argument(
         "--ortho",
         "--build-orthomosaic",
         dest="build_orthomosaic",
         action="store_true",
-        default=False,
-        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: False, enabled automatically in 'map' preset)",
+        default=None,
+        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: inferred or enabled in 'map' preset)",
     )
+    # Quality Report Options
+    parser.add_argument("--export-report", dest="export_report", action="store_true", default=True, help="Export official Metashape PDF calibration & quality report (default: True)")
+    parser.add_argument("--no-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
+    parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
+    # Multi-chunk options
     parser.add_argument(
         "--multi-chunk",
         choices=["auto", "force", "disable"],
@@ -1363,19 +1804,36 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    is_map = args.preset == "map"
-    faces = args.faces if args.faces is not None else (2000000 if is_map else 600000)
-    texture_pages = args.texture_pages if args.texture_pages is not None else (4 if is_map else 16)
+    if args.profile:
+        print("=========================================================================")
+        print("  AUTOMETASHAPE: DATASET TELEMETRY & SURVEY PROFILER")
+        print(f"  Target Directory: {args.images}")
+        print("=========================================================================", flush=True)
+        prof = profile_dataset(args.images, output_dir=args.output)
+        inferred = infer_optimal_parameters(prof)
+        print(f"  Photos Ingested:   {prof.get('photo_count', 0):,}")
+        print(f"  GPS Telemetry:     {'Present' if prof.get('has_gps') else 'Absent'} ({prof.get('gps_ratio', 0.0)*100:.1f}%% georeferenced)")
+        print(f"  Horizontal Span:   {prof.get('horizontal_span_m', 0.0):.1f} meters")
+        print(f"  Altitude Span:     {prof.get('alt_span_m', 0.0):.1f} meters")
+        print(f"  Avg Resolution:    {prof.get('avg_megapixels', 0.0):.1f} Megapixels")
+        cams = ', '.join(prof.get('cameras_detected', [])) or 'Standard Sensor'
+        print(f"  Camera Sensors:    {cams}")
+        print(f"  Rolling Shutter:   {'Recommended' if prof.get('rolling_shutter_recommended') else 'Not needed'}")
+        print("-------------------------------------------------------------------------")
+        print(f"  Survey Category:   {inferred['survey_category'].upper()}")
+        print(f"  Optimal Crop:      {inferred['crop_method'].upper()}")
+        print(f"  Target Faces:      {inferred['custom_faces']:,}")
+        print(f"  Texture Pages:     {inferred['texture_pages']} pages (8K)")
+        print(f"  Depth Filtering:   {inferred['depth_filtering'].capitalize()}")
+        print(f"  Point Cloud:       {'Enabled' if inferred['build_point_cloud'] else 'Disabled'}")
+        print(f"  DEM Elevation:     {'Enabled' if inferred['build_dem'] else 'Disabled'}")
+        print(f"  Orthomosaic:       {'Enabled' if inferred['build_orthomosaic'] else 'Disabled'}")
+        print("=========================================================================")
+        sys.exit(0)
 
-    if args.no_crop:
-        crop_method = "none"
-    elif args.crop_method is not None:
-        crop_method = args.crop_method
-    else:
-        crop_method = "none" if is_map else "gps-square"
-
+    crop_method = "none" if args.no_crop else args.crop_method
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
-    build_orthomosaic = args.build_orthomosaic or is_map
+    auto_params = args.auto or (args.preset == "auto")
 
     run_reconstruction(
         images_dir=args.images,
@@ -1389,8 +1847,8 @@ if __name__ == "__main__":
         filter_tiepoints=args.filter_tiepoints,
         depth_quality=args.depth_quality,
         depth_filtering=args.depth_filtering,
-        custom_faces=faces,
-        texture_pages=texture_pages,
+        custom_faces=args.faces,
+        texture_pages=args.texture_pages,
         fill_holes=args.fill_holes,
         ghosting_filter=args.ghosting_filter,
         rebake_texture=args.rebake_texture,
@@ -1404,5 +1862,16 @@ if __name__ == "__main__":
         multi_chunk=args.multi_chunk,
         chunk_align_method=args.chunk_align_method,
         preset=args.preset,
-        build_orthomosaic=build_orthomosaic,
+        auto_params=auto_params,
+        build_orthomosaic=args.build_orthomosaic,
+        build_dem=args.build_dem,
+        export_dem=args.export_dem,
+        build_point_cloud=args.build_point_cloud,
+        export_point_cloud=args.export_point_cloud,
+        point_cloud_format=args.point_cloud_format,
+        classify_ground=args.classify_ground,
+        classify_points=args.classify_points,
+        filter_point_confidence=args.filter_point_confidence,
+        export_report=args.export_report,
+        report_title=args.report_title,
     )
