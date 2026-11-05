@@ -49,16 +49,18 @@
   - Fail: Passing the batch root folder directly into `--images` (which erroneously fuses separate projects together); proceeding to next project without verifying the current one; unhandled project crash halting subsequent projects without diagnosis.
 
 
-### Scenario 5: Autonomous Survey Telemetry Profiling & Parameter Inference
-- **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; analyze the photos, learn the flight geometry and camera parameters, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
+### Scenario 5: Pro Photogrammetry Survey Physics Audit & USGS 4-Pass Optimization
+- **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; act as a senior photogrammetrist, audit the survey optics, calculate the true GSD, run USGS gradual selection bundle adjustment, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
 - **Expected behavior**:
-  - Uses `--preset auto` (or `--profile`), inspecting image telemetry, GPS distribution, altitude span, sensor megapixel count, and shutter tags.
-  - Correctly classifies survey category (e.g. nadir terrain survey or oblique architectural flight).
-  - Dynamically configures keypoint limits, tiepoint budgets, bounding box crop strategy (`none` vs `gps-square` vs `structure`), mesh face budget, and texture page count.
-  - Enables `buildPointCloud` (`.laz`), `buildDem` (`dem.tif`), `buildOrthomosaic` (`orthomosaic.tif`), and exports an executive PDF quality report (`report.pdf`).
+  - Uses `--preset pro` (or `--profile`), inspecting image telemetry, sensor hardware pitch, optical GSD in cm/px, flying height $H_{AGL}$, forward/lateral overlap, and shutter mechanism.
+  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411 or Phantom 4 Pro to prevent synthetic vertical elevation drift).
+  - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 12`, `PA <= 2.5`, `RE <= 0.35`, `ImageCount >= 3`) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting and tie point covariance).
+  - Computes exact 1:1 ground texel density budget from the reconstructed 3D surface area and GSD.
+  - Enables `buildPointCloud` (`.laz`), slope-adaptive ground classification, `buildDem` (`dem.tif`), `buildOrthomosaic` (`orthomosaic.tif`), and exports an executive PDF quality report (`report.pdf`).
+  - Outputs the executive Geomatics Engineering Summary with initial vs optimized RMS reprojection errors.
 - **Pass/fail criteria**:
-  - Pass: Profiling inspects telemetry correctly; executes pipeline with dynamically learned parameters; deliverables include `point_cloud.laz`, `dem.tif`, `orthomosaic.tif`, `report.pdf`, `model.glb`, `model.obj`, and `building_reconstruction.psx`.
-  - Fail: Blindly falling back to rigid manual presets; failing to extract EXIF telemetry; crashing during point cloud or DEM generation.
+  - Pass: Profiling audits optics and GSD correctly; executes USGS 4-pass optimization achieving RMS $< 0.35\text{ px}$; deliverables include `point_cloud.laz`, `dem.tif`, `orthomosaic.tif`, `report.pdf`, `model.glb`, `model.obj`, and `building_reconstruction.psx`.
+  - Fail: Blindly falling back to rigid manual presets; failing to extract EXIF telemetry; fitting distortion coefficients to high-uncertainty tie points; crashing during point cloud or DEM generation.
 
 ### Scenario 6: Dense Point Cloud Generation & Ground Point Classification
 - **Query**: "Process this drone photogrammetry dataset at `data/survey/forest_clearing` to generate a 3D point cloud with automatic bare-earth ground classification and export it to compressed LAZ format."

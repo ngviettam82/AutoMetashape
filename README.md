@@ -46,13 +46,14 @@ python scripts/autometashape_gui.py
 Run photogrammetry reconstruction directly from PowerShell or terminal:
 
 ```powershell
-# Autonomous Mode (Profiles dataset and learns optimal parameters dynamically):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset auto
+# Pro Photogrammetry & Geomatics Engine (Default):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
+    --images "C:/path/to/your/images" --preset pro
 
 # Drone Survey with Dense Point Cloud, DEM, Contours & Cesium 3D Tiles:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
     --images "C:/path/to/your/images" \
-    --preset map \
+    --preset pro \
     --build-point-cloud --build-dem --build-contours --build-tiled-model
 
 # Building Facade with Coded Target Detection, Delighting & FBX Export:
@@ -79,22 +80,25 @@ AutoMetashape supports all core photogrammetric operations in Agisoft Metashape 
 - **☀️ Texture Delighting / Shadow Removal (`--remove-lighting`)**: Removes harsh sunlight shadows and ambient occlusion using `chunk.removeLighting()` to output true photographic diffuse albedo textures for game engines and VFX.
 - **📐 Mesh Topology, Smoothing & Multi-Format Export**: Arbitrary or HeightField meshing, planar hole closing (`closeHoles`), Laplacian mesh smoothing (`--smooth-mesh`), decimation (`--decimate-mesh`), and exports to Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`), binary glTF (`.glb`), and Wavefront OBJ (`.obj` + `.mtl` + `.tif`).
 
-### 2. Autonomous Telemetry Profiling & Learned Parameters
-- **🧠 Dataset Profiling Engine (`--profile`, `--preset auto`)**:
-  - Automatically samples and extracts EXIF/XMP camera telemetry, focal lengths, megapixels, shutter models, and GPS flight bounds.
-  - Dynamically classifies dataset into **Nadir Aerial Survey**, **Oblique Facade Survey**, or **Terrestrial Close-Range Walkthrough**.
-  - Dynamically calculates optimal keypoint limits (60K for $\ge 30\text{MP}$, 40K otherwise), tiepoints (25K), bounding box cropping strategy, face budgets ($600\text{K} - 2\text{M}$), texture page counts, and toggles for DEM, point cloud, and orthomosaic generation.
-- **🏢 Building Preset (`--preset building`, Default)**:
-  - Tailored for architectural structures, towers, facades, and vertical monuments.
-  - **600,000 polygon faces (600K)** with Level-30 planar hole closing across window and door voids.
-  - **16-Page 8K Texture Atlas** ($16 \times 8192 \times 8192$) uncompressed TIFF mosaic blending with hole filling and ghosting filter.
-  - **`gps-square` Bounding Box**: Calculates the enclosing horizontal square of camera GPS poses while leaving vertical bounds uncropped to guarantee rooftops, spires, and foundations are never sliced.
+### 2. Pro Photogrammetry & Geomatics Engine
+- **🔬 Survey Physics & Optics Telemetry Audit (`--profile`, `--preset pro`, Default)**:
+  - Audits physical sensor geometry, pixel pitch in $\mu\text{m}$, mean flying height $H_{AGL}$, and calculates the exact Ground Sampling Distance (GSD in cm/pixel).
+  - Evaluates pairwise camera baselines to estimate forward and lateral overlap percentages.
+  - Samples luminance histograms to detect underexposed shadows ($Y < 20$) and highlight clipping ($Y > 235$), triggering texture delighting when shadow clipping exceeds $15\%$.
+- **⚙️ Camera Shutter Physics Conformance**:
+  - Automatically identifies mechanical leaf shutters (e.g. DJI FC3411, Phantom 4 Pro FC6310, Zenmuse P1, Phase One, Hasselblad) and **disables rolling shutter compensation** to eliminate synthetic bundle adjustment drift.
+  - Enables rolling shutter compensation only on CMOS rolling shutter payloads (DJI Mini, Mavic Air, consumer smartphones).
+- **📐 USGS 4-Pass Gradual Selection Bundle Adjustment**:
+  - Staged parameter unfreezing schedule: Pass 1 (RU $\le 12 \to f, cx, cy$) $\to$ Pass 2 (PA $\le 2.5\text{ px} \to k_1..k_3, p_1, p_2$) $\to$ Pass 3 (RE $\le 0.35\text{ px} \to k_4, b_1, b_2$, adaptive fitting) $\to$ Pass 4 (Image multiplicity $\ge 3$).
+  - Reports initial vs optimized RMS reprojection errors with reduction percentages.
+- **🎨 1:1 Ground Texel Density Budgeting**:
+  - Dynamically calculates the exact 8K texture atlas page count needed to match optical camera resolution on the 3D mesh surface, preventing blurry textures or bloated empty UV sheets.
+- **⛰️ Slope-Adaptive Ground Point Filtering & Morphological Meshing**:
+  - Derives terrain relief ratio $R = \Delta Z / D_{diag}$: sets planar sites ($R < 0.08$) to `HeightField` meshing with large ground cell sizes ($35\text{m}$), and complex 3D structures ($R \ge 0.08$) to `Arbitrary` meshing with steep slope angles ($28^\circ$).
+- **🏢 Building Preset (`--preset building`)**:
+  - 600K polygon faces, 16-page 8K texture atlas, Level-30 planar hole closing, and `gps-square` bounding box.
 - **🗺️ Aerial Map Preset (`--preset map`)**:
-  - Tailored for site surveys, civil engineering, topography, and agricultural mapping.
-  - **2,000,000 polygon faces (2M)** capturing micro-topographical terrain details.
-  - **4-Page 8K Texture Atlas** for sharp aerial orthophoto texture projection.
-  - **Full Uncropped Extent (`--no-crop`)**: Preserves the complete surveyed terrain, boundary roads, and environmental perimeter.
-  - **GeoTIFF Orthomosaic**: Surface-mesh projected mosaic orthophoto with BigTIFF LZW compression, ESRI `.tfw` world file, and automatic persistence inside the `.psx` project chunk.
+  - 2M polygon faces, 4-page 8K texture atlas, full uncropped terrain extent, and GeoTIFF orthomosaic.
 
 ### 3. Robust Single-Chunk Global Alignment & Multi-Chunk Registration
 - **Single-Chunk Global Alignment (Default, `--multi-chunk disable`)**: To prevent false alignment artifacts or coordinate shifts caused by chunk merging, AutoMetashape defaults to loading all photos across all subfolders into a single unified chunk, solving bundle adjustment globally.

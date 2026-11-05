@@ -7,7 +7,7 @@ owners:
   - core-engineering
 ---
 
-# High-Precision 3D Photogrammetry, Survey Telemetry Analysis & Complete Metashape Processing
+# High-Precision 3D Photogrammetry, Survey Physics Engine & Complete Metashape Processing
 
 Autonomous end-to-end photogrammetry and aerial survey pipeline transforming raw image folders (drone surveys, architectural captures, ground inspections) into high-density textured 3D models (`.obj`, `.mtl`, `.glb`, `.fbx`, `.ply`), classified dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK, OSGB), Digital Elevation Models (`dem.tif`), topographic contour vector maps (`.shp`, `.dxf`, `.geojson`, `.kml`), GeoTIFF orthomosaic maps (`orthomosaic.tif`), executive calibration quality reports (`report.pdf`), and native Agisoft Metashape Professional projects (`.psx`).
 
@@ -17,8 +17,10 @@ Autonomous end-to-end photogrammetry and aerial survey pipeline transforming raw
 
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests 3D models, classified point clouds, digital elevation models, topographic contours, or orthomosaic maps.
-- The user asks the agent to **learn and determine the best parameters** rather than forcing a rigid preset: the pipeline automatically inspects image telemetry, sensor resolution, camera models, and GPS flight geometry to dynamically configure the optimal reconstruction settings (`--preset auto` or `--profile`).
-- Dense 3D Point Clouds are required: generates point clouds directly from depth maps (`chunk.buildPointCloud()`), filters low-confidence points, performs automatic ground classification (`classifyGroundPoints`), or applies AI semantic classification (`classifyPoints`) with export to compressed LAZ, LAS, PLY, E57, or XYZ.
+- The user requests an agent that acts like a **Senior Certified Photogrammetrist & Geomatics Engineer**: never relying on simplistic preset heuristics, but systematically auditing survey physics (physical sensor dimensions, pixel pitch in $\mu\text{m}$, flying height $H_{AGL}$, true Ground Sampling Distance GSD in $\text{cm/px}$, forward/lateral overlap geometry, mechanical leaf vs CMOS electronic rolling shutter distinction, dynamic range shadow clipping, and topographic relief ratio $R = \Delta Z / D_{diag}$).
+- Professional bundle adjustment optimization is required: executes the **USGS 4-Pass Gradual Selection protocol** (`ReconstructionUncertainty` $\to$ `ProjectionAccuracy` $\to$ `ReprojectionError` $\to$ `ImageCount` multiplicity) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting) to guarantee sub-pixel reprojection residuals ($< 0.35\text{ px}$).
+- 1:1 Ground Texel Density Budgeting is needed: calculates the exact texture atlas page count required to match camera optical resolution on the 3D surface, eliminating blurry textures or bloated empty UV sheets.
+- Dense 3D Point Clouds are required: generates point clouds directly from depth maps (`chunk.buildPointCloud()`), filters low-confidence points, performs slope-adaptive ground classification (`classifyGroundPoints`), or applies AI semantic classification (`classifyPoints`) with export to compressed LAZ, LAS, PLY, E57, or XYZ.
 - Hierarchical 3D Tiled Models (LOD) are required: generates streaming LOD tilesets in Cesium 3D Tiles (`tileset.json` + `b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), or OpenSceneGraph (`.osgb`) for massive web GIS applications.
 - Topographic Digital Elevation Models (DEM/DSM/DTM) or vector contour lines (ESRI Shapefile, AutoCAD DXF, GeoJSON, KML) are needed at custom elevation intervals (e.g., 0.5m, 1m, 2m, 5m).
 - Texture Delighting / Shadow Removal is needed: removes harsh direct sunlight shadows and ambient occlusion using `chunk.removeLighting()` to recover true photographic diffuse albedo textures for game engines and VFX.
@@ -26,7 +28,6 @@ Use this skill when:
 - Coded target markers or AprilTags need to be automatically detected across photos (`chunk.detectMarkers()`).
 - Radiometric color calibration and white balance equalization across cameras is required (`chunk.calibrateColors()`).
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
-- Calibrating rolling shutter distortion on consumer drone CMOS sensors and closing localized window openings.
 - Exporting into multiple CAD/DCC formats: Autodesk FBX, Stanford PLY, AutoCAD DXF, alongside binary glTF and Wavefront OBJ.
 
 Do not use this skill when:
@@ -39,48 +40,65 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Ingestion & Telemetry Profiling<br/>(EXIF / XMP Optics, GPS Extent, Shutter Analysis)"]
+    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Pro Survey Physics & Telemetry Audit<br/>(Optics DB, Pixel Pitch, H_AGL, GSD, Shutter Physics, Relief Ratio R)"]
     B --> C["2. Quality Filtering, Markers & GCPs<br/>(Sharpness Filter < 0.50, detectMarkers, importReference)"]
-    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 40K/60K Keypoints, 25K Tiepoints, Guided Matching)"]
-    D --> E["4. Bounding Box Cropping<br/>(gps-square | none | structure | manual)"]
-    E --> F["5. Multi-View Stereo (MVS) Depth Maps<br/>(Medium Quality, Moderate / Aggressive Filtering)"]
-    F --> G["6. Dense Point Cloud & AI Classification<br/>(buildPointCloud, Confidence Filtering, Ground / Semantic AI Classification)"]
-    F --> H["7. Surface Meshing & Topology<br/>(Arbitrary / HeightField, 600K-2M Faces, Smoothing, Decimation)"]
-    H --> I["8. Texture Atlas & Delighting<br/>(8K Lossless TIFF, Mosaic Blending, removeLighting Diffuse Albedo)"]
-    F --> J["9. Hierarchical 3D Tiled Model<br/>(buildTiledModel: Cesium 3D Tiles, TLS, SLPK, OSGB)"]
-    F --> K["10. Digital Elevation Model & Contours<br/>(buildDem + buildContours: GeoTIFF, SHP, DXF, GeoJSON)"]
-    H --> L["11. GeoTIFF Orthomosaic<br/>(buildOrthomosaic + BigTIFF LZW Export)"]
-    D --> M["12. Executive PDF Calibration Report<br/>(exportReport: camera errors, overlap, GSD)"]
-    G --> N["Production Deliverables: <images_dir>/model/<br/>• 3D Models: model.glb, model.obj, model.fbx, model.ply, model.dxf<br/>• Dense Cloud: point_cloud.laz, tie_points.ply<br/>• 3D Tiles: tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: dem.tif, contours.shp, contours.dxf<br/>• Ortho & Report: orthomosaic.tif, report.pdf<br/>• Project Archive: building_reconstruction.psx"]
-    H --> N
-    I --> N
-    J --> N
-    K --> N
-    L --> N
-    M --> N
+    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 40K/60K Keypoints, Guided Matching)"]
+    D --> E["4. USGS 4-Pass Gradual Selection Bundle Adjustment<br/>(Pass 1: RU<=12 -> Pass 2: PA<=2.5 -> Pass 3: RE<=0.35 -> Pass 4: Rays>=3)"]
+    E --> F["5. Morphological Surface Meshing<br/>(Planar R<0.08: HeightField | 3D R>=0.08: Arbitrary)"]
+    E --> G["6. Dense Point Cloud & Slope-Adaptive Ground Filtering<br/>(buildPointCloud, Adaptive Cell Size & Angle, Semantic AI)"]
+    F --> H["7. 1:1 Texel Density Budgeting & Delighting<br/>(Surface Area / GSD^2 -> Exact 8K Page Count, removeLighting Diffuse Albedo)"]
+    E --> I["8. Hierarchical 3D Tiled Model<br/>(Cesium 3D Tiles tileset.json, TLS, SLPK, OSGB)"]
+    E --> J["9. Digital Elevation Model & Topographic Contours<br/>(buildDem + buildContours: GeoTIFF, SHP, DXF, GeoJSON)"]
+    F --> K["10. GeoTIFF Orthomosaic<br/>(buildOrthomosaic + BigTIFF LZW Export)"]
+    E --> L["11. Executive Geomatics Engineering Certification<br/>(exportReport: GSD, RMS error reduction, covariance, camera residuals)"]
+    G --> M["Production Deliverables: <images_dir>/model/<br/>• 3D Models: model.glb, model.obj, model.fbx, model.ply, model.dxf<br/>• Dense Cloud: point_cloud.laz, tie_points.ply<br/>• 3D Tiles: tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: dem.tif, contours.shp, contours.dxf<br/>• Ortho & Report: orthomosaic.tif, report.pdf<br/>• Project Archive: building_reconstruction.psx"]
+    H --> M
+    I --> M
+    J --> M
+    K --> M
+    L --> M
 ```
 
-### 1. Autonomous Survey Telemetry Profiling & Parameter Inference
+### 1. Senior Photogrammetrist Operating Protocol
 
-Rather than requiring manual trial-and-error or rigid presets, AutoMetashape features an autonomous telemetry profiling engine (`--profile` and `--preset auto` / `--auto`). An agent or automated pipeline inspects the dataset's EXIF/XMP metadata and mathematically derives the optimal photogrammetric configuration:
-
-#### Telemetry Inference Heuristics
-
-1. **Optical Resolution & Keypoint Budget**:
-   - $\text{Megapixels} \ge 30\text{ MP}$ (e.g. 45MP Nikon Z9, 61MP Sony A7R IV, 100MP Phase One): Ingests richer fine details; allocates **60,000 keypoints** and **25,000 tiepoints** with `guided_matching=True` to resolve micro-textures.
-   - $\text{Megapixels} < 30\text{ MP}$ (e.g. 12MP / 20MP drone sensors): Allocates **40,000 keypoints** and **25,000 tiepoints** to balance memory and matching speed.
-
-2. **Flight Profile & Survey Geometry**:
-   - **Nadir Terrain Survey**: Detected when GPS availability $\ge 70\%$, horizontal geographic span $\ge 140\text{ meters}$, and altitude variance $\le 65\text{ meters}$.
-     - *Inferred settings*: `crop_method="none"` (preserves uncropped site boundaries), `build_dem=True` (Digital Elevation Model), `build_orthomosaic=True` (orthophoto mosaic), `build_point_cloud=True`, `classify_ground=True` (ASPRS ground segmentation), `build_contours=True` (1m topographic contour vectors), `build_tiled_model=True` (Cesium 3D Tiles), `faces=2,000,000`, `texture_pages=4`, `depth_filtering="aggressive"`.
-   - **Oblique Architecture / Building Survey**: Detected when GPS availability $\ge 70\%$, but horizontal span $< 140\text{ meters}$ or altitude variance $> 40\text{ meters}$ (indicating multi-tier facade orbits or vertical inspections).
-     - *Inferred settings*: `crop_method="gps-square"` (tight horizontal bounding box with uncropped vertical elevation), `faces=600,000`, `texture_pages=16` (multi-page UV atlas for crisp wall details), `close_holes=True` (planar hole closing across window apertures), `depth_filtering="moderate"`.
-   - **Terrestrial Close-Range / Handheld Walkthrough**: Detected when GPS availability $< 70\%$ or spatial bounding footprint $< 25\text{ meters}$.
-     - *Inferred settings*: `crop_method="structure"` (computes camera optical ray convergence via Iteratively Reweighted Least Squares), `faces=600,000`, `texture_pages=16`, `close_holes=True`.
-
-3. **Sensor Shutter Mechanics**:
-   - **Rolling Shutter CMOS**: Automatically identified for consumer drone camera tags (e.g. `FC3582`, `FC3411`, `FC220`, `Mavic`, `Air`, `Mini`). Enables `sensor.rolling_shutter = Metashape.Shutter.Model.Regularized` to eliminate flight-induced wall stepping and reduce reprojection errors by up to 30%.
-   - **Global Shutter / Professional Photogrammetry Payloads**: Disabled to prevent over-parameterization.
+As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows strict physics-based engineering rules:
+1. **Never guess or cite rigid presets**: Analyze the raw image headers and telemetry to extract physical sensor properties and flight geometry.
+2. **Execute the Survey Physics Audit First**: Run `--profile` or compute the optics metrics before proposing or executing a reconstruction.
+3. **Respect Camera Shutter Physics**:
+   - For **Mechanical Leaf / Global Shutters** (e.g. DJI Phantom 4 Pro `FC6310`, Mavic 3 Enterprise Wide `FC3411`, Zenmuse P1, Phase One, Hasselblad): **Rolling shutter compensation must be DISABLED**. Enabling rolling shutter compensation on mechanical leaf shutters introduces ill-conditioned parameters into bundle adjustment and causes synthetic elevation drift.
+   - For **Electronic CMOS Rolling Shutters** (e.g. DJI Mini series, Mavic Air, Air 2S, Mavic Pro, consumer smartphones): Enable `Metashape.Shutter.Model.Regularized` to eliminate flight-velocity shear.
+4. **Execute the USGS 4-Pass Gradual Selection Protocol**:
+   Never accept raw sparse tie points. Staged parameter unfreezing is mandatory:
+   - **Pass 1 (Reconstruction Uncertainty $\le 12.0$)**: Prunes tie points with shallow ray intersection angles. Unfreezes basic interior orientation: $f, cx, cy$ only.
+   - **Pass 2 (Projection Accuracy $\le 2.5\text{ px}$)**: Prunes tie points with ambiguous pixel correlation. Unfreezes radial distortion: $f, cx, cy, k_1, k_2, k_3, p_1, p_2$.
+   - **Pass 3 (Reprojection Error $\le 0.35\text{ px}$)**: Prunes high-residual outlier points. Unfreezes complete polynomial model: $f, cx, cy, k_1..k_4, b_1, b_2, p_1, p_2$ with adaptive fitting and tie point covariance.
+   - **Pass 4 (Image Multiplicity $\ge 3$)**: Discards fragile 2-ray intersections. Locks in bundle adjustment geometry and reports initial vs final RMS reprojection error.
+5. **Derive Slope-Adaptive Ground Point Filtering**:
+   Calculate the terrain relief ratio $R = \Delta Z / D_{diag}$:
+   - Planar terrain ($R < 0.08$): `cell_size = 35.0m`, `max_angle = 12.0 deg`, `max_distance = 0.6m`, meshing as `HeightField`.
+   - High relief / 3D architecture ($R \ge 0.08$): `cell_size = 12.0m`, `max_angle = 28.0 deg`, `max_distance = 0.3m`, meshing as `Arbitrary`.
+6. **Enforce 1:1 Ground Texel Density Budgeting**:
+   Texture page count must be budgeted from the measured 3D mesh surface area $A_{m^2}$ and optical GSD:
+   $$N_{pages} = \text{clamp}\left(\text{ceil}\left(\frac{A_{m^2} \times 10^4}{\text{GSD}^2 \times 67,108,864} \times 1.25\right), 1, 32\right)$$
+7. **Present the Executive Geomatics Engineering Summary**:
+   Provide the user with an authoritative engineering report:
+   ```
+   ================================================================================
+     PRO PHOTOGRAMMETRY & GEOMATICS ENGINEERING REPORT
+   ================================================================================
+     Sensor Hardware:     DJI Mavic 3 Enterprise Wide (FC3411)
+     Sensor Geometry:     17.3 x 13.0 mm  |  Pixel Pitch: 3.28 µm
+     Shutter Physics:     Mechanical Leaf / Global Shutter [RS Comp: DISABLED]
+     Optics & Altitude:   Focal Length: 12.29 mm  |  Flying Height: 85.0 m AGL  |  GSD: 2.26 cm/px
+     Overlap Geometry:    Forward: 82.4%  |  Lateral: 68.2% [PASS]
+     Dynamic Range:       Shadow Clipping: 18.2%  |  Delighting: ACTIVATED (Diffuse Albedo)
+     Topographic Relief:  Span: 342.1m  |  Delta Z: 12.4m  |  R = 0.036 -> HEIGHTFIELD Meshing
+     USGS 4-Pass Bundle:  Pass 1 (RU<=12) -> Pass 2 (PA<=2.5) -> Pass 3 (RE<=0.35) -> Pass 4 (Multiplicity>=3)
+     Reprojection RMS:    Initial: 1.182 px  ->  Optimized: 0.284 px  (RMS Reduction: 75.9%)
+     Multi-ray Tiepoints: 18,420 robust tie points locked in (pruned 6,840 fragile rays)
+     1:1 Texel Budget:    Mesh Surface Area: 38,200 m² @ 2.26 cm GSD -> 2x 8K Pages (1.18 cm/texel)
+   ================================================================================
+   ```
 
 ### 2. Complete Metashape Processing Functions
 
@@ -94,7 +112,6 @@ Rather than requiring manual trial-and-error or rigid presets, AutoMetashape fea
    - Matching Quality: Medium (`downscale=2`) for optimal memory scaling.
    - Keypoint Limit: 40,000 (or 60,000 for $>30\text{MP}$); Tiepoint Limit: 25,000 tiepoints; Guided Matching enabled by default.
    - Single-Chunk Default (`--multi-chunk disable`): Solves all images globally in one bundle adjustment to prevent false alignment or chunk-merging offsets.
-   - Gradual Tie-Point Selection: Prunes tiepoints with reprojection error $>0.4\text{ px}$ and reconstruction uncertainty $>15$ before final bundle adjustment re-optimization.
    - Radiometric Calibration (`--calibrate-colors`): Performs camera color and white balance equalization across frames via `chunk.calibrateColors()`.
 
 3. **Bounding Box Cropping Strategies**:
@@ -106,12 +123,12 @@ Rather than requiring manual trial-and-error or rigid presets, AutoMetashape fea
 4. **GPU Depth Maps & Dense Point Cloud**:
    - Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs.
    - Dense Point Cloud (`buildPointCloud`): Fuses depth maps into a 3D point cloud with RGB vertex colors and confidence indices.
-   - Ground Point Classification (`--classify-ground`): Separates bare-earth topography from vegetation and structures using `chunk.point_cloud.classifyGroundPoints()`.
+   - Slope-Adaptive Ground Point Classification (`--classify-ground`): Separates bare-earth topography from vegetation and structures using slope-adaptive parameters (`cell_size`, `max_angle`, `max_distance`).
    - AI Semantic Classification (`--classify-points`): Applies multi-class deep learning classification assigning points to ASPRS standard classes (Ground, Low Veg, High Veg, Building, Road, Car).
    - Point Cloud Export: Exports dense point clouds in `.laz`, `.las`, `.ply`, `.e57`, or `.xyz` and sparse tie points via `--export-tie-points`.
 
 5. **Surface Meshing, Smoothing & Decimation**:
-   - Surface Type: Arbitrary (`--surface-type arbitrary`) for 3D structures or Height Field (`--surface-type heightfield`) for flat planar terrain.
+   - Surface Type: HeightField (`--surface-type heightfield`) for planar terrain ($R < 0.08$) or Arbitrary (`--surface-type arbitrary`) for 3D structures and complex relief.
    - Planar Hole Closing: Seals window apertures and planar voids via `chunk.model.closeHoles(level=30)`.
    - Laplacian Smoothing (`--smooth-mesh`, `--smooth-strength 3.0`): Applies Laplacian smoothing preserving sharp feature edges.
    - Decimation (`--decimate-mesh <N>`): Decimates mesh geometry to target polygon face budget.
@@ -122,7 +139,7 @@ Rather than requiring manual trial-and-error or rigid presets, AutoMetashape fea
    - Format Support (`--tiled-model-format [cesium|tls|slpk|osgb]`): Exports Cesium 3D Tiles (`tileset.json` + `b3dm`) for web GIS (CesiumJS, Unreal Engine), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), or OpenSceneGraph (`.osgb`).
 
 7. **Texture Atlas & Delighting (Shadow Removal)**:
-   - Generates non-overlapping UV coordinates with `GenericMapping` across 4 to 16 pages at 8K ($8192\times 8192$) resolution.
+   - Dynamically sizes UV atlas pages for 1:1 ground texel parity matching the camera GSD.
    - Projects photographic pixels with `MosaicBlending`, hole filling, and ghosting suppression.
    - Texture Delighting (`--remove-lighting`): Removes direct sunlight shadows and ambient occlusion using `chunk.removeLighting()` to output true diffuse albedo textures.
 
@@ -138,9 +155,9 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
 
 1. **Inspection**: Enumerate all immediate subdirectories in the parent folder. Verify photo counts and telemetry profiles.
 2. **Sequential Execution**:
-   - Execute each project independently:
+   - Execute each project independently using the Pro Photogrammetry Engine:
      ```powershell
-     & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset auto
+     & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset pro
      ```
    - Nested subfolders within a project (e.g. `Project_A/Flight_1`, `Project_A/Flight_2`) are solved in a single global bundle adjustment by default, ensuring zero chunk-merging false alignment.
 3. **Verification Gate**:
@@ -153,28 +170,29 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
 ### 4. CLI Recipes & Usage
 
 ```powershell
-# Autonomous Survey with Learned Parameters (Recommended):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset auto
+# Pro Photogrammetry & Geomatics Engine (Default):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset pro
 
-# Drone Topographic Survey with Point Cloud, DEM, Contours & Cesium 3D Tiles:
+# Full Drone Topographic Survey with Point Cloud, DEM, Contours & Cesium 3D Tiles:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
     --images "D:/Surveys/Topography" \
-    --preset map \
+    --preset pro \
     --build-point-cloud --point-cloud-format laz --classify-ground \
     --build-dem --build-contours --contour-interval 1.0 --contours-format shp \
     --build-tiled-model --tiled-model-format cesium \
     --export-report
 
-# Heritage Facade Survey with Coded Target Detection, GCP Import, Delighting & FBX:
+# Heritage Architectural Facade with Coded Target Detection, GCP Import, Delighting & FBX:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
     --images "D:/Surveys/HeritageSite" \
+    --preset pro \
     --detect-markers --target-type circular12 \
     --import-reference "D:/Surveys/HeritageSite/gcps.csv" \
     --calibrate-colors --remove-lighting \
     --export-fbx --export-ply \
     --export-report
 
-# Standalone Dataset Profiling (Inspect Only):
+# Standalone Optics & Telemetry Profiling (Inspect Only):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --profile
 
 # Checkpoint Resume:
@@ -188,13 +206,16 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
 Reconstruction outputs must satisfy the following quality criteria:
 1. **Camera Quality Filtering**: All active cameras must have sharpness quality $\ge 0.50$ (blurry frames disabled).
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
-3. **Point Cloud Integrity**: When point cloud generation is requested, `point_cloud.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
-4. **Surface Topology**: Arbitrary or HeightField surface mesh targeting specified face count ($600\text{K} - 2\text{M}$), free from degenerate zero-area faces.
-5. **Texture Atlas & Delighting**: Resolution $\ge 8192\times 8192$ with valid UV mapping, hole filling, and zero unmapped black voids.
-6. **Elevation Models & Contours**: GeoTIFF files (`dem.tif`, `orthomosaic.tif`) and vector shapefiles (`contours.shp`) exported with accompanying world/projection files.
-7. **Tiled Model**: Cesium 3D Tiles (`tileset.json`) or TLS archive exported with valid LOD bounding hierarchy.
-8. **Quality Report**: `report.pdf` generated containing camera calibration parameters and error estimates.
-9. **Native Project**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
+3. **Reprojection Residuals**: Bundle adjustment re-optimization must achieve RMS reprojection error $\le 0.35\text{ px}$.
+4. **Tie-Point Multiplicity**: Multi-ray intersections must maintain multiplicity $\ge 3$ rays (fragile 2-ray ties eliminated).
+5. **Shutter Mechanics Conformance**: Rolling shutter compensation verified as DISABLED for mechanical leaf shutters (e.g. DJI FC3411, FC6310, Zenmuse P1) to protect elevation accuracy.
+6. **Point Cloud Integrity**: When point cloud generation is requested, `point_cloud.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
+7. **Surface Topology**: Arbitrary or HeightField surface mesh targeting specified face count ($600\text{K} - 2\text{M}$), free from degenerate zero-area faces.
+8. **1:1 Texel Density**: Texture atlas resolution $\ge 8192\times 8192$ budgeted for 1:1 ground texel parity with zero unmapped black voids.
+9. **Elevation Models & Contours**: GeoTIFF files (`dem.tif`, `orthomosaic.tif`) and vector shapefiles (`contours.shp`) exported with accompanying world/projection files.
+10. **Tiled Model**: Cesium 3D Tiles (`tileset.json`) or TLS archive exported with valid LOD bounding hierarchy.
+11. **Quality Report**: `report.pdf` generated containing camera calibration parameters and error estimates.
+12. **Native Project**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
 
 ---
 
@@ -212,6 +233,7 @@ Reconstruction outputs must satisfy the following quality criteria:
 - [evaluations.md](evaluations.md)
 - [scripts/metashape_reconstruction.py](../../../scripts/metashape_reconstruction.py)
 - [scripts/metashape_export.py](../../../scripts/metashape_export.py)
+- [scripts/autometashape_gui.py](../../../scripts/autometashape_gui.py)
 - [Agisoft Metashape Professional User Manual (v2.x)](https://www.agisoft.com/downloads/user-manuals/)
 - [Open Geospatial Consortium (OGC) 3D Tiles Specification](https://www.ogc.org/standards/3DTiles)
 - [USGS National Geospatial Program Photogrammetry Standards](https://www.usgs.gov/core-science-systems/ngp)

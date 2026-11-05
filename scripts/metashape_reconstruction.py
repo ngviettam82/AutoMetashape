@@ -19,6 +19,7 @@ Configured with production-grade defaults:
 import argparse
 import math
 import os
+import re
 import sys
 import threading
 import time
@@ -130,6 +131,61 @@ def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: floa
     return r_earth * c
 
 
+# Professional Camera Optics & Sensor Database for Aerial Photogrammetry Payloads
+CAMERA_HARDWARE_DB = {
+    # DJI Enterprise & High-End Payloads (Mechanical Leaf / Global Shutters)
+    "fc6310": {"name": "DJI Phantom 4 Pro / RTK (FC6310)", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.41, "shutter": "mechanical", "focal_fixed": 8.8},
+    "fc6310r": {"name": "DJI Phantom 4 RTK (FC6310R)", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.41, "shutter": "mechanical", "focal_fixed": 8.8},
+    "fc3411": {"name": "DJI Mavic 3 Enterprise Wide (FC3411)", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "mechanical", "focal_fixed": 12.29},
+    "zenmuse p1": {"name": "DJI Zenmuse P1 Full-Frame", "sensor_w_mm": 35.9, "sensor_h_mm": 24.0, "pixel_pitch_um": 4.4, "shutter": "mechanical", "focal_fixed": None},
+    "zenmuse x4s": {"name": "DJI Zenmuse X4S", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.41, "shutter": "mechanical", "focal_fixed": 8.8},
+    "zenmuse x5s": {"name": "DJI Zenmuse X5S (Micro 4/3)", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.4, "shutter": "rolling", "focal_fixed": None},
+    "zenmuse x7": {"name": "DJI Zenmuse X7 (Super 35)", "sensor_w_mm": 23.5, "sensor_h_mm": 15.7, "pixel_pitch_um": 3.91, "shutter": "mechanical", "focal_fixed": None},
+    "l2": {"name": "DJI Zenmuse L2 RGB", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "mechanical", "focal_fixed": 12.29},
+    "m3m": {"name": "DJI Mavic 3 Multispectral RGB", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "mechanical", "focal_fixed": 12.29},
+
+    # DJI Consumer Drones (CMOS Electronic Rolling Shutter)
+    "fc3582": {"name": "DJI Mavic 3 / Cine / Classic Hasselblad", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "rolling", "focal_fixed": 12.29},
+    "fc3170": {"name": "DJI Mavic Air 2", "sensor_w_mm": 6.4, "sensor_h_mm": 4.8, "pixel_pitch_um": 0.8, "shutter": "rolling", "focal_fixed": 4.5},
+    "fc3011": {"name": "DJI Air 2S", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.4, "shutter": "rolling", "focal_fixed": 8.38},
+    "fc3580": {"name": "DJI Mini 3 / Mini 4 Pro", "sensor_w_mm": 9.6, "sensor_h_mm": 7.2, "pixel_pitch_um": 1.2, "shutter": "rolling", "focal_fixed": 6.72},
+    "fc7303": {"name": "DJI Mini 2", "sensor_w_mm": 6.17, "sensor_h_mm": 4.55, "pixel_pitch_um": 1.55, "shutter": "rolling", "focal_fixed": 4.49},
+    "fc220":  {"name": "DJI Mavic Pro", "sensor_w_mm": 6.17, "sensor_h_mm": 4.55, "pixel_pitch_um": 1.55, "shutter": "rolling", "focal_fixed": 4.73},
+
+    # Autel Survey Payloads
+    "evo ii pro": {"name": "Autel EVO II Pro (1-inch)", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.4, "shutter": "rolling", "focal_fixed": 9.0},
+    "evo max":    {"name": "Autel EVO Max 4T", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.4, "shutter": "rolling", "focal_fixed": None},
+
+    # Professional Aerial Survey & Photogrammetric Cameras (Global / Leaf Shutters)
+    "phase one":  {"name": "Phase One Industrial (iXM / iXU)", "sensor_w_mm": 53.4, "sensor_h_mm": 40.0, "pixel_pitch_um": 3.76, "shutter": "mechanical", "focal_fixed": None},
+    "ixm":        {"name": "Phase One iXM Medium Format", "sensor_w_mm": 53.4, "sensor_h_mm": 40.0, "pixel_pitch_um": 3.76, "shutter": "mechanical", "focal_fixed": None},
+    "hasselblad": {"name": "Hasselblad Aerial Medium Format", "sensor_w_mm": 43.8, "sensor_h_mm": 32.9, "pixel_pitch_um": 3.45, "shutter": "mechanical", "focal_fixed": None},
+    "ilx-lr1":    {"name": "Sony ILX-LR1 Industrial Full-Frame", "sensor_w_mm": 35.7, "sensor_h_mm": 23.8, "pixel_pitch_um": 3.76, "shutter": "mechanical", "focal_fixed": None},
+    "rx1r":       {"name": "Sony RX1R II Full-Frame", "sensor_w_mm": 35.9, "sensor_h_mm": 24.0, "pixel_pitch_um": 4.5, "shutter": "mechanical", "focal_fixed": 35.0},
+    "wingtra":    {"name": "WingtraOne Aerial Payload", "sensor_w_mm": 35.9, "sensor_h_mm": 24.0, "pixel_pitch_um": 4.5, "shutter": "mechanical", "focal_fixed": 35.0},
+}
+
+
+def parse_xmp_relative_altitude(img_path: str):
+    """Fast probe extracting DJI RelativeAltitude from XMP header packet."""
+    try:
+        with open(img_path, "rb") as f:
+            head = f.read(65536)
+            start = head.find(b"<x:xmpmeta")
+            if start != -1:
+                end = head.find(b"</x:xmpmeta>", start)
+                if end != -1:
+                    xmp_str = head[start:end+12].decode("utf-8", errors="ignore")
+                    m = re.search(r'RelativeAltitude=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
+                    if not m:
+                        m = re.search(r'<[^>]*RelativeAltitude>([+-]?\d+(?:\.\d+)?)</[^>]*RelativeAltitude>', xmp_str)
+                    if m:
+                        return float(m.group(1))
+    except Exception:
+        pass
+    return None
+
+
 def extract_image_telemetry(img_path: str) -> dict:
     """Extracts camera model, focal length, image resolution, and GPS telemetry from image headers."""
     meta = {
@@ -138,10 +194,14 @@ def extract_image_telemetry(img_path: str) -> dict:
         "make": "",
         "model": "",
         "focal_length": None,
+        "focal_35mm": None,
         "lat": None,
         "lon": None,
         "alt": None,
+        "relative_alt": None,
         "has_gps": False,
+        "iso": None,
+        "exposure_time": None,
     }
     try:
         from PIL import Image, ExifTags
@@ -160,6 +220,33 @@ def extract_image_telemetry(img_path: str) -> dict:
                             meta["focal_length"] = float(v)
                         except (ValueError, TypeError):
                             pass
+                    elif tag_name == "FocalLengthIn35mmFilm":
+                        try:
+                            meta["focal_35mm"] = float(v)
+                        except (ValueError, TypeError):
+                            pass
+                    elif tag_name in ("ISOSpeedRatings", "PhotographicSensitivity"):
+                        try:
+                            meta["iso"] = int(v)
+                        except (ValueError, TypeError):
+                            pass
+                    elif tag_name == "ExposureTime":
+                        try:
+                            meta["exposure_time"] = float(v)
+                        except (ValueError, TypeError):
+                            pass
+
+                # Nested EXIF IFD inspection for focal length in 35mm
+                if hasattr(ExifTags, "IFD") and hasattr(ExifTags.IFD, "Exif"):
+                    try:
+                        exif_ifd = exif_raw.get_ifd(ExifTags.IFD.Exif)
+                        if exif_ifd:
+                            if 41989 in exif_ifd and meta["focal_35mm"] is None:
+                                meta["focal_35mm"] = float(exif_ifd[41989])
+                            if 37386 in exif_ifd and meta["focal_length"] is None:
+                                meta["focal_length"] = float(exif_ifd[37386])
+                    except Exception:
+                        pass
 
                 gps_ifd = None
                 if hasattr(ExifTags, "IFD") and hasattr(ExifTags.IFD, "GPSInfo"):
@@ -200,13 +287,46 @@ def extract_image_telemetry(img_path: str) -> dict:
                             meta["alt"] = float(alt_val)
                         except Exception:
                             pass
+
+        # Fast probe for DJI relative altitude
+        meta["relative_alt"] = parse_xmp_relative_altitude(img_path)
     except Exception:
         pass
     return meta
 
 
-def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
-    """Profiles photogrammetry survey dataset by inspecting telemetry, GPS bounds, and sensor optics."""
+def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
+    """Evaluates optical dynamic range across sample images to detect shadow and highlight clipping."""
+    if not image_paths:
+        return {"shadow_clip_ratio": 0.0, "highlight_clip_ratio": 0.0, "delighting_recommended": False}
+    step = max(1, len(image_paths) // sample_count)
+    sampled = image_paths[::step][:sample_count]
+    shadow_counts = []
+    highlight_counts = []
+    from PIL import Image
+    for p in sampled:
+        try:
+            with Image.open(p) as img:
+                thumb = img.resize((256, 256)).convert("L")
+                hist = thumb.histogram()
+                total = 256 * 256
+                shadow_counts.append(sum(hist[:20]) / total)
+                highlight_counts.append(sum(hist[235:]) / total)
+        except Exception:
+            pass
+    if not shadow_counts:
+        return {"shadow_clip_ratio": 0.0, "highlight_clip_ratio": 0.0, "delighting_recommended": False}
+    avg_shadow = sum(shadow_counts) / len(shadow_counts)
+    avg_highlight = sum(highlight_counts) / len(highlight_counts)
+    return {
+        "shadow_clip_ratio": avg_shadow,
+        "highlight_clip_ratio": avg_highlight,
+        "delighting_recommended": (avg_shadow > 0.15) or (avg_shadow > 0.10 and avg_highlight > 0.10),
+    }
+
+
+def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
+    """Profiles survey physics: sensor optics, flying height, GSD, overlap, dynamic range, and relief ratio."""
     groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
     all_imgs = []
     for imgs in groups.values():
@@ -220,27 +340,96 @@ def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = No
     step = max(1, total_photos // sample_size)
     sampled = [all_imgs[i] for i in range(0, total_photos, step)][:sample_size]
 
-    lats, lons, alts = [], [], []
+    lats, lons, alts, rel_alts = [], [], [], []
     cameras_detected = set()
     widths, heights = [], []
+    focal_lengths = []
+    focal_35mms = []
+    makes = []
+    models = []
+    coords = []
 
     for path in sampled:
         t = extract_image_telemetry(path)
         if t["has_gps"]:
             lats.append(t["lat"])
             lons.append(t["lon"])
+            coords.append((t["lat"], t["lon"]))
             if t["alt"] is not None:
                 alts.append(t["alt"])
+        if t.get("relative_alt") is not None:
+            rel_alts.append(t["relative_alt"])
         if t["model"]:
             cameras_detected.add(f"{t['make']} {t['model']}".strip())
+            models.append(t["model"])
+        if t["make"]:
+            makes.append(t["make"])
         if t["width"] > 0:
             widths.append(t["width"])
             heights.append(t["height"])
+        if t.get("focal_length") is not None:
+            focal_lengths.append(t["focal_length"])
+        if t.get("focal_35mm") is not None:
+            focal_35mms.append(t["focal_35mm"])
 
     gps_count = len(lats)
     gps_ratio = gps_count / len(sampled) if sampled else 0.0
     has_gps = gps_ratio >= 0.70
 
+    # Sensor hardware resolution
+    primary_model = models[0] if models else ""
+    primary_make = makes[0] if makes else ""
+    combined_name = f"{primary_make} {primary_model}".strip().lower()
+
+    matched_hardware = None
+    for k, v in CAMERA_HARDWARE_DB.items():
+        if k in combined_name or (primary_model and k in primary_model.lower().replace("-", "").replace(" ", "")):
+            matched_hardware = v
+            break
+
+    avg_w = sum(widths) / len(widths) if widths else 4000
+    avg_h = sum(heights) / len(heights) if heights else 3000
+    avg_f = sum(focal_lengths) / len(focal_lengths) if focal_lengths else None
+    avg_f35 = sum(focal_35mms) / len(focal_35mms) if focal_35mms else None
+
+    if matched_hardware:
+        sensor_name = matched_hardware["name"]
+        sensor_w_mm = matched_hardware["sensor_w_mm"]
+        sensor_h_mm = matched_hardware["sensor_h_mm"]
+        pixel_pitch_um = matched_hardware["pixel_pitch_um"]
+        shutter = matched_hardware["shutter"]
+        if not avg_f and matched_hardware.get("focal_fixed"):
+            avg_f = matched_hardware["focal_fixed"]
+    else:
+        # Optical derivation from focal length and 35mm equivalent
+        if avg_f and avg_f35 and avg_f35 > 0:
+            sensor_w_mm = 36.0 * (avg_f / avg_f35)
+            sensor_h_mm = sensor_w_mm * (avg_h / avg_w)
+        else:
+            sensor_w_mm = 13.2  # 1-inch sensor standard fallback
+            sensor_h_mm = 8.8
+        pixel_pitch_um = (sensor_w_mm / avg_w) * 1000.0
+        shutter = "rolling" if any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone"]) else "mechanical"
+        sensor_name = f"{primary_make} {primary_model}".strip() or "Standard Optical Sensor"
+
+    # Flight altitude AGL
+    flight_height_m = None
+    if rel_alts:
+        valid_rel = [a for a in rel_alts if a > 1.0]
+        if valid_rel:
+            flight_height_m = sum(valid_rel) / len(valid_rel)
+    if flight_height_m is None and alts and len(alts) >= 2:
+        alt_range = max(alts) - min(alts)
+        flight_height_m = max(alts) - min(alts) if alt_range > 10.0 else min(alts)
+    if flight_height_m is None or flight_height_m < 5.0:
+        flight_height_m = 75.0  # reasonable aerial flight default
+
+    # Ground Sampling Distance (GSD in cm/pixel)
+    gsd_cm = None
+    if flight_height_m and avg_f and avg_w:
+        gsd_cm = (flight_height_m * sensor_w_mm) / (avg_f * avg_w) * 100.0
+
+    # Geographic footprint and relief ratio
     span_m = 0.0
     alt_span_m = 0.0
     if has_gps and len(lats) >= 2:
@@ -248,16 +437,31 @@ def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = No
         min_lon, max_lon = min(lons), max(lons)
         lat_dist = calculate_haversine_meters(min_lat, min_lon, max_lat, min_lon)
         lon_dist = calculate_haversine_meters(min_lat, min_lon, min_lat, max_lon)
-        span_m = max(lat_dist, lon_dist)
+        span_m = math.sqrt(lat_dist * lat_dist + lon_dist * lon_dist)
         if len(alts) >= 2:
             alt_span_m = max(alts) - min(alts)
 
-    avg_mp = 12.0
-    if widths and heights:
-        avg_mp = (sum(w * h for w, h in zip(widths, heights)) / len(widths)) / 1_000_000.0
+    relief_ratio = (alt_span_m / max(span_m, 1.0)) if span_m > 0 else 0.0
 
-    camera_str = " ".join(cameras_detected).lower()
-    rolling_shutter_recommended = any(k in camera_str for k in ["fc3582", "fc3411", "mavic", "air", "mini", "fc220", "fc3170"])
+    # Overlap estimation
+    fwd_ov, lat_ov = None, None
+    if gsd_cm and len(coords) >= 2:
+        ground_w_m = (gsd_cm * avg_w) / 100.0
+        ground_h_m = (gsd_cm * avg_h) / 100.0
+        baselines = []
+        for i in range(len(coords) - 1):
+            d = calculate_haversine_meters(coords[i][0], coords[i][1], coords[i+1][0], coords[i+1][1])
+            if d > 0.1:
+                baselines.append(d)
+        if baselines:
+            baselines.sort()
+            med_b = baselines[len(baselines) // 2]
+            fwd_ov = max(0.0, min(1.0 - (med_b / max(ground_h_m, 1.0)), 0.99)) * 100.0
+            lat_ov = max(0.0, min(1.0 - (med_b * 1.6 / max(ground_w_m, 1.0)), 0.95)) * 100.0
+
+    # Radiometry & Dynamic Range
+    rad = analyze_radiometry(sampled, sample_count=15)
+    avg_mp = (avg_w * avg_h) / 1_000_000.0
 
     return {
         "photo_count": total_photos,
@@ -266,24 +470,45 @@ def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = No
         "has_gps": has_gps,
         "horizontal_span_m": span_m,
         "alt_span_m": alt_span_m,
+        "relief_ratio": relief_ratio,
         "avg_megapixels": avg_mp,
+        "image_w": int(avg_w),
+        "image_h": int(avg_h),
+        "focal_mm": avg_f,
+        "flight_height_m": flight_height_m,
+        "gsd_cm": gsd_cm,
+        "sensor_name": sensor_name,
+        "sensor_w_mm": sensor_w_mm,
+        "sensor_h_mm": sensor_h_mm,
+        "pixel_pitch_um": pixel_pitch_um,
+        "shutter": shutter,
+        "forward_overlap_pct": fwd_ov,
+        "lateral_overlap_pct": lat_ov,
+        "shadow_clip_ratio": rad["shadow_clip_ratio"],
+        "highlight_clip_ratio": rad["highlight_clip_ratio"],
+        "delighting_recommended": rad["delighting_recommended"],
         "cameras_detected": list(cameras_detected),
-        "rolling_shutter_recommended": rolling_shutter_recommended,
     }
 
 
-def infer_optimal_parameters(profile: dict) -> dict:
-    """Dynamically infers optimal photogrammetric pipeline parameters based on survey profiling."""
-    photo_count = profile.get("photo_count", 0)
-    has_gps = profile.get("has_gps", False)
-    span_m = profile.get("horizontal_span_m", 0.0)
-    alt_span_m = profile.get("alt_span_m", 0.0)
-    rolling_recommended = profile.get("rolling_shutter_recommended", True)
-    avg_mp = profile.get("avg_megapixels", 12.0)
+def derive_pro_photogrammetry_plan(physics: dict) -> dict:
+    """Mathematically derives the optimal photogrammetric pipeline configuration from survey physics."""
+    photo_count = physics.get("photo_count", 0)
+    has_gps = physics.get("has_gps", False)
+    span_m = physics.get("horizontal_span_m", 0.0)
+    alt_span = physics.get("alt_span_m", 0.0)
+    relief_ratio = physics.get("relief_ratio", 0.0)
+    shutter = physics.get("shutter", "mechanical")
+    avg_mp = physics.get("avg_megapixels", 12.0)
+    delight_rec = physics.get("delighting_recommended", False)
+    gsd_cm = physics.get("gsd_cm")
 
-    # Classification
-    if has_gps and span_m >= 140.0 and alt_span_m <= 65.0:
+    is_planar = has_gps and (relief_ratio < 0.08) and (alt_span <= 65.0) and (span_m >= 80.0)
+    is_architecture = has_gps and not is_planar
+
+    if is_planar:
         survey_category = "nadir_terrain_mapping"
+        surface_type = "heightfield"
         crop_method = "none"
         custom_faces = min(max(photo_count * 2500, 1000000), 2000000)
         texture_pages = 4
@@ -293,8 +518,12 @@ def infer_optimal_parameters(profile: dict) -> dict:
         classify_ground = True
         close_holes = False
         depth_filtering = "aggressive"
-    elif has_gps and (span_m < 140.0 or alt_span_m > 40.0):
+        ground_cell_size = 35.0
+        ground_max_angle = 12.0
+        ground_max_distance = 0.6
+    elif is_architecture:
         survey_category = "oblique_architecture"
+        surface_type = "arbitrary"
         crop_method = "gps-square"
         custom_faces = min(max(photo_count * 2000, 400000), 1200000)
         texture_pages = 16
@@ -304,8 +533,12 @@ def infer_optimal_parameters(profile: dict) -> dict:
         classify_ground = False
         close_holes = True
         depth_filtering = "moderate"
+        ground_cell_size = 12.0
+        ground_max_angle = 28.0
+        ground_max_distance = 0.3
     else:
         survey_category = "terrestrial_close_range"
+        surface_type = "arbitrary"
         crop_method = "structure"
         custom_faces = min(max(photo_count * 1500, 300000), 800000)
         texture_pages = 16
@@ -315,23 +548,31 @@ def infer_optimal_parameters(profile: dict) -> dict:
         classify_ground = False
         close_holes = True
         depth_filtering = "moderate"
+        ground_cell_size = 10.0
+        ground_max_angle = 30.0
+        ground_max_distance = 0.25
+
+    # Shutter compensation is ONLY enabled for CMOS rolling shutter payloads.
+    # Enabling rolling shutter compensation on mechanical leaf shutters causes synthetic bundle adjustment drift!
+    rolling_shutter = (shutter == "rolling")
 
     align_quality = "medium"
     keypoint_limit = 60000 if avg_mp >= 30.0 else 40000
     tiepoint_limit = 25000
     guided_matching = True
     adaptive_fitting = True
-    filter_stationary_points = True if survey_category != "terrestrial_close_range" else False
+    filter_stationary_points = (survey_category != "terrestrial_close_range")
 
     return {
         "survey_category": survey_category,
+        "surface_type": surface_type,
         "align_quality": align_quality,
         "keypoint_limit": keypoint_limit,
         "tiepoint_limit": tiepoint_limit,
         "guided_matching": guided_matching,
         "adaptive_fitting": adaptive_fitting,
         "filter_stationary_points": filter_stationary_points,
-        "rolling_shutter": rolling_recommended,
+        "rolling_shutter": rolling_shutter,
         "crop_method": crop_method,
         "depth_quality": "medium",
         "depth_filtering": depth_filtering,
@@ -342,8 +583,64 @@ def infer_optimal_parameters(profile: dict) -> dict:
         "build_dem": build_dem,
         "build_point_cloud": build_point_cloud,
         "classify_ground": classify_ground,
+        "ground_cell_size": ground_cell_size,
+        "ground_max_angle": ground_max_angle,
+        "ground_max_distance": ground_max_distance,
+        "remove_lighting": delight_rec,
+        "delighting_color_mode": delight_rec,
         "export_report": True,
+        "gsd_cm": gsd_cm,
     }
+
+
+def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
+    """Profiles photogrammetry survey dataset by inspecting telemetry, GPS bounds, and sensor optics."""
+    phys = analyze_survey_physics(images_dir, sample_size=sample_size, output_dir=output_dir)
+    # Maintain legacy keys for backwards compatibility
+    phys["rolling_shutter_recommended"] = (phys.get("shutter") == "rolling")
+    return phys
+
+
+def infer_optimal_parameters(profile: dict) -> dict:
+    """Dynamically infers optimal photogrammetric pipeline parameters based on survey profiling."""
+    return derive_pro_photogrammetry_plan(profile)
+
+
+def print_pro_engineering_report(physics: dict, plan: dict, usgs_stats: dict = None) -> None:
+    """Prints a professional photogrammetric & geomatics engineering summary."""
+    print("\n" + "=" * 80, flush=True)
+    print("  AUTOMETASHAPE: PRO PHOTOGRAMMETRY & GEOMATICS ENGINEERING REPORT", flush=True)
+    print("=" * 80, flush=True)
+    print(f"  Sensor Hardware:     {physics.get('sensor_name', 'Optical Sensor')}")
+    print(f"  Sensor Geometry:     {physics.get('sensor_w_mm', 0):.1f} x {physics.get('sensor_h_mm', 0):.1f} mm  |  Pixel Pitch: {physics.get('pixel_pitch_um', 0):.2f} µm")
+    shutter_str = "Mechanical Leaf / Global Shutter [RS Comp: DISABLED]" if physics.get("shutter") == "mechanical" else "CMOS Electronic Rolling Shutter [RS Comp: ENABLED]"
+    print(f"  Shutter Physics:     {shutter_str}")
+    f_str = f"{physics.get('focal_mm', 0):.2f} mm" if physics.get('focal_mm') else "Auto"
+    agl_str = f"{physics.get('flight_height_m', 0):.1f} m AGL" if physics.get('flight_height_m') else "Unknown"
+    gsd_str = f"{physics.get('gsd_cm', 0):.2f} cm/px" if physics.get('gsd_cm') else "Unknown"
+    print(f"  Optics & Altitude:   Focal Length: {f_str}  |  Flying Height: {agl_str}  |  GSD: {gsd_str}")
+    fwd_ov = physics.get("forward_overlap_pct")
+    lat_ov = physics.get("lateral_overlap_pct")
+    ov_str = f"Forward: {fwd_ov:.1f}%  |  Lateral: {lat_ov:.1f}%" if fwd_ov is not None and lat_ov is not None else "Terrestrial / Uncalibrated"
+    print(f"  Overlap Geometry:    {ov_str}")
+    sh_clip = physics.get("shadow_clip_ratio", 0) * 100.0
+    hi_clip = physics.get("highlight_clip_ratio", 0) * 100.0
+    delight_str = "ACTIVATED (Diffuse Albedo Recovery)" if plan.get("remove_lighting") else "Not required (Balanced Radiometry)"
+    print(f"  Dynamic Range:       Shadow Clipping: {sh_clip:.1f}%  |  Highlight: {hi_clip:.1f}%  |  Delighting: {delight_str}")
+    r_val = physics.get("relief_ratio", 0.0)
+    surf_str = f"R = {r_val:.3f} -> {plan.get('surface_type', 'arbitrary').upper()} Meshing"
+    print(f"  Topographic Relief:  Span: {physics.get('horizontal_span_m', 0):.1f}m  |  Delta Z: {physics.get('alt_span_m', 0):.1f}m  |  {surf_str}")
+    if usgs_stats:
+        initial_rms = usgs_stats.get('initial_rms', 0.0)
+        final_rms = usgs_stats.get('final_rms', 0.0)
+        pct_imp = usgs_stats.get('rms_improvement_pct', 0.0)
+        pts_init = usgs_stats.get('initial_points', 0)
+        pts_final = usgs_stats.get('final_points', 0)
+        print("--------------------------------------------------------------------------------")
+        print("  USGS 4-Pass Bundle:  Pass 1 (RU<=12) -> Pass 2 (PA<=2.5) -> Pass 3 (RE<=0.35) -> Pass 4 (Multiplicity>=3)")
+        print(f"  Reprojection RMS:    Initial: {initial_rms:.3f} px  ->  Optimized: {final_rms:.3f} px  (RMS Reduction: {pct_imp:.1f}%)")
+        print(f"  Multi-ray Multiplicity: {pts_final:,} robust tie points locked in (pruned {pts_init - pts_final:,} fragile/outlier rays)")
+    print("=" * 80 + "\n", flush=True)
 
 
 def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
@@ -666,44 +963,171 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     return True
 
 
-def filter_tie_points(chunk, max_reproj_error: float = 0.4, max_uncertainty: float = 15.0):
-    """Filters low-confidence tie points using Gradual Selection criteria."""
-    print("[Gradual Selection] Filtering sparse tie points for camera optimization...", flush=True)
+def execute_usgs_gradual_selection(
+    chunk,
+    ru_thresh: float = 12.0,
+    pa_thresh: float = 2.5,
+    re_thresh: float = 0.35,
+    min_rays: int = 3,
+    max_removal_ratio: float = 0.50,
+) -> dict:
+    """Executes the USGS National Geospatial Program 4-Pass Gradual Selection protocol.
+
+    Refines camera interior and exterior orientations through staged tie-point pruning
+    and progressive camera parameter unfreezing:
+    - Pass 1 (Reconstruction Uncertainty <= 12.0): Prunes points with poor ray intersection angles.
+      Optimizes f, cx, cy only (protects distortion polynomials from outlier bias).
+    - Pass 2 (Projection Accuracy <= 2.5 px): Prunes ambiguous tie points with poor pixel correlation.
+      Optimizes f, cx, cy, k1..k3, p1, p2 (fits radial and tangential distortion).
+    - Pass 3 (Reprojection Error <= 0.35 px): Prunes high-residual points.
+      Optimizes full polynomial model (f, cx, cy, k1..k4, b1, b2, p1, p2) with adaptive fitting.
+    - Pass 4 (Image Multiplicity >= 3): Discards fragile 2-ray intersections.
+      Locks in bundle adjustment geometry and reports final RMS reprojection error.
+    """
+    if not chunk.tie_points or not chunk.tie_points.points:
+        print("  [Gradual Selection] No tie points present to filter; skipping.", flush=True)
+        return {}
+
+    initial_pts = len(chunk.tie_points.points)
     f = Metashape.TiePoints.Filter()
 
-    # 1. Reconstruction Uncertainty filter
-    try:
-        f.init(chunk, criterion=Metashape.TiePoints.Filter.ReconstructionUncertainty)
-        f.removePoints(max_uncertainty)
-        print(f"  Applied Reconstruction Uncertainty threshold: {max_uncertainty}", flush=True)
-    except Exception as e:
-        print(f"  Reconstruction Uncertainty filter skipped: {e}", flush=True)
-
-    # 2. Reprojection Error filter
+    # Calculate initial RMS Reprojection Error
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
-        f.removePoints(max_reproj_error)
-        print(f"  Applied Reprojection Error threshold: {max_reproj_error} px", flush=True)
-    except Exception as e:
-        print(f"  Reprojection Error filter skipped: {e}", flush=True)
+        initial_re = list(f.values)
+        initial_rms = math.sqrt(sum(v * v for v in initial_re) / len(initial_re)) if initial_re else 0.0
+    except Exception:
+        initial_rms = 0.0
 
-    # Optimize camera parameters
-    print("  Optimizing camera lens parameters...", flush=True)
-    chunk.optimizeCameras(
-        fit_f=True,
-        fit_cx=True,
-        fit_cy=True,
-        fit_b1=True,
-        fit_b2=True,
-        fit_k1=True,
-        fit_k2=True,
-        fit_k3=True,
-        fit_k4=True,
-        fit_p1=True,
-        fit_p2=True,
-        adaptive_fitting=True,
-    )
-    print("  Camera optimization complete.", flush=True)
+    print(f"\n[USGS Gradual Selection] Starting 4-pass bundle adjustment refinement across {initial_pts:,} tie points (Initial Reprojection RMS: {initial_rms:.3f} px)...", flush=True)
+
+    # Pass 1: Reconstruction Uncertainty (RU <= 12.0)
+    try:
+        f.init(chunk, criterion=Metashape.TiePoints.Filter.ReconstructionUncertainty)
+        vals = sorted(f.values)
+        if vals:
+            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            eff_ru = max(ru_thresh, lim) if ru_thresh < lim else ru_thresh
+        else:
+            eff_ru = ru_thresh
+        f.removePoints(eff_ru)
+        chunk.optimizeCameras(
+            fit_f=True, fit_cx=True, fit_cy=True,
+            fit_b1=False, fit_b2=False,
+            fit_k1=False, fit_k2=False, fit_k3=False, fit_k4=False,
+            fit_p1=False, fit_p2=False,
+            adaptive_fitting=False,
+        )
+        print(f"  [Pass 1/4] Reconstruction Uncertainty (RU <= {eff_ru:.1f}): Pruned low-intersection rays; optimized (f, cx, cy).", flush=True)
+    except Exception as e:
+        print(f"  [Pass 1/4] Reconstruction Uncertainty skipped: {e}", flush=True)
+
+    # Pass 2: Projection Accuracy (PA <= 2.5 px)
+    try:
+        f.init(chunk, criterion=Metashape.TiePoints.Filter.ProjectionAccuracy)
+        vals = sorted(f.values)
+        if vals:
+            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            eff_pa = max(pa_thresh, lim) if pa_thresh < lim else pa_thresh
+        else:
+            eff_pa = pa_thresh
+        f.removePoints(eff_pa)
+        chunk.optimizeCameras(
+            fit_f=True, fit_cx=True, fit_cy=True,
+            fit_b1=False, fit_b2=False,
+            fit_k1=True, fit_k2=True, fit_k3=True, fit_k4=False,
+            fit_p1=True, fit_p2=True,
+            adaptive_fitting=False,
+        )
+        print(f"  [Pass 2/4] Projection Accuracy (PA <= {eff_pa:.2f} px): Pruned correlation ambiguity; optimized (f, cx, cy, k1..k3, p1, p2).", flush=True)
+    except Exception as e:
+        print(f"  [Pass 2/4] Projection Accuracy skipped: {e}", flush=True)
+
+    # Pass 3: Reprojection Error (RE <= 0.35 px)
+    try:
+        f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
+        vals = sorted(f.values)
+        if vals:
+            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            eff_re = max(re_thresh, lim) if re_thresh < lim else re_thresh
+        else:
+            eff_re = re_thresh
+        f.removePoints(eff_re)
+        chunk.optimizeCameras(
+            fit_f=True, fit_cx=True, fit_cy=True,
+            fit_b1=True, fit_b2=True,
+            fit_k1=True, fit_k2=True, fit_k3=True, fit_k4=True,
+            fit_p1=True, fit_p2=True,
+            adaptive_fitting=True,
+            tiepoint_covariance=True,
+        )
+        print(f"  [Pass 3/4] Reprojection Error (RE <= {eff_re:.2f} px): Pruned residual outliers; optimized complete polynomial lens model (k4, b1, b2, adaptive).", flush=True)
+    except Exception as e:
+        print(f"  [Pass 3/4] Reprojection Error skipped: {e}", flush=True)
+
+    # Pass 4: Image Multiplicity (min_rays >= 3)
+    try:
+        f.init(chunk, criterion=Metashape.TiePoints.Filter.ImageCount)
+        f.selectPoints(min_rays - 1)
+        chunk.tie_points.removeSelectedPoints()
+        chunk.optimizeCameras(
+            fit_f=True, fit_cx=True, fit_cy=True,
+            fit_b1=True, fit_b2=True,
+            fit_k1=True, fit_k2=True, fit_k3=True, fit_k4=True,
+            fit_p1=True, fit_p2=True,
+            adaptive_fitting=True,
+            tiepoint_covariance=True,
+        )
+        print(f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Eliminated fragile 2-ray ties; locked in bundle adjustment.", flush=True)
+    except Exception as e:
+        print(f"  [Pass 4/4] Multiplicity filter skipped: {e}", flush=True)
+
+    # Final RMS Reprojection Error calculation
+    final_pts = len(chunk.tie_points.points) if chunk.tie_points else 0
+    try:
+        f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
+        final_re = list(f.values)
+        final_rms = math.sqrt(sum(v * v for v in final_re) / len(final_re)) if final_re else 0.0
+    except Exception:
+        final_rms = 0.0
+
+    rms_improvement = ((initial_rms - final_rms) / initial_rms * 100.0) if initial_rms > 0 else 0.0
+    print(f"  [USGS Optimization Summary] Reprojection RMS: {initial_rms:.3f} px -> {final_rms:.3f} px ({rms_improvement:.1f}% reduction). Inliers: {final_pts:,}/{initial_pts:,} tie points retained.\n", flush=True)
+
+    return {
+        "initial_points": initial_pts,
+        "final_points": final_pts,
+        "initial_rms": initial_rms,
+        "final_rms": final_rms,
+        "rms_improvement_pct": rms_improvement,
+    }
+
+
+def filter_tie_points(chunk, max_reproj_error: float = 0.35, max_uncertainty: float = 12.0) -> dict:
+    """Filters low-confidence tie points using the USGS 4-Pass Gradual Selection protocol."""
+    return execute_usgs_gradual_selection(chunk, ru_thresh=max_uncertainty, re_thresh=max_reproj_error)
+
+
+def calculate_optimal_texel_budget(chunk, gsd_cm: float, page_res: int = 8192, margin: float = 1.25) -> int:
+    """Calculates the exact 1:1 ground texel parity texture page budget based on 3D mesh surface area."""
+    if not chunk.model or gsd_cm is None or gsd_cm <= 0.0:
+        return 4
+    try:
+        surf_area_m2 = chunk.model.area()
+        if surf_area_m2 <= 0.0:
+            return 4
+        texels_per_page = page_res * page_res
+        required_texels = (surf_area_m2 * 10000.0) / (gsd_cm ** 2)
+        raw_pages = math.ceil((required_texels / texels_per_page) * margin)
+        optimal_pages = max(1, min(raw_pages, 32))
+        effective_gsd_texel = math.sqrt((surf_area_m2 * 10000.0) / (optimal_pages * texels_per_page / margin))
+        print(f"\n[1:1 Texel Density Budget] Mesh Surface Area: {surf_area_m2:,.1f} m² | Camera GSD: {gsd_cm:.2f} cm/px", flush=True)
+        print(f"  Required Surface Texels: {required_texels/1e6:.1f} Megapixels", flush=True)
+        print(f"  Allocated Texture Atlas: {optimal_pages}x {page_res}x{page_res} Pages (Effective Texel Density: {effective_gsd_texel:.2f} cm/texel, 1:1 Parity).", flush=True)
+        return optimal_pages
+    except Exception as e:
+        print(f"  [1:1 Texel Budget] Area computation skipped ({e}); using baseline pages.", flush=True)
+        return 4
 
 
 def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
@@ -924,8 +1348,11 @@ def run_reconstruction(
     resume: bool = False,
     multi_chunk: str = "disable",
     chunk_align_method: str = "camera",
-    preset: str = "auto",
+    preset: str = "pro",
     auto_params: bool = False,
+    ground_cell_size: float = None,
+    ground_max_angle: float = None,
+    ground_max_distance: float = None,
     build_orthomosaic: bool = None,
     build_dem: bool = None,
     export_dem: bool = False,
@@ -966,48 +1393,53 @@ def run_reconstruction(
     psx_out = os.path.join(output_dir, "building_reconstruction.psx")
 
     # -----------------------------------------------------------------------
-    # Preset & Autonomous Parameter Resolution
+    # Pro Photogrammetry Survey Physics & Telemetry Resolution
     # -----------------------------------------------------------------------
     inferred_profile = None
-    is_auto = (preset == "auto") or auto_params or (preset is None and crop_method is None and custom_faces is None)
+    survey_physics = None
+    pro_plan = None
+    usgs_stats = None
+    is_auto = (preset in ("pro", "auto")) or auto_params or (preset is None and crop_method is None and custom_faces is None)
     if is_auto:
-        print("=========================================================================")
-        print("  AUTOMETASHAPE: AUTONOMOUS SURVEY PROFILING & LEARNED PARAMETERS")
-        print("=========================================================================", flush=True)
         try:
-            profile = profile_dataset(images_dir, output_dir=output_dir)
-            inferred = infer_optimal_parameters(profile)
-            inferred_profile = profile
-            print(f"  [Survey Profile] Ingested {profile.get('photo_count', 0)} photos across survey directory.")
-            print(f"  [Survey Profile] GPS Georeferenced: {profile.get('has_gps')} (Span: {profile.get('horizontal_span_m', 0.0):.1f}m, Alt Span: {profile.get('alt_span_m', 0.0):.1f}m)")
-            cams_str = ', '.join(profile.get('cameras_detected', [])) or 'Standard Sensor'
-            print(f"  [Survey Profile] Camera Model: {cams_str}")
-            print(f"  [Survey Profile] Classified Geometry: {inferred['survey_category'].upper()}")
-            print(f"  [Learned Baseline] Inferred: Crop={inferred['crop_method'].upper()}, Faces={inferred['custom_faces']:,}, Pages={inferred['texture_pages']}, Rolling Shutter={inferred['rolling_shutter']}")
-            print(f"  [Learned Baseline] Deliverables: DEM={inferred['build_dem']}, Ortho={inferred['build_orthomosaic']}, Point Cloud={inferred['build_point_cloud']}")
+            survey_physics = analyze_survey_physics(images_dir, output_dir=output_dir)
+            pro_plan = derive_pro_photogrammetry_plan(survey_physics)
+            inferred_profile = survey_physics
+            print_pro_engineering_report(survey_physics, pro_plan)
 
             if crop_method is None:
-                crop_method = inferred["crop_method"]
+                crop_method = pro_plan["crop_method"]
             if custom_faces is None:
-                custom_faces = inferred["custom_faces"]
+                custom_faces = pro_plan["custom_faces"]
             if texture_pages is None:
-                texture_pages = inferred["texture_pages"]
+                texture_pages = pro_plan["texture_pages"]
             if build_orthomosaic is None:
-                build_orthomosaic = inferred["build_orthomosaic"]
+                build_orthomosaic = pro_plan["build_orthomosaic"]
             if build_dem is None:
-                build_dem = inferred["build_dem"]
+                build_dem = pro_plan["build_dem"]
             if build_point_cloud is None:
-                build_point_cloud = inferred["build_point_cloud"]
+                build_point_cloud = pro_plan["build_point_cloud"]
             if classify_ground is None:
-                classify_ground = inferred["classify_ground"]
+                classify_ground = pro_plan["classify_ground"]
             if rolling_shutter is None:
-                rolling_shutter = inferred["rolling_shutter"]
+                rolling_shutter = pro_plan["rolling_shutter"]
             if close_holes is None:
-                close_holes = inferred["close_holes"]
+                close_holes = pro_plan["close_holes"]
             if depth_filtering is None:
-                depth_filtering = inferred["depth_filtering"]
+                depth_filtering = pro_plan["depth_filtering"]
+            if surface_type == "arbitrary" and pro_plan.get("surface_type") == "heightfield":
+                surface_type = "heightfield"
+            if not remove_lighting and pro_plan.get("remove_lighting"):
+                remove_lighting = True
+                delighting_color_mode = True
+            if ground_cell_size is None:
+                ground_cell_size = pro_plan.get("ground_cell_size", 35.0)
+            if ground_max_angle is None:
+                ground_max_angle = pro_plan.get("ground_max_angle", 15.0)
+            if ground_max_distance is None:
+                ground_max_distance = pro_plan.get("ground_max_distance", 0.5)
         except Exception as e_prof:
-            print(f"  [Survey Profile] Note: Telemetry analysis ({e_prof}); using standard architectural defaults.", flush=True)
+            print(f"  [Survey Physics] Note: Telemetry analysis ({e_prof}); using standard architectural defaults.", flush=True)
 
     elif preset == "map":
         if crop_method is None:
@@ -1241,7 +1673,7 @@ def run_reconstruction(
                 print(f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
 
                 if filter_tiepoints:
-                    filter_tie_points(c, max_reproj_error=0.4, max_uncertainty=15.0)
+                    usgs_stats = filter_tie_points(c, max_reproj_error=0.35, max_uncertainty=12.0)
 
                 try:
                     c.updateTransform()
@@ -1404,7 +1836,7 @@ def run_reconstruction(
                 print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
 
             if filter_tiepoints:
-                filter_tie_points(chunk, max_reproj_error=0.4, max_uncertainty=15.0)
+                usgs_stats = filter_tie_points(chunk, max_reproj_error=0.35, max_uncertainty=12.0)
             else:
                 print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
@@ -1514,8 +1946,11 @@ def run_reconstruction(
                 chunk.point_cloud.resetFilters()
 
             if classify_ground and chunk.point_cloud:
-                print("  Executing automatic ground point classification (max_angle=15°, max_distance=1.0m, cell_size=50m)...", flush=True)
-                chunk.point_cloud.classifyGroundPoints(max_angle=15.0, max_distance=1.0, cell_size=50.0)
+                c_size = ground_cell_size if ground_cell_size is not None else 50.0
+                m_ang = ground_max_angle if ground_max_angle is not None else 15.0
+                m_dist = ground_max_distance if ground_max_distance is not None else 1.0
+                print(f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f}°, max_distance={m_dist:.2f}m)...", flush=True)
+                chunk.point_cloud.classifyGroundPoints(cell_size=c_size, max_angle=m_ang, max_distance=m_dist)
                 print("  Ground classification completed.", flush=True)
 
             if classify_points and chunk.point_cloud:
@@ -1621,10 +2056,17 @@ def run_reconstruction(
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
+        # Dynamically size texture atlas for 1:1 ground texel parity if in pro mode or unforced
+        eff_pages = texture_pages
+        if (texture_pages is None or is_auto) and chunk.model and survey_physics and survey_physics.get("gsd_cm"):
+            optimal_budget = calculate_optimal_texel_budget(chunk, gsd_cm=survey_physics["gsd_cm"])
+            if optimal_budget:
+                eff_pages = optimal_budget
+
         t_tex = time.time()
         chunk.buildUV(
             mapping_mode=Metashape.MappingMode.GenericMapping,
-            page_count=texture_pages,
+            page_count=eff_pages or 4,
             texture_size=8192,
         )
         chunk.buildTexture(
@@ -1883,6 +2325,9 @@ def run_reconstruction(
     total_time = (time.time() - t_start) / 60.0
     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
 
+    if survey_physics and pro_plan:
+        print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
@@ -1894,10 +2339,14 @@ if __name__ == "__main__":
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
     parser.add_argument(
         "--preset",
-        choices=["auto", "building", "map"],
-        default="auto",
-        help="Reconstruction preset: 'auto' (learned from telemetry), 'building' (600K faces, 16-page 8K, GPS crop), or 'map' (2M faces, 4-page 8K, uncropped terrain, DEM & Ortho)",
+        choices=["pro", "auto", "building", "map"],
+        default="pro",
+        help="Reconstruction preset: 'pro' (default: physics-driven survey optics, USGS 4-pass bundle adjustment, 1:1 texel budget), 'auto' (learned from telemetry), 'building', or 'map'",
     )
+    parser.add_argument("--pro", action="store_true", default=True, help="Execute the Pro Photogrammetry & Geomatics Engine (default: True)")
+    parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
+    parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
+    parser.add_argument("--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification")
     parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="medium", help="Image alignment accuracy/quality (default: medium)")
     parser.add_argument("--keypoint-limit", type=int, default=40000, help="Max keypoints per image (default: 40000)")
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
@@ -2033,34 +2482,17 @@ if __name__ == "__main__":
 
     if args.profile:
         print("=========================================================================")
-        print("  AUTOMETASHAPE: DATASET TELEMETRY & SURVEY PROFILER")
+        print("  AUTOMETASHAPE: PRO SURVEY OPTICS & TELEMETRY PROFILER")
         print(f"  Target Directory: {args.images}")
         print("=========================================================================", flush=True)
-        prof = profile_dataset(args.images, output_dir=args.output)
-        inferred = infer_optimal_parameters(prof)
-        print(f"  Photos Ingested:   {prof.get('photo_count', 0):,}")
-        print(f"  GPS Telemetry:     {'Present' if prof.get('has_gps') else 'Absent'} ({prof.get('gps_ratio', 0.0)*100:.1f}%% georeferenced)")
-        print(f"  Horizontal Span:   {prof.get('horizontal_span_m', 0.0):.1f} meters")
-        print(f"  Altitude Span:     {prof.get('alt_span_m', 0.0):.1f} meters")
-        print(f"  Avg Resolution:    {prof.get('avg_megapixels', 0.0):.1f} Megapixels")
-        cams = ', '.join(prof.get('cameras_detected', [])) or 'Standard Sensor'
-        print(f"  Camera Sensors:    {cams}")
-        print(f"  Rolling Shutter:   {'Recommended' if prof.get('rolling_shutter_recommended') else 'Not needed'}")
-        print("-------------------------------------------------------------------------")
-        print(f"  Survey Category:   {inferred['survey_category'].upper()}")
-        print(f"  Optimal Crop:      {inferred['crop_method'].upper()}")
-        print(f"  Target Faces:      {inferred['custom_faces']:,}")
-        print(f"  Texture Pages:     {inferred['texture_pages']} pages (8K)")
-        print(f"  Depth Filtering:   {inferred['depth_filtering'].capitalize()}")
-        print(f"  Point Cloud:       {'Enabled' if inferred['build_point_cloud'] else 'Disabled'}")
-        print(f"  DEM Elevation:     {'Enabled' if inferred['build_dem'] else 'Disabled'}")
-        print(f"  Orthomosaic:       {'Enabled' if inferred['build_orthomosaic'] else 'Disabled'}")
-        print("=========================================================================")
+        phys = analyze_survey_physics(args.images, output_dir=args.output)
+        pro_plan = derive_pro_photogrammetry_plan(phys)
+        print_pro_engineering_report(phys, pro_plan)
         sys.exit(0)
 
     crop_method = "none" if args.no_crop else args.crop_method
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
-    auto_params = args.auto or (args.preset == "auto")
+    auto_params = args.auto or (args.preset in ("pro", "auto")) or args.pro
 
     run_reconstruction(
         images_dir=args.images,
@@ -2090,6 +2522,9 @@ if __name__ == "__main__":
         chunk_align_method=args.chunk_align_method,
         preset=args.preset,
         auto_params=auto_params,
+        ground_cell_size=args.ground_cell_size,
+        ground_max_angle=args.ground_max_angle,
+        ground_max_distance=args.ground_max_distance,
         build_orthomosaic=args.build_orthomosaic,
         build_dem=args.build_dem,
         export_dem=args.export_dem,

@@ -35,6 +35,15 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 
+try:
+    from metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan
+except ImportError:
+    try:
+        from scripts.metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan
+    except ImportError:
+        analyze_survey_physics = None
+        derive_pro_photogrammetry_plan = None
+
 # ---------------------------------------------------------------------------
 # High-DPI Crisp Text & Per-Monitor v2 Awareness (Windows 10 / 11)
 # ---------------------------------------------------------------------------
@@ -559,7 +568,7 @@ class AutoMetashapeStudio:
         self.start_time: float = 0.0
         self.active_mode = "recon"
         self.adv_expanded = False
-        self.selected_preset_key = "building"
+        self.selected_preset_key = "pro"
         self.current_layout_mode = None  # "2col" or "1col"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
 
@@ -601,7 +610,7 @@ class AutoMetashapeStudio:
         self._bind_global_mousewheel()
 
         # Activate default preset
-        self._select_preset("building")
+        self._select_preset("pro")
 
         # Intercept window close for safe exit
         self.root.protocol("WM_DELETE_WINDOW", self._on_window_close)
@@ -1219,6 +1228,27 @@ class AutoMetashapeStudio:
         )
         ent_out.pack(fill=tk.X, pady=(3, 2))
 
+        bar_diag = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
+        bar_diag.pack(fill=tk.X, pady=(6, 2))
+
+        btn_diag = tk.Button(
+            bar_diag,
+            text="🔬 Inspect Survey Physics & Optics Telemetry",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._diagnose_survey_physics,
+        )
+        btn_diag.pack(side=tk.LEFT)
+
     # -----------------------------------------------------------------------
     # Step 2: Quality Presets Card
     # -----------------------------------------------------------------------
@@ -1303,14 +1333,14 @@ class AutoMetashapeStudio:
                 w.bind("<Leave>", lambda e, k=key: self._on_preset_hover(k, False))
 
         _make_preset(
-            "auto",
-            "Autonomous Survey (Learned Parameters)",
-            "Dynamic faces · Adaptive atlas · Telemetry-inferred crop",
-            "Auto-profiles image telemetry, GPS bounding box, and flight geometry to dynamically infer the optimal face count, texture pages, and bounding box.",
+            "pro",
+            "Pro Photogrammetry & Geomatics Engine (Default)",
+            "Physics GSD · USGS 4-pass · 1:1 Texel budget · Shutter audit",
+            "Autonomous geomatics workflow: evaluates physical sensor pitch, exact GSD, shutter mechanics (leaf vs rolling), USGS 4-pass gradual selection bundle adjustment, slope-adaptive ground filtering, and 1:1 texel density budgeting.",
         )
         _make_preset(
             "building",
-            "Building Reconstruction (Default)",
+            "Building Reconstruction",
             "600K faces · 16-page 8K · GPS crop",
             "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
         )
@@ -1318,7 +1348,7 @@ class AutoMetashapeStudio:
             "map",
             "Aerial Map & Orthomosaic",
             "2M faces · 4-page 8K · No crop · Ortho TIFF",
-            "Full-extent mapping without cropping: 2M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
+            "Full-extent terrain mapping without cropping: 2M face mesh, 4-page 8K texture atlas, DEM elevation, and geo-referenced Orthomosaic GeoTIFF.",
         )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
@@ -1894,11 +1924,11 @@ class AutoMetashapeStudio:
                 s.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
                 d.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
 
-        if key == "auto":
+        if key in ("pro", "auto"):
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("600000")
+            self.var_faces.set("800000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
@@ -1949,6 +1979,80 @@ class AutoMetashapeStudio:
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_ortho.set(True)
+
+    def _diagnose_survey_physics(self) -> None:
+        """Audits survey telemetry, optics, GSD, and shutter physics in background thread."""
+        img_dir = self.var_images_dir.get().strip()
+        if not img_dir or not os.path.isdir(img_dir):
+            messagebox.showwarning(
+                "Survey Diagnosis",
+                "Please select a valid raw images directory first.",
+                parent=self.root,
+            )
+            return
+
+        if not analyze_survey_physics:
+            messagebox.showerror(
+                "Survey Diagnosis",
+                "Metashape reconstruction module could not be imported.",
+                parent=self.root,
+            )
+            return
+
+        self._log("\n" + "=" * 70, "stage")
+        self._log("[DIAGNOSIS] Auditing survey telemetry, sensor optics, and GSD...", "stage")
+        self._log(f"  Target Directory: {img_dir}", "dim")
+
+        def _worker():
+            try:
+                phys = analyze_survey_physics(img_dir, sample_size=50)
+                plan = derive_pro_photogrammetry_plan(phys)
+
+                def _apply():
+                    sh_str = "Mechanical Leaf Shutter [RS Comp: DISABLED]" if phys.get("shutter") == "mechanical" else "CMOS Rolling Shutter [RS Comp: ENABLED]"
+                    fwd_ov = phys.get("forward_overlap_pct")
+                    lat_ov = phys.get("lateral_overlap_pct")
+                    ov_text = f"{fwd_ov:.1f}% fwd / {lat_ov:.1f}% lat" if fwd_ov is not None and lat_ov is not None else "Terrestrial / Uncalibrated"
+
+                    self._log(f"  Sensor Hardware:   {phys.get('sensor_name')}", "success")
+                    self._log(f"  Sensor Geometry:   {phys.get('sensor_w_mm', 0):.1f}x{phys.get('sensor_h_mm', 0):.1f}mm (Pitch: {phys.get('pixel_pitch_um', 0):.2f} µm)", "text")
+                    self._log(f"  Shutter Mechanism: {sh_str}", "text")
+                    self._log(f"  Flying Altitude:   {phys.get('flight_height_m', 0):.1f} m AGL", "text")
+                    self._log(f"  Optical GSD:       {phys.get('gsd_cm', 0):.2f} cm/pixel", "success")
+                    self._log(f"  Survey Overlap:    {ov_text}", "text")
+                    self._log(f"  Dynamic Range:     Shadow clip: {phys.get('shadow_clip_ratio', 0)*100:.1f}% | Delighting: {'ACTIVATED' if plan.get('remove_lighting') else 'Not required'}", "text")
+                    self._log(f"  Topographic Relief:Span: {phys.get('horizontal_span_m', 0):.1f}m | Delta Z: {phys.get('alt_span_m', 0):.1f}m | R={phys.get('relief_ratio', 0):.3f} -> {plan.get('surface_type', 'arbitrary').upper()}", "text")
+                    self._log(f"  USGS Optimization: 4-Pass Gradual Selection (RU<=12 -> PA<=2.5 -> RE<=0.35 -> Multiplicity>=3)", "stage")
+                    self._log("=" * 70 + "\n", "stage")
+
+                    # Automatically sync parameters into UI
+                    self.var_crop.set(plan["crop_method"])
+                    self.var_faces.set(str(plan["custom_faces"]))
+                    self.var_tex_pages.set(str(plan["texture_pages"]))
+                    self.var_rolling.set(plan["rolling_shutter"])
+                    self.var_surface_type.set(plan["surface_type"])
+                    self.var_remove_lighting.set(plan["remove_lighting"])
+                    self.var_ortho.set(plan["build_orthomosaic"])
+                    self.var_build_dem.set(plan["build_dem"])
+                    self.var_build_point_cloud.set(plan["build_point_cloud"])
+                    self.var_classify_ground.set(plan["classify_ground"])
+
+                    messagebox.showinfo(
+                        "Survey Physics Diagnosis Complete",
+                        f"Detected Sensor: {phys.get('sensor_name')}\n"
+                        f"Optical GSD: {phys.get('gsd_cm', 0):.2f} cm/pixel (Altitude: {phys.get('flight_height_m', 0):.1f} m AGL)\n"
+                        f"Shutter Physics: {sh_str}\n"
+                        f"Surface Type: {plan.get('surface_type', 'arbitrary').upper()} (Relief R: {phys.get('relief_ratio', 0):.3f})\n"
+                        f"Recommended Faces: {plan['custom_faces']:,} | Pages: {plan['texture_pages']}x 8K\n\n"
+                        "Pipeline parameters have been calibrated to this survey's optical physics.",
+                        parent=self.root,
+                    )
+
+                self.root.after(0, _apply)
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self._log(f"[DIAGNOSIS ERROR] {err}", "error"))
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def _set_mode(self, mode: str) -> None:
         if mode == self.active_mode:
@@ -2280,7 +2384,7 @@ class AutoMetashapeStudio:
             cmd.append("--build-dem")
         if hasattr(self, "var_export_report") and not self.var_export_report.get():
             cmd.append("--no-report")
-        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("auto", "building", "map"):
+        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("pro", "auto", "building", "map"):
             cmd.extend(["--preset", self.selected_preset_key])
         if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "disable":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
