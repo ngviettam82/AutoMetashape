@@ -87,6 +87,36 @@ POINT_CLOUD_FORMAT_MAP = {
     "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
 }
 
+TILED_MODEL_FORMAT_MAP = {
+    "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
+    "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
+    "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
+    "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
+}
+
+SHAPES_FORMAT_MAP = {
+    "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
+    "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
+    "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
+    "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
+}
+
+TARGET_TYPE_MAP = {
+    "circular12": Metashape.TargetType.CircularTarget12bit,
+    "circular14": Metashape.TargetType.CircularTarget14bit,
+    "circular16": Metashape.TargetType.CircularTarget16bit,
+    "circular20": Metashape.TargetType.CircularTarget20bit,
+    "cross": Metashape.TargetType.CrossTarget,
+    "apriltag16h5": Metashape.TargetType.AprilTag16h5,
+    "apriltag25h9": Metashape.TargetType.AprilTag25h9,
+    "apriltag36h11": Metashape.TargetType.AprilTag36h11,
+}
+
+SURFACE_TYPE_MAP = {
+    "arbitrary": Metashape.SurfaceType.Arbitrary,
+    "heightfield": Metashape.SurfaceType.HeightField,
+}
+
 
 def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculates orthodromic surface distance between two WGS84 GPS coordinates in meters."""
@@ -907,6 +937,27 @@ def run_reconstruction(
     filter_point_confidence: int = None,
     export_report: bool = True,
     report_title: str = None,
+    surface_type: str = "arbitrary",
+    detect_markers: bool = False,
+    target_type: str = "circular12",
+    marker_tolerance: int = 50,
+    import_reference: str = None,
+    calibrate_colors: bool = False,
+    smooth_mesh: bool = False,
+    smooth_strength: float = 3.0,
+    decimate_mesh: int = None,
+    remove_lighting: bool = False,
+    delighting_color_mode: bool = False,
+    build_tiled_model: bool = False,
+    tiled_model_format: str = "cesium",
+    tile_size: int = 256,
+    build_contours: bool = False,
+    contour_interval: float = 1.0,
+    contours_format: str = "shp",
+    export_fbx: bool = False,
+    export_ply: bool = False,
+    export_dxf: bool = False,
+    export_tie_points: bool = False,
 ):
     t_start = time.time()
     if not output_dir:
@@ -1277,6 +1328,24 @@ def run_reconstruction(
             enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
             print(f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).", flush=True)
 
+            if import_reference and os.path.isfile(import_reference):
+                print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
+                try:
+                    chunk.importReference(path=import_reference, format=Metashape.ReferenceFormat.ReferenceFormatCSV)
+                    chunk.updateTransform()
+                    print("  Reference import and georeferencing transform updated.", flush=True)
+                except Exception as e_ref:
+                    print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
+
+            if detect_markers:
+                print(f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...", flush=True)
+                try:
+                    tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
+                    chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
+                    print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
+                except Exception as e_mk:
+                    print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
+
         else:
             all_imgs = []
             for imgs in groups.values():
@@ -1289,6 +1358,24 @@ def run_reconstruction(
 
             if min_quality > 0.0:
                 filter_image_quality(chunk, min_quality=min_quality)
+
+            if import_reference and os.path.isfile(import_reference):
+                print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
+                try:
+                    chunk.importReference(path=import_reference, format=Metashape.ReferenceFormat.ReferenceFormatCSV)
+                    chunk.updateTransform()
+                    print("  Reference import and georeferencing transform updated.", flush=True)
+                except Exception as e_ref:
+                    print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
+
+            if detect_markers:
+                print(f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...", flush=True)
+                try:
+                    tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
+                    chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
+                    print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
+                except Exception as e_mk:
+                    print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
             print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
             t_match = time.time()
@@ -1464,9 +1551,10 @@ def run_reconstruction(
             face_count_custom_arg = 200000
             print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
 
+        surf_enum = SURFACE_TYPE_MAP.get(surface_type.lower(), Metashape.SurfaceType.Arbitrary)
         try:
             chunk.buildModel(
-                surface_type=Metashape.SurfaceType.Arbitrary,
+                surface_type=surf_enum,
                 source_data=Metashape.DataSource.DepthMapsData,
                 interpolation=Metashape.Interpolation.EnabledInterpolation,
                 face_count=face_count_arg,
@@ -1480,7 +1568,7 @@ def run_reconstruction(
             try:
                 Metashape.app.gpu_mask = 0
                 chunk.buildModel(
-                    surface_type=Metashape.SurfaceType.Arbitrary,
+                    surface_type=surf_enum,
                     source_data=Metashape.DataSource.DepthMapsData,
                     interpolation=Metashape.Interpolation.EnabledInterpolation,
                     face_count=face_count_arg,
@@ -1494,6 +1582,12 @@ def run_reconstruction(
         if close_holes and chunk.model:
             chunk.model.closeHoles(level=30)
             print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
+        if smooth_mesh and chunk.model:
+            print(f"  Applying Laplacian mesh smoothing (strength: {smooth_strength})...", flush=True)
+            chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
+        if decimate_mesh and chunk.model and decimate_mesh > 0:
+            print(f"  Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
+            chunk.decimateModel(face_count=decimate_mesh)
 
         mesh_verts = len(chunk.model.vertices)
         mesh_faces = len(chunk.model.faces)
@@ -1519,6 +1613,14 @@ def run_reconstruction(
         else:
             print(f"\n[6/7] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
 
+        if calibrate_colors:
+            print("\n[Color Calibration] Executing radiometric color & white balance calibration...", flush=True)
+            try:
+                chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
+                print("  Radiometric color calibration completed.", flush=True)
+            except Exception as e_col:
+                print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
+
         t_tex = time.time()
         chunk.buildUV(
             mapping_mode=Metashape.MappingMode.GenericMapping,
@@ -1532,8 +1634,49 @@ def run_reconstruction(
             ghosting_filter=ghosting_filter,
         )
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
+
+        if remove_lighting and chunk.model:
+            print("\n[Delighting] Removing harsh ambient shadows and illumination to recover diffuse albedo...", flush=True)
+            try:
+                chunk.removeLighting(color_mode=delighting_color_mode)
+                print("  Texture delighting completed.", flush=True)
+            except Exception as e_lt:
+                print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
         chunk = save_checkpoint(doc, psx_out)
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
+
+    # Step 6b: Hierarchical 3D Tiled Model (LOD / Cesium 3D Tiles)
+    if build_tiled_model:
+        try:
+            has_tiled = getattr(chunk, "tiled_model", None) is not None
+            if not has_tiled:
+                print(f"\n[6b/7] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
+                t_tile = time.time()
+                chunk.buildTiledModel(
+                    tile_size=tile_size,
+                    source_data=Metashape.DataSource.DepthMapsData,
+                )
+                print(f"  3D Tiled model completed in {(time.time() - t_tile)/60:.2f} min.", flush=True)
+                chunk = save_checkpoint(doc, psx_out)
+            else:
+                print("\n[6b/7] Reusing existing 3D Tiled Model from checkpoint.", flush=True)
+
+            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
+            tiled_fmt, tiled_ext = tiled_fmt_tuple
+            if tiled_model_format.lower() == "cesium":
+                tiled_dir = os.path.join(output_dir, "tiled_model")
+                os.makedirs(tiled_dir, exist_ok=True)
+                tiled_out = os.path.join(tiled_dir, "tileset.json")
+            else:
+                tiled_out = os.path.join(output_dir, f"tiled_model{tiled_ext}")
+            print(f"\n[6b/7] [EXPORT] Exporting 3D Tiled Model to: {tiled_out}...", flush=True)
+            chunk.exportTiledModel(
+                path=tiled_out,
+                format=tiled_fmt,
+            )
+            print(f"  [6b/7] [EXPORT] Saved 3D Tiled Model: {tiled_out}", flush=True)
+        except Exception as e_tile:
+            print(f"  [6b/7] [WARNING] 3D Tiled Model generation/export issue: {e_tile}. Continuing...", flush=True)
 
     # Production Asset Export
     print("\n=========================================================================")
@@ -1560,6 +1703,42 @@ def run_reconstruction(
         save_colors=True,
     )
     print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+
+    if export_fbx and chunk.model:
+        fbx_out = os.path.join(output_dir, "model.fbx")
+        print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
+        try:
+            chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
+            print(f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_fbx:
+            print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
+
+    if export_ply and chunk.model:
+        ply_out = os.path.join(output_dir, "model_mesh.ply")
+        print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
+        try:
+            chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
+            print(f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_ply:
+            print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
+
+    if export_dxf and chunk.model:
+        dxf_out = os.path.join(output_dir, "model.dxf")
+        print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
+        try:
+            chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
+            print(f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_dxf:
+            print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
+
+    if export_tie_points and chunk.tie_points:
+        tp_out = os.path.join(output_dir, "tie_points.ply")
+        print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
+        try:
+            chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
+            print(f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_tp:
+            print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
     # Step 7b: Digital Elevation Model (DEM) Generation & GeoTIFF Export
     if build_dem:
@@ -1598,6 +1777,32 @@ def run_reconstruction(
             print(f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
         except Exception as e_dem:
             print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
+
+    # Step 7b2: Topographic Contour Vectors
+    if build_contours and (getattr(chunk, "elevation", None) is not None or build_dem):
+        try:
+            print(f"\n[7b2/7] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
+            t_cnt = time.time()
+            chunk.buildContours(
+                source_data=Metashape.DataSource.ElevationData,
+                interval=contour_interval,
+                prevent_intersections=True,
+            )
+            print(f"  Contour lines generated in {(time.time() - t_cnt)/60:.2f} min.", flush=True)
+
+            sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
+            cnt_out = os.path.join(output_dir, f"contours{sh_ext}")
+            print(f"  [7b2/7] [EXPORT] Exporting Contour Shapes to: {cnt_out}...", flush=True)
+            chunk.exportShapes(
+                path=cnt_out,
+                format=sh_fmt,
+                save_polylines=True,
+                save_elevation=True,
+                save_attributes=True,
+            )
+            print(f"  [7b2/7] [EXPORT] Saved Topographic Contours: {cnt_out}", flush=True)
+        except Exception as e_cnt:
+            print(f"  [7b2/7] [WARNING] Topographic contours issue: {e_cnt}. Continuing...", flush=True)
 
     # Step 7c: Orthomosaic Generation & GeoTIFF Export
     if build_orthomosaic:
@@ -1778,6 +1983,28 @@ if __name__ == "__main__":
     parser.add_argument("--export-report", dest="export_report", action="store_true", default=True, help="Export official Metashape PDF calibration & quality report (default: True)")
     parser.add_argument("--no-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
     parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
+    # Extended Metashape Functions: Targets, GCPs, Colors, Tiled Model, Contours & Delighting
+    parser.add_argument("--detect-markers", action="store_true", default=False, help="Detect coded target markers or AprilTags")
+    parser.add_argument("--target-type", choices=["circular12", "circular14", "circular16", "circular20", "cross", "apriltag16h5", "apriltag25h9", "apriltag36h11"], default="circular12", help="Coded target type (default: circular12)")
+    parser.add_argument("--marker-tolerance", type=int, default=50, help="Marker detector tolerance 0-100 (default: 50)")
+    parser.add_argument("--import-reference", default=None, help="Path to ground control points (GCP) reference CSV/TXT file")
+    parser.add_argument("--calibrate-colors", action="store_true", default=False, help="Perform radiometric color & white balance calibration")
+    parser.add_argument("--surface-type", choices=["arbitrary", "heightfield"], default="arbitrary", help="Mesh surface type (default: arbitrary)")
+    parser.add_argument("--smooth-mesh", action="store_true", default=False, help="Apply Laplacian smoothing to surface mesh")
+    parser.add_argument("--smooth-strength", type=float, default=3.0, help="Laplacian smoothing strength (default: 3.0)")
+    parser.add_argument("--decimate-mesh", type=int, default=None, help="Decimate mesh to target face count")
+    parser.add_argument("--remove-lighting", action="store_true", default=False, help="Remove shadows and ambient lighting from texture (delighting)")
+    parser.add_argument("--delighting-color-mode", action="store_true", default=False, help="Enable multi-color delighting mode")
+    parser.add_argument("--build-tiled-model", action="store_true", default=False, help="Build hierarchical 3D tiled model (LOD)")
+    parser.add_argument("--tiled-model-format", choices=["cesium", "tls", "slpk", "osgb"], default="cesium", help="Format for 3D tiled model (default: cesium)")
+    parser.add_argument("--tile-size", type=int, default=256, help="Tile size in pixels (default: 256)")
+    parser.add_argument("--build-contours", action="store_true", default=False, help="Generate topographic contour lines from DEM")
+    parser.add_argument("--contour-interval", type=float, default=1.0, help="Contour elevation interval in meters (default: 1.0)")
+    parser.add_argument("--contours-format", choices=["shp", "dxf", "geojson", "kml"], default="shp", help="Format for topographic contours (default: shp)")
+    parser.add_argument("--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format")
+    parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
+    parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
+    parser.add_argument("--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format")
     # Multi-chunk options
     parser.add_argument(
         "--multi-chunk",
@@ -1874,4 +2101,25 @@ if __name__ == "__main__":
         filter_point_confidence=args.filter_point_confidence,
         export_report=args.export_report,
         report_title=args.report_title,
+        surface_type=args.surface_type,
+        detect_markers=args.detect_markers,
+        target_type=args.target_type,
+        marker_tolerance=args.marker_tolerance,
+        import_reference=args.import_reference,
+        calibrate_colors=args.calibrate_colors,
+        smooth_mesh=args.smooth_mesh,
+        smooth_strength=args.smooth_strength,
+        decimate_mesh=args.decimate_mesh,
+        remove_lighting=args.remove_lighting,
+        delighting_color_mode=args.delighting_color_mode,
+        build_tiled_model=args.build_tiled_model,
+        tiled_model_format=args.tiled_model_format,
+        tile_size=args.tile_size,
+        build_contours=args.build_contours,
+        contour_interval=args.contour_interval,
+        contours_format=args.contours_format,
+        export_fbx=args.export_fbx,
+        export_ply=args.export_ply,
+        export_dxf=args.export_dxf,
+        export_tie_points=args.export_tie_points,
     )

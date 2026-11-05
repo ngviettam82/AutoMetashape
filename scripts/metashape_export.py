@@ -27,6 +27,20 @@ POINT_CLOUD_FORMAT_MAP = {
     "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
 }
 
+TILED_MODEL_FORMAT_MAP = {
+    "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
+    "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
+    "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
+    "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
+}
+
+SHAPES_FORMAT_MAP = {
+    "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
+    "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
+    "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
+    "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
+}
+
 
 def export_project_assets(
     project_path: str,
@@ -43,6 +57,22 @@ def export_project_assets(
     export_orthomosaic: bool = False,
     export_report: bool = False,
     report_title: str = None,
+    export_tiled_model: bool = False,
+    tiled_model_format: str = "cesium",
+    tile_size: int = 256,
+    export_contours: bool = False,
+    contour_interval: float = 1.0,
+    contours_format: str = "shp",
+    remove_lighting: bool = False,
+    delighting_color_mode: bool = False,
+    calibrate_colors: bool = False,
+    smooth_mesh: bool = False,
+    smooth_strength: float = 3.0,
+    decimate_mesh: int = None,
+    export_fbx: bool = False,
+    export_ply: bool = False,
+    export_dxf: bool = False,
+    export_tie_points: bool = False,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -131,12 +161,30 @@ def export_project_assets(
     mesh_faces = len(chunk.model.faces)
     print(f"[Model Info] Geometry: {mesh_verts:,} vertices, {mesh_faces:,} polygonal faces.", flush=True)
 
+    if smooth_mesh and chunk.model:
+        print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
+        chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
+        doc.save()
+
+    if decimate_mesh and chunk.model and decimate_mesh > 0:
+        print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
+        chunk.decimateModel(face_count=decimate_mesh)
+        doc.save()
+
     # Optional / Conditional texture re-baking
     current_pages = 0
     if hasattr(chunk.model, "textures") and chunk.model.textures:
         current_pages = len(chunk.model.textures)
     elif hasattr(chunk.model, "texture") and chunk.model.texture():
         current_pages = 1
+
+    if calibrate_colors:
+        print("\n[Color Calibration] Executing radiometric calibration & white balance...", flush=True)
+        try:
+            chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
+            doc.save()
+        except Exception as e_col:
+            print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
     if rebake_texture or current_pages == 0:
         print(f"\n[Texture] Baking {texture_pages}x 8192x8192 (8K) Texture Atlas (Mosaic Blending, Fill Holes: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
@@ -156,6 +204,15 @@ def export_project_assets(
         doc.save()
         chunk = doc.chunk
         print(f"  Updated project saved: {project_path}", flush=True)
+
+    if remove_lighting and chunk.model:
+        print("\n[Delighting] Removing harsh ambient shadows and illumination...", flush=True)
+        try:
+            chunk.removeLighting(color_mode=delighting_color_mode)
+            doc.save()
+            print("  Texture delighting completed.", flush=True)
+        except Exception as e_lt:
+            print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
 
     glb_out = os.path.join(output_dir, "model.glb")
     obj_out = os.path.join(output_dir, "model.obj")
@@ -245,6 +302,86 @@ def export_project_assets(
         else:
             print("\n[Orthomosaic] Note: Project contains no built orthomosaic; skipping export.", flush=True)
 
+    # Export FBX
+    if export_fbx and chunk.model:
+        fbx_out = os.path.join(output_dir, "model.fbx")
+        print(f"\n[FBX] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
+        try:
+            chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
+            print(f"  Saved FBX: {fbx_out} ({os.path.getsize(fbx_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_fbx:
+            print(f"  [WARNING] FBX export issue: {e_fbx}", flush=True)
+
+    # Export PLY
+    if export_ply and chunk.model:
+        ply_out = os.path.join(output_dir, "model_mesh.ply")
+        print(f"\n[PLY] Exporting Stanford PLY to: {ply_out}...", flush=True)
+        try:
+            chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
+            print(f"  Saved PLY: {ply_out} ({os.path.getsize(ply_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_ply:
+            print(f"  [WARNING] PLY export issue: {e_ply}", flush=True)
+
+    # Export DXF
+    if export_dxf and chunk.model:
+        dxf_out = os.path.join(output_dir, "model.dxf")
+        print(f"\n[DXF] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
+        try:
+            chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
+            print(f"  Saved DXF: {dxf_out} ({os.path.getsize(dxf_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_dxf:
+            print(f"  [WARNING] DXF export issue: {e_dxf}", flush=True)
+
+    # Export Sparse Tie Points
+    if export_tie_points and chunk.tie_points:
+        tp_out = os.path.join(output_dir, "tie_points.ply")
+        print(f"\n[Tie Points] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
+        try:
+            chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
+            print(f"  Saved Tie Points: {tp_out} ({os.path.getsize(tp_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_tp:
+            print(f"  [WARNING] Tie points export issue: {e_tp}", flush=True)
+
+    # Export Hierarchical 3D Tiled Model
+    if export_tiled_model:
+        try:
+            has_tiled = getattr(chunk, "tiled_model", None) is not None
+            if not has_tiled:
+                print(f"\n[Tiled Model] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
+                chunk.buildTiledModel(tile_size=tile_size, source_data=Metashape.DataSource.DepthMapsData)
+                doc.save()
+
+            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
+            tiled_fmt, tiled_ext = tiled_fmt_tuple
+            if tiled_model_format.lower() == "cesium":
+                tiled_dir = os.path.join(output_dir, "tiled_model")
+                os.makedirs(tiled_dir, exist_ok=True)
+                tiled_out = os.path.join(tiled_dir, "tileset.json")
+            else:
+                tiled_out = os.path.join(output_dir, f"tiled_model{tiled_ext}")
+            print(f"\n[Tiled Model] Exporting 3D Tiled Model to: {tiled_out}...", flush=True)
+            chunk.exportTiledModel(path=tiled_out, format=tiled_fmt)
+            print(f"  Saved 3D Tiled Model: {tiled_out}", flush=True)
+        except Exception as e_tile:
+            print(f"  [WARNING] 3D Tiled Model export issue: {e_tile}. Continuing...", flush=True)
+
+    # Export Topographic Contours
+    if export_contours:
+        has_dem = getattr(chunk, "elevation", None) is not None
+        if has_dem:
+            try:
+                print(f"\n[Contours] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
+                chunk.buildContours(source_data=Metashape.DataSource.ElevationData, interval=contour_interval, prevent_intersections=True)
+                sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
+                cnt_out = os.path.join(output_dir, f"contours{sh_ext}")
+                print(f"  Exporting Contour Shapes to: {cnt_out}...", flush=True)
+                chunk.exportShapes(path=cnt_out, format=sh_fmt, save_polylines=True, save_elevation=True, save_attributes=True)
+                print(f"  Saved Topographic Contours: {cnt_out}", flush=True)
+            except Exception as e_cnt:
+                print(f"  [WARNING] Contour export issue: {e_cnt}. Continuing...", flush=True)
+        else:
+            print("\n[Contours] Project contains no built elevation model; skipping contour export.", flush=True)
+
     # 6. Optional Executive PDF Report Export
     if export_report:
         report_out = os.path.join(output_dir, "report.pdf")
@@ -278,6 +415,22 @@ if __name__ == "__main__":
     parser.add_argument("--export-orthomosaic", action="store_true", default=False, help="Export GeoTIFF Orthomosaic (orthomosaic.tif)")
     parser.add_argument("--export-report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report")
     parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
+    parser.add_argument("--export-tiled-model", action="store_true", default=False, help="Export hierarchical 3D tiled model (LOD)")
+    parser.add_argument("--tiled-model-format", choices=["cesium", "tls", "slpk", "osgb"], default="cesium", help="Format for 3D tiled model (default: cesium)")
+    parser.add_argument("--tile-size", type=int, default=256, help="Tile size in pixels (default: 256)")
+    parser.add_argument("--export-contours", action="store_true", default=False, help="Generate and export topographic contour lines from DEM")
+    parser.add_argument("--contour-interval", type=float, default=1.0, help="Contour elevation interval in meters (default: 1.0)")
+    parser.add_argument("--contours-format", choices=["shp", "dxf", "geojson", "kml"], default="shp", help="Format for topographic contours (default: shp)")
+    parser.add_argument("--remove-lighting", action="store_true", default=False, help="Remove shadows and ambient lighting from texture (delighting)")
+    parser.add_argument("--delighting-color-mode", action="store_true", default=False, help="Enable multi-color delighting mode")
+    parser.add_argument("--calibrate-colors", action="store_true", default=False, help="Perform radiometric color & white balance calibration")
+    parser.add_argument("--smooth-mesh", action="store_true", default=False, help="Apply Laplacian smoothing to surface mesh")
+    parser.add_argument("--smooth-strength", type=float, default=3.0, help="Laplacian smoothing strength (default: 3.0)")
+    parser.add_argument("--decimate-mesh", type=int, default=None, help="Decimate mesh to target face count")
+    parser.add_argument("--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format")
+    parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
+    parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
+    parser.add_argument("--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format")
     args = parser.parse_args()
 
     export_project_assets(
@@ -295,4 +448,20 @@ if __name__ == "__main__":
         export_orthomosaic=args.export_orthomosaic,
         export_report=args.export_report,
         report_title=args.report_title,
+        export_tiled_model=args.export_tiled_model,
+        tiled_model_format=args.tiled_model_format,
+        tile_size=args.tile_size,
+        export_contours=args.export_contours,
+        contour_interval=args.contour_interval,
+        contours_format=args.contours_format,
+        remove_lighting=args.remove_lighting,
+        delighting_color_mode=args.delighting_color_mode,
+        calibrate_colors=args.calibrate_colors,
+        smooth_mesh=args.smooth_mesh,
+        smooth_strength=args.smooth_strength,
+        decimate_mesh=args.decimate_mesh,
+        export_fbx=args.export_fbx,
+        export_ply=args.export_ply,
+        export_dxf=args.export_dxf,
+        export_tie_points=args.export_tie_points,
     )

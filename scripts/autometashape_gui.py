@@ -729,6 +729,44 @@ class AutoMetashapeStudio:
         self.var_exp_ortho = tk.BooleanVar(value=False)
         self.var_exp_report = tk.BooleanVar(value=False)
 
+        # Extended Metashape Functions: Targets, GCPs, Meshing, Tiled Model, Contours & Delighting
+        self.var_detect_markers = tk.BooleanVar(value=False)
+        self.var_target_type = tk.StringVar(value="circular12")
+        self.var_marker_tolerance = tk.StringVar(value="50")
+        self.var_import_reference = tk.StringVar(value="")
+        self.var_calibrate_colors = tk.BooleanVar(value=False)
+        self.var_surface_type = tk.StringVar(value="arbitrary")
+        self.var_smooth_mesh = tk.BooleanVar(value=False)
+        self.var_smooth_strength = tk.StringVar(value="3.0")
+        self.var_decimate_mesh = tk.StringVar(value="")
+        self.var_export_fbx = tk.BooleanVar(value=False)
+        self.var_export_ply = tk.BooleanVar(value=False)
+        self.var_export_dxf = tk.BooleanVar(value=False)
+        self.var_export_tie_points = tk.BooleanVar(value=False)
+
+        self.var_build_tiled_model = tk.BooleanVar(value=False)
+        self.var_tiled_model_format = tk.StringVar(value="cesium")
+        self.var_tile_size = tk.StringVar(value="256")
+
+        self.var_build_contours = tk.BooleanVar(value=False)
+        self.var_contour_interval = tk.StringVar(value="1.0")
+        self.var_contours_format = tk.StringVar(value="shp")
+
+        self.var_remove_lighting = tk.BooleanVar(value=False)
+
+        # Export Tab Extended Controls
+        self.var_exp_tiled_model = tk.BooleanVar(value=False)
+        self.var_exp_tiled_format = tk.StringVar(value="cesium")
+        self.var_exp_contours = tk.BooleanVar(value=False)
+        self.var_exp_contour_interval = tk.StringVar(value="1.0")
+        self.var_exp_contours_format = tk.StringVar(value="shp")
+        self.var_exp_remove_lighting = tk.BooleanVar(value=False)
+        self.var_exp_calibrate_colors = tk.BooleanVar(value=False)
+        self.var_exp_smooth_mesh = tk.BooleanVar(value=False)
+        self.var_exp_export_fbx = tk.BooleanVar(value=False)
+        self.var_exp_export_ply = tk.BooleanVar(value=False)
+        self.var_exp_tie_points = tk.BooleanVar(value=False)
+
         self.var_psx_path = tk.StringVar()
         self.var_export_out = tk.StringVar()
         self.var_exp_format = tk.StringVar(value="tiff")
@@ -1394,9 +1432,23 @@ class AutoMetashapeStudio:
         _c(chk_align_1, "Adaptive Camera Fitting", self.var_adaptive_fitting).pack(side=tk.LEFT)
 
         chk_align_2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_align_2.pack(fill=tk.X, pady=(2, 4))
+        chk_align_2.pack(fill=tk.X, pady=(2, 2))
         _c(chk_align_2, "CMOS Rolling Shutter", self.var_rolling).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_align_2, "Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT)
+        _c(chk_align_2, "Tie-Point Filtering", self.var_filter_tiepoints).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_align_2, "Radiometric Color Calibration", self.var_calibrate_colors).pack(side=tk.LEFT)
+
+        chk_align_targets = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_align_targets.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_align_targets, "Detect Coded Targets", self.var_detect_markers).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(chk_align_targets, text="Target:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(chk_align_targets, textvariable=self.var_target_type, values=["circular12", "circular14", "circular16", "circular20", "cross", "apriltag16h5", "apriltag25h9", "apriltag36h11"], state="readonly", width=12).pack(side=tk.LEFT, padx=(4, 10))
+
+        row_gcp = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        row_gcp.pack(fill=tk.X, pady=(2, 4))
+        tk.Label(row_gcp, text="GCP Reference (CSV):", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ent_ref = tk.Entry(row_gcp, textvariable=self.var_import_reference, font=("Segoe UI", 8), bg=UITheme.BG_INPUT, fg=UITheme.TEXT_PRIMARY, insertbackground="white", bd=1, relief=tk.SOLID)
+        ent_ref.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=4)
+        tk.Button(row_gcp, text="Browse...", font=("Segoe UI", 7), bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY, command=self._browse_reference_file).pack(side=tk.RIGHT)
 
         # -------------------------------------------------------------------
         # Process 2: Bounding Box & Region
@@ -1430,9 +1482,21 @@ class AutoMetashapeStudio:
         tk.Label(grid_model, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid_model, textvariable=self.var_faces, values=["500000", "600000", "1000000", "2000000", "3000000", "5000000"], width=8).grid(row=0, column=5, padx=4, pady=3)
 
+        grid_model2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        grid_model2.pack(fill=tk.X, pady=(2, 2))
+        tk.Label(grid_model2, text="Surface Type:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_model2, textvariable=self.var_surface_type, values=["arbitrary", "heightfield"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+
         chk_model = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_model.pack(fill=tk.X, pady=(2, 4))
-        _c(chk_model, "Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT)
+        chk_model.pack(fill=tk.X, pady=(2, 2))
+        _c(chk_model, "Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_model, "Laplacian Mesh Smoothing", self.var_smooth_mesh).pack(side=tk.LEFT, padx=(0, 10))
+
+        chk_model_exp = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_model_exp.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_model_exp, "Export FBX", self.var_export_fbx).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_model_exp, "Export PLY", self.var_export_ply).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_model_exp, "Export DXF", self.var_export_dxf).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
         # Process 4: Dense Point Cloud & Classification
@@ -1450,22 +1514,44 @@ class AutoMetashapeStudio:
         chk_pc2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_pc2.pack(fill=tk.X, pady=(2, 4))
         _c(chk_pc2, "Classify Ground Points", self.var_classify_ground).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_pc2, "Classify Points (Multiclass AI)", self.var_classify_points).pack(side=tk.LEFT)
+        _c(chk_pc2, "Classify Points (Multiclass AI)", self.var_classify_points).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_pc2, "Export Sparse Tie Points", self.var_export_tie_points).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
-        # Process 5: Elevation (DEM) & Orthomosaic
+        # Process 5: Hierarchical 3D Tiled Model (LOD Web GIS)
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "ELEVATION", "5. Elevation Model (DEM) & Orthomosaic", top_pad=8)
+        _make_sec_header(self.body_adv, "TILED MODEL", "5. Hierarchical 3D Tiled Model (LOD / Web GIS)", top_pad=8)
+
+        chk_tiled = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_tiled.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_tiled, "Build 3D Tiled Model (LOD)", self.var_build_tiled_model).pack(side=tk.LEFT, padx=(0, 10))
+        tk.Label(chk_tiled, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(chk_tiled, textvariable=self.var_tiled_model_format, values=["cesium", "tls", "slpk", "osgb"], state="readonly", width=8).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Label(chk_tiled, text="Tile Size:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(chk_tiled, textvariable=self.var_tile_size, values=["256", "512"], state="readonly", width=6).pack(side=tk.LEFT, padx=4)
+
+        # -------------------------------------------------------------------
+        # Process 6: Elevation (DEM) & Topographic Contours
+        # -------------------------------------------------------------------
+        _make_sec_header(self.body_adv, "ELEVATION & CONTOURS", "6. Elevation Model (DEM) & Topographic Contours", top_pad=8)
 
         chk_dem = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_dem.pack(fill=tk.X, pady=(2, 4))
+        chk_dem.pack(fill=tk.X, pady=(2, 2))
         _c(chk_dem, "Generate Orthomosaic GeoTIFF", self.var_ortho).pack(side=tk.LEFT, padx=(0, 10))
         _c(chk_dem, "Generate Digital Elevation Model (DEM)", self.var_build_dem).pack(side=tk.LEFT)
 
+        chk_cnt = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
+        chk_cnt.pack(fill=tk.X, pady=(2, 4))
+        _c(chk_cnt, "Generate Topographic Contours", self.var_build_contours).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Label(chk_cnt, text="Interval (m):", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(chk_cnt, textvariable=self.var_contour_interval, values=["0.5", "1.0", "2.0", "5.0", "10.0"], width=6).pack(side=tk.LEFT, padx=(4, 10))
+        tk.Label(chk_cnt, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(chk_cnt, textvariable=self.var_contours_format, values=["shp", "dxf", "geojson", "kml"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
+
         # -------------------------------------------------------------------
-        # Process 6: Texture Atlas
+        # Process 7: Texture Atlas & Delighting
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "TEXTURE", "6. Texture Atlas", top_pad=8)
+        _make_sec_header(self.body_adv, "TEXTURE", "7. Texture Atlas & Delighting", top_pad=8)
 
         grid_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         grid_tex.pack(fill=tk.X, pady=(2, 2))
@@ -1476,12 +1562,13 @@ class AutoMetashapeStudio:
         chk_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_tex.pack(fill=tk.X, pady=(2, 4))
         _c(chk_tex, "Texture Hole Filling", self.var_fill_holes).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_tex, "Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT)
+        _c(chk_tex, "Ghosting Filter", self.var_ghosting).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_tex, "Delighting (Remove Shadows)", self.var_remove_lighting).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
-        # Process 7: Quality Report & Lifecycle
+        # Process 8: Quality Report & Lifecycle
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "REPORT", "7. Quality Report & Lifecycle", top_pad=8)
+        _make_sec_header(self.body_adv, "REPORT", "8. Quality Report & Lifecycle", top_pad=8)
 
         chk_lifecycle = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_lifecycle.pack(fill=tk.X, pady=(2, 6))
@@ -1611,6 +1698,40 @@ class AutoMetashapeStudio:
 
         tk.Label(row2, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
         ttk.Combobox(row2, textvariable=self.var_exp_format, values=["tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
+
+        # Extended Export Controls: Point Cloud, DEM, Ortho, Tiled, Contours, FBX/PLY, Report
+        row3 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row3.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(row3, text="Export Point Cloud", variable=self.var_exp_point_cloud, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(row3, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row3, textvariable=self.var_exp_pc_format, values=["laz", "las", "ply", "e57", "xyz"], state="readonly", width=6).pack(side=tk.LEFT, padx=(4, 12))
+        tk.Checkbutton(row3, text="Export Tie Points", variable=self.var_exp_tie_points, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT)
+
+        row4 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row4.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(row4, text="Export DEM (GeoTIFF)", variable=self.var_exp_dem, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 12))
+        tk.Checkbutton(row4, text="Export Orthomosaic (GeoTIFF)", variable=self.var_exp_ortho, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT)
+
+        row5 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row5.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(row5, text="Export 3D Tiled Model (LOD)", variable=self.var_exp_tiled_model, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(row5, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row5, textvariable=self.var_exp_tiled_format, values=["cesium", "tls", "slpk", "osgb"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
+
+        row6 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row6.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(row6, text="Export Contours", variable=self.var_exp_contours, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(row6, text="Interval:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row6, textvariable=self.var_exp_contour_interval, values=["0.5", "1.0", "2.0", "5.0"], width=5).pack(side=tk.LEFT, padx=(2, 8))
+        tk.Label(row6, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        ttk.Combobox(row6, textvariable=self.var_exp_contours_format, values=["shp", "dxf", "geojson", "kml"], state="readonly", width=7).pack(side=tk.LEFT, padx=4)
+
+        row7 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)
+        row7.pack(fill=tk.X, pady=2)
+        tk.Checkbutton(row7, text="Export FBX", variable=self.var_exp_export_fbx, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(row7, text="Export PLY", variable=self.var_exp_export_ply, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(row7, text="Delighting", variable=self.var_exp_remove_lighting, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT, padx=(0, 8))
+        tk.Checkbutton(row7, text="Quality PDF Report", variable=self.var_exp_report, font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_PRIMARY, selectcolor=UITheme.BG_ROOT, bd=0).pack(side=tk.LEFT)
 
     # -----------------------------------------------------------------------
     # Stepper Card
@@ -1889,6 +2010,14 @@ class AutoMetashapeStudio:
             )
             self._log("[WARNING] Metashape executable not found in default paths. You will be prompted to locate it on start.", "warning")
 
+    def _browse_reference_file(self) -> None:
+        p = filedialog.askopenfilename(
+            title="Select Ground Control Points (GCP) Reference CSV",
+            filetypes=[("CSV & Text Files", "*.csv;*.txt"), ("All Files", "*.*")],
+        )
+        if p:
+            self.var_import_reference.set(p)
+
     def _browse_images_dir(self) -> None:
         chosen = filedialog.askdirectory(
             title="Select Raw Photos Directory",
@@ -2157,6 +2286,35 @@ class AutoMetashapeStudio:
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":
             cmd.extend(["--chunk-align-method", self.var_chunk_align_method.get()])
+        if hasattr(self, "var_surface_type") and self.var_surface_type.get() != "arbitrary":
+            cmd.extend(["--surface-type", self.var_surface_type.get()])
+        if hasattr(self, "var_detect_markers") and self.var_detect_markers.get():
+            cmd.append("--detect-markers")
+            cmd.extend(["--target-type", self.var_target_type.get()])
+        if hasattr(self, "var_import_reference") and self.var_import_reference.get().strip():
+            cmd.extend(["--import-reference", self.var_import_reference.get().strip()])
+        if hasattr(self, "var_calibrate_colors") and self.var_calibrate_colors.get():
+            cmd.append("--calibrate-colors")
+        if hasattr(self, "var_smooth_mesh") and self.var_smooth_mesh.get():
+            cmd.append("--smooth-mesh")
+        if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
+            cmd.append("--remove-lighting")
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+            cmd.append("--build-tiled-model")
+            cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+            cmd.extend(["--tile-size", self.var_tile_size.get()])
+        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+            cmd.append("--build-contours")
+            cmd.extend(["--contour-interval", self.var_contour_interval.get()])
+            cmd.extend(["--contours-format", self.var_contours_format.get()])
+        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+            cmd.append("--export-fbx")
+        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+            cmd.append("--export-ply")
+        if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
+            cmd.append("--export-dxf")
+        if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
+            cmd.append("--export-tie-points")
 
         self.stepper.reset()
         self.frame_crop_banner.pack_forget()
@@ -2196,6 +2354,23 @@ class AutoMetashapeStudio:
             cmd.append("--export-orthomosaic")
         if hasattr(self, "var_exp_report") and self.var_exp_report.get():
             cmd.append("--export-report")
+        if hasattr(self, "var_exp_tiled_model") and self.var_exp_tiled_model.get():
+            cmd.append("--export-tiled-model")
+            cmd.extend(["--tiled-model-format", self.var_exp_tiled_format.get()])
+        if hasattr(self, "var_exp_contours") and self.var_exp_contours.get():
+            cmd.append("--export-contours")
+            cmd.extend(["--contour-interval", self.var_exp_contour_interval.get()])
+            cmd.extend(["--contours-format", self.var_exp_contours_format.get()])
+        if hasattr(self, "var_exp_remove_lighting") and self.var_exp_remove_lighting.get():
+            cmd.append("--remove-lighting")
+        if hasattr(self, "var_exp_smooth_mesh") and self.var_exp_smooth_mesh.get():
+            cmd.append("--smooth-mesh")
+        if hasattr(self, "var_exp_export_fbx") and self.var_exp_export_fbx.get():
+            cmd.append("--export-fbx")
+        if hasattr(self, "var_exp_export_ply") and self.var_exp_export_ply.get():
+            cmd.append("--export-ply")
+        if hasattr(self, "var_exp_tie_points") and self.var_exp_tie_points.get():
+            cmd.append("--export-tie-points")
 
         self.stepper.reset()
         self.stepper.set_active(0, "Loading Project & Validating Mesh")

@@ -70,3 +70,25 @@
 - **Pass/fail criteria**:
   - Pass: `point_cloud.laz` is exported and non-empty; ground points classified into ASPRS Class 2 (Ground); project checkpoint saved.
   - Fail: Point cloud missing; ground classification skipped; unhandled exception during export.
+
+
+### Scenario 7: Hierarchical 3D Tiled Model (Cesium 3D Tiles) & Topographic Contours
+- **Query**: "Process this open-pit mine drone survey to generate streaming Cesium 3D Tiles and 1-meter topographic contour vectors for our GIS portal."
+- **Expected behavior**:
+  - Executes with `--build-tiled-model --tiled-model-format cesium --build-dem --build-contours --contour-interval 1.0 --contours-format shp`.
+  - Builds multiresolution hierarchical LOD 3D tiles and exports `model/tiled_model/tileset.json` with `.b3dm` tile payloads.
+  - Builds DEM and generates vector contour polylines with 1.0m elevation intervals, exporting `model/contours.shp` (or `.dxf`).
+- **Pass/fail criteria**:
+  - Pass: `tileset.json` created with valid LOD bounding hierarchy; `contours.shp` exported with elevation attributes; project saved in `.psx`.
+  - Fail: Missing tileset or unhandled contour generation crash.
+
+### Scenario 8: Target Marker Detection, GCP Georeferencing & Texture Delighting
+- **Query**: "Reconstruct this heritage temple facade. We placed circular 12-bit coded targets and have ground surveyed GCP coordinates in `gcps.csv`. Also remove harsh direct sunlight shadows from the texture atlas."
+- **Expected behavior**:
+  - Executes with `--detect-markers --target-type circular12 --import-reference "gcps.csv" --remove-lighting --export-fbx`.
+  - Automatically identifies circular coded targets on photos, loads CSV reference coordinates, and updates bundle adjustment transformation.
+  - Generates 8K texture atlas and applies `chunk.removeLighting()` to eliminate cast shadows and ambient occlusion.
+  - Exports production assets including `model.fbx`, `model.glb`, and `model.obj`.
+- **Pass/fail criteria**:
+  - Pass: Markers detected; reference imported; diffuse albedo texture delighted; FBX and GLB exported.
+  - Fail: Failing to detect targets; crashing on reference CSV import; shadow removal failure.
