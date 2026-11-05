@@ -145,6 +145,7 @@ CAMERA_HARDWARE_DB = {
     "m3m": {"name": "DJI Mavic 3 Multispectral RGB", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "mechanical", "focal_fixed": 12.29},
 
     # DJI Consumer Drones (CMOS Electronic Rolling Shutter)
+    "fc9470": {"name": "DJI Neo (FC9470)", "sensor_w_mm": 6.86, "sensor_h_mm": 3.86, "pixel_pitch_um": 1.72, "shutter": "rolling", "focal_fixed": 3.05},
     "fc3582": {"name": "DJI Mavic 3 / Cine / Classic Hasselblad", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "rolling", "focal_fixed": 12.29},
     "fc3170": {"name": "DJI Mavic Air 2", "sensor_w_mm": 6.4, "sensor_h_mm": 4.8, "pixel_pitch_um": 0.8, "shutter": "rolling", "focal_fixed": 4.5},
     "fc3011": {"name": "DJI Air 2S", "sensor_w_mm": 13.2, "sensor_h_mm": 8.8, "pixel_pitch_um": 2.4, "shutter": "rolling", "focal_fixed": 8.38},
@@ -273,7 +274,7 @@ def extract_image_telemetry(img_path: str) -> dict:
                     if lat_val and lon_val:
                         lat = _to_deg(lat_val)
                         lon = _to_deg(lon_val)
-                        if lat is not None and lon is not None:
+                        if lat is not None and lon is not None and (abs(lat) > 0.001 or abs(lon) > 0.001):
                             if lat_ref == "S":
                                 lat = -lat
                             if lon_ref == "W":
@@ -303,15 +304,39 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
     sampled = image_paths[::step][:sample_count]
     shadow_counts = []
     highlight_counts = []
-    from PIL import Image
+    has_pil = False
+    try:
+        from PIL import Image
+        has_pil = True
+    except ImportError:
+        has_pil = False
+
+    has_meta = False
+    try:
+        import Metashape
+        has_meta = True
+    except ImportError:
+        has_meta = False
+
     for p in sampled:
         try:
-            with Image.open(p) as img:
-                thumb = img.resize((256, 256)).convert("L")
-                hist = thumb.histogram()
-                total = 256 * 256
-                shadow_counts.append(sum(hist[:20]) / total)
-                highlight_counts.append(sum(hist[235:]) / total)
+            if has_pil:
+                with Image.open(p) as img:
+                    thumb = img.resize((256, 256)).convert("L")
+                    hist = thumb.histogram()
+                    total = 256 * 256
+                    shadow_counts.append(sum(hist[:20]) / total)
+                    highlight_counts.append(sum(hist[235:]) / total)
+            elif has_meta:
+                im = Metashape.Image().open(p)
+                if im:
+                    thumb = im.resize(256, 256)
+                    if thumb:
+                        raw = thumb.tostring()
+                        total = len(raw)
+                        if total > 0:
+                            shadow_counts.append(sum(1 for b in raw if b < 20) / total)
+                            highlight_counts.append(sum(1 for b in raw if b > 235) / total)
         except Exception:
             pass
     if not shadow_counts:
@@ -349,28 +374,88 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
     models = []
     coords = []
 
-    for path in sampled:
-        t = extract_image_telemetry(path)
-        if t["has_gps"]:
-            lats.append(t["lat"])
-            lons.append(t["lon"])
-            coords.append((t["lat"], t["lon"]))
-            if t["alt"] is not None:
-                alts.append(t["alt"])
-        if t.get("relative_alt") is not None:
-            rel_alts.append(t["relative_alt"])
-        if t["model"]:
-            cameras_detected.add(f"{t['make']} {t['model']}".strip())
-            models.append(t["model"])
-        if t["make"]:
-            makes.append(t["make"])
-        if t["width"] > 0:
-            widths.append(t["width"])
-            heights.append(t["height"])
-        if t.get("focal_length") is not None:
-            focal_lengths.append(t["focal_length"])
-        if t.get("focal_35mm") is not None:
-            focal_35mms.append(t["focal_35mm"])
+    has_meta = False
+    try:
+        import Metashape
+        has_meta = True
+    except ImportError:
+        has_meta = False
+
+    if has_meta:
+        try:
+            temp_doc = Metashape.Document()
+            temp_chunk = temp_doc.addChunk()
+            temp_chunk.addPhotos(sampled)
+            for c in temp_chunk.cameras:
+                meta = c.photo.meta
+                make = meta["Exif/Make"] if "Exif/Make" in meta else ""
+                model = meta["Exif/Model"] if "Exif/Model" in meta else ""
+                if model:
+                    cameras_detected.add(f"{make} {model}".strip())
+                    models.append(model)
+                if make:
+                    makes.append(make)
+                w = c.sensor.width if c.sensor else 0
+                h = c.sensor.height if c.sensor else 0
+                if w > 0:
+                    widths.append(w)
+                    heights.append(h)
+                if "Exif/FocalLength" in meta:
+                    try:
+                        focal_lengths.append(float(meta["Exif/FocalLength"]))
+                    except (ValueError, TypeError):
+                        pass
+                if "Exif/FocalLengthIn35mmFilm" in meta:
+                    try:
+                        focal_35mms.append(float(meta["Exif/FocalLengthIn35mmFilm"]))
+                    except (ValueError, TypeError):
+                        pass
+                if c.reference and getattr(c.reference, "enabled", True) and c.reference.location:
+                    lon = c.reference.location.x
+                    lat = c.reference.location.y
+                    alt = c.reference.location.z
+                    if abs(lat) > 0.001 or abs(lon) > 0.001:
+                        lats.append(lat)
+                        lons.append(lon)
+                        coords.append((lat, lon))
+                        if alt is not None:
+                            alts.append(alt)
+                rel_alt_val = None
+                if "DJI/RelativeAltitude" in meta:
+                    try:
+                        rel_alt_val = float(meta["DJI/RelativeAltitude"])
+                    except (ValueError, TypeError):
+                        pass
+                if rel_alt_val is None and c.photo and c.photo.path:
+                    rel_alt_val = parse_xmp_relative_altitude(c.photo.path)
+                if rel_alt_val is not None:
+                    rel_alts.append(rel_alt_val)
+        except Exception:
+            has_meta = False
+
+    if not has_meta:
+        for path in sampled:
+            t = extract_image_telemetry(path)
+            if t["has_gps"] and (abs(t["lat"]) > 0.001 or abs(t["lon"]) > 0.001):
+                lats.append(t["lat"])
+                lons.append(t["lon"])
+                coords.append((t["lat"], t["lon"]))
+                if t["alt"] is not None:
+                    alts.append(t["alt"])
+            if t.get("relative_alt") is not None:
+                rel_alts.append(t["relative_alt"])
+            if t["model"]:
+                cameras_detected.add(f"{t['make']} {t['model']}".strip())
+                models.append(t["model"])
+            if t["make"]:
+                makes.append(t["make"])
+            if t["width"] > 0:
+                widths.append(t["width"])
+                heights.append(t["height"])
+            if t.get("focal_length") is not None:
+                focal_lengths.append(t["focal_length"])
+            if t.get("focal_35mm") is not None:
+                focal_35mms.append(t["focal_35mm"])
 
     gps_count = len(lats)
     gps_ratio = gps_count / len(sampled) if sampled else 0.0
