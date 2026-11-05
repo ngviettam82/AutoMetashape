@@ -1259,8 +1259,8 @@ class AutoMetashapeStudio:
         _make_preset(
             "map",
             "Aerial Map & Orthomosaic",
-            "5M faces · 4-page 8K · No crop · Ortho TIFF",
-            "Full-extent mapping without cropping: 5M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
+            "2M faces · 4-page 8K · No crop · Ortho TIFF",
+            "Full-extent mapping without cropping: 2M face terrain mesh, 4-page 8K texture atlas, and geo-referenced Orthomosaic GeoTIFF.",
         )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
@@ -1746,7 +1746,7 @@ class AutoMetashapeStudio:
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("5000000")
+            self.var_faces.set("2000000")
             self.var_tex_pages.set("4")
             self.var_crop.set("none")
             self.var_depth_quality.set("medium")

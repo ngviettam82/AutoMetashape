@@ -672,7 +672,7 @@ def run_reconstruction(
         if crop_method is None:
             crop_method = "none"
         if custom_faces is None:
-            custom_faces = 5000000
+            custom_faces = 2000000
         if texture_pages is None:
             texture_pages = 4
         if build_orthomosaic is None:
@@ -1268,7 +1268,7 @@ if __name__ == "__main__":
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default="moderate", help="Depth map filtering mode (default: moderate)")
-    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 600,000 for building, 5,000,000 for map)")
+    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 600,000 for building, 2,000,000 for map)")
     parser.add_argument(
         "--guided-matching",
         dest="guided_matching",
@@ -1322,7 +1322,7 @@ if __name__ == "__main__":
         "--preset",
         choices=["building", "map"],
         default=None,
-        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (5M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
+        help="Reconstruction preset: 'building' (default: 600K faces, 16-page 8K, GPS-square crop) or 'map' (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic export)",
     )
     parser.add_argument(
         "--no-crop",
@@ -1364,7 +1364,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     is_map = args.preset == "map"
-    faces = args.faces if args.faces is not None else (5000000 if is_map else 600000)
+    faces = args.faces if args.faces is not None else (2000000 if is_map else 600000)
     texture_pages = args.texture_pages if args.texture_pages is not None else (4 if is_map else 16)
 
     if args.no_crop:

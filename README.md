@@ -49,7 +49,7 @@ Run photogrammetry reconstruction directly from PowerShell or terminal:
 # Building Preset (Default: 600K faces, 16-page 8K textures, GPS crop):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "C:/path/to/your/images"
 
-# Aerial Map Preset (5M faces, 4-page 8K textures, uncropped scene, GeoTIFF orthomosaic):
+# Aerial Map Preset (2M faces, 4-page 8K textures, uncropped scene, GeoTIFF orthomosaic):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset map
 ```
 
@@ -67,7 +67,7 @@ All production deliverables are automatically placed in `C:/path/to/your/images/
   - **`gps-square` Bounding Box**: Calculates the enclosing horizontal square of camera GPS poses while leaving vertical bounds uncropped to guarantee rooftops, spires, and foundations are never sliced.
 - **🗺️ Aerial Map Preset (`--preset map`)**:
   - Tailored for site surveys, civil engineering, topography, and agricultural mapping.
-  - **5,000,000 polygon faces (5M)** capturing micro-topographical terrain details.
+  - **2,000,000 polygon faces (2M)** capturing micro-topographical terrain details.
   - **4-Page 8K Texture Atlas** for sharp aerial orthophoto texture projection.
   - **Full Uncropped Extent (`--no-crop`)**: Preserves the complete surveyed terrain, boundary roads, and environmental perimeter.
   - **GeoTIFF Orthomosaic**: Surface-mesh projected mosaic orthophoto with BigTIFF LZW compression, ESRI `.tfw` world file, and automatic persistence inside the `.psx` project chunk.
@@ -129,7 +129,7 @@ flowchart TD
     C --> D["3. Camera Bundle Adjustment<br/>(Single-Chunk Default | Multi-Chunk Opt-In)"]
     D --> E["4. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     E --> F["5. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
-    F --> G["6. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 5M Faces, Level 30 Hole Closing)"]
+    F --> G["6. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 2M Faces, Level 30 Hole Closing)"]
     G --> H["7. Photogrammetric Texture Atlas<br/>(Building: 16-page 8K | Map: 4-page 8K, Lossless TIFF)"]
     H --> I["8. GeoTIFF Orthomosaic<br/>(Map Preset or --ortho: orthomosaic.tif + tfw)"]
     I --> J["Output Directory: <images_dir>/model/<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• orthomosaic.tif + orthomosaic.tfw<br/>• building_reconstruction.psx"]
@@ -145,7 +145,7 @@ flowchart TD
     --images "D:/Surveys/BuildingSite"
 ```
 
-### Aerial Map Preset (5M Faces, Full Extent, GeoTIFF Orthomosaic)
+### Aerial Map Preset (2M Faces, Full Extent, GeoTIFF Orthomosaic)
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
     --images "D:/Surveys/SiteMapping" \
@@ -226,7 +226,7 @@ python tools/skills/cli.py check
 - **Engine**: Agisoft Metashape Professional 2.0 or 2.1+.
 - **Python**: Python 3.10, 3.11, or 3.12 (or Metashape bundled Python environment).
 - **GPU**: NVIDIA GPU with CUDA support (RTX 30-series, RTX 40-series, RTX 50-series, or Quadro/Tesla).
-- **RAM**: 32 GB RAM recommended for Building preset; 64 GB+ RAM recommended for large 5M-face Map presets.
+- **RAM**: 32 GB RAM recommended for Building preset; 32-64 GB RAM recommended for 2M-face Map presets.
 
 ---
 

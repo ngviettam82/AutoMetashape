@@ -16,12 +16,12 @@
 ### Scenario 2: Aerial Site Survey & Terrain Mapping (Map Preset)
 - **Query**: "Process this aerial drone map dataset at `data/survey/site_ortho` using the map preset to give me a high-density terrain mesh and orthomosaic."
 - **Expected behavior**:
-  - Detects `--preset map` and sets default target faces to 5,000,000 (5M), texture pages to 4, crop method to `none` (uncropped terrain boundary), and enables GeoTIFF orthomosaic.
+  - Detects `--preset map` and sets default target faces to 2,000,000 (2M), texture pages to 4, crop method to `none` (uncropped terrain boundary), and enables GeoTIFF orthomosaic.
   - Computes dense depth maps across the complete surveyed footprint without clipping perimeter vegetation or access roads.
-  - Meshes arbitrary surface to 5M faces for fine topographic relief.
+  - Meshes arbitrary surface to 2M faces for fine topographic relief.
   - Generates 2D GeoTIFF orthomosaic directly inside the Metashape project and exports `orthomosaic.tif` alongside `orthomosaic.tfw` world file with LZW BigTIFF compression.
 - **Pass/fail criteria**:
-  - Pass: Complete boundary uncropped; 5M face mesh; `orthomosaic.tif` and `orthomosaic.tfw` generated; saved inside `.psx`.
+  - Pass: Complete boundary uncropped; 2M face mesh; `orthomosaic.tif` and `orthomosaic.tfw` generated; saved inside `.psx`.
   - Fail: Scene cropped by building bounding box; orthomosaic missing or failing with uncaught coordinate projection error.
 
 ### Scenario 3: Ground Handheld Walkthrough Photogrammetry & Checkpoint Resume

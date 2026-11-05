@@ -26,5 +26,5 @@ All skills must conform to:
 
 ### User Skills
 
-- `user/image-to-3d-model/`: Reconstructs high-precision 3D textured models (`.obj`, `.mtl`, `.glb`), GeoTIFF orthomosaics (`.tif`, `.tfw`), and native Agisoft Metashape projects (`.psx`) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Uses robust single-chunk global bundle adjustment by default with optional multi-chunk alignment.
+- `user/image-to-3d-model/`: Reconstructs high-precision 3D textured models (`.obj`, `.mtl`, `.glb`), GeoTIFF orthomosaics (`.tif`, `.tfw`), and native Agisoft Metashape projects (`.psx`) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (2M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Uses robust single-chunk global bundle adjustment by default with optional multi-chunk alignment.
 - `user/photogrammetry-export/`: Exports photogrammetric 3D reconstructions into production formats including GLB with embedded PBR textures, Wavefront OBJ with 16-page 8K TIFF textures, and native Metashape projects with metric georeferencing. Supports standalone texture re-baking without recomputing depth maps.

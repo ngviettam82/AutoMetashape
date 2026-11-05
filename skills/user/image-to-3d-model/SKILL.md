@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (5M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Defaults to robust single-chunk global bundle adjustment (--multi-chunk disable) with optional multi-chunk alignment (--multi-chunk auto). Filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
+description: "Reconstructs high-precision 3D textured models (.obj, .mtl, .glb), orthomosaic maps (.tif), and native Metashape projects (.psx) from raw image folders or aerial drone surveys. Features two primary presets: Building (600K faces, 16-page 8K textures, GPS crop) and Map (2M faces, 4-page 8K textures, no crop, GeoTIFF orthomosaic). Defaults to robust single-chunk global bundle adjustment (--multi-chunk disable) with optional multi-chunk alignment (--multi-chunk auto). Filters sub-0.5 blurry photos, applies CMOS rolling shutter compensation, Medium MVS depth maps (Moderate filtering), and photographic mosaic blending. Defaults to fresh execution from scratch with optional checkpoint resume (--resume). Supports drone DNG RAW, camera RAW, standard raster, and thermal imagery. Use when generating 3D models or orthomosaics from drone/camera captures."
 audience: user
 status: stable
 owners:
@@ -23,7 +23,7 @@ Use this skill when:
 - Hands-free autonomous execution is needed: defaults to `gps-square` cropping (horizontal square of camera GPS poses with uncropped vertical bounds) for buildings, or `--no-crop` for complete aerial terrain surveys.
 - Reconstructing architectural structures, buildings, urban environments, or complex terrain requiring metric accuracy, flat walls, and crisp 90-degree corners.
 - Calibrating rolling shutter distortion on consumer drone CMOS sensors and closing localized window openings.
-- Requiring optimized meshes (600K faces for buildings, 5M faces for terrain maps) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
+- Requiring optimized meshes (600K faces for buildings, 2M faces for terrain maps) and lossless uncompressed texture atlases (16-page 8K 8192×8192 TIFF mosaic photographic blending with hole filling and ghosting filter).
 
 Do not use this skill when:
 - Synthesizing 3D models from single images, sketches, or text prompts without multi-view photographic overlap.
@@ -41,7 +41,7 @@ flowchart TD
     D --> E["4. Multi-Flight Chunk Registration<br/>(Camera/GPS method=2 with Point-Based ICP Fallback)"]
     E --> F["5. Bounding Box Cropping<br/>(Building: gps-square | Map: no-crop)"]
     F --> G["6. Multi-View Stereo Depth Maps<br/>(Medium Quality, Moderate Filtering)"]
-    G --> H["7. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 5M Faces, Level 30 Hole Closing)"]
+    G --> H["7. Arbitrary Surface Meshing<br/>(Building: 600K Faces | Map: 2M Faces, Level 30 Hole Closing)"]
     H --> I["8. Photogrammetric Texture Atlas<br/>(Building: 16-page 8K | Map: 4-page 8K, Lossless TIFF)"]
     I --> J["9. GeoTIFF Orthomosaic<br/>(Map Preset or --ortho: orthomosaic.tif + tfw)"]
     J --> K["Dedicated model/ Subfolder<br/>• model.obj + model.mtl + model.tif<br/>• model.glb<br/>• orthomosaic.tif (Map)<br/>• building_reconstruction.psx (Editable in GUI)"]
@@ -50,13 +50,13 @@ flowchart TD
 ### 1. Ingestion & Workflow Presets
 AutoMetashape provides two purpose-built workflow presets:
 1. **Building Preset (`--preset building`, Default)**: Optimized for architectural structures and vertical facades. Uses GPS-square horizontal bounding box cropping, 600K polygon face budget, and a 16-page 8K lossless texture atlas.
-2. **Map Preset (`--preset map`)**: Optimized for aerial site surveys, terrain mapping, and orthophoto generation. Reconstructs the full uncropped scene (`--no-crop`), generates a high-density 5,000,000 (5M) face terrain mesh, a 4-page 8K texture atlas, and exports a geo-referenced Orthomosaic GeoTIFF (`orthomosaic.tif` + `.tfw`) saved directly inside the native Metashape project.
+2. **Map Preset (`--preset map`)**: Optimized for aerial site surveys, terrain mapping, and orthophoto generation. Reconstructs the full uncropped scene (`--no-crop`), generates a high-density 2,000,000 (2M) face terrain mesh, a 4-page 8K texture atlas, and exports a geo-referenced Orthomosaic GeoTIFF (`orthomosaic.tif` + `.tfw`) saved directly inside the native Metashape project.
 
 ```powershell
 # Building Preset (Default):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>"
 
-# Map Preset (5M faces, 4-page 8K, no crop, GeoTIFF orthomosaic):
+# Map Preset (2M faces, 4-page 8K, no crop, GeoTIFF orthomosaic):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<path_to_images>" --preset map
 
 # Explicit Parameter Override (overrides preset defaults):
@@ -89,7 +89,7 @@ AutoMetashape provides two purpose-built workflow presets:
 > - **Auto-Cropping Default (`gps-square`)**: Calculates the smallest enclosing horizontal square of all camera GPS poses, with altitude bounded by $[\min, \max]$ tie points inside the square.
 > - **Depth Maps & Meshing**:
 >   - **Quality**: `Medium` (`downscale=4`) depth maps with `ModerateFiltering`.
->   - **Polygon Count**: 600,000 faces limit for Building preset; 5,000,000 faces limit for Map preset.
+>   - **Polygon Count**: 600,000 faces limit for Building preset; 2,000,000 faces limit for Map preset.
 >   - **Hole Closing**: Automatically applies `closeHoles(level=30)` to seal planar window and facade openings.
 > - **Lossless Texture Atlases**: 16-page 8K (8192×8192) TIFF mosaic photographic blending with hole filling (`fill_holes=True`) and ghosting filter (`ghosting_filter=True`).
 > - **GeoTIFF Orthomosaic**: Surface mesh-projected mosaic blending with BigTIFF LZW compression, ESRI `.tfw` world file, stored directly in `.psx` chunk.
@@ -170,7 +170,7 @@ The pipeline provides three automated cropping strategies (`--crop-method`):
 
 ### 6. Arbitrary Surface Polygonal Meshing & Hole Closing
 - Fuses visibility-consistent depth maps into a continuous polygonal mesh using `DataSource.DepthMapsData`.
-- Targets **600,000 faces (600K)** by default for Building preset; **5,000,000 faces (5M)** for Map preset.
+- Targets **600,000 faces (600K)** by default for Building preset; **2,000,000 faces (2M)** for Map preset.
 - Automatically executes `chunk.model.closeHoles(level=30)` to seal window voids and planar gaps.
 - **Automatic GPU Driver Fallback**: Wrapped in an automated exception handler: if an internal CUDA driver exception occurs during octree meshing on next-gen architectures, it seamlessly retries on CPU without failing the pipeline, then restores GPU acceleration for texture baking.
 
@@ -201,7 +201,7 @@ Reconstruction must satisfy the following quality criteria:
 1. **Camera Quality Filtering**: All active cameras must have sharpness quality $\ge 0.50$ (blurry frames disabled).
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
 3. **Target Bounding Box**: `chunk.region` must be appropriately configured (`gps-square` tightly enclosing structures, or uncropped for terrain mapping).
-4. **Surface Topology**: Arbitrary surface mesh targeting specified face count (600K or 5M), free from degenerate zero-area faces.
+4. **Surface Topology**: Arbitrary surface mesh targeting specified face count (600K or 2M), free from degenerate zero-area faces.
 5. **Texture Atlas**: Resolution $\ge 8192\times 8192$ with valid UV mapping, hole filling, and zero unmapped black voids.
 6. **Orthomosaic (Map Mode)**: GeoTIFF file exported with accompanying `.tfw` world file and valid spatial resolution.
 7. **Project File**: Native `.psx` file must be successfully saved and loadable in Agisoft Metashape Professional GUI.
