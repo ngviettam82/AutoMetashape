@@ -2372,7 +2372,7 @@ def run_reconstruction(
             print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
 
     # Step 7d: Dense Point Cloud Export
-    if export_point_cloud or (build_point_cloud and export_point_cloud is not False):
+    if export_point_cloud or build_point_cloud:
         if chunk.point_cloud and chunk.point_cloud.point_count > 0:
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
