@@ -1407,6 +1407,43 @@ def save_checkpoint(doc, target_path=None):
     return doc.chunk
 
 
+def infer_project_name(
+    images_dir: str | None = None,
+    output_dir: str | None = None,
+    project_file: str | None = None,
+) -> str:
+    """Derive clean project base name from survey folder, output folder, or project path."""
+    if project_file:
+        base = os.path.splitext(os.path.basename(project_file))[0]
+        if base and base.lower() != "building_reconstruction":
+            return base
+        parent = os.path.basename(os.path.dirname(os.path.abspath(project_file)))
+        if parent.lower().startswith("model") or parent.lower() in ("export", "exports", "output", "outputs"):
+            grandparent = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(project_file))))
+            if grandparent:
+                return grandparent
+        if parent:
+            return parent
+
+    if images_dir:
+        abs_img = os.path.abspath(images_dir)
+        base = os.path.basename(abs_img)
+        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input") and os.path.dirname(abs_img):
+            base = os.path.basename(os.path.dirname(abs_img))
+        if base and base not in (".", "/", "\\"):
+            return base
+
+    if output_dir:
+        abs_out = os.path.abspath(output_dir)
+        base = os.path.basename(abs_out)
+        if (base.lower().startswith("model") or base.lower() in ("export", "exports", "output", "outputs")) and os.path.dirname(abs_out):
+            base = os.path.basename(os.path.dirname(abs_out))
+        if base and base not in (".", "/", "\\"):
+            return base
+
+    return "project"
+
+
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
@@ -1470,12 +1507,16 @@ def run_reconstruction(
     export_ply: bool = False,
     export_dxf: bool = False,
     export_tie_points: bool = False,
+    project_name: str | None = None,
 ):
     t_start = time.time()
     if not output_dir:
         output_dir = os.path.join(images_dir, "model")
     os.makedirs(output_dir, exist_ok=True)
-    psx_out = os.path.join(output_dir, "building_reconstruction.psx")
+    if not project_name:
+        project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
+    psx_out = os.path.join(output_dir, f"{project_name}.psx")
+    legacy_psx = os.path.join(output_dir, "building_reconstruction.psx")
 
     # -----------------------------------------------------------------------
     # Pro Photogrammetry Survey Physics & Telemetry Resolution
@@ -1629,8 +1670,9 @@ def run_reconstruction(
 
     doc = Metashape.Document()
     resumed = False
-    if resume and os.path.exists(psx_out):
-        print(f"\n[Checkpoint] Found existing project (--resume specified): {psx_out}", flush=True)
+    target_psx = psx_out if os.path.exists(psx_out) else (legacy_psx if os.path.exists(legacy_psx) else None)
+    if resume and target_psx:
+        print(f"\n[Checkpoint] Found existing project (--resume specified): {target_psx}", flush=True)
         try:
             files_dir = psx_out.replace(".psx", ".files")
             lock_file = os.path.join(files_dir, "lock")
@@ -1641,12 +1683,12 @@ def run_reconstruction(
                 except Exception as e_lock:
                     print(f"  [Warning] Could not remove lock file: {e_lock}", flush=True)
             try:
-                doc.open(psx_out, read_only=False, ignore_lock=True)
+                doc.open(target_psx, read_only=False, ignore_lock=True)
             except Exception:
                 try:
-                    doc.open(psx_out, ignore_lock=True)
+                    doc.open(target_psx, ignore_lock=True)
                 except Exception:
-                    doc.open(psx_out)
+                    doc.open(target_psx)
             try:
                 doc.read_only = False
             except Exception:
@@ -1934,12 +1976,12 @@ def run_reconstruction(
                 except Exception:
                     pass
             try:
-                doc.open(psx_out, read_only=False, ignore_lock=True)
+                doc.open(target_psx, read_only=False, ignore_lock=True)
             except Exception:
                 try:
-                    doc.open(psx_out, ignore_lock=True)
+                    doc.open(target_psx, ignore_lock=True)
                 except Exception:
-                    doc.open(psx_out)
+                    doc.open(target_psx)
             try:
                 doc.read_only = False
             except Exception:
@@ -2049,10 +2091,12 @@ def run_reconstruction(
     # Step 5: High-Precision Arbitrary Surface Meshing
     chunk = doc.chunk
     if chunk.model is None:
-        cand_obj = os.path.join(output_dir, "model.obj")
-        if os.path.isfile(cand_obj):
-            print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {cand_obj}. Re-linking...", flush=True)
-            chunk.importModel(path=cand_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
+        cand_obj = os.path.join(output_dir, f"{project_name}.obj")
+        cand_obj_legacy = os.path.join(output_dir, "model.obj")
+        target_obj = cand_obj if os.path.isfile(cand_obj) else (cand_obj_legacy if os.path.isfile(cand_obj_legacy) else None)
+        if target_obj:
+            print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {target_obj}. Re-linking...", flush=True)
+            chunk.importModel(path=target_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
             chunk = save_checkpoint(doc, psx_out)
             print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
 
@@ -2191,11 +2235,11 @@ def run_reconstruction(
             tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
             tiled_fmt, tiled_ext = tiled_fmt_tuple
             if tiled_model_format.lower() == "cesium":
-                tiled_dir = os.path.join(output_dir, "tiled_model")
+                tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
                 os.makedirs(tiled_dir, exist_ok=True)
                 tiled_out = os.path.join(tiled_dir, "tileset.json")
             else:
-                tiled_out = os.path.join(output_dir, f"tiled_model{tiled_ext}")
+                tiled_out = os.path.join(output_dir, f"{project_name}_tiled_model{tiled_ext}")
             print(f"\n[6b/7] [EXPORT] Exporting 3D Tiled Model to: {tiled_out}...", flush=True)
             chunk.exportTiledModel(
                 path=tiled_out,
@@ -2209,8 +2253,8 @@ def run_reconstruction(
     print("\n=========================================================================")
     print("  [7/7] EXPORTING PRODUCTION ASSETS (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
     print("=========================================================================")
-    glb_out = os.path.join(output_dir, "model.glb")
-    obj_out = os.path.join(output_dir, "model.obj")
+    glb_out = os.path.join(output_dir, f"{project_name}.glb")
+    obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
     chunk.exportModel(
         glb_out,
@@ -2232,7 +2276,7 @@ def run_reconstruction(
     print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
 
     if export_fbx and chunk.model:
-        fbx_out = os.path.join(output_dir, "model.fbx")
+        fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
         print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
         try:
             chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
@@ -2241,7 +2285,7 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
 
     if export_ply and chunk.model:
-        ply_out = os.path.join(output_dir, "model_mesh.ply")
+        ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
         print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
             chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
@@ -2250,7 +2294,7 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
 
     if export_dxf and chunk.model:
-        dxf_out = os.path.join(output_dir, "model.dxf")
+        dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
         print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
         try:
             chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
@@ -2259,7 +2303,7 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
 
     if export_tie_points and chunk.tie_points:
-        tp_out = os.path.join(output_dir, "tie_points.ply")
+        tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
             chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
@@ -2289,7 +2333,7 @@ def run_reconstruction(
             else:
                 print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
 
-            dem_out = os.path.join(output_dir, "dem.tif")
+            dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
             print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF DEM to: {dem_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -2318,7 +2362,7 @@ def run_reconstruction(
             print(f"  Contour lines generated in {(time.time() - t_cnt)/60:.2f} min.", flush=True)
 
             sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
-            cnt_out = os.path.join(output_dir, f"contours{sh_ext}")
+            cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
             print(f"  [7b2/7] [EXPORT] Exporting Contour Shapes to: {cnt_out}...", flush=True)
             chunk.exportShapes(
                 path=cnt_out,
@@ -2354,7 +2398,7 @@ def run_reconstruction(
             else:
                 print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
-            ortho_out = os.path.join(output_dir, "orthomosaic.tif")
+            ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -2376,7 +2420,7 @@ def run_reconstruction(
         if chunk.point_cloud and chunk.point_cloud.point_count > 0:
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
-            pc_out = os.path.join(output_dir, f"point_cloud{pc_ext}")
+            pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
             print(f"\n[7d/7] [EXPORT] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
             chunk.exportPointCloud(
                 path=pc_out,
@@ -2392,7 +2436,7 @@ def run_reconstruction(
     # Step 7e: Executive PDF Quality & Calibration Report
     if export_report:
         try:
-            report_out = os.path.join(output_dir, "report.pdf")
+            report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
             print(f"\n[7e/7] [EXPORT] Exporting Official Calibration & Quality PDF Report to: {report_out}...", flush=True)
             rep_title = report_title or "AutoMetashape Processing & Calibration Report"
             chunk.exportReport(
@@ -2407,6 +2451,27 @@ def run_reconstruction(
     chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
+    # Maintain dual-compatibility aliases for legacy model.glb and building_reconstruction.psx
+    if project_name.lower() != "model":
+        legacy_glb = os.path.join(output_dir, "model.glb")
+        legacy_obj = os.path.join(output_dir, "model.obj")
+        if not os.path.exists(legacy_glb) and os.path.exists(glb_out):
+            try:
+                os.link(glb_out, legacy_glb)
+            except Exception:
+                pass
+        if not os.path.exists(legacy_obj) and os.path.exists(obj_out):
+            try:
+                os.link(obj_out, legacy_obj)
+            except Exception:
+                pass
+        if legacy_psx != psx_out and not os.path.exists(legacy_psx):
+            try:
+                with open(legacy_psx, "w", encoding="utf-8") as f_leg:
+                    f_leg.write(f'<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="{project_name}.files/project.zip"/>\n')
+            except Exception:
+                pass
+
     total_time = (time.time() - t_start) / 60.0
     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
 
@@ -2420,6 +2485,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
+    parser.add_argument("--project-name", default=None, help="Base name for the project file, 3D model, textures, point cloud, and reports (default: folder name of the project)")
     parser.add_argument("--profile", action="store_true", help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing")
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
     parser.add_argument(
@@ -2642,4 +2708,5 @@ if __name__ == "__main__":
         export_ply=args.export_ply,
         export_dxf=args.export_dxf,
         export_tie_points=args.export_tie_points,
+        project_name=args.project_name,
     )

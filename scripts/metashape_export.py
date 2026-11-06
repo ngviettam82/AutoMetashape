@@ -42,6 +42,43 @@ SHAPES_FORMAT_MAP = {
 }
 
 
+def infer_project_name(
+    images_dir: str | None = None,
+    output_dir: str | None = None,
+    project_file: str | None = None,
+) -> str:
+    """Derive clean project base name from survey folder, output folder, or project path."""
+    if project_file:
+        base = os.path.splitext(os.path.basename(project_file))[0]
+        if base and base.lower() != "building_reconstruction":
+            return base
+        parent = os.path.basename(os.path.dirname(os.path.abspath(project_file)))
+        if parent.lower().startswith("model") or parent.lower() in ("export", "exports", "output", "outputs"):
+            grandparent = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(project_file))))
+            if grandparent:
+                return grandparent
+        if parent:
+            return parent
+
+    if images_dir:
+        abs_img = os.path.abspath(images_dir)
+        base = os.path.basename(abs_img)
+        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input") and os.path.dirname(abs_img):
+            base = os.path.basename(os.path.dirname(abs_img))
+        if base and base not in (".", "/", "\\"):
+            return base
+
+    if output_dir:
+        abs_out = os.path.abspath(output_dir)
+        base = os.path.basename(abs_out)
+        if (base.lower().startswith("model") or base.lower() in ("export", "exports", "output", "outputs")) and os.path.dirname(abs_out):
+            base = os.path.basename(os.path.dirname(abs_out))
+        if base and base not in (".", "/", "\\"):
+            return base
+
+    return "project"
+
+
 def export_project_assets(
     project_path: str,
     output_dir: str = None,
@@ -73,6 +110,7 @@ def export_project_assets(
     export_ply: bool = False,
     export_dxf: bool = False,
     export_tie_points: bool = False,
+    project_name: str | None = None,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -82,6 +120,8 @@ def export_project_assets(
     if not output_dir:
         output_dir = project_dir
     os.makedirs(output_dir, exist_ok=True)
+    if not project_name:
+        project_name = infer_project_name(output_dir=output_dir, project_file=project_path)
 
     print("=========================================================================")
     print("  AUTOMETASHAPE: PRODUCTION ASSET EXPORT")
@@ -214,8 +254,8 @@ def export_project_assets(
         except Exception as e_lt:
             print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
 
-    glb_out = os.path.join(output_dir, "model.glb")
-    obj_out = os.path.join(output_dir, "model.obj")
+    glb_out = os.path.join(output_dir, f"{project_name}.glb")
+    obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
     # 1. Export Binary GLTF/GLB
     print("\n[1/2] Exporting Binary glTF (.glb) with embedded PBR textures...", flush=True)
@@ -249,7 +289,7 @@ def export_project_assets(
     if export_point_cloud and chunk.point_cloud and chunk.point_cloud.point_count > 0:
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
         pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
-        pc_out = os.path.join(output_dir, f"point_cloud{pc_ext}")
+        pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         print(f"\n[Point Cloud] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
         chunk.exportPointCloud(
             path=pc_out,
@@ -266,7 +306,7 @@ def export_project_assets(
     if export_dem:
         has_dem = getattr(chunk, "elevation", None) is not None
         if has_dem:
-            dem_out = os.path.join(output_dir, "dem.tif")
+            dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
             print(f"\n[DEM] Exporting GeoTIFF Elevation Model to: {dem_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -285,7 +325,7 @@ def export_project_assets(
     # 5. Optional Orthomosaic Export
     if export_orthomosaic:
         if chunk.orthomosaic is not None:
-            ortho_out = os.path.join(output_dir, "orthomosaic.tif")
+            ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -304,7 +344,7 @@ def export_project_assets(
 
     # Export FBX
     if export_fbx and chunk.model:
-        fbx_out = os.path.join(output_dir, "model.fbx")
+        fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
         print(f"\n[FBX] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
         try:
             chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
@@ -314,7 +354,7 @@ def export_project_assets(
 
     # Export PLY
     if export_ply and chunk.model:
-        ply_out = os.path.join(output_dir, "model_mesh.ply")
+        ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
         print(f"\n[PLY] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
             chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
@@ -324,7 +364,7 @@ def export_project_assets(
 
     # Export DXF
     if export_dxf and chunk.model:
-        dxf_out = os.path.join(output_dir, "model.dxf")
+        dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
         print(f"\n[DXF] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
         try:
             chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
@@ -334,7 +374,7 @@ def export_project_assets(
 
     # Export Sparse Tie Points
     if export_tie_points and chunk.tie_points:
-        tp_out = os.path.join(output_dir, "tie_points.ply")
+        tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"\n[Tie Points] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
             chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
@@ -354,11 +394,11 @@ def export_project_assets(
             tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
             tiled_fmt, tiled_ext = tiled_fmt_tuple
             if tiled_model_format.lower() == "cesium":
-                tiled_dir = os.path.join(output_dir, "tiled_model")
+                tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
                 os.makedirs(tiled_dir, exist_ok=True)
                 tiled_out = os.path.join(tiled_dir, "tileset.json")
             else:
-                tiled_out = os.path.join(output_dir, f"tiled_model{tiled_ext}")
+                tiled_out = os.path.join(output_dir, f"{project_name}_tiled_model{tiled_ext}")
             print(f"\n[Tiled Model] Exporting 3D Tiled Model to: {tiled_out}...", flush=True)
             chunk.exportTiledModel(path=tiled_out, format=tiled_fmt)
             print(f"  Saved 3D Tiled Model: {tiled_out}", flush=True)
@@ -373,7 +413,7 @@ def export_project_assets(
                 print(f"\n[Contours] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
                 chunk.buildContours(source_data=Metashape.DataSource.ElevationData, interval=contour_interval, prevent_intersections=True)
                 sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
-                cnt_out = os.path.join(output_dir, f"contours{sh_ext}")
+                cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
                 print(f"  Exporting Contour Shapes to: {cnt_out}...", flush=True)
                 chunk.exportShapes(path=cnt_out, format=sh_fmt, save_polylines=True, save_elevation=True, save_attributes=True)
                 print(f"  Saved Topographic Contours: {cnt_out}", flush=True)
@@ -384,7 +424,7 @@ def export_project_assets(
 
     # 6. Optional Executive PDF Report Export
     if export_report:
-        report_out = os.path.join(output_dir, "report.pdf")
+        report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
         print(f"\n[Report] Exporting Calibration & Quality PDF Report to: {report_out}...", flush=True)
         rep_title = report_title or "AutoMetashape Quality & Calibration Report"
         chunk.exportReport(
@@ -403,6 +443,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--project", required=True, help="Path to existing Metashape project file (.psx)")
     parser.add_argument("--output", default=None, help="Output directory for exported 3D assets (default: same folder as .psx)")
+    parser.add_argument("--project-name", default=None, help="Base name for exported 3D model, textures, point cloud, and reports (default: folder project name)")
     parser.add_argument("--texture-format", choices=["tiff", "jpeg"], default="tiff", help="Texture atlas format (default: tiff)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Re-bake UV parameterization and 8K texture atlas before export")
     parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages if re-baking (default: 16)")
@@ -464,4 +505,5 @@ if __name__ == "__main__":
         export_ply=args.export_ply,
         export_dxf=args.export_dxf,
         export_tie_points=args.export_tie_points,
+        project_name=args.project_name,
     )

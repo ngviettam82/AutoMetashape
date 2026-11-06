@@ -37,13 +37,14 @@ from tkinter.scrolledtext import ScrolledText
 import webbrowser
 
 try:
-    from metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan
+    from metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan, infer_project_name
 except ImportError:
     try:
-        from scripts.metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan
+        from scripts.metashape_reconstruction import analyze_survey_physics, derive_pro_photogrammetry_plan, infer_project_name
     except ImportError:
         analyze_survey_physics = None
         derive_pro_photogrammetry_plan = None
+        infer_project_name = None
 
 # ---------------------------------------------------------------------------
 # High-DPI Crisp Text & Per-Monitor v2 Awareness (Windows 10 / 11)
@@ -2658,7 +2659,7 @@ class AutoMetashapeStudio:
         for p in selected:
             p_img = p["path"]
             p_out = os.path.join(p_img, "model")
-            cmd = f'"{exe}" -r "{self.recon_script}" --images "{p_img}" --output "{p_out}" --preset {preset} --faces {faces} --texture-pages {pages} --crop-method {crop}'
+            cmd = f'"{exe}" -r "{self.recon_script}" --images "{p_img}" --output "{p_out}" --project-name "{p["name"]}" --preset {preset} --faces {faces} --texture-pages {pages} --crop-method {crop}'
             cmds.append(cmd)
 
         cli_text = "\n\n".join(cmds)
@@ -2722,6 +2723,8 @@ class AutoMetashapeStudio:
             img_dir,
             "--output",
             out_dir,
+            "--project-name",
+            proj_name,
             "--preset",
             preset,
             "--faces",
@@ -2875,11 +2878,16 @@ class AutoMetashapeStudio:
             return
 
         folder = self._get_active_output_dir()
-        psx = (
-            os.path.join(folder, "building_reconstruction.psx")
-            if self.active_mode == "recon"
-            else self.var_psx_path.get().strip()
-        )
+        if self.active_mode in ("recon", "multi"):
+            psx = None
+            if folder and os.path.isdir(folder):
+                candidates = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".psx")]
+                if candidates:
+                    psx = candidates[0]
+            if not psx and folder:
+                psx = os.path.join(folder, "building_reconstruction.psx")
+        else:
+            psx = self.var_psx_path.get().strip()
 
         if psx and os.path.isfile(psx):
             subprocess.Popen([self.metashape_exe, psx])
@@ -2932,6 +2940,7 @@ class AutoMetashapeStudio:
 
         out_dir = self.var_output_dir.get().strip() or os.path.join(img_dir, "model")
         self.var_output_dir.set(out_dir)
+        proj_name = infer_project_name(images_dir=img_dir, output_dir=out_dir) if infer_project_name else os.path.basename(img_dir)
 
         cmd = [
             self.metashape_exe,
@@ -2941,6 +2950,8 @@ class AutoMetashapeStudio:
             img_dir,
             "--output",
             out_dir,
+            "--project-name",
+            proj_name,
             "--align-quality",
             self.var_align_quality.get(),
             "--faces",
@@ -3045,6 +3056,7 @@ class AutoMetashapeStudio:
 
         out_dir = self.var_export_out.get().strip() or os.path.dirname(psx)
         self.var_export_out.set(out_dir)
+        proj_name = infer_project_name(output_dir=out_dir, project_file=psx) if infer_project_name else os.path.splitext(os.path.basename(psx))[0]
 
         cmd = [
             self.metashape_exe,
@@ -3054,6 +3066,8 @@ class AutoMetashapeStudio:
             psx,
             "--output",
             out_dir,
+            "--project-name",
+            proj_name,
             "--texture-format",
             self.var_exp_format.get(),
         ]
@@ -3295,7 +3309,13 @@ class AutoMetashapeStudio:
             pass
 
         folder = self._get_active_output_dir()
-        psx = os.path.join(folder, "building_reconstruction.psx")
+        psx = None
+        if folder and os.path.isdir(folder):
+            candidates = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".psx")]
+            if candidates:
+                psx = candidates[0]
+        if not psx and folder:
+            psx = os.path.join(folder, "building_reconstruction.psx")
 
         open_now = messagebox.askyesno(
             "Manual Bounding Box in Metashape Pro",

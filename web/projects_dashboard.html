@@ -830,7 +830,7 @@
         faces: "1.16M / 5.03M",
         status: "completed",
         statusLabel: "Completed (Dual)",
-        deliverables: "GLB (223M), OBJ (650M), 8x 8K TIFFs, PSX, PDF",
+        deliverables: "Toa nha 1.glb, Toa nha 1.obj, 8x 8K TIFFs, Toa nha 1.psx, PDF",
         overlap: "78.7% / 80.9%",
         relief: "0.783 (Arbitrary)",
         reproj: "0.136 px",
@@ -1082,7 +1082,7 @@
 
     document.getElementById("btn-copy-cli").addEventListener("click", () => {
       const selected = projects.filter(p => p.selected);
-      const cmds = selected.map(p => `& "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" -r scripts\\metashape_reconstruction.py --images "${p.path}" --preset pro`).join("\n");
+      const cmds = selected.map(p => `& "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" -r scripts\\metashape_reconstruction.py --images "${p.path}" --project-name "${p.name.includes('/') ? p.name.split('/').pop().trim() : p.name}" --preset pro`).join("\n");
       navigator.clipboard.writeText(cmds);
       alert(`Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
     });
