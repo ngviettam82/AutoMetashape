@@ -2580,7 +2580,7 @@ if __name__ == "__main__":
     )
     parser.add_argument("--rolling-shutter", dest="rolling_shutter", action="store_true", default=None, help="Force enable CMOS rolling shutter compensation")
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
-    parser.add_argument("--close-holes", dest="close_holes", action="store_true", default=False, help="Enable mesh hole closing (bridges voids up to level 30)")
+    parser.add_argument("--close-holes", dest="close_holes", action="store_true", default=None, help="Enable mesh hole closing (bridges voids up to level 30)")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", help="Disable mesh hole closing (default: disabled to prevent planar webbing artifacts)")
     parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 22 in 'pro' preset, or custom specified)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
