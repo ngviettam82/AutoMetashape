@@ -2644,6 +2644,10 @@ class AutoMetashapeStudio:
             self.card_adv.pack_forget()
             self.card_multi.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
+            if not self.var_psx_path.get().strip():
+                detected_psx = self._get_project_psx()
+                if detected_psx and os.path.isfile(detected_psx):
+                    self.var_psx_path.set(detected_psx)
             self.btn_start.config(
                 text="Export Assets",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_CYAN,
@@ -2974,7 +2978,7 @@ class AutoMetashapeStudio:
         for p in selected:
             p_img = p["path"]
             p_out = os.path.join(p_img, "model")
-            cmd = f'"{exe}" -r "{self.recon_script}" --images "{p_img}" --output "{p_out}" --project-name "{p["name"]}" --preset {preset} --faces {faces} --texture-pages {pages} --crop-method {crop}'
+            cmd = f'"{exe}" -r "{self.recon_script}" --images "{p_img}" --output "{p_out}" --project-name "{p["name"]}" --preset {preset} --faces {faces} --texture-pages {pages} --crop-method {crop} --build-point-cloud --export-point-cloud'
             cmds.append(cmd)
 
         cli_text = "\n\n".join(cmds)
