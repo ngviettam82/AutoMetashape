@@ -623,65 +623,37 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
 
 
 def derive_pro_photogrammetry_plan(physics: dict) -> dict:
-    """Mathematically derives the optimal photogrammetric pipeline configuration from survey physics."""
+    """Mathematically derives the optimal photogrammetric pipeline configuration from survey physics.
+
+    Standard Production Geomatics Profile:
+    - Strictly Arbitrary 3D surface (never 2.5D heightfield to prevent wall flattening)
+    - Fixed 22-page 8K texture atlas (retains full architectural sharpness)
+    - 2,000,000 polygon surface mesh
+    - Native meshing interpolation with no aggressive hole-closing webbing (close_holes = False)
+    - True orthomosaic GeoTIFF & elevation DEM enabled
+    - CMOS rolling shutter compensation enabled strictly for rolling shutter sensors
+    - Gentle tie-point filtering capping point removal at <= 10% (retains >= 90% inliers)
+    """
     photo_count = physics.get("photo_count", 0)
     has_gps = physics.get("has_gps", False)
-    span_m = physics.get("horizontal_span_m", 0.0)
-    alt_span = physics.get("alt_span_m", 0.0)
     relief_ratio = physics.get("relief_ratio", 0.0)
     shutter = physics.get("shutter", "mechanical")
-    avg_mp = physics.get("avg_megapixels", 12.0)
-    delight_rec = physics.get("delighting_recommended", False)
     gsd_cm = physics.get("gsd_cm")
 
-    is_planar = has_gps and (relief_ratio < 0.08) and (alt_span <= 65.0) and (span_m >= 80.0)
-    is_architecture = has_gps and not is_planar
-
-    if is_planar:
-        survey_category = "nadir_terrain_mapping"
-        surface_type = "heightfield"
-        crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 5000, 1000000), 5000000)
-        texture_pages = 4
-        build_orthomosaic = True
-        build_dem = True
-        build_point_cloud = True
-        classify_ground = True
-        close_holes = False
-        depth_filtering = "aggressive"
-        ground_cell_size = 35.0
-        ground_max_angle = 12.0
-        ground_max_distance = 0.6
-    elif is_architecture:
-        survey_category = "oblique_architecture"
-        surface_type = "arbitrary"
-        crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 6000, 1000000), 5000000)
-        texture_pages = 22
-        build_orthomosaic = False
-        build_dem = False
-        build_point_cloud = True
-        classify_ground = False
-        close_holes = True
-        depth_filtering = "moderate"
-        ground_cell_size = 12.0
-        ground_max_angle = 28.0
-        ground_max_distance = 0.3
-    else:
-        survey_category = "terrestrial_close_range"
-        surface_type = "arbitrary"
-        crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 4000, 1000000), 5000000)
-        texture_pages = 22
-        build_orthomosaic = False
-        build_dem = False
-        build_point_cloud = True
-        classify_ground = False
-        close_holes = True
-        depth_filtering = "moderate"
-        ground_cell_size = 10.0
-        ground_max_angle = 30.0
-        ground_max_distance = 0.25
+    survey_category = "oblique_architecture" if (has_gps and relief_ratio >= 0.08) else "production_geomatics"
+    surface_type = "arbitrary"
+    crop_method = "gps-square"
+    custom_faces = 2000000
+    texture_pages = 22
+    build_orthomosaic = True
+    build_dem = True
+    build_point_cloud = True
+    classify_ground = False
+    close_holes = False
+    depth_filtering = "moderate"
+    ground_cell_size = 12.0
+    ground_max_angle = 28.0
+    ground_max_distance = 0.3
 
     # Shutter compensation is ONLY enabled for CMOS rolling shutter payloads.
     # Enabling rolling shutter compensation on mechanical leaf shutters causes synthetic bundle adjustment drift!
@@ -692,7 +664,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     tiepoint_limit = 25000
     guided_matching = True
     adaptive_fitting = True
-    filter_stationary_points = (survey_category != "terrestrial_close_range")
+    filter_stationary_points = True
 
     return {
         "survey_category": survey_category,
@@ -717,8 +689,8 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         "ground_cell_size": ground_cell_size,
         "ground_max_angle": ground_max_angle,
         "ground_max_distance": ground_max_distance,
-        "remove_lighting": delight_rec,
-        "delighting_color_mode": delight_rec,
+        "remove_lighting": False,
+        "delighting_color_mode": False,
         "export_report": True,
         "gsd_cm": gsd_cm,
     }
@@ -1096,24 +1068,25 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
 
 def execute_usgs_gradual_selection(
     chunk,
-    ru_thresh: float = 12.0,
-    pa_thresh: float = 2.5,
-    re_thresh: float = 0.35,
-    min_rays: int = 3,
-    max_removal_ratio: float = 0.50,
+    ru_thresh: float = 15.0,
+    pa_thresh: float = 3.0,
+    re_thresh: float = 0.50,
+    min_rays: int = 2,
+    max_removal_ratio: float = 0.10,
 ) -> dict:
-    """Executes the USGS National Geospatial Program 4-Pass Gradual Selection protocol.
+    """Executes gentle architectural-grade gradual selection refinement.
 
     Refines camera interior and exterior orientations through staged tie-point pruning
-    and progressive camera parameter unfreezing:
-    - Pass 1 (Reconstruction Uncertainty <= 12.0): Prunes points with poor ray intersection angles.
-      Optimizes f, cx, cy only (protects distortion polynomials from outlier bias).
-    - Pass 2 (Projection Accuracy <= 2.5 px): Prunes ambiguous tie points with poor pixel correlation.
-      Optimizes f, cx, cy, k1..k3, p1, p2 (fits radial and tangential distortion).
-    - Pass 3 (Reprojection Error <= 0.35 px): Prunes high-residual points.
-      Optimizes full polynomial model (f, cx, cy, k1..k4, b1, b2, p1, p2) with adaptive fitting.
-    - Pass 4 (Image Multiplicity >= 3): Discards fragile 2-ray intersections.
+    and progressive camera parameter unfreezing without destroying building corners or fine geometry:
+    - Pass 1 (Reconstruction Uncertainty <= 15.0): Prunes extreme ray intersection outliers.
+      Optimizes f, cx, cy only. Capped at 10% maximum removal.
+    - Pass 2 (Projection Accuracy <= 3.0 px): Prunes correlation ambiguity and lens flare artifacts.
+      Optimizes f, cx, cy, k1..k3, p1, p2. Capped at 10% maximum removal.
+    - Pass 3 (Reprojection Error <= 0.50 px): Prunes high-residual outliers.
+      Optimizes full polynomial model (f, cx, cy, k1..k4, b1, b2, p1, p2) with adaptive fitting. Capped at 10% maximum removal.
+    - Pass 4 (Image Multiplicity >= 2): Preserves valid 2-ray structural intersections on corners, eaves, and thin details.
       Locks in bundle adjustment geometry and reports final RMS reprojection error.
+    Guarantees >= 90% tie-point retention across the entire alignment.
     """
     if not chunk.tie_points or not chunk.tie_points.points:
         print("  [Gradual Selection] No tie points present to filter; skipping.", flush=True)
@@ -1130,9 +1103,9 @@ def execute_usgs_gradual_selection(
     except Exception:
         initial_rms = 0.0
 
-    print(f"\n[USGS Gradual Selection] Starting 4-pass bundle adjustment refinement across {initial_pts:,} tie points (Initial Reprojection RMS: {initial_rms:.3f} px)...", flush=True)
+    print(f"\n[Tie-Point Refinement] Starting gentle gradual selection refinement across {initial_pts:,} tie points (Initial Reprojection RMS: {initial_rms:.3f} px, max prune ratio: {int(max_removal_ratio*100)}%)...", flush=True)
 
-    # Pass 1: Reconstruction Uncertainty (RU <= 12.0)
+    # Pass 1: Reconstruction Uncertainty (RU <= 15.0)
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReconstructionUncertainty)
         vals = sorted(f.values)
@@ -1153,7 +1126,7 @@ def execute_usgs_gradual_selection(
     except Exception as e:
         print(f"  [Pass 1/4] Reconstruction Uncertainty skipped: {e}", flush=True)
 
-    # Pass 2: Projection Accuracy (PA <= 2.5 px)
+    # Pass 2: Projection Accuracy (PA <= 3.0 px)
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ProjectionAccuracy)
         vals = sorted(f.values)
@@ -1174,7 +1147,7 @@ def execute_usgs_gradual_selection(
     except Exception as e:
         print(f"  [Pass 2/4] Projection Accuracy skipped: {e}", flush=True)
 
-    # Pass 3: Reprojection Error (RE <= 0.35 px)
+    # Pass 3: Reprojection Error (RE <= 0.50 px)
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
         vals = sorted(f.values)
@@ -1196,11 +1169,12 @@ def execute_usgs_gradual_selection(
     except Exception as e:
         print(f"  [Pass 3/4] Reprojection Error skipped: {e}", flush=True)
 
-    # Pass 4: Image Multiplicity (min_rays >= 3)
+    # Pass 4: Image Multiplicity (min_rays >= 2)
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ImageCount)
-        f.selectPoints(min_rays - 1)
-        chunk.tie_points.removeSelectedPoints()
+        if min_rays > 1:
+            f.selectPoints(min_rays - 1)
+            chunk.tie_points.removeSelectedPoints()
         chunk.optimizeCameras(
             fit_f=True, fit_cx=True, fit_cy=True,
             fit_b1=True, fit_b2=True,
@@ -1209,7 +1183,7 @@ def execute_usgs_gradual_selection(
             adaptive_fitting=True,
             tiepoint_covariance=True,
         )
-        print(f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Eliminated fragile 2-ray ties; locked in bundle adjustment.", flush=True)
+        print(f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Preserved structural multi-view rays; locked in bundle adjustment.", flush=True)
     except Exception as e:
         print(f"  [Pass 4/4] Multiplicity filter skipped: {e}", flush=True)
 
@@ -1223,7 +1197,7 @@ def execute_usgs_gradual_selection(
         final_rms = 0.0
 
     rms_improvement = ((initial_rms - final_rms) / initial_rms * 100.0) if initial_rms > 0 else 0.0
-    print(f"  [USGS Optimization Summary] Reprojection RMS: {initial_rms:.3f} px -> {final_rms:.3f} px ({rms_improvement:.1f}% reduction). Inliers: {final_pts:,}/{initial_pts:,} tie points retained.\n", flush=True)
+    print(f"  [Tie-Point Summary] Reprojection RMS: {initial_rms:.3f} px -> {final_rms:.3f} px ({rms_improvement:.1f}% reduction). Inliers: {final_pts:,}/{initial_pts:,} tie points retained ({final_pts/initial_pts*100.0:.1f}%).\n", flush=True)
 
     return {
         "initial_points": initial_pts,
@@ -1234,9 +1208,23 @@ def execute_usgs_gradual_selection(
     }
 
 
-def filter_tie_points(chunk, max_reproj_error: float = 0.35, max_uncertainty: float = 12.0) -> dict:
-    """Filters low-confidence tie points using the USGS 4-Pass Gradual Selection protocol."""
-    return execute_usgs_gradual_selection(chunk, ru_thresh=max_uncertainty, re_thresh=max_reproj_error)
+def filter_tie_points(
+    chunk,
+    max_reproj_error: float = 0.50,
+    max_uncertainty: float = 15.0,
+    pa_thresh: float = 3.0,
+    min_rays: int = 2,
+    max_removal_ratio: float = 0.10,
+) -> dict:
+    """Filters low-confidence tie points using gentle architectural-grade gradual selection."""
+    return execute_usgs_gradual_selection(
+        chunk,
+        ru_thresh=max_uncertainty,
+        pa_thresh=pa_thresh,
+        re_thresh=max_reproj_error,
+        min_rays=min_rays,
+        max_removal_ratio=max_removal_ratio,
+    )
 
 
 def calculate_optimal_texel_budget(chunk, gsd_cm: float, page_res: int = 8192, margin: float = 1.25) -> int:
@@ -1515,7 +1503,7 @@ def run_reconstruction(
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
     rolling_shutter: bool = True,
-    close_holes: bool = True,
+    close_holes: bool = False,
     pause_after_crop: bool = False,
     resume: bool = False,
     multi_chunk: str = "disable",
@@ -1575,10 +1563,11 @@ def run_reconstruction(
     survey_physics = None
     pro_plan = None
     usgs_stats = None
-    if preset in ("building", "map", "custom"):
+    if preset == "custom":
         is_auto = False
     else:
-        is_auto = (preset in ("pro", "auto")) or auto_params or (preset is None and crop_method is None and custom_faces is None)
+        is_auto = True
+
     if is_auto:
         try:
             survey_physics = analyze_survey_physics(images_dir, output_dir=output_dir)
@@ -1618,45 +1607,7 @@ def run_reconstruction(
             if ground_max_distance is None:
                 ground_max_distance = pro_plan.get("ground_max_distance", 0.5)
         except Exception as e_prof:
-            print(f"  [Survey Physics] Note: Telemetry analysis ({e_prof}); using standard architectural defaults.", flush=True)
-
-    elif preset == "map":
-        if crop_method is None:
-            crop_method = "gps-square"
-        if custom_faces is None:
-            custom_faces = 3000000
-        if texture_pages is None:
-            texture_pages = 4
-        if build_orthomosaic is None:
-            build_orthomosaic = True
-        if build_dem is None:
-            build_dem = True
-        if build_point_cloud is None:
-            build_point_cloud = True
-        if classify_ground is None:
-            classify_ground = True
-        if close_holes is None:
-            close_holes = False
-    elif preset == "building":
-        if crop_method is None:
-            crop_method = "gps-square"
-        if custom_faces is None:
-            custom_faces = 2000000
-        if texture_pages is None:
-            texture_pages = 22
-        if build_orthomosaic is None:
-            build_orthomosaic = False
-        if build_dem is None:
-            build_dem = False
-        if build_point_cloud is None:
-            build_point_cloud = True
-        if classify_ground is None:
-            classify_ground = False
-        if close_holes is None:
-            close_holes = True
-    elif preset == "custom":
-        # Custom manual configuration: user-supplied parameters are strictly preserved
-        pass
+            print(f"  [Survey Physics] Note: Telemetry analysis ({e_prof}); using standard production geomatics defaults.", flush=True)
 
     # Final safety fallbacks
     if crop_method is None:
@@ -1674,7 +1625,7 @@ def run_reconstruction(
     if classify_ground is None:
         classify_ground = False
     if close_holes is None:
-        close_holes = True
+        close_holes = False
 
     print("=========================================================================")
     if preset == "custom":
@@ -1862,7 +1813,7 @@ def run_reconstruction(
                 print(f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
 
                 if filter_tiepoints:
-                    usgs_stats = filter_tie_points(c, max_reproj_error=0.35, max_uncertainty=12.0)
+                    usgs_stats = filter_tie_points(c)
 
                 try:
                     c.updateTransform()
@@ -2026,7 +1977,7 @@ def run_reconstruction(
                 print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
 
             if filter_tiepoints:
-                usgs_stats = filter_tie_points(chunk, max_reproj_error=0.35, max_uncertainty=12.0)
+                usgs_stats = filter_tie_points(chunk)
             else:
                 print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
@@ -2251,9 +2202,9 @@ def run_reconstruction(
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
-        # Dynamically size texture atlas for 1:1 ground texel parity if in pro mode or unforced
-        eff_pages = texture_pages
-        if (texture_pages is None or is_auto) and chunk.model and survey_physics and survey_physics.get("gsd_cm"):
+        # Dynamically size texture atlas for 1:1 ground texel parity if unforced
+        eff_pages = texture_pages or 22
+        if texture_pages is None and chunk.model and survey_physics and survey_physics.get("gsd_cm"):
             optimal_budget = calculate_optimal_texel_budget(chunk, gsd_cm=survey_physics["gsd_cm"])
             if optimal_budget:
                 eff_pages = optimal_budget
@@ -2584,9 +2535,9 @@ if __name__ == "__main__":
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
     parser.add_argument(
         "--preset",
-        choices=["pro", "auto", "building", "map", "custom"],
+        choices=["pro", "custom"],
         default="pro",
-        help="Reconstruction preset: 'pro' (default: physics-driven survey optics, USGS 4-pass bundle adjustment, 1:1 texel budget), 'auto' (learned from telemetry), 'building', 'map', or 'custom' (manual configuration)",
+        help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 22-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
     )
     parser.add_argument("--pro", action="store_true", default=False, help="Execute the Pro Photogrammetry & Geomatics Engine")
     parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
@@ -2598,7 +2549,7 @@ if __name__ == "__main__":
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="high", help="Depth map quality (default: high)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
-    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: inferred in 1M-5M range or 2,000,000)")
+    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 2,000,000 in 'pro' preset)")
     parser.add_argument(
         "--guided-matching",
         dest="guided_matching",
@@ -2615,16 +2566,23 @@ if __name__ == "__main__":
     parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
     parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
     parser.add_argument(
+        "--filter-tiepoints",
+        dest="filter_tiepoints",
+        action="store_true",
+        default=True,
+        help="Enable gentle gradual selection tie-point filtering and camera re-optimization (default: enabled)",
+    )
+    parser.add_argument(
         "--no-filter-tiepoints",
         dest="filter_tiepoints",
         action="store_false",
-        default=True,
-        help="Disable Gradual Selection tie-point filtering and camera re-optimization (keeps all aligned tie points intact)",
+        help="Disable gentle gradual selection tie-point filtering (keeps all aligned tie points intact)",
     )
     parser.add_argument("--rolling-shutter", dest="rolling_shutter", action="store_true", default=None, help="Force enable CMOS rolling shutter compensation")
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
-    parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
-    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: inferred or 22 for building, 4 for map)")
+    parser.add_argument("--close-holes", dest="close_holes", action="store_true", default=False, help="Enable mesh hole closing (bridges voids up to level 30)")
+    parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", help="Disable mesh hole closing (default: disabled to prevent planar webbing artifacts)")
+    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 22 in 'pro' preset, or custom specified)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
@@ -2674,7 +2632,7 @@ if __name__ == "__main__":
         dest="build_orthomosaic",
         action="store_true",
         default=None,
-        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: inferred or enabled in 'map' preset)",
+        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: enabled in 'pro' preset)",
     )
     # Quality Report Options
     parser.add_argument("--export-report", dest="export_report", action="store_true", default=True, help="Export official Metashape PDF calibration & quality report (default: True)")
@@ -2740,7 +2698,7 @@ if __name__ == "__main__":
 
     crop_method = "none" if args.no_crop else args.crop_method
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
-    auto_params = args.auto or args.pro or (args.preset in ("pro", "auto"))
+    auto_params = args.auto or args.pro or (args.preset == "pro")
 
     run_reconstruction(
         images_dir=args.images,

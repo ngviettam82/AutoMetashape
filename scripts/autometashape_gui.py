@@ -825,7 +825,7 @@ class AutoMetashapeStudio:
             alt_root = r"C:\Users\ADMIN\Documents\Reality Scan"
             default_multi_root = alt_root if os.path.exists(alt_root) else ""
         self.var_multi_root = tk.StringVar(value=default_multi_root)
-        self.var_multi_preset = tk.StringVar(value="pro (Professional Default)")
+        self.var_multi_preset = tk.StringVar(value="pro (Production Geomatics)")
         self.var_multi_faces = tk.StringVar(value="2000000")
         self.var_multi_tex_pages = tk.StringVar(value="22")
         self.var_multi_crop = tk.StringVar(value="gps-square")
@@ -1446,20 +1446,8 @@ class AutoMetashapeStudio:
         _make_preset(
             "pro",
             "Pro Photogrammetry & Geomatics Engine (Default)",
-            "Physics GSD · USGS 4-pass · 1:1 Texel budget · Shutter audit",
-            "Autonomous geomatics workflow: evaluates physical sensor pitch, exact GSD, shutter mechanics (leaf vs rolling), USGS 4-pass gradual selection bundle adjustment, slope-adaptive ground filtering, and 1:1 texel density budgeting.",
-        )
-        _make_preset(
-            "building",
-            "Building Reconstruction",
-            "High Quality · 2M faces · 22-page 8K · GPS crop",
-            "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
-        )
-        _make_preset(
-            "map",
-            "Aerial Map & Orthomosaic",
-            "High Quality · 3M faces · 4-page 8K · GPS crop · Ortho TIFF",
-            "Terrain mapping with GPS-square bounding box: 2M face mesh, 4-page 8K texture atlas, DEM elevation, and geo-referenced Orthomosaic GeoTIFF.",
+            "Gentle Filter (90%+ retained) · 2M Arbitrary 3D · 22-Page 8K · Ortho & DEM",
+            "Production geomatics standard: gentle tie-point filtering, 2M polygon arbitrary 3D mesh, 22-page 8K texture atlas, 2.0 cm/px true orthomosaic GeoTIFF, elevation DEM, and sensor optics compensation.",
         )
         _make_preset(
             "custom",
@@ -2038,7 +2026,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(
             col1,
             textvariable=self.var_multi_preset,
-            values=["pro (Professional Default)", "high (High Fidelity)", "low (Fast Preview)", "building (Architecture)"],
+            values=["pro (Production Geomatics)", "custom (Custom Configuration)"],
             state="readonly",
         ).pack(fill=tk.X, pady=(2, 0))
 
@@ -2285,28 +2273,8 @@ class AutoMetashapeStudio:
             self.var_align_quality.set("high")
             self.var_keypoint_limit.set("200000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("2500000")
-            self.var_tex_pages.set("22")
-            self.var_crop.set("gps-square")
-            self.var_depth_quality.set("high")
-            self.var_depth_filtering.set("moderate")
-            self.var_guided.set(True)
-            self.var_rolling.set(True)
-            self.var_stationary.set(True)
-            self.var_adaptive_fitting.set(True)
-            self.var_close_holes.set(True)
-            self.var_fill_holes.set(True)
-            self.var_ghosting.set(True)
-            self.var_ortho.set(False)
-            self.var_build_dem.set(False)
-            self.var_build_point_cloud.set(True)
-            self.var_export_point_cloud.set(True)
-            self.var_classify_ground.set(False)
-            self.var_export_report.set(True)
-        elif key == "building":
-            self.var_align_quality.set("high")
-            self.var_keypoint_limit.set("200000")
-            self.var_tiepoint_limit.set("25000")
+            if hasattr(self, "var_filter_tiepoints"):
+                self.var_filter_tiepoints.set(True)
             self.var_faces.set("2000000")
             self.var_tex_pages.set("22")
             self.var_crop.set("gps-square")
@@ -2316,36 +2284,14 @@ class AutoMetashapeStudio:
             self.var_rolling.set(True)
             self.var_stationary.set(True)
             self.var_adaptive_fitting.set(True)
-            self.var_close_holes.set(True)
-            self.var_fill_holes.set(True)
-            self.var_ghosting.set(True)
-            self.var_ortho.set(False)
-            self.var_build_dem.set(False)
-            self.var_build_point_cloud.set(True)
-            self.var_export_point_cloud.set(True)
-            self.var_classify_ground.set(False)
-            self.var_export_report.set(True)
-        elif key == "map":
-            self.var_align_quality.set("high")
-            self.var_keypoint_limit.set("200000")
-            self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("3000000")
-            self.var_tex_pages.set("4")
-            self.var_crop.set("gps-square")
-            self.var_depth_quality.set("high")
-            self.var_depth_filtering.set("moderate")
-            self.var_guided.set(True)
-            self.var_rolling.set(True)
-            self.var_stationary.set(True)
-            self.var_adaptive_fitting.set(True)
-            self.var_close_holes.set(True)
+            self.var_close_holes.set(False)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_ortho.set(True)
             self.var_build_dem.set(True)
             self.var_build_point_cloud.set(True)
             self.var_export_point_cloud.set(True)
-            self.var_classify_ground.set(True)
+            self.var_classify_ground.set(False)
             self.var_export_report.set(True)
         elif key == "custom":
             # Custom preset preserves current manual user parameters
@@ -3311,9 +3257,9 @@ class AutoMetashapeStudio:
             proj_name,
         ]
 
-        if preset_key in ("pro", "building", "map"):
-            # Selected preset defines and owns its parameters; do NOT pass manual config overrides
-            cmd.extend(["--preset", preset_key])
+        if preset_key == "pro":
+            # Pro preset defines and owns its parameters; do NOT pass manual config overrides
+            cmd.extend(["--preset", "pro"])
         else:
             # Custom preset: full manual control, pass all explicit config parameters
             cmd.extend([

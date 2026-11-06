@@ -13,10 +13,10 @@
   - Pass: >90% of views registered; 600K face mesh generated; 16-page 8K texture atlas baked; `.glb` and `.psx` created in `model/`.
   - Fail: Duplicate ghost walls from barometric drift; failing to align multiple subfolders; untextured or non-manifold mesh.
 
-### Scenario 2: Aerial Site Survey & Terrain Mapping (Map Preset)
-- **Query**: "Process this aerial drone map dataset at `data/survey/site_ortho` using the map preset to give me a high-density terrain mesh and orthomosaic."
+### Scenario 2: Aerial Site Survey & Terrain Mapping (Pro Preset)
+- **Query**: "Process this aerial drone map dataset at `data/survey/site_ortho` using the pro preset to give me a high-density terrain mesh and orthomosaic."
 - **Expected behavior**:
-  - Detects `--preset map` and sets default target faces to 2,000,000 (2M), texture pages to 4, crop method to `none` (uncropped terrain boundary), and enables GeoTIFF orthomosaic.
+  - Uses `--preset pro` and applies the Production Geomatics standard: 2,000,000 (2M) face arbitrary 3D mesh, 22-page 8K texture atlas, gentle tie-point filtering, and native GeoTIFF orthomosaic & elevation DEM generation.
   - Computes dense depth maps across the complete surveyed footprint without clipping perimeter vegetation or access roads.
   - Meshes arbitrary surface to 2M faces for fine topographic relief.
   - Generates 2D GeoTIFF orthomosaic directly inside the Metashape project and exports `orthomosaic.tif` alongside `orthomosaic.tfw` world file with LZW BigTIFF compression.
