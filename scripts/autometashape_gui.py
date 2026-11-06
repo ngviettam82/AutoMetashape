@@ -820,7 +820,11 @@ class AutoMetashapeStudio:
         )
 
         # Multi-Project Studio Batch Variables
-        self.var_multi_root = tk.StringVar(value=r"C:\Users\ADMIN\Documents\Reality Scan\Metashape\00. CATP")
+        default_multi_root = r"C:\Users\ADMIN\Documents\Reality Scan\00. CATP"
+        if not os.path.exists(default_multi_root):
+            alt_root = r"C:\Users\ADMIN\Documents\Reality Scan"
+            default_multi_root = alt_root if os.path.exists(alt_root) else ""
+        self.var_multi_root = tk.StringVar(value=default_multi_root)
         self.var_multi_preset = tk.StringVar(value="pro (Professional Default)")
         self.var_multi_faces = tk.StringVar(value="2000000")
         self.var_multi_tex_pages = tk.StringVar(value="22")
@@ -2057,7 +2061,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(
             col3,
             textvariable=self.var_multi_tex_pages,
-            values=["8", "16", "4", "2"],
+            values=["22", "16", "8", "4", "2"],
             state="readonly",
         ).pack(fill=tk.X, pady=(2, 0))
 
@@ -2655,6 +2659,8 @@ class AutoMetashapeStudio:
             self.card_adv.pack_forget()
             self.card_export.pack_forget()
             self.card_multi.pack(fill=tk.X, pady=(0, 6))
+            if not self.multi_discovered_projects and self.var_multi_root.get().strip():
+                self._scan_multi_projects()
             self.btn_start.config(
                 text="Run Selected Projects (Batch)",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
@@ -2728,47 +2734,72 @@ class AutoMetashapeStudio:
             self._populate_multi_project_rows()
 
     def _analyze_project_dir(self, dir_path: str) -> dict:
+        dir_path = os.path.normpath(dir_path)
         name = os.path.basename(dir_path)
-        direct_img_count = 0
-        nested_img_count = 0
+        photo_count = 0
+        direct_photos = 0
         has_psx = False
         models = []
 
+        EXCLUDED_DIR_NAMES = {
+            "output", "outputs", "export", "exports", "result", "results", "__pycache__"
+        }
+
         try:
             for entry in os.scandir(dir_path):
+                lower_name = entry.name.lower()
                 if entry.is_file():
                     ext = os.path.splitext(entry.name)[1].lower()
-                    if ext in SUPPORTED_IMAGE_EXTS and ext != ".tif":
-                        direct_img_count += 1
+                    if ext in SUPPORTED_IMAGE_EXTS:
+                        # Exclude tfw georeferenced orthomosaic tiffs in root if any
+                        if ext == ".tif" and os.path.exists(os.path.join(dir_path, os.path.splitext(entry.name)[0] + ".tfw")):
+                            pass
+                        else:
+                            direct_photos += 1
+                            photo_count += 1
                     elif ext == ".psx":
                         has_psx = True
                 elif entry.is_dir():
-                    if entry.name.lower().startswith("model") or entry.name.lower() in ("export", "exports", "output", "outputs"):
+                    if lower_name.startswith("model") or lower_name in EXCLUDED_DIR_NAMES:
                         models.append(entry.name)
-                    elif entry.name.lower() in ("images", "photos", "dji", "survey", "raw"):
-                        for sub_entry in os.scandir(entry.path):
-                            if sub_entry.is_file() and os.path.splitext(sub_entry.name)[1].lower() in SUPPORTED_IMAGE_EXTS:
-                                nested_img_count += 1
+                        try:
+                            for sub in os.scandir(entry.path):
+                                if sub.is_file() and sub.name.lower().endswith(".psx"):
+                                    has_psx = True
+                        except Exception:
+                            pass
+                    elif not lower_name.startswith(".") and not lower_name.endswith(".files") and not lower_name.endswith(".tmp"):
+                        # Recursively count all survey photos across all flight folders (nadir, ob1, DCIM, etc.)
+                        for root, dirs, files in os.walk(entry.path):
+                            dirs[:] = [
+                                d for d in dirs
+                                if not d.startswith(".")
+                                and not d.lower().startswith("model")
+                                and d.lower() not in EXCLUDED_DIR_NAMES
+                                and not d.lower().endswith((".files", ".tmp", ".temp"))
+                            ]
+                            for f in files:
+                                f_ext = os.path.splitext(f)[1].lower()
+                                if f_ext in SUPPORTED_IMAGE_EXTS:
+                                    photo_count += 1
         except Exception:
             pass
 
-        total_photos = direct_img_count + nested_img_count
-
         status_text = "Ready"
         if models:
-            status_text = f"Completed ({', '.join(models)})"
+            status_text = f"Completed ({models[0]})"
         elif has_psx:
             status_text = "Project PSX exists"
-        elif total_photos > 0:
-            status_text = f"{total_photos} photos"
+        elif photo_count > 0:
+            status_text = f"{photo_count:,} photos"
         else:
             status_text = "Empty / No photos"
 
         return {
             "name": name,
             "path": dir_path,
-            "photo_count": total_photos,
-            "direct_photos": direct_img_count,
+            "photo_count": photo_count,
+            "direct_photos": direct_photos,
             "has_psx": has_psx,
             "models": models,
             "status": status_text,
@@ -2782,20 +2813,48 @@ class AutoMetashapeStudio:
 
         self._log(f"[Multi-Project Studio] Scanning root directory: {root_dir}", "stage")
         self.multi_discovered_projects.clear()
-        EXCLUDED = {"model", "models", "output", "outputs", "export", "exports", "__pycache__", ".git"}
+        EXCLUDED = {"model", "models", "output", "outputs", "export", "exports", "result", "results", "__pycache__", ".git"}
 
+        # 1. Inspect direct subdirectories
+        sub_dirs = []
         try:
             for entry in os.scandir(root_dir):
-                if entry.is_dir() and not entry.name.startswith(".") and entry.name.lower() not in EXCLUDED and not entry.name.lower().startswith("model"):
-                    proj_info = self._analyze_project_dir(entry.path)
-                    if proj_info["photo_count"] > 0 or proj_info["has_psx"] or proj_info["models"]:
-                        self.multi_discovered_projects.append(proj_info)
+                if (
+                    entry.is_dir()
+                    and not entry.name.startswith(".")
+                    and entry.name.lower() not in EXCLUDED
+                    and not entry.name.lower().startswith("model")
+                    and not entry.name.lower().endswith(".files")
+                ):
+                    sub_dirs.append(entry)
         except Exception as e:
             self._log(f"[Multi-Project Studio] Scan error: {e}", "error")
 
+        # 2. Check whether root_dir itself is a single survey with flight passes (nadir, ob1, ob2...)
+        # or a collection of individual projects
+        is_single_survey_with_flights = False
+        if sub_dirs:
+            flight_tokens = ("nadir", "oblique", "ob1", "ob2", "ob3", "ob4", "flight", "pass", "dji", "dcim", "100media")
+            flight_matches = sum(1 for d in sub_dirs if any(tok in d.name.lower() for tok in flight_tokens))
+            if flight_matches == len(sub_dirs):
+                is_single_survey_with_flights = True
+
         root_info = self._analyze_project_dir(root_dir)
-        if root_info["direct_photos"] > 0 and not any(p["path"] == root_dir for p in self.multi_discovered_projects):
-            self.multi_discovered_projects.insert(0, root_info)
+
+        if is_single_survey_with_flights or (root_info["has_psx"] and not any(self._analyze_project_dir(d.path)["has_psx"] for d in sub_dirs)):
+            # Treat root_dir as a single unified multi-flight project
+            if root_info["photo_count"] > 0 or root_info["has_psx"] or root_info["models"]:
+                self.multi_discovered_projects.append(root_info)
+        else:
+            # Root is a parent directory containing separate projects
+            for entry in sorted(sub_dirs, key=lambda e: e.name):
+                proj_info = self._analyze_project_dir(entry.path)
+                if proj_info["photo_count"] > 0 or proj_info["has_psx"] or proj_info["models"]:
+                    self.multi_discovered_projects.append(proj_info)
+
+            # If root_dir itself had photos directly in its root, also include it
+            if root_info["direct_photos"] > 0 and not any(p["path"] == root_dir for p in self.multi_discovered_projects):
+                self.multi_discovered_projects.insert(0, root_info)
 
         self._populate_multi_project_rows()
 
@@ -2837,9 +2896,12 @@ class AutoMetashapeStudio:
             )
             cb.pack(side=tk.LEFT, padx=(6, 8), pady=4)
 
-            badge_text = f"{p['photo_count']} photos"
+            count_str = f"{p['photo_count']:,} photo" if p["photo_count"] == 1 else f"{p['photo_count']:,} photos"
+            badge_text = count_str
             if p["models"]:
-                badge_text += f" | {', '.join(p['models'])}"
+                badge_text += f" | Model: {', '.join(p['models'])}"
+            elif p["has_psx"]:
+                badge_text += " | PSX saved"
 
             tk.Label(
                 row,
@@ -2870,7 +2932,8 @@ class AutoMetashapeStudio:
     def _update_multi_selection_count(self) -> None:
         sel = sum(1 for v in self.multi_project_vars.values() if v.get())
         total = len(self.multi_discovered_projects)
-        self.lbl_multi_scan_status.set(f"{total} projects detected ({sel} selected)")
+        total_photos = sum(p["photo_count"] for p in self.multi_discovered_projects if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get())
+        self.lbl_multi_scan_status.set(f"{total} projects detected ({sel} selected · {total_photos:,} photos)")
         self._sync_dynamic_stepper()
 
     def _select_all_multi(self, selected: bool) -> None:
