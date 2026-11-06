@@ -595,7 +595,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         survey_category = "nadir_terrain_mapping"
         surface_type = "heightfield"
         crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 2500, 1000000), 2000000)
+        custom_faces = min(max(photo_count * 5000, 1000000), 5000000)
         texture_pages = 4
         build_orthomosaic = True
         build_dem = True
@@ -610,7 +610,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         survey_category = "oblique_architecture"
         surface_type = "arbitrary"
         crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 2000, 400000), 1200000)
+        custom_faces = min(max(photo_count * 6000, 1000000), 5000000)
         texture_pages = 16
         build_orthomosaic = False
         build_dem = False
@@ -625,7 +625,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         survey_category = "terrestrial_close_range"
         surface_type = "arbitrary"
         crop_method = "gps-square"
-        custom_faces = min(max(photo_count * 1500, 300000), 800000)
+        custom_faces = min(max(photo_count * 4000, 1000000), 5000000)
         texture_pages = 16
         build_orthomosaic = False
         build_dem = False
@@ -1574,7 +1574,7 @@ def run_reconstruction(
         if crop_method is None:
             crop_method = "gps-square"
         if custom_faces is None:
-            custom_faces = 2000000
+            custom_faces = 3000000
         if texture_pages is None:
             texture_pages = 4
         if build_orthomosaic is None:
@@ -1591,7 +1591,7 @@ def run_reconstruction(
         if crop_method is None:
             crop_method = "gps-square"
         if custom_faces is None:
-            custom_faces = 600000
+            custom_faces = 2000000
         if texture_pages is None:
             texture_pages = 16
         if build_orthomosaic is None:
@@ -1612,7 +1612,7 @@ def run_reconstruction(
     if crop_method is None:
         crop_method = "gps-square"
     if custom_faces is None:
-        custom_faces = 600000
+        custom_faces = 2000000
     if texture_pages is None:
         texture_pages = 16
     if build_orthomosaic is None:
@@ -2514,7 +2514,7 @@ if __name__ == "__main__":
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
-    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: inferred or 600,000 for building, 2,000,000 for map)")
+    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: inferred in 1M-5M range or 2,000,000)")
     parser.add_argument(
         "--guided-matching",
         dest="guided_matching",

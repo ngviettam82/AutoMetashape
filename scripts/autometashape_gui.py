@@ -736,7 +736,7 @@ class AutoMetashapeStudio:
         self.var_align_quality = tk.StringVar(value="medium")
         self.var_keypoint_limit = tk.StringVar(value="40000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
-        self.var_faces = tk.StringVar(value="600000")
+        self.var_faces = tk.StringVar(value="2000000")
         self.var_tex_pages = tk.StringVar(value="16")
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="medium")
@@ -822,7 +822,7 @@ class AutoMetashapeStudio:
         # Multi-Project Studio Batch Variables
         self.var_multi_root = tk.StringVar(value=r"C:\Users\ADMIN\Documents\Reality Scan\Metashape\00. CATP")
         self.var_multi_preset = tk.StringVar(value="pro (Professional Default)")
-        self.var_multi_faces = tk.StringVar(value="1200000")
+        self.var_multi_faces = tk.StringVar(value="2000000")
         self.var_multi_tex_pages = tk.StringVar(value="8")
         self.var_multi_crop = tk.StringVar(value="gps-square")
         self.multi_discovered_projects: list[dict] = []
@@ -1448,13 +1448,13 @@ class AutoMetashapeStudio:
         _make_preset(
             "building",
             "Building Reconstruction",
-            "600K faces · 16-page 8K · GPS crop",
+            "2M faces · 16-page 8K · GPS crop",
             "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
         )
         _make_preset(
             "map",
             "Aerial Map & Orthomosaic",
-            "2M faces · 4-page 8K · GPS crop · Ortho TIFF",
+            "3M faces · 4-page 8K · GPS crop · Ortho TIFF",
             "Terrain mapping with GPS-square bounding box: 2M face mesh, 4-page 8K texture atlas, DEM elevation, and geo-referenced Orthomosaic GeoTIFF.",
         )
         _make_preset(
@@ -1625,7 +1625,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid_model, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
 
         tk.Label(grid_model, text="Target Faces:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_model, textvariable=self.var_faces, values=["500000", "600000", "1000000", "2000000", "3000000", "5000000"], width=8).grid(row=0, column=5, padx=4, pady=3)
+        ttk.Combobox(grid_model, textvariable=self.var_faces, values=["1000000", "2000000", "3000000", "4000000", "5000000"], width=8).grid(row=0, column=5, padx=4, pady=3)
 
         grid_model2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         grid_model2.pack(fill=tk.X, pady=(2, 2))
@@ -2044,7 +2044,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(
             col2,
             textvariable=self.var_multi_faces,
-            values=["1200000", "5000000", "3000000", "600000", "300000"],
+            values=["1000000", "2000000", "3000000", "4000000", "5000000"],
             state="normal",
         ).pack(fill=tk.X, pady=(2, 0))
 
@@ -2281,7 +2281,7 @@ class AutoMetashapeStudio:
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("800000")
+            self.var_faces.set("2500000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
@@ -2303,7 +2303,7 @@ class AutoMetashapeStudio:
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("600000")
+            self.var_faces.set("2000000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
@@ -2325,7 +2325,7 @@ class AutoMetashapeStudio:
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
-            self.var_faces.set("2000000")
+            self.var_faces.set("3000000")
             self.var_tex_pages.set("4")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("medium")
