@@ -733,13 +733,13 @@ class AutoMetashapeStudio:
     def _init_variables(self) -> None:
         self.var_images_dir = tk.StringVar()
         self.var_output_dir = tk.StringVar()
-        self.var_align_quality = tk.StringVar(value="medium")
+        self.var_align_quality = tk.StringVar(value="high")
         self.var_keypoint_limit = tk.StringVar(value="40000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
         self.var_faces = tk.StringVar(value="2000000")
         self.var_tex_pages = tk.StringVar(value="16")
         self.var_crop = tk.StringVar(value="gps-square")
-        self.var_depth_quality = tk.StringVar(value="medium")
+        self.var_depth_quality = tk.StringVar(value="high")
         self.var_depth_filtering = tk.StringVar(value="moderate")
         self.var_multi_chunk = tk.StringVar(value="disable")
         self.var_chunk_align_method = tk.StringVar(value="camera")
@@ -1448,13 +1448,13 @@ class AutoMetashapeStudio:
         _make_preset(
             "building",
             "Building Reconstruction",
-            "2M faces · 16-page 8K · GPS crop",
+            "High Quality · 2M faces · 16-page 8K · GPS crop",
             "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
         )
         _make_preset(
             "map",
             "Aerial Map & Orthomosaic",
-            "3M faces · 4-page 8K · GPS crop · Ortho TIFF",
+            "High Quality · 3M faces · 4-page 8K · GPS crop · Ortho TIFF",
             "Terrain mapping with GPS-square bounding box: 2M face mesh, 4-page 8K texture atlas, DEM elevation, and geo-referenced Orthomosaic GeoTIFF.",
         )
         _make_preset(
@@ -1556,7 +1556,7 @@ class AutoMetashapeStudio:
         grid_align.pack(fill=tk.X, pady=(2, 4))
 
         tk.Label(grid_align, text="Align Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_align, textvariable=self.var_align_quality, values=["medium", "high", "highest", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_align_quality, values=["high", "ultra", "highest", "medium", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid_align, text="Keypoint Limit:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid_align, textvariable=self.var_keypoint_limit, values=["40000", "20000", "60000", "80000", "100000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
@@ -1619,7 +1619,7 @@ class AutoMetashapeStudio:
         grid_model.pack(fill=tk.X, pady=(2, 2))
 
         tk.Label(grid_model, text="Depth Quality:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_model, textvariable=self.var_depth_quality, values=["medium", "high", "ultra", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid_model, textvariable=self.var_depth_quality, values=["high", "ultra", "medium", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid_model, text="Depth Filter:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid_model, textvariable=self.var_depth_filtering, values=["moderate", "mild", "aggressive"], state="readonly", width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
@@ -2278,13 +2278,13 @@ class AutoMetashapeStudio:
                 d.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
 
         if key in ("pro", "auto"):
-            self.var_align_quality.set("medium")
+            self.var_align_quality.set("high")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("2500000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
-            self.var_depth_quality.set("medium")
+            self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
             self.var_guided.set(True)
             self.var_rolling.set(True)
@@ -2300,13 +2300,13 @@ class AutoMetashapeStudio:
             self.var_classify_ground.set(False)
             self.var_export_report.set(True)
         elif key == "building":
-            self.var_align_quality.set("medium")
+            self.var_align_quality.set("high")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("2000000")
             self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
-            self.var_depth_quality.set("medium")
+            self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
             self.var_guided.set(True)
             self.var_rolling.set(True)
@@ -2322,13 +2322,13 @@ class AutoMetashapeStudio:
             self.var_classify_ground.set(False)
             self.var_export_report.set(True)
         elif key == "map":
-            self.var_align_quality.set("medium")
+            self.var_align_quality.set("high")
             self.var_keypoint_limit.set("40000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("3000000")
             self.var_tex_pages.set("4")
             self.var_crop.set("gps-square")
-            self.var_depth_quality.set("medium")
+            self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
             self.var_guided.set(True)
             self.var_rolling.set(True)

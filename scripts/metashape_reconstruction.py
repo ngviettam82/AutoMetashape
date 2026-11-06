@@ -8,11 +8,11 @@
 Reconstructs production-ready 3D architectural models (.obj, .mtl, .glb, .psx)
 directly from raw aerial drone or ground camera image directories on NVIDIA GPUs.
 Configured with production-grade defaults:
-- Image Alignment: Medium quality (downscale=2), 40,000 keypoint limit, 25,000 tiepoint limit,
+- Image Alignment: High quality (downscale=1), 40,000 keypoint limit, 25,000 tiepoint limit,
                    stationary tie points excluded, guided matching enabled, adaptive fitting enabled.
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses with uncropped vertical bounds).
-- Depth Maps & Meshing: Medium quality depth maps (downscale=4), Moderate depth filtering, 600,000 (600K) custom faces.
+- Depth Maps & Meshing: High quality depth maps (downscale=2), Moderate depth filtering, 600,000 (600K) custom faces.
 - Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
@@ -687,7 +687,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     # Enabling rolling shutter compensation on mechanical leaf shutters causes synthetic bundle adjustment drift!
     rolling_shutter = (shutter == "rolling")
 
-    align_quality = "medium"
+    align_quality = "high"
     keypoint_limit = 60000 if avg_mp >= 30.0 else 40000
     tiepoint_limit = 25000
     guided_matching = True
@@ -705,7 +705,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         "filter_stationary_points": filter_stationary_points,
         "rolling_shutter": rolling_shutter,
         "crop_method": crop_method,
-        "depth_quality": "medium",
+        "depth_quality": "high",
         "depth_filtering": depth_filtering,
         "custom_faces": custom_faces,
         "texture_pages": texture_pages,
@@ -1493,14 +1493,14 @@ def infer_project_name(
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
-    align_quality: str = "medium",
+    align_quality: str = "high",
     keypoint_limit: int = 40000,
     tiepoint_limit: int = 25000,
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
     adaptive_fitting: bool = True,
     filter_tiepoints: bool = True,
-    depth_quality: str = "medium",
+    depth_quality: str = "high",
     depth_filtering: str = "moderate",
     custom_faces: int = None,
     texture_pages: int = None,
@@ -2582,10 +2582,10 @@ if __name__ == "__main__":
     parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
     parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
     parser.add_argument("--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification")
-    parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="medium", help="Image alignment accuracy/quality (default: medium)")
+    parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="high", help="Image alignment accuracy/quality (default: high)")
     parser.add_argument("--keypoint-limit", type=int, default=40000, help="Max keypoints per image (default: 40000)")
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
-    parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="medium", help="Depth map quality (default: medium)")
+    parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="high", help="Depth map quality (default: high)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
     parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: inferred in 1M-5M range or 2,000,000)")
     parser.add_argument(
