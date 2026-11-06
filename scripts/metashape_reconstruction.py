@@ -16,6 +16,7 @@ Configured with production-grade defaults:
 - Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
+from __future__ import annotations
 import argparse
 import math
 import os
@@ -119,6 +120,13 @@ SURFACE_TYPE_MAP = {
 }
 
 
+def compute_utm_epsg(lon: float, lat: float) -> int:
+    """Calculates the standard WGS 84 / UTM Zone EPSG code for a given longitude and latitude."""
+    zone = int((lon + 180.0) // 6.0) + 1
+    zone = max(1, min(zone, 60))
+    return 32600 + zone if lat >= 0.0 else 32700 + zone
+
+
 def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculates orthodromic surface distance between two WGS84 GPS coordinates in meters."""
     r_earth = 6371000.0
@@ -145,6 +153,7 @@ CAMERA_HARDWARE_DB = {
     "m3m": {"name": "DJI Mavic 3 Multispectral RGB", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "mechanical", "focal_fixed": 12.29},
 
     # DJI Consumer Drones (CMOS Electronic Rolling Shutter)
+    "fc9589": {"name": "DJI Mini 4 / Neo / Consumer Payload (FC9589)", "sensor_w_mm": 10.08, "sensor_h_mm": 7.56, "pixel_pitch_um": 2.50, "shutter": "rolling", "focal_fixed": 6.72},
     "fc9470": {"name": "DJI Neo (FC9470)", "sensor_w_mm": 6.86, "sensor_h_mm": 3.86, "pixel_pitch_um": 1.72, "shutter": "rolling", "focal_fixed": 3.05},
     "fc3582": {"name": "DJI Mavic 3 / Cine / Classic Hasselblad", "sensor_w_mm": 17.3, "sensor_h_mm": 13.0, "pixel_pitch_um": 3.28, "shutter": "rolling", "focal_fixed": 12.29},
     "fc3170": {"name": "DJI Mavic Air 2", "sensor_w_mm": 6.4, "sensor_h_mm": 4.8, "pixel_pitch_um": 0.8, "shutter": "rolling", "focal_fixed": 4.5},
@@ -167,8 +176,9 @@ CAMERA_HARDWARE_DB = {
 }
 
 
-def parse_xmp_relative_altitude(img_path: str):
-    """Fast probe extracting DJI RelativeAltitude from XMP header packet."""
+def parse_xmp_telemetry(img_path: str) -> dict:
+    """Fast probe extracting DJI RelativeAltitude, ShutterType, and GimbalPitch from XMP packet."""
+    res = {"relative_alt": None, "shutter_type": None, "gimbal_pitch": None}
     try:
         with open(img_path, "rb") as f:
             head = f.read(65536)
@@ -181,10 +191,27 @@ def parse_xmp_relative_altitude(img_path: str):
                     if not m:
                         m = re.search(r'<[^>]*RelativeAltitude>([+-]?\d+(?:\.\d+)?)</[^>]*RelativeAltitude>', xmp_str)
                     if m:
-                        return float(m.group(1))
+                        res["relative_alt"] = float(m.group(1))
+
+                    m_sh = re.search(r'ShutterType=["\']([A-Za-z]+)["\']', xmp_str)
+                    if not m_sh:
+                        m_sh = re.search(r'<[^>]*ShutterType>([A-Za-z]+)</[^>]*ShutterType>', xmp_str)
+                    if m_sh:
+                        res["shutter_type"] = m_sh.group(1).strip().lower()
+
+                    m_pitch = re.search(r'GimbalPitchDegree=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
+                    if not m_pitch:
+                        m_pitch = re.search(r'<[^>]*GimbalPitchDegree>([+-]?\d+(?:\.\d+)?)</[^>]*GimbalPitchDegree>', xmp_str)
+                    if m_pitch:
+                        res["gimbal_pitch"] = float(m_pitch.group(1))
     except Exception:
         pass
-    return None
+    return res
+
+
+def parse_xmp_relative_altitude(img_path: str):
+    """Backwards-compatible probe extracting relative altitude."""
+    return parse_xmp_telemetry(img_path).get("relative_alt")
 
 
 def extract_image_telemetry(img_path: str) -> dict:
@@ -290,7 +317,10 @@ def extract_image_telemetry(img_path: str) -> dict:
                             pass
 
         # Fast probe for DJI relative altitude
-        meta["relative_alt"] = parse_xmp_relative_altitude(img_path)
+        xmp_data = parse_xmp_telemetry(img_path)
+        meta["relative_alt"] = xmp_data.get("relative_alt")
+        meta["xmp_shutter"] = xmp_data.get("shutter_type")
+        meta["gimbal_pitch"] = xmp_data.get("gimbal_pitch")
     except Exception:
         pass
     return meta
@@ -494,7 +524,23 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
             sensor_w_mm = 13.2  # 1-inch sensor standard fallback
             sensor_h_mm = 8.8
         pixel_pitch_um = (sensor_w_mm / avg_w) * 1000.0
-        shutter = "rolling" if any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone"]) else "mechanical"
+        # Robust physical shutter determination:
+        xmp_shutters = [extract_image_telemetry(p).get("xmp_shutter") for p in sampled[:10]]
+        xmp_shutter_valid = [s for s in xmp_shutters if s]
+        if any(s == "electronic" for s in xmp_shutter_valid):
+            shutter = "rolling"
+        elif any(s == "mechanical" for s in xmp_shutter_valid):
+            shutter = "mechanical"
+        elif primary_make.lower() == "dji":
+            if any(k in combined_name for k in ["fc6310", "fc3411", "p1", "x7", "x4s", "l2", "m3m"]):
+                shutter = "mechanical"
+            else:
+                # All consumer DJI payloads (FC9589, FC9470, FC3580, FC3582, Mini, Neo, Air) use electronic rolling shutters
+                shutter = "rolling"
+        elif any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone", "gopro"]):
+            shutter = "rolling"
+        else:
+            shutter = "mechanical"
         sensor_name = f"{primary_make} {primary_model}".strip() or "Standard Optical Sensor"
 
     # Flight altitude AGL
@@ -1073,7 +1119,7 @@ def execute_usgs_gradual_selection(
         print("  [Gradual Selection] No tie points present to filter; skipping.", flush=True)
         return {}
 
-    initial_pts = len(chunk.tie_points.points)
+    initial_pts = sum(1 for p in chunk.tie_points.points if p.valid)
     f = Metashape.TiePoints.Filter()
 
     # Calculate initial RMS Reprojection Error
@@ -1168,7 +1214,7 @@ def execute_usgs_gradual_selection(
         print(f"  [Pass 4/4] Multiplicity filter skipped: {e}", flush=True)
 
     # Final RMS Reprojection Error calculation
-    final_pts = len(chunk.tie_points.points) if chunk.tie_points else 0
+    final_pts = sum(1 for p in chunk.tie_points.points if p.valid) if chunk.tie_points else 0
     try:
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
         final_re = list(f.values)
@@ -2135,6 +2181,7 @@ def run_reconstruction(
                 face_count=face_count_arg,
                 face_count_custom=face_count_custom_arg,
                 vertex_colors=True,
+                vertex_confidence=True,
             )
         except Exception as e:
             print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
@@ -2330,8 +2377,21 @@ def run_reconstruction(
                 print(f"\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
                 t_dem = time.time()
                 proj = Metashape.OrthoProjection()
-                if chunk.crs:
-                    proj.crs = chunk.crs
+                target_crs = chunk.crs
+                if chunk.crs and not getattr(chunk.crs, "projcs", None):
+                    aligned_gps = [c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled]
+                    if aligned_gps:
+                        avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
+                        avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
+                        if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
+                            utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
+                            try:
+                                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+                                print(f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for DEM metric scale.", flush=True)
+                            except Exception:
+                                target_crs = chunk.crs
+                if target_crs:
+                    proj.crs = target_crs
                 dem_source = Metashape.DataSource.PointCloudData if (chunk.point_cloud and chunk.point_cloud.point_count > 0) else Metashape.DataSource.DepthMapsData
                 chunk.buildDem(
                     source_data=dem_source,
@@ -2394,8 +2454,21 @@ def run_reconstruction(
                 print(f"\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
                 t_ortho = time.time()
                 proj = Metashape.OrthoProjection()
-                if chunk.crs:
-                    proj.crs = chunk.crs
+                target_crs = chunk.crs
+                if chunk.crs and not getattr(chunk.crs, "projcs", None):
+                    aligned_gps = [c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled]
+                    if aligned_gps:
+                        avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
+                        avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
+                        if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
+                            utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
+                            try:
+                                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+                                print(f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for Orthomosaic metric scale.", flush=True)
+                            except Exception:
+                                target_crs = chunk.crs
+                if target_crs:
+                    proj.crs = target_crs
                 chunk.buildOrthomosaic(
                     surface_data=Metashape.DataSource.ModelData,
                     blending_mode=Metashape.BlendingMode.MosaicBlending,
