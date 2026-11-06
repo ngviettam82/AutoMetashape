@@ -594,7 +594,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     if is_planar:
         survey_category = "nadir_terrain_mapping"
         surface_type = "heightfield"
-        crop_method = "none"
+        crop_method = "gps-square"
         custom_faces = min(max(photo_count * 2500, 1000000), 2000000)
         texture_pages = 4
         build_orthomosaic = True
@@ -624,7 +624,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     else:
         survey_category = "terrestrial_close_range"
         surface_type = "arbitrary"
-        crop_method = "structure"
+        crop_method = "gps-square"
         custom_faces = min(max(photo_count * 1500, 300000), 800000)
         texture_pages = 16
         build_orthomosaic = False
@@ -1569,7 +1569,7 @@ def run_reconstruction(
 
     elif preset == "map":
         if crop_method is None:
-            crop_method = "none"
+            crop_method = "gps-square"
         if custom_faces is None:
             custom_faces = 2000000
         if texture_pages is None:
