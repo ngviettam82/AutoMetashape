@@ -734,10 +734,10 @@ class AutoMetashapeStudio:
         self.var_images_dir = tk.StringVar()
         self.var_output_dir = tk.StringVar()
         self.var_align_quality = tk.StringVar(value="high")
-        self.var_keypoint_limit = tk.StringVar(value="40000")
+        self.var_keypoint_limit = tk.StringVar(value="200000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
         self.var_faces = tk.StringVar(value="2000000")
-        self.var_tex_pages = tk.StringVar(value="16")
+        self.var_tex_pages = tk.StringVar(value="22")
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="high")
         self.var_depth_filtering = tk.StringVar(value="moderate")
@@ -823,7 +823,7 @@ class AutoMetashapeStudio:
         self.var_multi_root = tk.StringVar(value=r"C:\Users\ADMIN\Documents\Reality Scan\Metashape\00. CATP")
         self.var_multi_preset = tk.StringVar(value="pro (Professional Default)")
         self.var_multi_faces = tk.StringVar(value="2000000")
-        self.var_multi_tex_pages = tk.StringVar(value="8")
+        self.var_multi_tex_pages = tk.StringVar(value="22")
         self.var_multi_crop = tk.StringVar(value="gps-square")
         self.multi_discovered_projects: list[dict] = []
         self.multi_project_vars: dict[str, tk.BooleanVar] = {}
@@ -1448,7 +1448,7 @@ class AutoMetashapeStudio:
         _make_preset(
             "building",
             "Building Reconstruction",
-            "High Quality · 2M faces · 16-page 8K · GPS crop",
+            "High Quality · 2M faces · 22-page 8K · GPS crop",
             "Balanced architectural geometry with GPS-square bounding box, 16-page 8K texture atlas, and CMOS rolling shutter compensation.",
         )
         _make_preset(
@@ -1559,7 +1559,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid_align, textvariable=self.var_align_quality, values=["high", "ultra", "highest", "medium", "low"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         tk.Label(grid_align, text="Keypoint Limit:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_align, textvariable=self.var_keypoint_limit, values=["40000", "20000", "60000", "80000", "100000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_keypoint_limit, values=["200000", "100000", "60000", "40000", "20000"], width=10).grid(row=0, column=3, padx=(4, 14), pady=3)
 
         tk.Label(grid_align, text="Tiepoint Limit:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=4, sticky=tk.W, pady=3)
         ttk.Combobox(grid_align, textvariable=self.var_tiepoint_limit, values=["25000", "10000", "40000", "50000", "0"], width=8).grid(row=0, column=5, padx=4, pady=3)
@@ -2279,10 +2279,10 @@ class AutoMetashapeStudio:
 
         if key in ("pro", "auto"):
             self.var_align_quality.set("high")
-            self.var_keypoint_limit.set("40000")
+            self.var_keypoint_limit.set("200000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("2500000")
-            self.var_tex_pages.set("16")
+            self.var_tex_pages.set("22")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
@@ -2301,10 +2301,10 @@ class AutoMetashapeStudio:
             self.var_export_report.set(True)
         elif key == "building":
             self.var_align_quality.set("high")
-            self.var_keypoint_limit.set("40000")
+            self.var_keypoint_limit.set("200000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("2000000")
-            self.var_tex_pages.set("16")
+            self.var_tex_pages.set("22")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
@@ -2323,7 +2323,7 @@ class AutoMetashapeStudio:
             self.var_export_report.set(True)
         elif key == "map":
             self.var_align_quality.set("high")
-            self.var_keypoint_limit.set("40000")
+            self.var_keypoint_limit.set("200000")
             self.var_tiepoint_limit.set("25000")
             self.var_faces.set("3000000")
             self.var_tex_pages.set("4")

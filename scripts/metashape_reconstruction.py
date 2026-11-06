@@ -8,12 +8,12 @@
 Reconstructs production-ready 3D architectural models (.obj, .mtl, .glb, .psx)
 directly from raw aerial drone or ground camera image directories on NVIDIA GPUs.
 Configured with production-grade defaults:
-- Image Alignment: High quality (downscale=1), 40,000 keypoint limit, 25,000 tiepoint limit,
+- Image Alignment: High quality (downscale=1), 200,000 keypoint limit (15,000/MP), 25,000 tiepoint limit,
                    stationary tie points excluded, guided matching enabled, adaptive fitting enabled.
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses with uncropped vertical bounds).
 - Depth Maps & Meshing: High quality depth maps (downscale=2), Moderate depth filtering, 600,000 (600K) custom faces.
-- Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
+- Texture Atlas: 22-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
 from __future__ import annotations
@@ -657,7 +657,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         surface_type = "arbitrary"
         crop_method = "gps-square"
         custom_faces = min(max(photo_count * 6000, 1000000), 5000000)
-        texture_pages = 16
+        texture_pages = 22
         build_orthomosaic = False
         build_dem = False
         build_point_cloud = True
@@ -672,7 +672,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         surface_type = "arbitrary"
         crop_method = "gps-square"
         custom_faces = min(max(photo_count * 4000, 1000000), 5000000)
-        texture_pages = 16
+        texture_pages = 22
         build_orthomosaic = False
         build_dem = False
         build_point_cloud = True
@@ -688,7 +688,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     rolling_shutter = (shutter == "rolling")
 
     align_quality = "high"
-    keypoint_limit = 60000 if avg_mp >= 30.0 else 40000
+    keypoint_limit = 200000
     tiepoint_limit = 25000
     guided_matching = True
     adaptive_fitting = True
@@ -1494,7 +1494,8 @@ def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
     align_quality: str = "high",
-    keypoint_limit: int = 40000,
+    keypoint_limit: int = 200000,
+    keypoint_limit_per_mpx: int = 15000,
     tiepoint_limit: int = 25000,
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
@@ -1504,6 +1505,9 @@ def run_reconstruction(
     depth_filtering: str = "moderate",
     custom_faces: int = None,
     texture_pages: int = None,
+    points_spacing: float = 0.02,
+    ortho_resolution: float = 0.02,
+    ortho_cull_faces: bool = True,
     fill_holes: bool = True,
     ghosting_filter: bool = True,
     rebake_texture: bool = False,
@@ -1639,7 +1643,7 @@ def run_reconstruction(
         if custom_faces is None:
             custom_faces = 2000000
         if texture_pages is None:
-            texture_pages = 16
+            texture_pages = 22
         if build_orthomosaic is None:
             build_orthomosaic = False
         if build_dem is None:
@@ -1660,7 +1664,7 @@ def run_reconstruction(
     if custom_faces is None:
         custom_faces = 2000000
     if texture_pages is None:
-        texture_pages = 16
+        texture_pages = 22
     if build_orthomosaic is None:
         build_orthomosaic = False
     if build_dem is None:
@@ -1840,8 +1844,9 @@ def run_reconstruction(
                     generic_preselection=True,
                     reference_preselection=True,
                     keypoint_limit=keypoint_limit,
+                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
                     tiepoint_limit=tiepoint_limit,
-                    mask_tiepoints=True,
+                    mask_tiepoints=False,
                     filter_stationary_points=filter_stationary_points,
                     guided_matching=guided_matching,
                 )
@@ -2000,8 +2005,9 @@ def run_reconstruction(
                 generic_preselection=True,
                 reference_preselection=True,
                 keypoint_limit=keypoint_limit,
+                keypoint_limit_per_mpx=keypoint_limit_per_mpx,
                 tiepoint_limit=tiepoint_limit,
-                mask_tiepoints=True,
+                mask_tiepoints=False,
                 filter_stationary_points=filter_stationary_points,
                 guided_matching=guided_matching,
             )
@@ -2118,6 +2124,8 @@ def run_reconstruction(
                 source_data=Metashape.DataSource.DepthMapsData,
                 point_colors=True,
                 point_confidence=True,
+                uniform_sampling=True,
+                points_spacing=points_spacing,
                 keep_depth=True,
             )
             pc_count = chunk.point_cloud.point_count if chunk.point_cloud else 0
@@ -2474,7 +2482,9 @@ def run_reconstruction(
                     blending_mode=Metashape.BlendingMode.MosaicBlending,
                     fill_holes=fill_holes,
                     ghosting_filter=ghosting_filter,
+                    cull_faces=ortho_cull_faces,
                     projection=proj,
+                    resolution=ortho_resolution if getattr(proj.crs, "projcs", None) else 0,
                 )
                 print(f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
@@ -2583,7 +2593,8 @@ if __name__ == "__main__":
     parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
     parser.add_argument("--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification")
     parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="high", help="Image alignment accuracy/quality (default: high)")
-    parser.add_argument("--keypoint-limit", type=int, default=40000, help="Max keypoints per image (default: 40000)")
+    parser.add_argument("--keypoint-limit", type=int, default=200000, help="Max keypoints per image (default: 200000)")
+    parser.add_argument("--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)")
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="high", help="Depth map quality (default: high)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
@@ -2613,7 +2624,7 @@ if __name__ == "__main__":
     parser.add_argument("--rolling-shutter", dest="rolling_shutter", action="store_true", default=None, help="Force enable CMOS rolling shutter compensation")
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", default=True, help="Disable mesh hole closing (default: enabled at level 30)")
-    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: inferred or 16 for building, 4 for map)")
+    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: inferred or 22 for building, 4 for map)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
