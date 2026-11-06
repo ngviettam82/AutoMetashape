@@ -62,4 +62,5 @@ htmlcov/
 !.agents/skills/
 !.agents/rules/
 scratch/
+.taste-skill/
 *.tmp
