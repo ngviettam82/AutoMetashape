@@ -614,7 +614,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         texture_pages = 16
         build_orthomosaic = False
         build_dem = False
-        build_point_cloud = False
+        build_point_cloud = True
         classify_ground = False
         close_holes = True
         depth_filtering = "moderate"
@@ -629,7 +629,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         texture_pages = 16
         build_orthomosaic = False
         build_dem = False
-        build_point_cloud = False
+        build_point_cloud = True
         classify_ground = False
         close_holes = True
         depth_filtering = "moderate"
@@ -1478,8 +1478,8 @@ def run_reconstruction(
     build_orthomosaic: bool = None,
     build_dem: bool = None,
     export_dem: bool = False,
-    build_point_cloud: bool = None,
-    export_point_cloud: bool = False,
+    build_point_cloud: bool = True,
+    export_point_cloud: bool = True,
     point_cloud_format: str = "laz",
     classify_ground: bool = None,
     classify_points: bool = False,
@@ -1596,7 +1596,7 @@ def run_reconstruction(
         if build_dem is None:
             build_dem = False
         if build_point_cloud is None:
-            build_point_cloud = False
+            build_point_cloud = True
         if classify_ground is None:
             classify_ground = False
         if close_holes is None:
@@ -1614,7 +1614,7 @@ def run_reconstruction(
     if build_dem is None:
         build_dem = False
     if build_point_cloud is None:
-        build_point_cloud = False
+        build_point_cloud = True
     if classify_ground is None:
         classify_ground = False
     if close_holes is None:
@@ -2561,8 +2561,10 @@ if __name__ == "__main__":
         help="Disable bounding box cropping (reconstruct full uncropped scene)",
     )
     # Point Cloud Options
-    parser.add_argument("--build-point-cloud", action="store_true", default=None, help="Generate dense point cloud from depth maps")
-    parser.add_argument("--export-point-cloud", action="store_true", default=False, help="Export dense point cloud file")
+    parser.add_argument("--build-point-cloud", dest="build_point_cloud", action="store_true", default=True, help="Generate dense point cloud from depth maps (default: True)")
+    parser.add_argument("--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation")
+    parser.add_argument("--export-point-cloud", dest="export_point_cloud", action="store_true", default=True, help="Export dense point cloud file (default: True)")
+    parser.add_argument("--no-export-point-cloud", dest="export_point_cloud", action="store_false", help="Disable dense point cloud export")
     parser.add_argument("--point-cloud-format", choices=["laz", "las", "ply", "e57", "xyz"], default="laz", help="Format for exported dense point cloud (default: laz)")
     parser.add_argument("--classify-ground", action="store_true", default=None, help="Classify ground vs non-ground points in dense point cloud")
     parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")

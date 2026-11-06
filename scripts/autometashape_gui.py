@@ -279,7 +279,7 @@ class StudioPipelineStepper(tk.Frame):
         self.build_stages(stages or STAGES_RECON)
 
     def build_stages(self, stages: list[tuple[str, str, str]]) -> None:
-        """Dynamically construct stage pill cards."""
+        """Dynamically construct stage pill cards scaled to milestone count."""
         self.stages = stages
         for child in self.cards_row.winfo_children():
             child.destroy()
@@ -289,11 +289,18 @@ class StudioPipelineStepper(tk.Frame):
         self.stage_titles.clear()
         self.stage_subtitles.clear()
 
+        n = len(self.stages)
+        pad_x = 3 if n > 8 else (4 if n > 6 else 6)
+        pad_y = 3 if n > 8 else (4 if n > 6 else 6)
+        f_ind = ("Segoe UI", 7, "bold") if n > 8 else ("Segoe UI", 8, "bold")
+        f_title = ("Segoe UI", 7, "bold") if n > 8 else ("Segoe UI", 8, "bold")
+        f_sub = ("Segoe UI", 6) if n > 8 else ("Segoe UI", 7)
+
         for i, (num, name, subtitle) in enumerate(self.stages):
             outer = tk.Frame(self.cards_row, bg=UITheme.BORDER, bd=1, relief=tk.FLAT)
-            outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=2)
+            outer.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=1 if n > 8 else 2)
 
-            inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=6, pady=6)
+            inner = tk.Frame(outer, bg=UITheme.BG_ROOT, padx=pad_x, pady=pad_y)
             inner.pack(fill=tk.BOTH, expand=True, padx=1, pady=1)
 
             top_row = tk.Frame(inner, bg=UITheme.BG_ROOT)
@@ -302,7 +309,7 @@ class StudioPipelineStepper(tk.Frame):
             ind = tk.Label(
                 top_row,
                 text=f"{num}.",
-                font=("Segoe UI", 8, "bold"),
+                font=f_ind,
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_DIM,
             )
@@ -311,7 +318,7 @@ class StudioPipelineStepper(tk.Frame):
             t = tk.Label(
                 inner,
                 text=name,
-                font=("Segoe UI", 8, "bold"),
+                font=f_title,
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_MUTED,
                 anchor=tk.W,
@@ -321,7 +328,7 @@ class StudioPipelineStepper(tk.Frame):
             s = tk.Label(
                 inner,
                 text=subtitle,
-                font=("Segoe UI", 7),
+                font=f_sub,
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_DIM,
                 anchor=tk.W,
@@ -581,7 +588,12 @@ class AutoMetashapeStudio:
         self.current_layout_mode = None  # "2col" or "1col"
         self.preset_cards: dict[str, dict[str, tk.Widget]] = {}
 
-        # Independent tab state cache
+        # Dynamic tab stage keys and state cache
+        self.mode_stage_keys: dict[str, list[str]] = {
+            "recon": ["ingest", "match", "align", "depth", "point_cloud", "mesh", "texture", "export", "report"],
+            "export": ["project", "mesh", "texture", "glb", "obj", "point_cloud"],
+            "multi": ["discover", "select", "execute", "done"],
+        }
         self.mode_states = {
             "recon": {
                 "stages": list(STAGES_RECON),
@@ -744,8 +756,8 @@ class AutoMetashapeStudio:
         self.var_rebake = tk.BooleanVar(value=False)
         self.var_resume = tk.BooleanVar(value=False)
         self.var_ortho = tk.BooleanVar(value=False)
-        self.var_build_point_cloud = tk.BooleanVar(value=False)
-        self.var_export_point_cloud = tk.BooleanVar(value=False)
+        self.var_build_point_cloud = tk.BooleanVar(value=True)
+        self.var_export_point_cloud = tk.BooleanVar(value=True)
         self.var_pc_format = tk.StringVar(value="laz")
         self.var_classify_ground = tk.BooleanVar(value=False)
         self.var_classify_points = tk.BooleanVar(value=False)
@@ -753,7 +765,7 @@ class AutoMetashapeStudio:
         self.var_export_dem = tk.BooleanVar(value=False)
         self.var_export_report = tk.BooleanVar(value=True)
 
-        self.var_exp_point_cloud = tk.BooleanVar(value=False)
+        self.var_exp_point_cloud = tk.BooleanVar(value=True)
         self.var_exp_pc_format = tk.StringVar(value="laz")
         self.var_exp_dem = tk.BooleanVar(value=False)
         self.var_exp_ortho = tk.BooleanVar(value=False)
@@ -819,6 +831,30 @@ class AutoMetashapeStudio:
         self.batch_queue: list[dict] = []
         self.batch_current_idx: int = -1
         self.lbl_multi_scan_status = tk.StringVar(value="0 projects detected")
+
+        # Synchronize dynamic pipeline milestones whenever options toggle
+        for _v in [
+            self.var_build_point_cloud,
+            self.var_export_point_cloud,
+            self.var_build_dem,
+            self.var_export_dem,
+            self.var_ortho,
+            self.var_build_tiled_model,
+            self.var_build_contours,
+            self.var_export_report,
+            self.var_rebake,
+            self.var_exp_rebake,
+            self.var_exp_remove_lighting,
+            self.var_exp_point_cloud,
+            self.var_exp_dem,
+            self.var_exp_ortho,
+            self.var_exp_tiled_model,
+            self.var_exp_contours,
+            self.var_exp_export_fbx,
+            self.var_exp_export_ply,
+            self.var_exp_report,
+        ]:
+            _v.trace_add("write", lambda *_: self._sync_dynamic_stepper())
 
     # -----------------------------------------------------------------------
     # Main UI Layout Construction
@@ -2242,7 +2278,8 @@ class AutoMetashapeStudio:
             self.var_ghosting.set(True)
             self.var_ortho.set(False)
             self.var_build_dem.set(False)
-            self.var_build_point_cloud.set(False)
+            self.var_build_point_cloud.set(True)
+            self.var_export_point_cloud.set(True)
             self.var_classify_ground.set(False)
             self.var_export_report.set(True)
         elif key == "building":
@@ -2262,6 +2299,11 @@ class AutoMetashapeStudio:
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_ortho.set(False)
+            self.var_build_dem.set(False)
+            self.var_build_point_cloud.set(True)
+            self.var_export_point_cloud.set(True)
+            self.var_classify_ground.set(False)
+            self.var_export_report.set(True)
         elif key == "map":
             self.var_align_quality.set("medium")
             self.var_keypoint_limit.set("40000")
@@ -2279,6 +2321,13 @@ class AutoMetashapeStudio:
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_ortho.set(True)
+            self.var_build_dem.set(True)
+            self.var_build_point_cloud.set(True)
+            self.var_export_point_cloud.set(True)
+            self.var_classify_ground.set(True)
+            self.var_export_report.set(True)
+
+        self._sync_dynamic_stepper()
 
     def _diagnose_survey_physics(self) -> None:
         """Audits survey telemetry, optics, GSD, and shutter physics in background thread."""
@@ -2354,6 +2403,186 @@ class AutoMetashapeStudio:
 
         threading.Thread(target=_worker, daemon=True).start()
 
+    def get_dynamic_recon_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Dynamically compute photogrammetry stages based on active options."""
+        keys: list[str] = ["ingest", "match", "align", "depth"]
+        stages: list[tuple[str, str, str]] = [
+            ("1", "Ingest", "Photos & blur filter"),
+            ("2", "Match", "GPU feature matching"),
+            ("3", "Align", "Cameras & crop"),
+            ("4", "Depth", "Dense stereopsis"),
+        ]
+
+        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
+            keys.append("point_cloud")
+            stages.append((str(len(stages) + 1), "Point Cloud", "Dense 3D point cloud"))
+
+        keys.append("mesh")
+        stages.append((str(len(stages) + 1), "Mesh", "Surface mesh"))
+
+        keys.append("texture")
+        stages.append((str(len(stages) + 1), "Texture", "Texture atlas"))
+
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+            keys.append("tiled_model")
+            stages.append((str(len(stages) + 1), "Tiled Model", "Hierarchical 3D tiles"))
+
+        keys.append("export")
+        stages.append((str(len(stages) + 1), "Export", "GLB, OBJ & TIFF"))
+
+        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+            keys.append("dem")
+            stages.append((str(len(stages) + 1), "DEM", "GeoTIFF DEM"))
+
+        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+            keys.append("contours")
+            stages.append((str(len(stages) + 1), "Contours", "Topographic vectors"))
+
+        if hasattr(self, "var_ortho") and self.var_ortho.get():
+            keys.append("orthomosaic")
+            stages.append((str(len(stages) + 1), "Orthomosaic", "GeoTIFF aerial ortho"))
+
+        if hasattr(self, "var_export_report") and self.var_export_report.get():
+            keys.append("report")
+            stages.append((str(len(stages) + 1), "Report", "Calibration PDF report"))
+
+        return keys, stages
+
+    def get_dynamic_export_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Dynamically compute export stages based on active deliverables."""
+        keys: list[str] = ["project", "mesh"]
+        stages: list[tuple[str, str, str]] = [
+            ("1", "Project", "Load .psx project"),
+            ("2", "Verify", "Validate 3D mesh"),
+        ]
+
+        if hasattr(self, "var_exp_rebake") and self.var_exp_rebake.get():
+            keys.append("texture")
+            stages.append((str(len(stages) + 1), "Texture", "Re-bake atlas"))
+
+        if hasattr(self, "var_exp_remove_lighting") and self.var_exp_remove_lighting.get():
+            keys.append("delight")
+            stages.append((str(len(stages) + 1), "Delight", "Remove lighting"))
+
+        keys.append("glb")
+        stages.append((str(len(stages) + 1), "glTF", "Export binary GLB"))
+
+        keys.append("obj")
+        stages.append((str(len(stages) + 1), "Wavefront", "Export OBJ & TIFF"))
+
+        if hasattr(self, "var_exp_point_cloud") and self.var_exp_point_cloud.get():
+            keys.append("point_cloud")
+            stages.append((str(len(stages) + 1), "Point Cloud", "Export dense cloud"))
+
+        if hasattr(self, "var_exp_dem") and self.var_exp_dem.get():
+            keys.append("dem")
+            stages.append((str(len(stages) + 1), "DEM", "Export GeoTIFF DEM"))
+
+        if hasattr(self, "var_exp_ortho") and self.var_exp_ortho.get():
+            keys.append("orthomosaic")
+            stages.append((str(len(stages) + 1), "Orthomosaic", "Export Orthomosaic"))
+
+        if hasattr(self, "var_exp_tiled_model") and self.var_exp_tiled_model.get():
+            keys.append("tiled_model")
+            stages.append((str(len(stages) + 1), "Tiled Model", "Export 3D tiles"))
+
+        if hasattr(self, "var_exp_contours") and self.var_exp_contours.get():
+            keys.append("contours")
+            stages.append((str(len(stages) + 1), "Contours", "Export contours"))
+
+        if hasattr(self, "var_exp_export_fbx") and self.var_exp_export_fbx.get():
+            keys.append("fbx")
+            stages.append((str(len(stages) + 1), "FBX", "Export Autodesk FBX"))
+
+        if hasattr(self, "var_exp_export_ply") and self.var_exp_export_ply.get():
+            keys.append("ply")
+            stages.append((str(len(stages) + 1), "PLY", "Export Stanford PLY"))
+
+        if hasattr(self, "var_exp_report") and self.var_exp_report.get():
+            keys.append("report")
+            stages.append((str(len(stages) + 1), "Report", "Export PDF report"))
+
+        return keys, stages
+
+    def get_dynamic_multi_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
+        """Dynamically compute multi-project batch stages based on selected queue."""
+        selected: list[dict] = []
+        if hasattr(self, "multi_discovered_projects") and hasattr(self, "multi_project_vars"):
+            selected = [
+                p for p in self.multi_discovered_projects
+                if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()
+            ]
+
+        keys: list[str] = []
+        stages: list[tuple[str, str, str]] = []
+
+        if 1 <= len(selected) <= 7:
+            for i, p in enumerate(selected):
+                keys.append(f"proj_{i}")
+                stages.append((str(i + 1), p["name"][:12], f"{p.get('photo_count', 0)} photos"))
+        elif len(selected) > 7:
+            keys = ["discover", "queue", "execute", "done"]
+            stages = [
+                ("1", "Discover", "Discovered surveys"),
+                ("2", "Queue", f"{len(selected)} projects in batch"),
+                ("3", "Execute", "Sequential execution"),
+                ("4", "Deliverables", "Batch completion"),
+            ]
+        else:
+            keys = ["discover", "select", "execute", "done"]
+            stages = [
+                ("1", "Discover", "Scan & detect inputs"),
+                ("2", "Select", "Choose projects"),
+                ("3", "Execute", "Sequential run"),
+                ("4", "Deliverables", "Batch completion"),
+            ]
+
+        return keys, stages
+
+    def _find_stage_index_by_key(self, mode: str, key: str) -> int:
+        stages = getattr(self, "mode_stage_keys", {}).get(mode, [])
+        try:
+            return stages.index(key)
+        except ValueError:
+            return -1
+
+    def _sync_dynamic_stepper(self) -> None:
+        """Dynamically update stepper milestones to match currently selected processes."""
+        if getattr(self, "is_running", False):
+            return
+
+        r_keys, r_stages = self.get_dynamic_recon_stages()
+        e_keys, e_stages = self.get_dynamic_export_stages()
+        m_keys, m_stages = self.get_dynamic_multi_stages()
+
+        if hasattr(self, "mode_stage_keys"):
+            self.mode_stage_keys["recon"] = r_keys
+            self.mode_stage_keys["export"] = e_keys
+            self.mode_stage_keys["multi"] = m_keys
+
+        if hasattr(self, "mode_states"):
+            self.mode_states["recon"]["stages"] = list(r_stages)
+            self.mode_states["export"]["stages"] = list(e_stages)
+            self.mode_states["multi"]["stages"] = list(m_stages)
+
+        if not hasattr(self, "stepper") or not hasattr(self, "card_stepper"):
+            return
+
+        cur_mode = getattr(self, "active_mode", "recon")
+        cur_stages = self.mode_states[cur_mode]["stages"]
+        self.stepper.build_stages(cur_stages)
+
+        if cur_mode == "recon":
+            self.card_stepper.set_subtitle(f"{len(cur_stages)}-stage automated photogrammetry trajectory")
+        elif cur_mode == "export":
+            self.card_stepper.set_subtitle(f"{len(cur_stages)}-stage production asset export & processing")
+        elif cur_mode == "multi":
+            sel_cnt = len(self.batch_queue) if getattr(self, "batch_running", False) else len([
+                p for p in getattr(self, "multi_discovered_projects", [])
+                if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()
+            ])
+            self.card_stepper.set_subtitle(f"Batch execution trajectory across {sel_cnt} project(s)")
+
     def _set_mode(self, mode: str) -> None:
         if mode == self.active_mode:
             return
@@ -2373,7 +2602,6 @@ class AutoMetashapeStudio:
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
             self.card_adv.pack(fill=tk.X, pady=(0, 6))
-            self.card_stepper.set_subtitle("7-stage automated photogrammetry trajectory")
             self.btn_start.config(
                 text="Start Reconstruction",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
@@ -2389,7 +2617,6 @@ class AutoMetashapeStudio:
             self.card_adv.pack_forget()
             self.card_multi.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
-            self.card_stepper.set_subtitle("5-stage production export & texture re-bake")
             self.btn_start.config(
                 text="Export Assets",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_CYAN,
@@ -2405,7 +2632,6 @@ class AutoMetashapeStudio:
             self.card_adv.pack_forget()
             self.card_export.pack_forget()
             self.card_multi.pack(fill=tk.X, pady=(0, 6))
-            self.card_stepper.set_subtitle("4-stage batch queue trajectory across selected projects")
             self.btn_start.config(
                 text="Run Selected Projects (Batch)",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
@@ -2413,8 +2639,10 @@ class AutoMetashapeStudio:
                 state=tk.DISABLED if self.is_running else tk.NORMAL,
             )
 
-        # 3. Restore the target mode's stepper state seamlessly!
-        if hasattr(self, "stepper"):
+        # 3. Restore the target mode's stepper state or sync dynamic stepper
+        if not self.is_running:
+            self._sync_dynamic_stepper()
+        elif hasattr(self, "stepper"):
             self.stepper.restore_state(self.mode_states[mode])
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
@@ -2620,6 +2848,7 @@ class AutoMetashapeStudio:
         sel = sum(1 for v in self.multi_project_vars.values() if v.get())
         total = len(self.multi_discovered_projects)
         self.lbl_multi_scan_status.set(f"{total} projects detected ({sel} selected)")
+        self._sync_dynamic_stepper()
 
     def _select_all_multi(self, selected: bool) -> None:
         for v in self.multi_project_vars.values():
@@ -2733,10 +2962,15 @@ class AutoMetashapeStudio:
             str(pages),
             "--crop-method",
             crop,
+            "--build-point-cloud",
+            "--export-point-cloud",
         ]
 
         self.stepper.reset()
-        self.stepper.set_active(0, f"Batch {current_num}/{total_items}: {proj_name}")
+        if total_items <= 7:
+            self.stepper.set_active(self.batch_current_idx, f"Processing {proj_name}...")
+        else:
+            self.stepper.set_active(2, f"Project {current_num}/{total_items}: {proj_name}")
         self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
 
 
@@ -2996,8 +3230,12 @@ class AutoMetashapeStudio:
             cmd.append("--ortho")
         if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
             cmd.append("--build-point-cloud")
+        else:
+            cmd.append("--no-point-cloud")
         if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
             cmd.append("--export-point-cloud")
+        else:
+            cmd.append("--no-export-point-cloud")
         if hasattr(self, "var_pc_format") and self.var_pc_format.get() != "laz":
             cmd.extend(["--point-cloud-format", self.var_pc_format.get()])
         if hasattr(self, "var_classify_ground") and self.var_classify_ground.get():
@@ -3175,14 +3413,18 @@ class AutoMetashapeStudio:
         def _apply():
             if mode in self.mode_states:
                 st = self.mode_states[mode]
+                if idx < st.get("active_idx", -1):
+                    # Do not rewind active milestone
+                    return
                 st["active_idx"] = idx
                 st["desc"] = desc
                 st["is_done"] = False
                 st["is_paused"] = False
-                num = st["stages"][idx][0]
-                name = st["stages"][idx][1]
-                st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
-                st["status_fg"] = UITheme.ACCENT_CYAN
+                if 0 <= idx < len(st["stages"]):
+                    num = st["stages"][idx][0]
+                    name = st["stages"][idx][1]
+                    st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
+                    st["status_fg"] = UITheme.ACCENT_CYAN
             if self.active_mode == mode:
                 self.stepper.set_active(idx, desc)
         self.root.after(0, _apply)
@@ -3204,55 +3446,150 @@ class AutoMetashapeStudio:
         l = line.lower()
         mode = self.worker_mode or self.active_mode
         if mode == "recon":
-            # Match strictly against unambiguous stage indicators to avoid false triggers from banner summaries
-            if "[1/7]" in line or "[1/6]" in line:
-                self._update_stepper_mode("recon", 0, "Ingesting photos & filtering blur")
-            elif "[2/7]" in line or "[2/6]" in line:
-                self._update_stepper_mode("recon", 1, "GPU Feature Matching")
-            elif "[3/7]" in line or "[3/6]" in line:
-                self._update_stepper_mode("recon", 2, "Camera Alignment & Bundle Adjustment")
+            target_key = None
+            desc = ""
+            if "[1/7]" in line or "[1/6]" in line or "ingesting photos" in l or "ingesting chunk" in l:
+                target_key = "ingest"
+                desc = "Ingesting photos & blur filter"
+            elif "[2/7]" in line or "[2/6]" in line or "gpu feature matching" in l:
+                target_key = "match"
+                desc = "GPU Feature Matching"
+            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
+                target_key = "align"
+                desc = "Camera Alignment & Bundle Adjustment"
             elif "[auto-crop]" in line:
-                self._update_stepper_mode("recon", 2, "Alignment & Bounding Box Crop")
+                target_key = "align"
+                desc = "Alignment & Bounding Box Crop"
             elif "[pause_crop]" in line:
                 self.root.after(0, self._on_pipeline_paused_for_crop)
-            elif "skipping steps 1-3" in l:
-                self._update_stepper_mode("recon", 3, "Resuming at Depth Maps")
-            elif "[4/7]" in line or "[4/6]" in line:
-                self._update_stepper_mode("recon", 3, "MVS Dense Stereopsis")
-            elif "[5/7]" in line or "[5/6]" in line:
-                self._update_stepper_mode("recon", 4, "Fusing Surface Mesh & Closing Holes")
-            elif "[6/7]" in line or "[6/6]" in line:
-                self._update_stepper_mode("recon", 5, "Baking Texture Atlas")
-            elif "[7b/7]" in line or "generating orthomosaic" in l or "geotiff orthomosaic" in l:
-                self._update_stepper_mode("recon", 6, "Building & Exporting GeoTIFF Orthomosaic")
-            elif "[7/7]" in line or "[export]" in l or "exporting final production assets" in l:
-                self._update_stepper_mode("recon", 6, "Exporting GLB, OBJ, TIFF & PSX")
+                return
+            elif "[4b/7]" in line or "dense point cloud" in l:
+                target_key = "point_cloud"
+                desc = "Generating Dense Point Cloud"
+            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
+                target_key = "mesh"
+                desc = "Fusing Surface Mesh & Closing Holes"
+            elif "skipping steps 1-3" in l or "[4/7]" in line or "[4/6]" in line or "depth maps" in l:
+                target_key = "depth"
+                desc = "MVS Dense Stereopsis"
+            elif "[6/7]" in line or "[6/6]" in line or ("baking" in l and "texture" in l) or "re-baking texture atlas" in l:
+                target_key = "texture"
+                desc = "Baking 8K Texture Atlas"
+            elif "[6b/7]" in line or "hierarchical 3d tiled model" in l or "tiled model" in l:
+                target_key = "tiled_model"
+                desc = "Building Hierarchical 3D Tiled Model"
+            elif "[7/7]" in line or "exporting production assets" in l or "saved binary glb" in l:
+                target_key = "export"
+                desc = "Exporting GLB, OBJ & Production Assets"
+            elif "[7b/7]" in line or "digital elevation model" in l or "dem generation" in l or "geotiff dem" in l:
+                target_key = "dem"
+                desc = "Building & Exporting GeoTIFF DEM"
+            elif "[7b2/7]" in line or "contour shapes" in l or "topographic contours" in l:
+                target_key = "contours"
+                desc = "Generating Topographic Contours"
+            elif "[7c/7]" in line or "orthomosaic" in l:
+                target_key = "orthomosaic"
+                desc = "Building & Exporting GeoTIFF Orthomosaic"
+            elif "[7d/7]" in line or "exporting dense point cloud" in l:
+                target_key = "point_cloud" if "point_cloud" in self.mode_stage_keys.get("recon", []) else "export"
+                desc = "Exporting Dense Point Cloud Deliverable"
+            elif "[7e/7]" in line or "quality report" in l or "official calibration" in l:
+                target_key = "report"
+                desc = "Exporting Official Quality PDF Report"
             elif "[success]" in l and "entire pipeline finished" in l:
                 self._complete_stepper_mode("recon")
+                return
+
+            if target_key:
+                idx = self._find_stage_index_by_key("recon", target_key)
+                if idx >= 0:
+                    self._update_stepper_mode("recon", idx, desc)
+
         elif mode == "export":
-            if "project:" in l or "autometashape: production asset export" in l:
-                self._update_stepper_mode("export", 0, "Loading Metashape Project")
-            elif "[model info]" in l or "polygonal faces" in l:
-                self._update_stepper_mode("export", 1, "Validating 3D Mesh Geometry")
-            elif "[texture]" in l:
-                self._update_stepper_mode("export", 2, "Re-baking Texture Atlas")
-            elif "[1/2]" in line or "exporting binary gltf" in l:
-                self._update_stepper_mode("export", 3, "Exporting Binary GLB")
-            elif "[2/2]" in line or "exporting wavefront obj" in l:
-                self._update_stepper_mode("export", 4, "Exporting Wavefront OBJ & TIFF")
+            target_key = None
+            desc = ""
+            if "project:" in l or "loading metashape project" in l or "[import]" in l or "re-linked model saved" in l:
+                target_key = "project"
+                desc = "Loading Metashape Project"
+            elif "[model info]" in l or "polygonal faces" in l or "[mesh]" in l:
+                target_key = "mesh"
+                desc = "Validating 3D Mesh Geometry"
+            elif "[color calibration]" in l:
+                desc = "Radiometric Color Calibration"
+            elif "[texture]" in l or "texture atlas" in l or "re-baking" in l:
+                target_key = "texture"
+                desc = "Re-baking Texture Atlas"
+            elif "[delighting]" in l or "ambient shadows" in l:
+                target_key = "delight"
+                desc = "Delighting & Shadow Removal"
+            elif "[1/2]" in line or "binary gltf" in l or ".glb" in l:
+                target_key = "glb"
+                desc = "Exporting Binary GLB"
+            elif "[2/2]" in line or "wavefront obj" in l or ".obj" in l:
+                target_key = "obj"
+                desc = "Exporting Wavefront OBJ & TIFF"
+            elif "[point cloud]" in l or "dense point cloud" in l:
+                target_key = "point_cloud"
+                desc = "Exporting Dense Point Cloud"
+            elif "[dem]" in l or "geotiff elevation" in l:
+                target_key = "dem"
+                desc = "Exporting GeoTIFF Elevation Model"
+            elif "[orthomosaic]" in l:
+                target_key = "orthomosaic"
+                desc = "Exporting GeoTIFF Orthomosaic"
+            elif "[tiled model]" in l:
+                target_key = "tiled_model"
+                desc = "Building & Exporting 3D Tiles"
+            elif "[contours]" in l:
+                target_key = "contours"
+                desc = "Exporting Topographic Contours"
+            elif "[fbx]" in l:
+                target_key = "fbx"
+                desc = "Exporting Autodesk FBX"
+            elif "[ply]" in l:
+                target_key = "ply"
+                desc = "Exporting Stanford PLY"
+            elif "[report]" in l:
+                target_key = "report"
+                desc = "Exporting Official PDF Report"
             elif "[success]" in l:
                 self._complete_stepper_mode("export")
+                return
+
+            if target_key:
+                idx = self._find_stage_index_by_key("export", target_key)
+                if idx >= 0:
+                    self._update_stepper_mode("export", idx, desc)
+
         elif mode == "multi":
-            if "[1/7]" in line or "[1/6]" in line or "ingest" in l:
-                self._update_stepper_mode("multi", 0, "Ingesting photos & scanning survey")
-            elif "[2/7]" in line or "[3/7]" in line or "match" in l or "align" in l:
-                self._update_stepper_mode("multi", 1, "Feature Matching & Alignment")
-            elif "[4/7]" in line or "[5/7]" in line or "[6/7]" in line or "mesh" in l or "texture" in l:
-                self._update_stepper_mode("multi", 2, "Reconstructing Dense Mesh & Texture")
-            elif "[7/7]" in line or "[export]" in l or "export" in l:
-                self._update_stepper_mode("multi", 3, "Exporting Production Assets & Report")
-            elif "[success]" in l:
-                self._complete_stepper_mode("multi")
+            total_items = len(self.batch_queue) if getattr(self, "batch_queue", None) else 1
+            cur_idx = getattr(self, "batch_current_idx", 0)
+            proj_name = self.batch_queue[cur_idx]["name"] if getattr(self, "batch_queue", None) and cur_idx < len(self.batch_queue) else "Project"
+
+            sub_desc = ""
+            if "[1/7]" in line or "ingest" in l:
+                sub_desc = "Ingesting photos"
+            elif "[2/7]" in line or "gpu feature" in l:
+                sub_desc = "Feature Matching"
+            elif "[3/7]" in line or "aligning cameras" in l:
+                sub_desc = "Camera Alignment"
+            elif "[4/7]" in line or "depth maps" in l:
+                sub_desc = "Depth Maps"
+            elif "[4b/7]" in line or "point cloud" in l:
+                sub_desc = "Dense Point Cloud"
+            elif "[5/7]" in line or "surface mesh" in l:
+                sub_desc = "Surface Mesh"
+            elif "[6/7]" in line or "texture" in l:
+                sub_desc = "Texture Atlas"
+            elif "[7/7]" in line or "[export]" in l:
+                sub_desc = "Exporting Deliverables"
+
+            if total_items <= 7:
+                desc = f"{proj_name} ({sub_desc})" if sub_desc else f"Processing {proj_name}..."
+                self._update_stepper_mode("multi", cur_idx, desc)
+            else:
+                desc = f"Batch [{cur_idx+1}/{total_items}] {proj_name}: {sub_desc}" if sub_desc else f"Batch [{cur_idx+1}/{total_items}] {proj_name}"
+                self._update_stepper_mode("multi", 2, desc)
 
     def _consume_log_queue(self) -> None:
         while not self.log_queue.empty():
@@ -3269,7 +3606,7 @@ class AutoMetashapeStudio:
                         self._on_finished(success=False, user_cancelled=False)
                 else:
                     tag = None
-                    if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[5/7]", "[6/7]", "[7/7]", "[7b/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[Auto-Crop]", "[EXPORT]"]):
+                    if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[4b/7]", "[5/7]", "[6/7]", "[6b/7]", "[7/7]", "[7b/7]", "[7b2/7]", "[7c/7]", "[7d/7]", "[7e/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[1/2]", "[2/2]", "[Auto-Crop]", "[EXPORT]", "[Point Cloud]", "[DEM]", "[Orthomosaic]", "[Contours]", "[Tiled Model]"]):
                         tag = "stage"
                     elif "[SUCCESS]" in line or "[CHECKPOINT]" in line:
                         tag = "success"
@@ -3283,7 +3620,10 @@ class AutoMetashapeStudio:
         self.root.after(80, self._consume_log_queue)
 
     def _on_pipeline_paused_for_crop(self) -> None:
-        self.stepper.set_paused(2, "Open Metashape Pro to Crop, then click Continue")
+        crop_idx = self._find_stage_index_by_key("recon", "align")
+        if crop_idx < 0:
+            crop_idx = 2
+        self.stepper.set_paused(crop_idx, "Open Metashape Pro to Crop, then click Continue")
         self.lbl_status.config(
             text="Paused: Crop in Metashape & click Continue",
             fg=UITheme.ACCENT_AMBER_TXT,
