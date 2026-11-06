@@ -3192,27 +3192,58 @@ class AutoMetashapeStudio:
         else:
             messagebox.showinfo("Folder Not Found", f"Output directory does not exist yet:\n{folder}")
 
+    def _get_project_psx(self) -> str | None:
+        """Finds the primary project-named .psx file in the active output directory."""
+        if self.active_mode == "export":
+            psx = self.var_psx_path.get().strip()
+            return psx if psx and os.path.isfile(psx) else None
+
+        folder = self._get_active_output_dir()
+        if not folder or not os.path.isdir(folder):
+            return None
+
+        img_dir = self.var_images_dir.get().strip()
+        proj_name = None
+        if infer_project_name:
+            try:
+                proj_name = infer_project_name(images_dir=img_dir, output_dir=folder)
+            except Exception:
+                pass
+        if not proj_name and img_dir:
+            proj_name = os.path.basename(os.path.normpath(img_dir))
+
+        # 1. Match project-named .psx
+        if proj_name:
+            target = os.path.join(folder, f"{proj_name}.psx")
+            if os.path.isfile(target):
+                return target
+
+        # 2. Match any .psx not named building_reconstruction.psx
+        candidates = [
+            os.path.join(folder, f)
+            for f in os.listdir(folder)
+            if f.lower().endswith(".psx") and f.lower() != "building_reconstruction.psx"
+        ]
+        if candidates:
+            return candidates[0]
+
+        # 3. Fallback to any .psx
+        all_psx = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".psx")]
+        if all_psx:
+            return all_psx[0]
+
+        return os.path.join(folder, f"{proj_name}.psx") if proj_name else None
+
     def _on_open_metashape_gui(self) -> None:
         if not self.metashape_exe:
             messagebox.showerror("Error", "Metashape Pro executable not configured.")
             return
 
-        folder = self._get_active_output_dir()
-        if self.active_mode in ("recon", "multi"):
-            psx = None
-            if folder and os.path.isdir(folder):
-                candidates = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".psx")]
-                if candidates:
-                    psx = candidates[0]
-            if not psx and folder:
-                psx = os.path.join(folder, "building_reconstruction.psx")
-        else:
-            psx = self.var_psx_path.get().strip()
-
+        psx = self._get_project_psx()
         if psx and os.path.isfile(psx):
             subprocess.Popen([self.metashape_exe, psx])
         else:
-            messagebox.showinfo("Project Not Found", f"No Metashape project found at:\n{psx}")
+            messagebox.showinfo("Project Not Found", f"No Metashape project found at:\n{psx or 'model directory'}")
 
     def _copy_log(self) -> None:
         self.root.clipboard_clear()
@@ -3739,13 +3770,11 @@ class AutoMetashapeStudio:
             pass
 
         folder = self._get_active_output_dir()
-        psx = None
-        if folder and os.path.isdir(folder):
-            candidates = [os.path.join(folder, f) for f in os.listdir(folder) if f.lower().endswith(".psx")]
-            if candidates:
-                psx = candidates[0]
+        psx = self._get_project_psx()
         if not psx and folder:
-            psx = os.path.join(folder, "building_reconstruction.psx")
+            img_dir = self.var_images_dir.get().strip()
+            proj_name = infer_project_name(images_dir=img_dir, output_dir=folder) if infer_project_name else os.path.basename(img_dir)
+            psx = os.path.join(folder, f"{proj_name}.psx")
 
         open_now = messagebox.askyesno(
             "Manual Bounding Box in Metashape Pro",

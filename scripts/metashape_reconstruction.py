@@ -2559,10 +2559,10 @@ def run_reconstruction(
                 os.link(obj_out, legacy_obj)
             except Exception:
                 pass
-        if legacy_psx != psx_out and not os.path.exists(legacy_psx):
+        # Clean up obsolete building_reconstruction.psx to ensure single project-named file
+        if legacy_psx != psx_out and os.path.exists(legacy_psx):
             try:
-                with open(legacy_psx, "w", encoding="utf-8") as f_leg:
-                    f_leg.write(f'<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="{project_name}.files/project.zip"/>\n')
+                os.remove(legacy_psx)
             except Exception:
                 pass
 
