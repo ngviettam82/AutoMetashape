@@ -12,6 +12,7 @@ production-ready 3D assets without re-running camera matching or depth maps:
 - Preserves local metric scale and ellipsoidal elevation
 """
 
+from __future__ import annotations
 import argparse
 import os
 import sys
