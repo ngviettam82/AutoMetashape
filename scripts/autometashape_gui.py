@@ -1457,6 +1457,12 @@ class AutoMetashapeStudio:
             "2M faces · 4-page 8K · GPS crop · Ortho TIFF",
             "Terrain mapping with GPS-square bounding box: 2M face mesh, 4-page 8K texture atlas, DEM elevation, and geo-referenced Orthomosaic GeoTIFF.",
         )
+        _make_preset(
+            "custom",
+            "Custom Configuration",
+            "Manual parameters · Full override · Custom face budget",
+            "Manual photogrammetry parameters: customize polygon density, texture atlas pages, keypoint budgets, depth filtering, hole closing, and geomatics flags.",
+        )
 
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
         if key == self.selected_preset_key:
@@ -1471,10 +1477,12 @@ class AutoMetashapeStudio:
     def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
         self.card_adv = StudioCard(
             parent,
-            title="3. Pipeline Parameters",
-            subtitle="Optional advanced calibration and processing flags",
+            title="3. Custom Pipeline Parameters",
+            subtitle="Manual calibration, face density, and processing flags (Custom Preset)",
         )
-        self.card_adv.pack(fill=tk.X, pady=(0, 6))
+        # Advanced config card is only visible when the user selects the Custom preset
+        if getattr(self, "selected_preset_key", "pro") == "custom":
+            self.card_adv.pack(fill=tk.X, pady=(0, 6))
 
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
@@ -2234,6 +2242,15 @@ class AutoMetashapeStudio:
     def _select_preset(self, key: str) -> None:
         """Visual card selection logic with quiet accent styling."""
         self.selected_preset_key = key
+
+        # Show config parameter card ONLY if Custom preset is chosen
+        if hasattr(self, "card_adv"):
+            if key == "custom":
+                self.card_adv.pack(fill=tk.X, pady=(0, 6))
+                if not getattr(self, "adv_expanded", False):
+                    self._toggle_advanced()
+            else:
+                self.card_adv.pack_forget()
         for p_key, card in self.preset_cards.items():
             outer = card["outer"]
             inner = card["inner"]
@@ -2326,6 +2343,9 @@ class AutoMetashapeStudio:
             self.var_export_point_cloud.set(True)
             self.var_classify_ground.set(True)
             self.var_export_report.set(True)
+        elif key == "custom":
+            # Custom preset preserves current manual user parameters
+            pass
 
         self._sync_dynamic_stepper()
 
@@ -2601,7 +2621,10 @@ class AutoMetashapeStudio:
             self.card_multi.pack_forget()
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
-            self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            if getattr(self, "selected_preset_key", "pro") == "custom":
+                self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            else:
+                self.card_adv.pack_forget()
             self.btn_start.config(
                 text="Start Reconstruction",
                 bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
@@ -3176,6 +3199,8 @@ class AutoMetashapeStudio:
         self.var_output_dir.set(out_dir)
         proj_name = infer_project_name(images_dir=img_dir, output_dir=out_dir) if infer_project_name else os.path.basename(img_dir)
 
+        preset_key = getattr(self, "selected_preset_key", "pro")
+
         cmd = [
             self.metashape_exe,
             "-r",
@@ -3186,48 +3211,77 @@ class AutoMetashapeStudio:
             out_dir,
             "--project-name",
             proj_name,
-            "--align-quality",
-            self.var_align_quality.get(),
-            "--faces",
-            str(self.var_faces.get()),
-            "--texture-pages",
-            str(self.var_tex_pages.get()),
-            "--crop-method",
-            self.var_crop.get(),
-            "--depth-quality",
-            self.var_depth_quality.get(),
-            "--depth-filtering",
-            self.var_depth_filtering.get(),
         ]
 
-        if hasattr(self, "var_guided") and not self.var_guided.get():
-            cmd.append("--no-guided-matching")
-        if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip() != "40000":
-            cmd.extend(["--keypoint-limit", self.var_keypoint_limit.get().strip()])
-        if hasattr(self, "var_tiepoint_limit") and self.var_tiepoint_limit.get().strip() != "25000":
-            cmd.extend(["--tiepoint-limit", self.var_tiepoint_limit.get().strip()])
-        if hasattr(self, "var_adaptive_fitting") and not self.var_adaptive_fitting.get():
-            cmd.append("--no-adaptive-fitting")
-        if not self.var_filter_tiepoints.get():
-            cmd.append("--no-filter-tiepoints")
-        if not self.var_rolling.get():
-            cmd.append("--no-rolling-shutter")
-        if not self.var_stationary.get():
-            cmd.append("--no-filter-stationary")
-        if not self.var_close_holes.get():
-            cmd.append("--no-close-holes")
-        if not self.var_fill_holes.get():
-            cmd.append("--no-fill-holes")
-        if not self.var_ghosting.get():
-            cmd.append("--no-ghosting-filter")
-        if self.var_pause_crop.get():
-            cmd.append("--pause-after-crop")
-        if self.var_rebake.get():
-            cmd.append("--rebake-texture")
-        if self.var_resume.get():
-            cmd.append("--resume")
-        if self.var_ortho.get():
-            cmd.append("--ortho")
+        if preset_key in ("pro", "building", "map"):
+            # Selected preset defines and owns its parameters; do NOT pass manual config overrides
+            cmd.extend(["--preset", preset_key])
+        else:
+            # Custom preset: full manual control, pass all explicit config parameters
+            cmd.extend([
+                "--preset", "custom",
+                "--align-quality", self.var_align_quality.get(),
+                "--faces", str(self.var_faces.get()),
+                "--texture-pages", str(self.var_tex_pages.get()),
+                "--crop-method", self.var_crop.get(),
+                "--depth-quality", self.var_depth_quality.get(),
+                "--depth-filtering", self.var_depth_filtering.get(),
+            ])
+            if hasattr(self, "var_guided") and not self.var_guided.get():
+                cmd.append("--no-guided-matching")
+            if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip() != "40000":
+                cmd.extend(["--keypoint-limit", self.var_keypoint_limit.get().strip()])
+            if hasattr(self, "var_tiepoint_limit") and self.var_tiepoint_limit.get().strip() != "25000":
+                cmd.extend(["--tiepoint-limit", self.var_tiepoint_limit.get().strip()])
+            if hasattr(self, "var_adaptive_fitting") and not self.var_adaptive_fitting.get():
+                cmd.append("--no-adaptive-fitting")
+            if not self.var_filter_tiepoints.get():
+                cmd.append("--no-filter-tiepoints")
+            if not self.var_rolling.get():
+                cmd.append("--no-rolling-shutter")
+            if not self.var_stationary.get():
+                cmd.append("--no-filter-stationary")
+            if not self.var_close_holes.get():
+                cmd.append("--no-close-holes")
+            if not self.var_fill_holes.get():
+                cmd.append("--no-fill-holes")
+            if not self.var_ghosting.get():
+                cmd.append("--no-ghosting-filter")
+            if self.var_ortho.get():
+                cmd.append("--ortho")
+            if hasattr(self, "var_build_dem") and self.var_build_dem.get():
+                cmd.append("--build-dem")
+            if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+                cmd.append("--build-tiled-model")
+                cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+                cmd.extend(["--tile-size", self.var_tile_size.get()])
+            if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+                cmd.append("--build-contours")
+                cmd.extend(["--contour-interval", self.var_contour_interval.get()])
+                cmd.extend(["--contours-format", self.var_contours_format.get()])
+            if hasattr(self, "var_surface_type") and self.var_surface_type.get() != "arbitrary":
+                cmd.extend(["--surface-type", self.var_surface_type.get()])
+            if hasattr(self, "var_detect_markers") and self.var_detect_markers.get():
+                cmd.append("--detect-markers")
+                cmd.extend(["--target-type", self.var_target_type.get()])
+            if hasattr(self, "var_import_reference") and self.var_import_reference.get().strip():
+                cmd.extend(["--import-reference", self.var_import_reference.get().strip()])
+            if hasattr(self, "var_calibrate_colors") and self.var_calibrate_colors.get():
+                cmd.append("--calibrate-colors")
+            if hasattr(self, "var_smooth_mesh") and self.var_smooth_mesh.get():
+                cmd.append("--smooth-mesh")
+            if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
+                cmd.append("--remove-lighting")
+            if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+                cmd.append("--export-fbx")
+            if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+                cmd.append("--export-ply")
+            if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
+                cmd.append("--export-dxf")
+            if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
+                cmd.append("--export-tie-points")
+
+        # Global runtime & deliverable options applicable across all modes
         if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
             cmd.append("--build-point-cloud")
         else:
@@ -3242,45 +3296,18 @@ class AutoMetashapeStudio:
             cmd.append("--classify-ground")
         if hasattr(self, "var_classify_points") and self.var_classify_points.get():
             cmd.append("--classify-points")
-        if hasattr(self, "var_build_dem") and self.var_build_dem.get():
-            cmd.append("--build-dem")
         if hasattr(self, "var_export_report") and not self.var_export_report.get():
             cmd.append("--no-report")
-        if hasattr(self, "selected_preset_key") and self.selected_preset_key in ("pro", "auto", "building", "map"):
-            cmd.extend(["--preset", self.selected_preset_key])
+        if self.var_pause_crop.get():
+            cmd.append("--pause-after-crop")
+        if self.var_rebake.get():
+            cmd.append("--rebake-texture")
+        if self.var_resume.get():
+            cmd.append("--resume")
         if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "disable":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":
             cmd.extend(["--chunk-align-method", self.var_chunk_align_method.get()])
-        if hasattr(self, "var_surface_type") and self.var_surface_type.get() != "arbitrary":
-            cmd.extend(["--surface-type", self.var_surface_type.get()])
-        if hasattr(self, "var_detect_markers") and self.var_detect_markers.get():
-            cmd.append("--detect-markers")
-            cmd.extend(["--target-type", self.var_target_type.get()])
-        if hasattr(self, "var_import_reference") and self.var_import_reference.get().strip():
-            cmd.extend(["--import-reference", self.var_import_reference.get().strip()])
-        if hasattr(self, "var_calibrate_colors") and self.var_calibrate_colors.get():
-            cmd.append("--calibrate-colors")
-        if hasattr(self, "var_smooth_mesh") and self.var_smooth_mesh.get():
-            cmd.append("--smooth-mesh")
-        if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
-            cmd.append("--remove-lighting")
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-            cmd.append("--build-tiled-model")
-            cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
-            cmd.extend(["--tile-size", self.var_tile_size.get()])
-        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
-            cmd.append("--build-contours")
-            cmd.extend(["--contour-interval", self.var_contour_interval.get()])
-            cmd.extend(["--contours-format", self.var_contours_format.get()])
-        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
-            cmd.append("--export-fbx")
-        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
-            cmd.append("--export-ply")
-        if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
-            cmd.append("--export-dxf")
-        if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
-            cmd.append("--export-tie-points")
 
         self.stepper.reset()
         self.frame_crop_banner.pack_forget()

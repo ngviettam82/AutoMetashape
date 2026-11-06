@@ -1525,7 +1525,10 @@ def run_reconstruction(
     survey_physics = None
     pro_plan = None
     usgs_stats = None
-    is_auto = (preset in ("pro", "auto")) or auto_params or (preset is None and crop_method is None and custom_faces is None)
+    if preset in ("building", "map", "custom"):
+        is_auto = False
+    else:
+        is_auto = (preset in ("pro", "auto")) or auto_params or (preset is None and crop_method is None and custom_faces is None)
     if is_auto:
         try:
             survey_physics = analyze_survey_physics(images_dir, output_dir=output_dir)
@@ -1601,6 +1604,9 @@ def run_reconstruction(
             classify_ground = False
         if close_holes is None:
             close_holes = True
+    elif preset == "custom":
+        # Custom manual configuration: user-supplied parameters are strictly preserved
+        pass
 
     # Final safety fallbacks
     if crop_method is None:
@@ -1621,7 +1627,12 @@ def run_reconstruction(
         close_holes = True
 
     print("=========================================================================")
-    preset_label = f" [{preset.upper()} PRESET]" if preset else (" [AUTONOMOUS INFERENCE]" if is_auto else "")
+    if preset == "custom":
+        preset_label = " [CUSTOM MANUAL CONFIGURATION]"
+    elif preset:
+        preset_label = f" [{preset.upper()} PRESET]"
+    else:
+        preset_label = " [AUTONOMOUS INFERENCE]" if is_auto else ""
     print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE{preset_label}")
     print("=========================================================================", flush=True)
     print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
@@ -2490,11 +2501,11 @@ if __name__ == "__main__":
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
     parser.add_argument(
         "--preset",
-        choices=["pro", "auto", "building", "map"],
+        choices=["pro", "auto", "building", "map", "custom"],
         default="pro",
-        help="Reconstruction preset: 'pro' (default: physics-driven survey optics, USGS 4-pass bundle adjustment, 1:1 texel budget), 'auto' (learned from telemetry), 'building', or 'map'",
+        help="Reconstruction preset: 'pro' (default: physics-driven survey optics, USGS 4-pass bundle adjustment, 1:1 texel budget), 'auto' (learned from telemetry), 'building', 'map', or 'custom' (manual configuration)",
     )
-    parser.add_argument("--pro", action="store_true", default=True, help="Execute the Pro Photogrammetry & Geomatics Engine (default: True)")
+    parser.add_argument("--pro", action="store_true", default=False, help="Execute the Pro Photogrammetry & Geomatics Engine")
     parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
     parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
     parser.add_argument("--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification")
@@ -2645,7 +2656,7 @@ if __name__ == "__main__":
 
     crop_method = "none" if args.no_crop else args.crop_method
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
-    auto_params = args.auto or (args.preset in ("pro", "auto")) or args.pro
+    auto_params = args.auto or args.pro or (args.preset in ("pro", "auto"))
 
     run_reconstruction(
         images_dir=args.images,
