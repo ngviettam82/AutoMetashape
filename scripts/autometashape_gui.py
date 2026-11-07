@@ -25,7 +25,6 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
-import re
 import shutil
 import subprocess
 import sys
@@ -33,7 +32,6 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 import webbrowser
 
 try:
@@ -113,20 +111,61 @@ SUPPORTED_IMAGE_EXTS = {
     ".raw", ".rwl", ".pef", ".ptx", ".seq", ".ara",
 }
 
-DEFAULT_METASHAPE_PATHS = [
-    r"C:\Program Files\Agisoft\Metashape Pro\metashape.exe",
-    r"C:\Program Files\Agisoft\PhotoScan Pro\photoscan.exe",
-]
-
-
 def find_metashape_path() -> str | None:
-    """Locate Agisoft Metashape Pro executable on the system."""
-    for p in DEFAULT_METASHAPE_PATHS:
-        if os.path.isfile(p):
+    """Locate Agisoft Metashape Pro executable dynamically across platforms."""
+    # 1. Bundled relative to current Python if running inside Metashape's embedded Python
+    candidate = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "metashape.exe"))
+    if os.path.isfile(candidate):
+        return candidate
+
+    # 2. Check system PATH
+    for name in ("metashape", "metashape.exe", "photoscan", "photoscan.exe"):
+        p = shutil.which(name)
+        if p and os.path.isfile(p):
             return p
-    which_p = shutil.which("metashape")
-    if which_p and os.path.isfile(which_p):
-        return which_p
+
+    # 3. Dynamic Windows environment paths
+    if sys.platform == "win32":
+        env_dirs = [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("ProgramW6432"),
+            os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
+        ]
+        subpaths = [
+            os.path.join("Agisoft", "Metashape Pro", "metashape.exe"),
+            os.path.join("Agisoft", "PhotoScan Pro", "photoscan.exe"),
+            os.path.join("Programs", "Agisoft", "Metashape Pro", "metashape.exe"),
+        ]
+        for base in env_dirs:
+            if base:
+                for sub in subpaths:
+                    full_p = os.path.join(base, sub)
+                    if os.path.isfile(full_p):
+                        return full_p
+
+        # Dynamic drive scanning (checks all mounted drive letters without assuming C:)
+        import string
+
+        for drive in string.ascii_uppercase:
+            for sub in (
+                rf"{drive}:\Program Files\Agisoft\Metashape Pro\metashape.exe",
+                rf"{drive}:\Program Files (x86)\Agisoft\Metashape Pro\metashape.exe",
+                rf"{drive}:\Agisoft\Metashape Pro\metashape.exe",
+            ):
+                if os.path.isfile(sub):
+                    return sub
+
+    elif sys.platform == "darwin":
+        cand = "/Applications/MetashapePro.app/Contents/MacOS/MetashapePro"
+        if os.path.isfile(cand):
+            return cand
+    else:
+        # Linux standard locations
+        for cand in ("/opt/metashape-pro/metashape.sh", "/usr/local/bin/metashape", "/usr/bin/metashape"):
+            if os.path.isfile(cand):
+                return cand
+
     return None
 
 
@@ -227,13 +266,6 @@ STAGES_EXPORT = [
     ("3", "Texture", "Atlas & delighting"),
     ("4", "3D Models", "Export GLB & OBJ"),
     ("5", "Deliverables", "Ortho, DEM & cloud"),
-]
-
-STAGES_MULTI = [
-    ("1", "Discover", "Scan & detect inputs"),
-    ("2", "Queue", "Order survey batch"),
-    ("3", "Execute", "Sequential run"),
-    ("4", "Telemetry", "GSD & error report"),
 ]
 
 
@@ -612,7 +644,6 @@ class AutoMetashapeStudio:
         self.mode_stage_keys: dict[str, list[str]] = {
             "recon": ["ingest", "match", "align", "depth", "mesh", "texture", "export"],
             "export": ["project", "mesh", "texture", "models", "deliverables"],
-            "multi": ["discover", "select", "execute", "done"],
         }
         self.mode_states = {
             "recon": {
@@ -636,18 +667,6 @@ class AutoMetashapeStudio:
                 "pause_msg": "",
                 "desc": "",
                 "status_text": "Status: Ready to export",
-                "status_fg": UITheme.TEXT_SECONDARY,
-                "timer_text": "Elapsed: --:--",
-            },
-            "multi": {
-                "stages": list(STAGES_MULTI),
-                "active_idx": -1,
-                "is_done": False,
-                "is_paused": False,
-                "pause_idx": -1,
-                "pause_msg": "",
-                "desc": "",
-                "status_text": "Status: Ready to batch process",
                 "status_fg": UITheme.TEXT_SECONDARY,
                 "timer_text": "Elapsed: --:--",
             },
@@ -752,7 +771,6 @@ class AutoMetashapeStudio:
 
     def _init_variables(self) -> None:
         self.var_images_dir = tk.StringVar()
-        self.var_output_dir = tk.StringVar()
         self.var_align_quality = tk.StringVar(value="high")
         self.var_keypoint_limit = tk.StringVar(value="200000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
@@ -1473,7 +1491,7 @@ class AutoMetashapeStudio:
 
         lbl_export_info = tk.Label(
             self.card_folder.body,
-            text="ℹ Each project creates and exports to: <Export Folder>/<project_name>/ (e.g. D:/Reconstructions/0211/0211.psx)",
+            text="ℹ Each project creates and exports to: <Export Folder>/<project_name>/<project_name>.psx",
             font=("Segoe UI", 7),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_DIM,
@@ -1740,12 +1758,6 @@ class AutoMetashapeStudio:
         self.var_export_tie_points.set(False)
         self.var_build_tiled_model.set(False)
         self.var_export_report.set(False)
-        self._on_recon_export_checklist_changed()
-
-    def _set_standard_3d_exports(self) -> None:
-        self._clear_recon_export_checklist()
-        self.var_export_glb.set(True)
-        self.var_export_obj.set(True)
         self._on_recon_export_checklist_changed()
 
     def _select_all_recon_exports(self) -> None:
@@ -2258,11 +2270,14 @@ class AutoMetashapeStudio:
             self.var_export_root.set(norm)
             self._render_queue_items()
 
-    def _add_project_to_queue(self) -> None:
-        chosen = filedialog.askdirectory(title="Select Drone Survey Project Folder to Add")
-        if not chosen or not os.path.isdir(chosen):
-            return
-        folder = os.path.normpath(chosen)
+    def _add_project_to_queue(self, folder: str | None = None) -> None:
+        if not folder:
+            chosen = filedialog.askdirectory(title="Select Drone Survey Project Folder to Add")
+            if not chosen or not os.path.isdir(chosen):
+                return
+            folder = os.path.normpath(chosen)
+        else:
+            folder = os.path.normpath(folder)
 
         # If queue is empty but primary input has a valid folder, add it first as Item 1
         prim_dir = self.var_images_dir.get().strip()
@@ -2766,41 +2781,6 @@ class AutoMetashapeStudio:
         ]
         return keys, stages
 
-    def get_dynamic_multi_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Dynamically compute multi-project batch stages based on selected queue."""
-        selected: list[dict] = []
-        if hasattr(self, "multi_discovered_projects") and hasattr(self, "multi_project_vars"):
-            selected = [
-                p for p in self.multi_discovered_projects
-                if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()
-            ]
-
-        keys: list[str] = []
-        stages: list[tuple[str, str, str]] = []
-
-        if 1 <= len(selected) <= 7:
-            for i, p in enumerate(selected):
-                keys.append(f"proj_{i}")
-                stages.append((str(i + 1), p["name"][:12], f"{p.get('photo_count', 0)} photos"))
-        elif len(selected) > 7:
-            keys = ["discover", "queue", "execute", "done"]
-            stages = [
-                ("1", "Discover", "Discovered surveys"),
-                ("2", "Queue", f"{len(selected)} projects in batch"),
-                ("3", "Execute", "Sequential execution"),
-                ("4", "Deliverables", "Batch completion"),
-            ]
-        else:
-            keys = ["discover", "select", "execute", "done"]
-            stages = [
-                ("1", "Discover", "Scan & detect inputs"),
-                ("2", "Select", "Choose projects"),
-                ("3", "Execute", "Sequential run"),
-                ("4", "Deliverables", "Batch completion"),
-            ]
-
-        return keys, stages
-
     def _find_stage_index_by_key(self, mode: str, key: str) -> int:
         stages = getattr(self, "mode_stage_keys", {}).get(mode, [])
         try:
@@ -2815,17 +2795,14 @@ class AutoMetashapeStudio:
 
         r_keys, r_stages = self.get_dynamic_recon_stages()
         e_keys, e_stages = self.get_dynamic_export_stages()
-        m_keys, m_stages = self.get_dynamic_multi_stages()
 
         if hasattr(self, "mode_stage_keys"):
             self.mode_stage_keys["recon"] = r_keys
             self.mode_stage_keys["export"] = e_keys
-            self.mode_stage_keys["multi"] = m_keys
 
         if hasattr(self, "mode_states"):
             self.mode_states["recon"]["stages"] = list(r_stages)
             self.mode_states["export"]["stages"] = list(e_stages)
-            self.mode_states["multi"]["stages"] = list(m_stages)
 
         if not hasattr(self, "stepper") or not hasattr(self, "card_stepper"):
             return
@@ -2838,12 +2815,6 @@ class AutoMetashapeStudio:
             self.card_stepper.set_subtitle(f"{len(cur_stages)}-stage automated photogrammetry trajectory")
         elif cur_mode == "export":
             self.card_stepper.set_subtitle(f"{len(cur_stages)}-stage production asset export & processing")
-        elif cur_mode == "multi":
-            sel_cnt = len(self.batch_queue) if getattr(self, "batch_running", False) else len([
-                p for p in getattr(self, "multi_discovered_projects", [])
-                if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()
-            ])
-            self.card_stepper.set_subtitle(f"Batch execution trajectory across {sel_cnt} project(s)")
 
     def _sync_stepper_view(self) -> None:
         """Dynamically adapt milestone steppers and Start button based on mode and queue size."""
@@ -2973,41 +2944,15 @@ class AutoMetashapeStudio:
         if p:
             self.var_import_reference.set(p)
 
-    def _browse_images_dir(self) -> None:
-        chosen = filedialog.askdirectory(
-            title="Select Raw Photos Directory",
-            initialdir=self.var_images_dir.get().strip() or os.path.expanduser("~"),
-        )
-        if chosen:
-            self.var_images_dir.set(os.path.normpath(chosen))
-
-    # -----------------------------------------------------------------------
-    # Multi-Project Studio Batch Helpers
-    # -----------------------------------------------------------------------
-    def _open_dir_in_os(self, path: str) -> None:
-        if path and os.path.exists(path):
-            try:
-                os.startfile(path)
-            except Exception as e:
-                self._log(f"[Multi-Project Studio] Could not open directory: {e}", "warning")
-
     def _open_web_studio(self) -> None:
         web_file = os.path.join(self.repo_dir, "web", "projects_dashboard.html")
         if not os.path.isfile(web_file):
             web_file = os.path.abspath("web/projects_dashboard.html")
         if os.path.isfile(web_file):
             webbrowser.open_new_tab(f"file:///{os.path.normpath(web_file).replace(os.sep, '/')}")
-            self._log(f"[Multi-Project Studio] Opened Web Studio Dashboard in browser: {web_file}", "stage")
+            self._log(f"[Web Studio] Opened Web Studio Dashboard in browser: {web_file}", "stage")
         else:
             messagebox.showerror("Error", f"Web dashboard file not found:\n{web_file}")
-
-    def _browse_output_dir(self) -> None:
-        chosen = filedialog.askdirectory(
-            title="Select Output Directory",
-            initialdir=self.var_output_dir.get().strip() or self.var_images_dir.get().strip() or os.path.expanduser("~"),
-        )
-        if chosen:
-            self.var_output_dir.set(os.path.normpath(chosen))
 
     def _browse_psx_file(self) -> None:
         chosen = filedialog.askopenfilename(
@@ -3193,7 +3138,7 @@ class AutoMetashapeStudio:
         if psx and os.path.isfile(psx):
             subprocess.Popen([self.metashape_exe, psx])
         else:
-            messagebox.showinfo("Project Not Found", f"No Metashape project found at:\n{psx or 'model directory'}")
+            messagebox.showinfo("Project Not Found", f"No Metashape project found at:\n{psx or 'project directory'}")
 
     def _copy_log(self) -> None:
         self.root.clipboard_clear()
@@ -3970,7 +3915,10 @@ class AutoMetashapeStudio:
                     return
                 else:
                     self.batch_running = False
-                    self._complete_stepper_mode("multi")
+                    if hasattr(self, "stepper_multi"):
+                        self.stepper_multi.set_all_done()
+                    if hasattr(self, "stepper"):
+                        self.stepper.set_all_done()
                     self.lbl_status.config(text="✓ Status: Batch Complete", fg=UITheme.ACCENT_GREEN_TXT)
                     self._log("\n" + "=" * 70, "success")
                     self._log(f"[BATCH COMPLETE] All {len(self.batch_queue)} survey projects processed successfully!", "success")

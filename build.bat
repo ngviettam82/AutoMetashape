@@ -8,10 +8,12 @@ cd /d "%~dp0"
 
 REM Detect Agisoft Metashape Python or system Python
 set "PYTHON_CMD="
-if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
-    set "PYTHON_CMD=C:\Program Files\Agisoft\Metashape Pro\python\python.exe"
-) else if exist "C:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe" (
-    set "PYTHON_CMD=C:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe"
+if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_CMD=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
+) else if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_CMD=%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe"
+) else if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_CMD=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe"
 ) else (
     where python >nul 2>nul
     if !ERRORLEVEL! equ 0 set "PYTHON_CMD=python"

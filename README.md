@@ -63,7 +63,7 @@ Run photogrammetry reconstruction directly from PowerShell or terminal:
     --detect-markers --remove-lighting --export-fbx
 ```
 
-All production deliverables are automatically placed in `C:/path/to/your/images/model/`.
+All production deliverables are automatically placed in `<export_folder>/<project_name>/` (or `<images_dir>/<project_name>/`).
 
 ---
 

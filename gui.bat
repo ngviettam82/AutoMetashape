@@ -2,12 +2,14 @@
 setlocal EnableDelayedExpansion
 cd /d "%~dp0"
 
-REM 1. Detect Agisoft Metashape Pro bundled Python
+REM 1. Detect Agisoft Metashape Pro bundled Python or system Python
 set "PYTHON_EXE="
-if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
-    set "PYTHON_EXE=C:\Program Files\Agisoft\Metashape Pro\python\python.exe"
-) else if exist "C:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe" (
-    set "PYTHON_EXE=C:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe"
+if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
+) else if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe"
+) else if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe"
 ) else (
     REM 2. Fall back to system Python on PATH
     where python >nul 2>nul

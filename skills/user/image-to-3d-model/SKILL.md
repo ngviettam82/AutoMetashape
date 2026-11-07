@@ -161,7 +161,7 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
      ```
    - Nested subfolders within a project (e.g. `Project_A/Flight_1`, `Project_A/Flight_2`) are solved in a single global bundle adjustment by default, ensuring zero chunk-merging false alignment.
 3. **Verification Gate**:
-   - Check `<project>/model/` contains deliverables (`model.obj`, `model.glb`, `building_reconstruction.psx`).
+   - Check `<project>/<project_name>/` contains deliverables (`<project_name>.obj`, `<project_name>.glb`, `<project_name>.psx`).
    - Confirm camera alignment registration rate $\ge 90\%$.
    - Confirm exit code 0 and zero unhandled exceptions.
 4. **Progressive Advancement**: Advance to Project $N+1$ only after Project $N$ passes verification.

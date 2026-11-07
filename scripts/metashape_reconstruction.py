@@ -1289,7 +1289,30 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
                 # MB_YESNO = 4, MB_ICONQUESTION = 0x20, MB_SYSTEMMODAL = 0x1000, IDYES = 6
                 metashape_bin = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "metashape.exe"))
                 if not os.path.isfile(metashape_bin):
-                    metashape_bin = r"C:\Program Files\Agisoft\Metashape Pro\metashape.exe"
+                    from shutil import which
+
+                    which_p = which("metashape.exe") or which("metashape")
+                    if which_p and os.path.isfile(which_p):
+                        metashape_bin = which_p
+                    else:
+                        for base in (
+                            os.environ.get("PROGRAMFILES"),
+                            os.environ.get("ProgramW6432"),
+                            os.environ.get("PROGRAMFILES(X86)"),
+                            os.environ.get("LOCALAPPDATA"),
+                        ):
+                            if base:
+                                for sub in (
+                                    os.path.join("Agisoft", "Metashape Pro", "metashape.exe"),
+                                    os.path.join("Agisoft", "PhotoScan Pro", "photoscan.exe"),
+                                    os.path.join("Programs", "Agisoft", "Metashape Pro", "metashape.exe"),
+                                ):
+                                    cand = os.path.join(base, sub)
+                                    if os.path.isfile(cand):
+                                        metashape_bin = cand
+                                        break
+                                if os.path.isfile(metashape_bin):
+                                    break
                 if not os.path.isfile(metashape_bin):
                     metashape_bin = "metashape.exe"
 

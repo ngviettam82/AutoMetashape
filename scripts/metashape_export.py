@@ -15,7 +15,6 @@ production-ready 3D assets without re-running camera matching or depth maps:
 from __future__ import annotations
 import argparse
 import os
-import sys
 import time
 import Metashape
 
