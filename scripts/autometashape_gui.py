@@ -3925,24 +3925,10 @@ class AutoMetashapeStudio:
             self.stepper.reset(is_export=(mode == "export"))
 
     def _update_stepper_mode(self, mode: str, idx: int, desc: str) -> None:
-        def _apply():
-            if mode in self.mode_states:
-                st = self.mode_states[mode]
-                if idx < st.get("active_idx", -1):
-                    # Do not rewind active milestone
-                    return
-                st["active_idx"] = idx
-                st["desc"] = desc
-                st["is_done"] = False
-                st["is_paused"] = False
-                if 0 <= idx < len(st["stages"]):
-                    num = st["stages"][idx][0]
-                    name = st["stages"][idx][1]
-                    st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
-                    st["status_fg"] = UITheme.ACCENT_CYAN
-            if self.active_mode == mode:
-                self.stepper.set_active(idx, desc)
-        self.root.after(0, _apply)
+        """Applies a stage transition by numeric index safely via the main thread."""
+        keys = getattr(self, "mode_stage_keys", {}).get(mode, [])
+        if 0 <= idx < len(keys):
+            self.root.after(0, lambda: self._handle_stage_transition(mode, keys[idx], desc))
 
     def _complete_stepper_mode(self, mode: str) -> None:
         def _apply():
