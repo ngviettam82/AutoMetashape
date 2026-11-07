@@ -280,6 +280,21 @@ class StudioPipelineStepper(tk.Frame):
 
     def build_stages(self, stages: list[tuple[str, str, str]]) -> None:
         """Dynamically construct stage pill cards scaled to milestone count."""
+        # Flicker-free in-place label update if stage count and widgets already exist
+        if (
+            hasattr(self, "stages")
+            and len(self.stage_frames) == len(stages)
+            and len(self.stage_indicators) == len(stages)
+            and len(self.stage_titles) == len(stages)
+            and len(self.stage_subtitles) == len(stages)
+        ):
+            self.stages = stages
+            for i, (num, name, subtitle) in enumerate(stages):
+                self.stage_indicators[i].config(text=f"{num}.")
+                self.stage_titles[i].config(text=name)
+                self.stage_subtitles[i].config(text=subtitle)
+            return
+
         self.stages = stages
         for child in self.cards_row.winfo_children():
             child.destroy()
@@ -1478,60 +1493,43 @@ class AutoMetashapeStudio:
         )
         self.card_recon_export.pack(fill=tk.X, pady=(0, 6))
 
-        # Action bar: Quick selection chips & summary badge
+        # Action bar: Quick selection chips (Select All / Clear All) & summary badge
         bar_actions = tk.Frame(self.card_recon_export.body, bg=UITheme.BG_SURFACE)
         bar_actions.pack(fill=tk.X, pady=(0, 6))
 
-        btn_none = tk.Button(
+        btn_all = tk.Button(
             bar_actions,
-            text="Clear (Project Only)",
+            text="Select All",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            relief=tk.FLAT,
+            command=self._select_all_recon_exports,
+        )
+        btn_all.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_clear = tk.Button(
+            bar_actions,
+            text="Clear All",
             font=("Segoe UI", 8),
             bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_SECONDARY,
             activebackground=UITheme.BORDER_HOVER,
             activeforeground="white",
             bd=0,
-            padx=8,
+            padx=10,
             pady=3,
             cursor="hand2",
             relief=tk.FLAT,
             command=self._clear_recon_export_checklist,
         )
-        btn_none.pack(side=tk.LEFT, padx=(0, 4))
-
-        btn_std = tk.Button(
-            bar_actions,
-            text="Standard 3D (GLB + OBJ)",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=0,
-            padx=8,
-            pady=3,
-            cursor="hand2",
-            relief=tk.FLAT,
-            command=self._set_standard_3d_exports,
-        )
-        btn_std.pack(side=tk.LEFT, padx=(0, 4))
-
-        btn_all = tk.Button(
-            bar_actions,
-            text="Select All Deliverables",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=0,
-            padx=8,
-            pady=3,
-            cursor="hand2",
-            relief=tk.FLAT,
-            command=self._select_all_recon_exports,
-        )
-        btn_all.pack(side=tk.LEFT, padx=(0, 8))
+        btn_clear.pack(side=tk.LEFT, padx=(0, 8))
 
         self.lbl_recon_export_summary = tk.Label(
             bar_actions,
@@ -1682,7 +1680,6 @@ class AutoMetashapeStudio:
                     text=f"{count} deliverables selected for export",
                     fg=UITheme.ACCENT_CYAN,
                 )
-        self._sync_dynamic_stepper()
 
 
     # -----------------------------------------------------------------------
@@ -2610,35 +2607,6 @@ class AutoMetashapeStudio:
             pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
         tex_sub = f"{pages_str} atlas"
 
-        exp_parts = []
-        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
-            exp_parts.append("GLB")
-        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
-            exp_parts.append("OBJ")
-        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
-            exp_parts.append("FBX")
-        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
-            exp_parts.append("PLY")
-        if hasattr(self, "var_ortho") and self.var_ortho.get():
-            exp_parts.append("Ortho")
-        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
-            exp_parts.append("DEM")
-        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
-            exp_parts.append("Cloud")
-        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
-            exp_parts.append("Contours")
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-            exp_parts.append("Tiles")
-        if hasattr(self, "var_export_report") and self.var_export_report.get():
-            exp_parts.append("Report")
-
-        if not exp_parts:
-            export_sub = "Metashape project only"
-        elif len(exp_parts) <= 3:
-            export_sub = ", ".join(exp_parts)
-        else:
-            export_sub = f"{exp_parts[0]}, {exp_parts[1]} & {len(exp_parts)-2} more"
-
         stages: list[tuple[str, str, str]] = [
             ("1", "Ingest", "Photos & blur filter"),
             ("2", "Match", "GPU feature matching"),
@@ -2646,7 +2614,7 @@ class AutoMetashapeStudio:
             ("4", "Depth", depth_sub),
             ("5", "Mesh", mesh_sub),
             ("6", "Texture", tex_sub),
-            ("7", "Export", export_sub),
+            ("7", "Export", "Project & deliverables"),
         ]
         return keys, stages
 
