@@ -178,14 +178,14 @@ class StudioCard(tk.Frame):
         header_bar = tk.Frame(self.inner, bg=UITheme.BG_SURFACE)
         header_bar.pack(fill=tk.X, padx=14, pady=(10, 4))
 
-        lbl_title = tk.Label(
+        self.lbl_title = tk.Label(
             header_bar,
             text=self.title_text,
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_PRIMARY,
         )
-        lbl_title.pack(side=tk.LEFT)
+        self.lbl_title.pack(side=tk.LEFT)
 
         if self.subtitle_text:
             self.lbl_sub = tk.Label(
@@ -196,6 +196,11 @@ class StudioCard(tk.Frame):
                 fg=UITheme.TEXT_MUTED,
             )
             self.lbl_sub.pack(side=tk.RIGHT)
+
+    def set_title(self, text: str) -> None:
+        self.title_text = text
+        if hasattr(self, "lbl_title"):
+            self.lbl_title.config(text=text)
 
     def set_subtitle(self, text: str) -> None:
         self.subtitle_text = text
@@ -837,22 +842,13 @@ class AutoMetashapeStudio:
             value="No folder selected. Click 'Browse...' to choose your raw photos folder."
         )
 
-        # Multi-Project Studio Batch Variables
-        default_multi_root = r"C:\Users\ADMIN\Documents\Reality Scan\00. CATP"
-        if not os.path.exists(default_multi_root):
-            alt_root = r"C:\Users\ADMIN\Documents\Reality Scan"
-            default_multi_root = alt_root if os.path.exists(alt_root) else ""
-        self.var_multi_root = tk.StringVar(value=default_multi_root)
-        self.var_multi_preset = tk.StringVar(value="pro (Production Geomatics)")
-        self.var_multi_faces = tk.StringVar(value="2000000")
-        self.var_multi_tex_pages = tk.StringVar(value="22")
-        self.var_multi_crop = tk.StringVar(value="gps-square")
-        self.multi_discovered_projects: list[dict] = []
-        self.multi_project_vars: dict[str, tk.BooleanVar] = {}
+        # Master Export Folder & Unified Multi-Project Queue
+        self.var_export_root = tk.StringVar(value="")
+        self.project_items: list[dict] = []
         self.batch_running: bool = False
         self.batch_queue: list[dict] = []
         self.batch_current_idx: int = -1
-        self.lbl_multi_scan_status = tk.StringVar(value="0 projects detected")
+        self.lbl_queue_status = tk.StringVar(value="0 projects in queue")
 
         # Synchronize dynamic pipeline milestones whenever options toggle
         for _v in [
@@ -960,7 +956,7 @@ class AutoMetashapeStudio:
 
         self.btn_tab_export = tk.Button(
             bar,
-            text="Texture Re-Bake & Export",
+            text="Asset Export",
             font=("Segoe UI", 9),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_SECONDARY,
@@ -974,25 +970,7 @@ class AutoMetashapeStudio:
             cursor="hand2",
             command=lambda: self._set_mode("export"),
         )
-        self.btn_tab_export.pack(side=tk.LEFT, padx=(0, 6))
-
-        self.btn_tab_multi = tk.Button(
-            bar,
-            text="Multi-Project Studio",
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_SECONDARY,
-            activebackground=UITheme.BG_SURFACE_RAISED,
-            activeforeground=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=16,
-            pady=5,
-            cursor="hand2",
-            command=lambda: self._set_mode("multi"),
-        )
-        self.btn_tab_multi.pack(side=tk.LEFT)
+        self.btn_tab_export.pack(side=tk.LEFT)
 
         btn_web_panel = tk.Button(
             bar,
@@ -1178,7 +1156,6 @@ class AutoMetashapeStudio:
         self._build_recon_export_checklist_card(self.col_left)
         self._build_advanced_settings_card(self.col_left)
         self._build_export_card(self.col_left)
-        self._build_multi_project_card(self.col_left)
 
         # Populate Right Column (Execution Log with matching height)
         self._build_log_card(self.col_right)
@@ -1251,18 +1228,18 @@ class AutoMetashapeStudio:
     def _build_folder_card(self, parent: tk.Widget) -> None:
         self.card_folder = StudioCard(
             parent,
-            title="1. Photos & Output Destination",
-            subtitle="Survey photos & model export path",
+            title="1. Project Photos & Export Destination",
+            subtitle="Select project photos, manage batch queue, and specify export folder",
         )
         self.card_folder.pack(fill=tk.X, pady=(0, 6))
 
-        # Raw Images Row
+        # 1. Primary Raw Photos Row
         row_img = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
         row_img.pack(fill=tk.X, pady=(0, 2))
 
         lbl_img_title = tk.Label(
             row_img,
-            text="Photos Directory",
+            text="Primary Project Photos Directory",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_PRIMARY,
@@ -1280,12 +1257,30 @@ class AutoMetashapeStudio:
             bd=1,
             relief=tk.SOLID,
             highlightbackground=UITheme.BORDER,
-            padx=12,
+            padx=10,
             pady=2,
             cursor="hand2",
             command=self._browse_images_dir,
         )
         btn_browse_img.pack(side=tk.RIGHT)
+
+        btn_add_proj = tk.Button(
+            row_img,
+            text="+ Add Project to Queue...",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._add_project_to_queue,
+        )
+        btn_add_proj.pack(side=tk.RIGHT, padx=(0, 6))
 
         self.var_images_dir.trace_add("write", self._on_images_dir_changed)
         ent_img = tk.Entry(
@@ -1302,11 +1297,11 @@ class AutoMetashapeStudio:
         ent_img.pack(fill=tk.X, pady=(3, 4))
 
         # Photo count & size summary line
-        stats_frame = tk.Frame(self.card_folder.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
-        stats_frame.pack(fill=tk.X, pady=(0, 8))
+        self.stats_frame = tk.Frame(self.card_folder.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
+        self.stats_frame.pack(fill=tk.X, pady=(0, 6))
 
         lbl_stats = tk.Label(
-            stats_frame,
+            self.stats_frame,
             textvariable=self.lbl_photo_status,
             font=("Segoe UI", 8),
             bg=UITheme.BG_ROOT,
@@ -1315,13 +1310,130 @@ class AutoMetashapeStudio:
         )
         lbl_stats.pack(fill=tk.X)
 
-        # Output Folder Row
+        # 2. Multi-Project Queue Box (Container)
+        self.frame_queue_container = tk.Frame(
+            self.card_folder.body,
+            bg=UITheme.BG_ROOT,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=8,
+            pady=6,
+        )
+        self.frame_queue_container.pack_forget()
+
+        row_q_header = tk.Frame(self.frame_queue_container, bg=UITheme.BG_ROOT)
+        row_q_header.pack(fill=tk.X, pady=(0, 4))
+
+        self.lbl_queue_count = tk.Label(
+            row_q_header,
+            textvariable=self.lbl_queue_status,
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.ACCENT_CYAN,
+        )
+        self.lbl_queue_count.pack(side=tk.LEFT)
+
+        btn_q_clear = tk.Button(
+            row_q_header,
+            text="Clear Queue",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=6,
+            pady=1,
+            cursor="hand2",
+            command=self._clear_project_queue,
+        )
+        btn_q_clear.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_q_add = tk.Button(
+            row_q_header,
+            text="+ Add Project...",
+            font=("Segoe UI", 7, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=6,
+            pady=1,
+            cursor="hand2",
+            command=self._add_project_to_queue,
+        )
+        btn_q_add.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_q_none = tk.Button(
+            row_q_header,
+            text="Deselect All",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=6,
+            pady=1,
+            cursor="hand2",
+            command=lambda: self._set_all_queue_checked(False),
+        )
+        btn_q_none.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_q_all = tk.Button(
+            row_q_header,
+            text="Select All",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=6,
+            pady=1,
+            cursor="hand2",
+            command=lambda: self._set_all_queue_checked(True),
+        )
+        btn_q_all.pack(side=tk.RIGHT)
+
+        # Scrollable items frame
+        self.canvas_queue = tk.Canvas(
+            self.frame_queue_container,
+            bg=UITheme.BG_INPUT,
+            bd=0,
+            highlightthickness=0,
+            height=120,
+        )
+        queue_scroll = ttk.Scrollbar(self.frame_queue_container, orient=tk.VERTICAL, command=self.canvas_queue.yview)
+        self.frame_queue_items = tk.Frame(self.canvas_queue, bg=UITheme.BG_INPUT)
+        self.canvas_queue.create_window((0, 0), window=self.frame_queue_items, anchor="nw")
+        self.canvas_queue.configure(yscrollcommand=queue_scroll.set)
+        self.canvas_queue.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        queue_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.frame_queue_items.bind(
+            "<Configure>",
+            lambda e: self.canvas_queue.configure(scrollregion=self.canvas_queue.bbox("all")),
+        )
+
+        lbl_q_hint = tk.Label(
+            self.frame_queue_container,
+            text="ℹ Check or uncheck projects to selectively include them in the reconstruction run.",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_DIM,
+            anchor=tk.W,
+        )
+        lbl_q_hint.pack(fill=tk.X, pady=(4, 0))
+
+        # 3. Master Export Destination Folder
         row_out = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
-        row_out.pack(fill=tk.X, pady=(0, 2))
+        row_out.pack(fill=tk.X, pady=(6, 2))
 
         lbl_out_title = tk.Label(
             row_out,
-            text="Deliverables Destination (GLB, OBJ, TIFF, PSX)",
+            text="Master Export Folder (Required)",
             font=("Segoe UI", 9, "bold"),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_PRIMARY,
@@ -1330,24 +1442,25 @@ class AutoMetashapeStudio:
 
         btn_browse_out = tk.Button(
             row_out,
-            text="Change...",
+            text="Browse Export Folder...",
             font=("Segoe UI", 8),
             bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.TEXT_PRIMARY,
             activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
             bd=1,
             relief=tk.SOLID,
             highlightbackground=UITheme.BORDER,
             padx=10,
             pady=2,
             cursor="hand2",
-            command=self._browse_output_dir,
+            command=self._browse_export_root,
         )
         btn_browse_out.pack(side=tk.RIGHT)
 
         ent_out = tk.Entry(
             self.card_folder.body,
-            textvariable=self.var_output_dir,
+            textvariable=self.var_export_root,
             font=("Segoe UI", 9),
             bg=UITheme.BG_INPUT,
             fg=UITheme.TEXT_PRIMARY,
@@ -1358,8 +1471,20 @@ class AutoMetashapeStudio:
         )
         ent_out.pack(fill=tk.X, pady=(3, 2))
 
+        lbl_export_info = tk.Label(
+            self.card_folder.body,
+            text="ℹ Each project creates and exports to: <Export Folder>/<project_name>/ (e.g. D:/Reconstructions/0211/0211.psx)",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_DIM,
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        lbl_export_info.pack(fill=tk.X, pady=(0, 4))
+
+        # 4. Optics & Physics Diagnostic Button
         bar_diag = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
-        bar_diag.pack(fill=tk.X, pady=(6, 2))
+        bar_diag.pack(fill=tk.X, pady=(4, 2))
 
         btn_diag = tk.Button(
             bar_diag,
@@ -1378,10 +1503,6 @@ class AutoMetashapeStudio:
             command=self._diagnose_survey_physics,
         )
         btn_diag.pack(side=tk.LEFT)
-
-    # -----------------------------------------------------------------------
-    # Step 2: Quality Presets Card
-    # -----------------------------------------------------------------------
     def _build_presets_card(self, parent: tk.Widget) -> None:
         self.card_preset = StudioCard(
             parent,
@@ -2092,231 +2213,196 @@ class AutoMetashapeStudio:
     # -----------------------------------------------------------------------
     # Multi-Project Studio Card (Batch Selection & Queue)
     # -----------------------------------------------------------------------
-    def _build_multi_project_card(self, parent: tk.Widget) -> None:
-        self.card_multi = StudioCard(
-            parent,
-            title="Multi-Project Studio & Batch Queue",
-            subtitle="Batch process multiple drone survey datasets with unified preset",
+    # -----------------------------------------------------------------------
+    # Multi-Project Queue & Export Folder Management
+    # -----------------------------------------------------------------------
+    def _quick_count_photos(self, folder: str) -> int:
+        if not folder or not os.path.isdir(folder):
+            return 0
+        exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng")
+        count = 0
+        for r, dirs, files in os.walk(folder):
+            dirs[:] = [d for d in dirs if not d.lower().startswith(("export", "model", "output", "."))]
+            for f in files:
+                if f.lower().endswith(exts):
+                    count += 1
+        return count
+
+    def _get_active_projects(self) -> list[dict]:
+        if self.project_items:
+            checked = [p for p in self.project_items if p["var_checked"].get()]
+            return checked
+        # Fallback to single primary folder if queue is empty
+        img_dir = self.var_images_dir.get().strip()
+        if img_dir and os.path.isdir(img_dir):
+            name = infer_project_name(images_dir=img_dir) if infer_project_name else os.path.basename(img_dir)
+            cnt = self._quick_count_photos(img_dir)
+            return [{"path": img_dir, "name": name, "count": cnt, "var_checked": tk.BooleanVar(value=True)}]
+        return []
+
+    def _browse_images_dir(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="Select Raw Photos Directory",
+            initialdir=self.var_images_dir.get().strip() or os.path.expanduser("~"),
         )
-        if self.active_mode != "multi":
-            self.card_multi.pack_forget()
+        if chosen:
+            self.var_images_dir.set(os.path.normpath(chosen))
 
-        body = self.card_multi.body
-
-        # 1. Survey Root Directory
-        row_root = tk.Frame(body, bg=UITheme.BG_SURFACE)
-        row_root.pack(fill=tk.X, pady=(0, 4))
-
-        tk.Label(
-            row_root,
-            text="Survey Root Directory",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        ).pack(side=tk.LEFT)
-
-        btn_browse_root = tk.Button(
-            row_root,
-            text="Browse...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            command=self._browse_multi_root,
+    def _browse_export_root(self) -> None:
+        chosen = filedialog.askdirectory(
+            title="Select Master Export Folder",
+            initialdir=self.var_export_root.get().strip() or os.path.expanduser("~"),
         )
-        btn_browse_root.pack(side=tk.RIGHT, padx=(4, 0))
+        if chosen:
+            norm = os.path.normpath(chosen)
+            self.var_export_root.set(norm)
+            self._render_queue_items()
 
-        btn_scan = tk.Button(
-            row_root,
-            text="Scan Subfolders",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.BG_ACTIVE,
-            fg=UITheme.ACCENT_CYAN,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            command=self._scan_multi_projects,
-        )
-        btn_scan.pack(side=tk.RIGHT)
+    def _add_project_to_queue(self) -> None:
+        chosen = filedialog.askdirectory(title="Select Drone Survey Project Folder to Add")
+        if not chosen or not os.path.isdir(chosen):
+            return
+        folder = os.path.normpath(chosen)
 
-        ent_root = tk.Entry(
-            body,
-            textvariable=self.var_multi_root,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_root.pack(fill=tk.X, pady=(2, 6))
+        # If queue is empty but primary input has a valid folder, add it first as Item 1
+        prim_dir = self.var_images_dir.get().strip()
+        if not self.project_items and prim_dir and os.path.isdir(prim_dir) and os.path.normpath(prim_dir) != folder:
+            p_name = infer_project_name(images_dir=prim_dir) if infer_project_name else os.path.basename(prim_dir)
+            p_cnt = self._quick_count_photos(prim_dir)
+            self.project_items.append({
+                "path": os.path.normpath(prim_dir),
+                "name": p_name,
+                "count": p_cnt,
+                "var_checked": tk.BooleanVar(value=True),
+            })
 
-        # 2. Status & Quick Selection Bar
-        row_sel = tk.Frame(body, bg=UITheme.BG_SURFACE)
-        row_sel.pack(fill=tk.X, pady=(4, 4))
+        # Check duplicate
+        if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
+            messagebox.showinfo("Project Already Queued", f"The folder '{folder}' is already in the project queue.")
+            return
 
-        self.lbl_multi_count = tk.Label(
-            row_sel,
-            textvariable=self.lbl_multi_scan_status,
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_MUTED,
-        )
-        self.lbl_multi_count.pack(side=tk.LEFT)
+        name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
+        cnt = self._quick_count_photos(folder)
+        var_chk = tk.BooleanVar(value=True)
+        self.project_items.append({
+            "path": folder,
+            "name": name,
+            "count": cnt,
+            "var_checked": var_chk,
+        })
+        self._update_queue_ui()
 
-        btn_add = tk.Button(
-            row_sel,
-            text="+ Add Folder...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=8,
-            pady=1,
-            command=self._add_custom_multi_project,
-        )
-        btn_add.pack(side=tk.RIGHT, padx=(4, 0))
+    def _remove_queue_item(self, idx: int) -> None:
+        if 0 <= idx < len(self.project_items):
+            del self.project_items[idx]
+            self._update_queue_ui()
 
-        btn_none = tk.Button(
-            row_sel,
-            text="Deselect All",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_MUTED,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=8,
-            pady=1,
-            command=lambda: self._select_all_multi(False),
-        )
-        btn_none.pack(side=tk.RIGHT, padx=(4, 0))
+    def _set_all_queue_checked(self, checked: bool) -> None:
+        for p in self.project_items:
+            p["var_checked"].set(checked)
+        self._on_queue_item_toggled()
 
-        btn_all = tk.Button(
-            row_sel,
-            text="Select All",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=8,
-            pady=1,
-            command=lambda: self._select_all_multi(True),
-        )
-        btn_all.pack(side=tk.RIGHT)
+    def _clear_project_queue(self) -> None:
+        self.project_items.clear()
+        self._update_queue_ui()
 
-        # 3. Scrollable Project Table Container
-        tbl_container = tk.Frame(body, bg=UITheme.BORDER, bd=1, relief=tk.FLAT)
-        tbl_container.pack(fill=tk.BOTH, expand=True, pady=(2, 8))
+    def _on_queue_item_toggled(self) -> None:
+        active = [p for p in self.project_items if p["var_checked"].get()]
+        total = len(self.project_items)
+        self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
+        self._sync_stepper_view()
 
-        self.canvas_multi = tk.Canvas(tbl_container, bg=UITheme.BG_INPUT, bd=0, highlightthickness=0, height=180)
-        multi_scroll = ttk.Scrollbar(tbl_container, orient=tk.VERTICAL, command=self.canvas_multi.yview)
-        self.frame_multi_items = tk.Frame(self.canvas_multi, bg=UITheme.BG_INPUT)
+    def _update_queue_ui(self) -> None:
+        total = len(self.project_items)
+        active = [p for p in self.project_items if p["var_checked"].get()]
+        self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
 
-        self.canvas_multi.create_window((0, 0), window=self.frame_multi_items, anchor="nw")
-        self.canvas_multi.configure(yscrollcommand=multi_scroll.set)
+        if total > 0:
+            self.frame_queue_container.pack(fill=tk.X, pady=(4, 6), after=self.stats_frame)
+        else:
+            self.frame_queue_container.pack_forget()
 
-        self.canvas_multi.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        multi_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self._render_queue_items()
+        self._sync_stepper_view()
 
-        self.frame_multi_items.bind(
-            "<Configure>",
-            lambda e: self.canvas_multi.configure(scrollregion=self.canvas_multi.bbox("all")),
-        )
+    def _render_queue_items(self) -> None:
+        if not hasattr(self, "frame_queue_items"):
+            return
+        for child in self.frame_queue_items.winfo_children():
+            child.destroy()
 
-        # 4. Batch Pipeline Execution Options
-        row_cfg = tk.Frame(body, bg=UITheme.BG_SURFACE)
-        row_cfg.pack(fill=tk.X, pady=(6, 4))
+        export_root = self.var_export_root.get().strip()
 
-        col1 = tk.Frame(row_cfg, bg=UITheme.BG_SURFACE)
-        col1.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        tk.Label(col1, text="Preset:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(anchor=tk.W)
-        ttk.Combobox(
-            col1,
-            textvariable=self.var_multi_preset,
-            values=["pro (Production Geomatics)", "custom (Custom Configuration)"],
-            state="readonly",
-        ).pack(fill=tk.X, pady=(2, 0))
+        for i, item in enumerate(self.project_items):
+            row = tk.Frame(self.frame_queue_items, bg=UITheme.BG_SURFACE_RAISED, bd=1, relief=tk.SOLID, highlightbackground=UITheme.BORDER)
+            row.pack(fill=tk.X, padx=4, pady=2)
 
-        col2 = tk.Frame(row_cfg, bg=UITheme.BG_SURFACE)
-        col2.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        tk.Label(col2, text="Mesh Face Count:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(anchor=tk.W)
-        ttk.Combobox(
-            col2,
-            textvariable=self.var_multi_faces,
-            values=["1000000", "2000000", "3000000", "4000000", "5000000"],
-            state="normal",
-        ).pack(fill=tk.X, pady=(2, 0))
+            cb = tk.Checkbutton(
+                row,
+                variable=item["var_checked"],
+                bg=UITheme.BG_SURFACE_RAISED,
+                selectcolor=UITheme.BG_SURFACE,
+                activebackground=UITheme.BG_SURFACE_RAISED,
+                bd=0,
+                command=self._on_queue_item_toggled,
+            )
+            cb.pack(side=tk.LEFT, padx=(4, 2))
 
-        row_cfg2 = tk.Frame(body, bg=UITheme.BG_SURFACE)
-        row_cfg2.pack(fill=tk.X, pady=(4, 6))
+            lbl_name = tk.Label(
+                row,
+                text=item["name"],
+                font=("Segoe UI", 8, "bold"),
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.TEXT_PRIMARY,
+            )
+            lbl_name.pack(side=tk.LEFT, padx=(2, 6))
 
-        col3 = tk.Frame(row_cfg2, bg=UITheme.BG_SURFACE)
-        col3.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-        tk.Label(col3, text="8K Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(anchor=tk.W)
-        ttk.Combobox(
-            col3,
-            textvariable=self.var_multi_tex_pages,
-            values=["22", "16", "8", "4", "2"],
-            state="readonly",
-        ).pack(fill=tk.X, pady=(2, 0))
+            lbl_cnt = tk.Label(
+                row,
+                text=f"{item.get('count', 0)} photos",
+                font=("Segoe UI", 7),
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.ACCENT_CYAN,
+            )
+            lbl_cnt.pack(side=tk.LEFT, padx=(0, 6))
 
-        col4 = tk.Frame(row_cfg2, bg=UITheme.BG_SURFACE)
-        col4.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(6, 0))
-        tk.Label(col4, text="Crop Method:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(anchor=tk.W)
-        ttk.Combobox(
-            col4,
-            textvariable=self.var_multi_crop,
-            values=["gps-square", "manual", "gps-circle", "none"],
-            state="readonly",
-        ).pack(fill=tk.X, pady=(2, 0))
+            # Status check for existing target folder
+            target_out = os.path.join(export_root, item["name"]) if export_root else ""
+            has_existing = bool(target_out and os.path.isdir(target_out) and os.listdir(target_out))
+            if has_existing:
+                lbl_st = tk.Label(
+                    row,
+                    text="⚠️ Folder exists",
+                    font=("Segoe UI", 7),
+                    bg=UITheme.BG_SURFACE_RAISED,
+                    fg=UITheme.ACCENT_AMBER_TXT,
+                )
+            else:
+                lbl_st = tk.Label(
+                    row,
+                    text="✨ Ready (New)",
+                    font=("Segoe UI", 7),
+                    bg=UITheme.BG_SURFACE_RAISED,
+                    fg=UITheme.TEXT_MUTED,
+                )
+            lbl_st.pack(side=tk.LEFT, padx=(0, 6))
 
-        # 5. Dual Launch & Clipboard Actions
-        row_actions = tk.Frame(body, bg=UITheme.BG_SURFACE)
-        row_actions.pack(fill=tk.X, pady=(8, 2))
-
-        btn_open_web = tk.Button(
-            row_actions,
-            text="Open Web Studio Panel (Geist UI) ↗",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.ACCENT_CYAN,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=5,
-            cursor="hand2",
-            command=self._open_web_studio,
-        )
-        btn_open_web.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
-
-        btn_copy_cli = tk.Button(
-            row_actions,
-            text="Copy Batch CLI",
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=12,
-            pady=5,
-            cursor="hand2",
-            command=self._copy_batch_cli,
-        )
-        btn_copy_cli.pack(side=tk.RIGHT, padx=(6, 0))
+            # Remove button
+            btn_del = tk.Button(
+                row,
+                text="×",
+                font=("Segoe UI", 8, "bold"),
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.TEXT_MUTED,
+                activebackground=UITheme.ACCENT_RED,
+                activeforeground="white",
+                bd=0,
+                padx=6,
+                pady=0,
+                cursor="hand2",
+                command=lambda idx=i: self._remove_queue_item(idx),
+            )
+            btn_del.pack(side=tk.RIGHT, padx=4)
 
     # -----------------------------------------------------------------------
     # Stepper Card
@@ -2329,8 +2415,35 @@ class AutoMetashapeStudio:
         )
         self.card_stepper.pack(fill=tk.X, pady=(0, 6))
 
-        self.stepper = StudioPipelineStepper(self.card_stepper.body)
+        # 1. Multi-project batch stepper container (visible when > 1 projects selected)
+        self.frame_multi_stepper = tk.Frame(self.card_stepper.body, bg=UITheme.BG_SURFACE)
+        self.lbl_multi_stepper_header = tk.Label(
+            self.frame_multi_stepper,
+            text="MULTI-PROJECT BATCH PROGRESS",
+            font=("Segoe UI", 7, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.ACCENT_CYAN,
+            anchor=tk.W,
+        )
+        self.lbl_multi_stepper_header.pack(fill=tk.X, pady=(0, 2))
+        self.stepper_multi = StudioPipelineStepper(self.frame_multi_stepper)
+        self.stepper_multi.pack(fill=tk.X, pady=(0, 4))
+        self.frame_multi_stepper.pack_forget()
+
+        # 2. Active project photogrammetry process stepper container
+        self.frame_recon_stepper = tk.Frame(self.card_stepper.body, bg=UITheme.BG_SURFACE)
+        self.lbl_recon_stepper_header = tk.Label(
+            self.frame_recon_stepper,
+            text="CURRENT PROJECT PHOTOGRAMMETRY PROCESS (7 STAGES)",
+            font=("Segoe UI", 7, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_SECONDARY,
+            anchor=tk.W,
+        )
+        self.lbl_recon_stepper_header.pack_forget()
+        self.stepper = StudioPipelineStepper(self.frame_recon_stepper)
         self.stepper.pack(fill=tk.X)
+        self.frame_recon_stepper.pack(fill=tk.X)
 
     # -----------------------------------------------------------------------
     # Console Feed & Deliverables
@@ -2732,12 +2845,72 @@ class AutoMetashapeStudio:
             ])
             self.card_stepper.set_subtitle(f"Batch execution trajectory across {sel_cnt} project(s)")
 
+    def _sync_stepper_view(self) -> None:
+        """Dynamically adapt milestone steppers and Start button based on mode and queue size."""
+        if not hasattr(self, "card_stepper"):
+            return
+
+        if self.active_mode == "export":
+            if hasattr(self, "frame_multi_stepper"):
+                self.frame_multi_stepper.pack_forget()
+            if hasattr(self, "lbl_recon_stepper_header"):
+                self.lbl_recon_stepper_header.pack_forget()
+            self.card_stepper.set_title("Pipeline Milestones")
+            self.card_stepper.set_subtitle("5-stage asset export & re-bake trajectory")
+            if not self.is_running:
+                self.btn_start.config(
+                    text="Export Assets",
+                    bg=UITheme.ACCENT_CYAN,
+                    fg=UITheme.BG_ROOT,
+                    state=tk.NORMAL,
+                )
+            return
+
+        # Reconstruction mode
+        active = self._get_active_projects()
+        n_active = len(active)
+
+        if n_active > 1:
+            # Dual steppers: Multi-Project Progress on top, 7-Stage Process below
+            if hasattr(self, "frame_multi_stepper"):
+                self.frame_multi_stepper.pack(fill=tk.X, pady=(0, 4), before=self.frame_recon_stepper)
+            if hasattr(self, "lbl_recon_stepper_header"):
+                self.lbl_recon_stepper_header.pack(fill=tk.X, pady=(0, 2), before=self.stepper)
+            self.card_stepper.set_title("Multi-Project Execution & Milestones")
+            self.card_stepper.set_subtitle(
+                f"Batch queue ({n_active} projects) & real-time stage trajectory"
+            )
+            if not self.is_running:
+                stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(active)]
+                self.stepper_multi.build_stages(stages_multi)
+                self.btn_start.config(
+                    text=f"Start Batch Reconstruction ({n_active} Projects)",
+                    bg=UITheme.ACCENT_CYAN,
+                    fg=UITheme.BG_ROOT,
+                    state=tk.NORMAL,
+                )
+        else:
+            # Single project: clean 1-stepper view
+            if hasattr(self, "frame_multi_stepper"):
+                self.frame_multi_stepper.pack_forget()
+            if hasattr(self, "lbl_recon_stepper_header"):
+                self.lbl_recon_stepper_header.pack_forget()
+            self.card_stepper.set_title("Pipeline Milestones")
+            self.card_stepper.set_subtitle("7-stage automated photogrammetry trajectory")
+            if not self.is_running:
+                self.btn_start.config(
+                    text="Start Reconstruction",
+                    bg=UITheme.ACCENT_GREEN,
+                    fg="white",
+                    state=tk.NORMAL,
+                )
+
     def _set_mode(self, mode: str) -> None:
         if mode == self.active_mode:
             return
 
         # 1. Snapshot current tab's stepper state
-        if hasattr(self, "stepper"):
+        if hasattr(self, "stepper") and self.active_mode in self.mode_states:
             self.mode_states[self.active_mode] = self.stepper.get_state()
         self.active_mode = mode
 
@@ -2745,9 +2918,7 @@ class AutoMetashapeStudio:
         if mode == "recon":
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.btn_tab_multi.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.card_export.pack_forget()
-            self.card_multi.pack_forget()
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
             if hasattr(self, "card_recon_export"):
@@ -2757,60 +2928,27 @@ class AutoMetashapeStudio:
                 self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_w)
             else:
                 self.card_adv.pack_forget()
-            self.btn_start.config(
-                text="Start Reconstruction",
-                bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
-                fg=UITheme.TEXT_MUTED if self.is_running else "white",
-                state=tk.DISABLED if self.is_running else tk.NORMAL,
-            )
         elif mode == "export":
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.btn_tab_multi.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.card_folder.pack_forget()
             self.card_preset.pack_forget()
             if hasattr(self, "card_recon_export"):
                 self.card_recon_export.pack_forget()
             self.card_adv.pack_forget()
-            self.card_multi.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
             if not self.var_psx_path.get().strip():
                 detected_psx = self._get_project_psx()
                 if detected_psx and os.path.isfile(detected_psx):
                     self.var_psx_path.set(detected_psx)
-            self.btn_start.config(
-                text="Export Assets",
-                bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_CYAN,
-                fg=UITheme.TEXT_MUTED if self.is_running else UITheme.BG_ROOT,
-                state=tk.DISABLED if self.is_running else tk.NORMAL,
-            )
-        elif mode == "multi":
-            self.btn_tab_multi.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
-            self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
-            self.card_folder.pack_forget()
-            self.card_preset.pack_forget()
-            if hasattr(self, "card_recon_export"):
-                self.card_recon_export.pack_forget()
-            self.card_adv.pack_forget()
-            self.card_export.pack_forget()
-            self.card_multi.pack(fill=tk.X, pady=(0, 6))
-            if not self.multi_discovered_projects and self.var_multi_root.get().strip():
-                self._scan_multi_projects()
-            self.btn_start.config(
-                text="Run Selected Projects (Batch)",
-                bg=UITheme.BG_SURFACE_RAISED if self.is_running else UITheme.ACCENT_GREEN,
-                fg=UITheme.TEXT_MUTED if self.is_running else "white",
-                state=tk.DISABLED if self.is_running else tk.NORMAL,
-            )
 
-        # 3. Restore the target mode's stepper state or sync dynamic stepper
+        # 3. Synchronize steppers and button labels
+        self._sync_stepper_view()
         if not self.is_running:
             self._sync_dynamic_stepper()
-        elif hasattr(self, "stepper"):
+        elif hasattr(self, "stepper") and mode in self.mode_states:
             self.stepper.restore_state(self.mode_states[mode])
         self.canvas.configure(scrollregion=self.canvas.bbox("all"))
-
     def _check_metashape(self) -> None:
         if self.metashape_exe:
             self.lbl_metashape_badge.config(
@@ -2846,244 +2984,6 @@ class AutoMetashapeStudio:
     # -----------------------------------------------------------------------
     # Multi-Project Studio Batch Helpers
     # -----------------------------------------------------------------------
-    def _browse_multi_root(self) -> None:
-        chosen = filedialog.askdirectory(
-            title="Select Parent Survey Directory",
-            initialdir=self.var_multi_root.get().strip() or os.path.expanduser("~"),
-        )
-        if chosen:
-            self.var_multi_root.set(os.path.normpath(chosen))
-            self._scan_multi_projects()
-
-    def _add_custom_multi_project(self) -> None:
-        chosen = filedialog.askdirectory(
-            title="Select Drone Survey Project Folder",
-            initialdir=self.var_multi_root.get().strip() or os.path.expanduser("~"),
-        )
-        if chosen:
-            path = os.path.normpath(chosen)
-            if any(p["path"] == path for p in self.multi_discovered_projects):
-                messagebox.showinfo("Already Added", "This folder is already in the project list.")
-                return
-            proj_info = self._analyze_project_dir(path)
-            self.multi_discovered_projects.append(proj_info)
-            self._populate_multi_project_rows()
-
-    def _is_model_output_dir(self, dir_path: str, dir_name: str) -> bool:
-        low = dir_name.lower()
-        if low.startswith(("model", "propreset", "preset", "output", "export", "result", "deliverable", "batch_")):
-            return True
-        if low in {"output", "outputs", "export", "exports", "result", "results", "__pycache__", ".git"}:
-            return True
-        try:
-            for entry in os.scandir(dir_path):
-                if entry.is_file() and entry.name.lower().endswith((".glb", ".obj", ".fbx", ".ply")):
-                    return True
-        except Exception:
-            pass
-        return False
-
-    def _analyze_project_dir(self, dir_path: str) -> dict:
-        dir_path = os.path.normpath(dir_path)
-        name = os.path.basename(dir_path)
-        photo_count = 0
-        direct_photos = 0
-        has_psx = False
-        models = []
-
-        try:
-            for entry in os.scandir(dir_path):
-                lower_name = entry.name.lower()
-                if entry.is_file():
-                    ext = os.path.splitext(entry.name)[1].lower()
-                    if ext in SUPPORTED_IMAGE_EXTS:
-                        # Exclude tfw georeferenced orthomosaic tiffs in root if any
-                        if ext == ".tif" and os.path.exists(os.path.join(dir_path, os.path.splitext(entry.name)[0] + ".tfw")):
-                            pass
-                        else:
-                            direct_photos += 1
-                            photo_count += 1
-                    elif ext == ".psx":
-                        has_psx = True
-                elif entry.is_dir():
-                    if self._is_model_output_dir(entry.path, entry.name):
-                        models.append(entry.name)
-                        try:
-                            for sub in os.scandir(entry.path):
-                                if sub.is_file() and sub.name.lower().endswith(".psx"):
-                                    has_psx = True
-                        except Exception:
-                            pass
-                    elif not lower_name.startswith(".") and not lower_name.endswith((".files", ".tmp", ".temp")):
-                        # Recursively count all survey photos across all flight folders (nadir, ob1, DCIM, etc.)
-                        for root, dirs, files in os.walk(entry.path):
-                            dirs[:] = [
-                                d for d in dirs
-                                if not d.startswith(".")
-                                and not self._is_model_output_dir(os.path.join(root, d), d)
-                                and not d.lower().endswith((".files", ".tmp", ".temp"))
-                            ]
-                            for f in files:
-                                f_ext = os.path.splitext(f)[1].lower()
-                                if f_ext in SUPPORTED_IMAGE_EXTS:
-                                    photo_count += 1
-        except Exception:
-            pass
-
-        status_text = "Ready"
-        if models:
-            status_text = f"Completed ({models[0]})"
-        elif has_psx:
-            status_text = "Project PSX exists"
-        elif photo_count > 0:
-            status_text = f"{photo_count:,} photos"
-        else:
-            status_text = "Empty / No photos"
-
-        return {
-            "name": name,
-            "path": dir_path,
-            "photo_count": photo_count,
-            "direct_photos": direct_photos,
-            "has_psx": has_psx,
-            "models": models,
-            "status": status_text,
-        }
-
-    def _scan_multi_projects(self) -> None:
-        root_dir = self.var_multi_root.get().strip()
-        if not root_dir or not os.path.isdir(root_dir):
-            messagebox.showwarning("Directory Required", "Please select a valid parent survey directory.")
-            return
-
-        self._log(f"[Multi-Project Studio] Scanning root directory: {root_dir}", "stage")
-        self.multi_discovered_projects.clear()
-
-        # 1. Inspect direct subdirectories, cleanly excluding all output / deliverable directories
-        sub_dirs = []
-        try:
-            for entry in os.scandir(root_dir):
-                if (
-                    entry.is_dir()
-                    and not entry.name.startswith(".")
-                    and not self._is_model_output_dir(entry.path, entry.name)
-                    and not entry.name.lower().endswith((".files", ".tmp", ".temp"))
-                ):
-                    sub_dirs.append(entry)
-        except Exception as e:
-            self._log(f"[Multi-Project Studio] Scan error: {e}", "error")
-
-        # 2. Check whether root_dir itself is a single survey with flight passes (nadir, ob1, ob2...)
-        # or a collection of individual projects
-        is_single_survey_with_flights = False
-        if sub_dirs:
-            flight_tokens = ("nadir", "oblique", "ob1", "ob2", "ob3", "ob4", "flight", "pass", "dji", "dcim", "100media")
-            flight_matches = sum(1 for d in sub_dirs if any(tok in d.name.lower() for tok in flight_tokens))
-            if flight_matches == len(sub_dirs) or (len(sub_dirs) > 1 and flight_matches >= len(sub_dirs) - 1):
-                is_single_survey_with_flights = True
-
-        root_info = self._analyze_project_dir(root_dir)
-
-        if is_single_survey_with_flights or (root_info["has_psx"] and not any(self._analyze_project_dir(d.path)["has_psx"] for d in sub_dirs)):
-            # Treat root_dir as a single unified multi-flight project
-            if root_info["photo_count"] > 0 or root_info["has_psx"] or root_info["models"]:
-                self.multi_discovered_projects.append(root_info)
-        else:
-            # Root is a parent directory containing separate projects
-            for entry in sorted(sub_dirs, key=lambda e: e.name):
-                proj_info = self._analyze_project_dir(entry.path)
-                if proj_info["photo_count"] > 0 or proj_info["has_psx"] or proj_info["models"]:
-                    self.multi_discovered_projects.append(proj_info)
-
-            # If root_dir itself had photos directly in its root, also include it
-            if root_info["direct_photos"] > 0 and not any(p["path"] == root_dir for p in self.multi_discovered_projects):
-                self.multi_discovered_projects.insert(0, root_info)
-
-        self._populate_multi_project_rows()
-
-    def _populate_multi_project_rows(self) -> None:
-        for w in self.frame_multi_items.winfo_children():
-            w.destroy()
-
-        self.multi_project_vars.clear()
-
-        if not self.multi_discovered_projects:
-            tk.Label(
-                self.frame_multi_items,
-                text="No projects found with photos or Metashape models. Click '+ Add Folder...' to add one manually.",
-                font=("Segoe UI", 9),
-                bg=UITheme.BG_INPUT,
-                fg=UITheme.TEXT_MUTED,
-                pady=16,
-            ).pack(fill=tk.X)
-            self.lbl_multi_scan_status.set("0 projects detected")
-            return
-
-        for p in self.multi_discovered_projects:
-            var = tk.BooleanVar(value=True)
-            self.multi_project_vars[p["path"]] = var
-
-            row = tk.Frame(self.frame_multi_items, bg=UITheme.BG_SURFACE, bd=1, relief=tk.FLAT)
-            row.pack(fill=tk.X, padx=4, pady=2)
-
-            cb = tk.Checkbutton(
-                row,
-                text=p["name"],
-                variable=var,
-                font=("Segoe UI", 9, "bold"),
-                bg=UITheme.BG_SURFACE,
-                fg=UITheme.TEXT_PRIMARY,
-                selectcolor=UITheme.BG_ROOT,
-                bd=0,
-                command=self._update_multi_selection_count,
-            )
-            cb.pack(side=tk.LEFT, padx=(6, 8), pady=4)
-
-            count_str = f"{p['photo_count']:,} photo" if p["photo_count"] == 1 else f"{p['photo_count']:,} photos"
-            badge_text = count_str
-            if p["models"]:
-                badge_text += f" | Model: {', '.join(p['models'])}"
-            elif p["has_psx"]:
-                badge_text += " | PSX saved"
-
-            tk.Label(
-                row,
-                text=badge_text,
-                font=("Consolas", 8),
-                bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.ACCENT_CYAN if p["models"] else UITheme.TEXT_SECONDARY,
-                padx=6,
-                pady=1,
-            ).pack(side=tk.LEFT, padx=4)
-
-            btn_open = tk.Button(
-                row,
-                text="Open Folder",
-                font=("Segoe UI", 7),
-                bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.TEXT_MUTED,
-                bd=0,
-                padx=6,
-                pady=1,
-                cursor="hand2",
-                command=lambda target=p["path"]: self._open_dir_in_os(target),
-            )
-            btn_open.pack(side=tk.RIGHT, padx=6)
-
-        self._update_multi_selection_count()
-
-    def _update_multi_selection_count(self) -> None:
-        sel = sum(1 for v in self.multi_project_vars.values() if v.get())
-        total = len(self.multi_discovered_projects)
-        total_photos = sum(p["photo_count"] for p in self.multi_discovered_projects if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get())
-        self.lbl_multi_scan_status.set(f"{total} projects detected ({sel} selected · {total_photos:,} photos)")
-        self._sync_dynamic_stepper()
-
-    def _select_all_multi(self, selected: bool) -> None:
-        for v in self.multi_project_vars.values():
-            v.set(selected)
-        self._update_multi_selection_count()
-
     def _open_dir_in_os(self, path: str) -> None:
         if path and os.path.exists(path):
             try:
@@ -3100,137 +3000,6 @@ class AutoMetashapeStudio:
             self._log(f"[Multi-Project Studio] Opened Web Studio Dashboard in browser: {web_file}", "stage")
         else:
             messagebox.showerror("Error", f"Web dashboard file not found:\n{web_file}")
-
-    def _copy_batch_cli(self) -> None:
-        selected = [p for p in self.multi_discovered_projects if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()]
-        if not selected:
-            messagebox.showwarning("No Projects Selected", "Please select at least one project to generate CLI commands.")
-            return
-
-        cmds = []
-        exe = self.metashape_exe or "metashape.exe"
-        preset = self.var_multi_preset.get().split()[0]
-        faces = self.var_multi_faces.get().split()[0]
-        pages = self.var_multi_tex_pages.get().split()[0]
-        crop = self.var_multi_crop.get()
-
-        for p in selected:
-            p_img = p["path"]
-            p_out = os.path.join(p_img, "model")
-            cmd = f'"{exe}" -r "{self.recon_script}" --images "{p_img}" --output "{p_out}" --project-name "{p["name"]}" --preset {preset} --faces {faces} --texture-pages {pages} --crop-method {crop} --build-point-cloud --export-point-cloud'
-            cmds.append(cmd)
-
-        cli_text = "\n\n".join(cmds)
-        self.root.clipboard_clear()
-        self.root.clipboard_append(cli_text)
-        self._log(f"[Multi-Project Studio] Copied {len(selected)} batch command(s) to clipboard.", "success")
-        messagebox.showinfo("CLI Commands Copied", f"Copied {len(selected)} batch reconstruction command(s) to clipboard.")
-
-    def _start_multi_batch(self) -> None:
-        if not self.metashape_exe or not os.path.isfile(self.metashape_exe):
-            chosen = filedialog.askopenfilename(
-                title="Locate metashape.exe",
-                filetypes=[("Executable", "metashape.exe"), ("All Files", "*.*")],
-            )
-            if chosen and os.path.isfile(chosen):
-                self.metashape_exe = os.path.normpath(chosen)
-                self._check_metashape()
-            else:
-                messagebox.showerror("Error", "Metashape Pro executable is required.")
-                return
-
-        selected = [p for p in self.multi_discovered_projects if self.multi_project_vars.get(p["path"], tk.BooleanVar()).get()]
-        if not selected:
-            messagebox.showwarning("No Projects Selected", "Please select at least one project to batch process.")
-            return
-
-        self.batch_running = True
-        self.batch_queue = selected
-        self.batch_current_idx = 0
-        self._run_next_batch_item()
-
-    def _run_next_batch_item(self) -> None:
-        if not self.batch_running or self.batch_current_idx >= len(self.batch_queue):
-            self.batch_running = False
-            self._log("\n" + "=" * 70, "success")
-            self._log(f"[BATCH COMPLETE] All {len(self.batch_queue)} survey projects processed successfully!", "success")
-            self._log("=" * 70 + "\n", "success")
-            messagebox.showinfo("Batch Complete", f"All {len(self.batch_queue)} survey projects have been processed successfully!")
-            self._on_finished(success=True)
-            return
-
-        item = self.batch_queue[self.batch_current_idx]
-        img_dir = item["path"]
-        proj_name = item["name"]
-        total_items = len(self.batch_queue)
-        current_num = self.batch_current_idx + 1
-
-        self._log(f"\n[{current_num}/{total_items}] Starting Batch Project: {proj_name} ({img_dir})", "stage")
-
-        preset = self.var_multi_preset.get().split()[0]
-        faces = self.var_multi_faces.get().split()[0]
-        pages = self.var_multi_tex_pages.get().split()[0]
-        crop = self.var_multi_crop.get()
-        out_dir = os.path.join(img_dir, "model")
-
-        cmd = [
-            self.metashape_exe,
-            "-r",
-            self.recon_script,
-            "--images",
-            img_dir,
-            "--output",
-            out_dir,
-            "--project-name",
-            proj_name,
-            "--preset",
-            preset,
-            "--faces",
-            str(faces),
-            "--texture-pages",
-            str(pages),
-            "--crop-method",
-            crop,
-            "--build-point-cloud",
-        ]
-        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
-            cmd.append("--export-glb")
-        else:
-            cmd.append("--no-export-glb")
-
-        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
-            cmd.append("--export-obj")
-        else:
-            cmd.append("--no-export-obj")
-
-        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
-            cmd.append("--export-point-cloud")
-        else:
-            cmd.append("--no-export-point-cloud")
-
-        if hasattr(self, "var_ortho") and self.var_ortho.get():
-            cmd.append("--ortho")
-        else:
-            cmd.append("--no-ortho")
-
-        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
-            cmd.append("--build-dem")
-            cmd.append("--export-dem")
-        else:
-            cmd.append("--no-dem")
-
-        if hasattr(self, "var_export_report") and self.var_export_report.get():
-            cmd.append("--export-report")
-        else:
-            cmd.append("--no-report")
-
-        self.stepper.reset()
-        if total_items <= 7:
-            self.stepper.set_active(self.batch_current_idx, f"Processing {proj_name}...")
-        else:
-            self.stepper.set_active(2, f"Project {current_num}/{total_items}: {proj_name}")
-        self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
-
 
     def _browse_output_dir(self) -> None:
         chosen = filedialog.askdirectory(
@@ -3264,7 +3033,7 @@ class AutoMetashapeStudio:
     def _on_images_dir_changed(self, *_args) -> None:
         folder = self.var_images_dir.get().strip()
         if not folder or not os.path.isdir(folder):
-            self.lbl_photo_status.set("No folder selected. Click 'Browse...' to choose your raw photos folder.")
+            self.lbl_photo_status.set("No valid folder selected. Click 'Browse...' to select survey photos.")
             return
 
         # When a new project folder is loaded, reset recon progress to clean state if not currently running
@@ -3273,10 +3042,19 @@ class AutoMetashapeStudio:
             self.mode_states["recon"] = self.stepper.get_state()
             self.lbl_status.config(text="● Ready", fg=UITheme.TEXT_SECONDARY)
 
-        default_out = os.path.join(folder, "model")
-        cur_out = self.var_output_dir.get().strip()
-        if not cur_out or cur_out.endswith("model"):
-            self.var_output_dir.set(default_out)
+        # Auto-populate master export folder if empty
+        if not self.var_export_root.get().strip():
+            suggested_export = os.path.dirname(os.path.normpath(folder))
+            self.var_export_root.set(suggested_export)
+
+        # Update primary queue item if queue already initialized
+        p_name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
+        if self.project_items:
+            self.project_items[0]["path"] = os.path.normpath(folder)
+            self.project_items[0]["name"] = p_name
+            self._update_queue_ui()
+        else:
+            self._sync_stepper_view()
 
         self.lbl_photo_status.set("Scanning directory and subfolders for supported photos...")
 
@@ -3288,10 +3066,9 @@ class AutoMetashapeStudio:
             for root, dirs, files in os.walk(folder):
                 dirs[:] = [
                     d for d in dirs
-                    if not os.path.abspath(os.path.join(root, d)).startswith(os.path.abspath(default_out))
-                    and not d.lower().startswith("model")
+                    if not d.lower().startswith(("export", "model", "output", "."))
                 ]
-                if os.path.abspath(root).startswith(os.path.abspath(default_out)) or os.path.basename(root).lower().startswith("model"):
+                if os.path.basename(root).lower().startswith(("export", "model", "output", ".")):
                     continue
                 for f in files:
                     ext = os.path.splitext(f)[1].lower()
@@ -3307,15 +3084,14 @@ class AutoMetashapeStudio:
             try:
                 for entry in sorted(os.listdir(folder)):
                     full_entry = os.path.join(folder, entry)
-                    if os.path.isdir(full_entry) and not entry.lower().startswith("model") and not entry.startswith("."):
-                        if not (os.path.abspath(full_entry).startswith(os.path.abspath(default_out))):
-                            has_img = False
-                            for _, _, fs in os.walk(full_entry):
-                                if any(f.lower().endswith(tuple(SUPPORTED_IMAGE_EXTS)) for f in fs):
-                                    has_img = True
-                                    break
-                            if has_img:
-                                subfolder_count += 1
+                    if os.path.isdir(full_entry) and not entry.lower().startswith(("export", "model", "output", ".")):
+                        has_img = False
+                        for _, _, fs in os.walk(full_entry):
+                            if any(f.lower().endswith(tuple(SUPPORTED_IMAGE_EXTS)) for f in fs):
+                                has_img = True
+                                break
+                        if has_img:
+                            subfolder_count += 1
             except Exception:
                 pass
 
@@ -3336,7 +3112,6 @@ class AutoMetashapeStudio:
             self.log_queue.put(f"__STATUS_PHOTO__{st_msg}")
 
         threading.Thread(target=_scan, daemon=True).start()
-
     def _on_psx_path_changed(self, *_args) -> None:
         psx = self.var_psx_path.get().strip()
         if psx and os.path.isfile(psx):
@@ -3345,16 +3120,19 @@ class AutoMetashapeStudio:
 
     def _get_active_output_dir(self) -> str:
         if self.active_mode == "recon":
-            out = self.var_output_dir.get().strip()
-            if not out:
-                img_dir = self.var_images_dir.get().strip()
-                if img_dir:
-                    out = os.path.join(img_dir, "model")
-            return out
-        elif self.active_mode == "multi":
-            if self.batch_queue and 0 <= self.batch_current_idx < len(self.batch_queue):
-                return os.path.join(self.batch_queue[self.batch_current_idx]["path"], "model")
-            return self.var_multi_root.get().strip()
+            export_root = self.var_export_root.get().strip()
+            if getattr(self, "batch_running", False) and self.batch_queue and 0 <= self.batch_current_idx < len(self.batch_queue):
+                p_name = self.batch_queue[self.batch_current_idx]["name"]
+                return os.path.join(export_root, p_name) if export_root else ""
+            active = self._get_active_projects()
+            if active:
+                p_name = active[0]["name"]
+                return os.path.join(export_root, p_name) if export_root else ""
+            img_dir = self.var_images_dir.get().strip()
+            if img_dir:
+                p_name = infer_project_name(images_dir=img_dir) if infer_project_name else os.path.basename(img_dir)
+                return os.path.join(export_root, p_name) if export_root else ""
+            return export_root
         return self.var_export_out.get().strip()
 
     def _on_open_output_folder(self) -> None:
@@ -3452,19 +3230,8 @@ class AutoMetashapeStudio:
             self._start_reconstruction()
         elif self.active_mode == "export":
             self._start_export()
-        elif self.active_mode == "multi":
-            self._start_multi_batch()
 
-    def _start_reconstruction(self) -> None:
-        img_dir = self.var_images_dir.get().strip()
-        if not img_dir or not os.path.isdir(img_dir):
-            messagebox.showwarning("Input Required", "Please select a valid raw photos folder.")
-            return
-
-        out_dir = self.var_output_dir.get().strip() or os.path.join(img_dir, "model")
-        self.var_output_dir.set(out_dir)
-        proj_name = infer_project_name(images_dir=img_dir, output_dir=out_dir) if infer_project_name else os.path.basename(img_dir)
-
+    def _build_reconstruction_cmd(self, img_dir: str, out_dir: str, proj_name: str) -> list[str]:
         preset_key = getattr(self, "selected_preset_key", "pro")
 
         cmd = [
@@ -3480,10 +3247,8 @@ class AutoMetashapeStudio:
         ]
 
         if preset_key == "pro":
-            # Pro preset defines and owns its parameters; do NOT pass manual config overrides
             cmd.extend(["--preset", "pro"])
         else:
-            # Custom preset: full manual control, pass all explicit config parameters
             cmd.extend([
                 "--preset", "custom",
                 "--align-quality", self.var_align_quality.get(),
@@ -3527,7 +3292,6 @@ class AutoMetashapeStudio:
             if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
                 cmd.append("--remove-lighting")
 
-        # Export Deliverables Checklist: pass explicit flags across all presets
         if hasattr(self, "var_export_glb") and self.var_export_glb.get():
             cmd.append("--export-glb")
         else:
@@ -3568,7 +3332,6 @@ class AutoMetashapeStudio:
             cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
             cmd.extend(["--tile-size", self.var_tile_size.get()])
 
-        # Global runtime & deliverable options applicable across all modes
         if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
             cmd.append("--build-point-cloud")
         else:
@@ -3598,10 +3361,107 @@ class AutoMetashapeStudio:
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":
             cmd.extend(["--chunk-align-method", self.var_chunk_align_method.get()])
 
-        self.stepper.reset()
-        self.frame_crop_banner.pack_forget()
-        self._spawn_worker(cmd, "3D Reconstruction")
+        return cmd
 
+    def _start_reconstruction(self) -> None:
+        # 1. Validate Master Export Folder
+        export_root = self.var_export_root.get().strip()
+        if not export_root:
+            messagebox.showwarning(
+                "Export Folder Required",
+                "Please select a master export destination folder.\n\n"
+                "AutoMetashape will create a dedicated folder named after each project inside this export directory.",
+            )
+            self._browse_export_root()
+            export_root = self.var_export_root.get().strip()
+            if not export_root:
+                return
+
+        # 2. Get active checked projects
+        active_projects = self._get_active_projects()
+        if not active_projects:
+            messagebox.showwarning(
+                "No Projects Selected",
+                "Please select or add at least one project folder with survey photos.",
+            )
+            return
+
+        # 3. Detect existing folder conflicts and request confirmation
+        conflicts = []
+        for p in active_projects:
+            p_out = os.path.join(export_root, p["name"])
+            if os.path.isdir(p_out) and os.listdir(p_out):
+                files = os.listdir(p_out)
+                conflicts.append((p["name"], p_out, files))
+
+        if conflicts:
+            conflict_lines = []
+            for name, path, files in conflicts[:4]:
+                preview = ", ".join(files[:3])
+                if len(files) > 3:
+                    preview += f", ... (+{len(files)-3} more files)"
+                conflict_lines.append(f"• {name}: {path}\n  [{preview}]")
+            if len(conflicts) > 4:
+                conflict_lines.append(f"... and {len(conflicts)-4} more existing project folders")
+
+            msg = (
+                "The destination already contains existing reconstruction files for:\n\n"
+                + "\n\n".join(conflict_lines)
+                + "\n\nDo you want to overwrite existing files and continue?\n\n"
+                "Click 'Yes' to overwrite existing project files, or 'No' to cancel."
+            )
+            if not messagebox.askyesno("Overwrite Existing Project Files?", msg, icon="warning"):
+                self._log("[CANCEL] Reconstruction cancelled by user to preserve existing project files.", "warning")
+                return
+
+        # 4. Launch single or batch reconstruction
+        if len(active_projects) == 1:
+            item = active_projects[0]
+            img_dir = item["path"]
+            proj_name = item["name"]
+            out_dir = os.path.join(export_root, proj_name)
+            os.makedirs(out_dir, exist_ok=True)
+            cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
+            self.stepper.reset()
+            self.frame_crop_banner.pack_forget()
+            self._spawn_worker(cmd, f"3D Reconstruction ({proj_name})")
+        else:
+            self.batch_running = True
+            self.batch_queue = active_projects
+            self.batch_current_idx = 0
+            stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(self.batch_queue)]
+            self.stepper_multi.build_stages(stages_multi)
+            self._run_next_batch_item()
+
+    def _run_next_batch_item(self) -> None:
+        if not self.batch_running or self.batch_current_idx >= len(self.batch_queue):
+            self.batch_running = False
+            if hasattr(self, "stepper_multi"):
+                self.stepper_multi.set_all_done()
+            self._log("\n" + "=" * 70, "success")
+            self._log(f"[BATCH COMPLETE] All {len(self.batch_queue)} survey projects processed successfully!", "success")
+            self._log("=" * 70 + "\n", "success")
+            messagebox.showinfo("Batch Complete", f"All {len(self.batch_queue)} survey projects have been processed successfully!")
+            self._on_finished(success=True)
+            return
+
+        item = self.batch_queue[self.batch_current_idx]
+        img_dir = item["path"]
+        proj_name = item["name"]
+        export_root = self.var_export_root.get().strip()
+        out_dir = os.path.join(export_root, proj_name)
+        os.makedirs(out_dir, exist_ok=True)
+
+        total_items = len(self.batch_queue)
+        current_num = self.batch_current_idx + 1
+
+        self._log(f"\n[{current_num}/{total_items}] Starting Batch Project: {proj_name} ({img_dir})", "stage")
+        self.stepper_multi.set_active(self.batch_current_idx, f"Processing {proj_name} ({current_num}/{total_items})")
+        self.stepper.reset()
+
+        cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
+        self.frame_crop_banner.pack_forget()
+        self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
     def _start_export(self) -> None:
         psx = self.var_psx_path.get().strip()
         if not psx or not os.path.isfile(psx):
@@ -3861,6 +3721,9 @@ class AutoMetashapeStudio:
                 idx = self._find_stage_index_by_key("recon", target_key)
                 if idx >= 0:
                     self._update_stepper_mode("recon", idx, desc)
+                    if getattr(self, "batch_running", False) and hasattr(self, "stepper_multi") and self.batch_queue and 0 <= self.batch_current_idx < len(self.batch_queue):
+                        cur_p = self.batch_queue[self.batch_current_idx]["name"]
+                        self.stepper_multi.set_active(self.batch_current_idx, f"{cur_p} (Stage {idx+1}/7)")
 
         elif mode == "export":
             target_key = None
@@ -3925,35 +3788,7 @@ class AutoMetashapeStudio:
                 if idx >= 0:
                     self._update_stepper_mode("export", idx, desc)
 
-        elif mode == "multi":
-            total_items = len(self.batch_queue) if getattr(self, "batch_queue", None) else 1
-            cur_idx = getattr(self, "batch_current_idx", 0)
-            proj_name = self.batch_queue[cur_idx]["name"] if getattr(self, "batch_queue", None) and cur_idx < len(self.batch_queue) else "Project"
 
-            sub_desc = ""
-            if "[1/7]" in line or "ingest" in l:
-                sub_desc = "Ingesting photos"
-            elif "[2/7]" in line or "gpu feature" in l:
-                sub_desc = "Feature Matching"
-            elif "[3/7]" in line or "aligning cameras" in l:
-                sub_desc = "Camera Alignment"
-            elif "[4/7]" in line or "depth maps" in l:
-                sub_desc = "Depth Maps"
-            elif "[4b/7]" in line or "point cloud" in l:
-                sub_desc = "Dense Point Cloud"
-            elif "[5/7]" in line or "surface mesh" in l:
-                sub_desc = "Surface Mesh"
-            elif "[6/7]" in line or "texture" in l:
-                sub_desc = "Texture Atlas"
-            elif "[7/7]" in line or "[export]" in l:
-                sub_desc = "Exporting Deliverables"
-
-            if total_items <= 7:
-                desc = f"{proj_name} ({sub_desc})" if sub_desc else f"Processing {proj_name}..."
-                self._update_stepper_mode("multi", cur_idx, desc)
-            else:
-                desc = f"Batch [{cur_idx+1}/{total_items}] {proj_name}: {sub_desc}" if sub_desc else f"Batch [{cur_idx+1}/{total_items}] {proj_name}"
-                self._update_stepper_mode("multi", 2, desc)
 
     def _consume_log_queue(self) -> None:
         while not self.log_queue.empty():
@@ -4119,11 +3954,7 @@ class AutoMetashapeStudio:
         if hasattr(self, "frame_crop_banner"):
             self.frame_crop_banner.pack_forget()
 
-        self.btn_start.config(
-            state=tk.NORMAL,
-            bg=UITheme.ACCENT_GREEN if self.active_mode == "recon" else UITheme.ACCENT_CYAN,
-            fg="white" if self.active_mode == "recon" else UITheme.BG_ROOT,
-        )
+        self._sync_stepper_view()
         self.btn_stop.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_MUTED)
 
         if getattr(self, "batch_running", False):

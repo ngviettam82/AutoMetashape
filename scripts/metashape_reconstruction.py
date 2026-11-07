@@ -1550,11 +1550,11 @@ def run_reconstruction(
     project_name: str | None = None,
 ):
     t_start = time.time()
-    if not output_dir:
-        output_dir = os.path.join(images_dir, "model")
-    os.makedirs(output_dir, exist_ok=True)
     if not project_name:
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
+    if not output_dir:
+        output_dir = os.path.join(images_dir, project_name)
+    os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, f"{project_name}.psx")
     legacy_psx = os.path.join(output_dir, "building_reconstruction.psx")
 
@@ -2514,26 +2514,12 @@ def run_reconstruction(
     chunk = save_checkpoint(doc, psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
-    # Maintain dual-compatibility aliases for legacy model.glb and building_reconstruction.psx
-    if project_name.lower() != "model":
-        legacy_glb = os.path.join(output_dir, "model.glb")
-        legacy_obj = os.path.join(output_dir, "model.obj")
-        if not os.path.exists(legacy_glb) and os.path.exists(glb_out):
-            try:
-                os.link(glb_out, legacy_glb)
-            except Exception:
-                pass
-        if not os.path.exists(legacy_obj) and os.path.exists(obj_out):
-            try:
-                os.link(obj_out, legacy_obj)
-            except Exception:
-                pass
-        # Clean up obsolete building_reconstruction.psx to ensure single project-named file
-        if legacy_psx != psx_out and os.path.exists(legacy_psx):
-            try:
-                os.remove(legacy_psx)
-            except Exception:
-                pass
+    # Clean up obsolete building_reconstruction.psx if present to ensure single project-named file
+    if legacy_psx != psx_out and os.path.exists(legacy_psx):
+        try:
+            os.remove(legacy_psx)
+        except Exception:
+            pass
 
     total_time = (time.time() - t_start) / 60.0
     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
@@ -2548,7 +2534,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="AutoMetashape: Autonomous High-Precision Photogrammetry Pipeline (Survey Profiling, Point Cloud, Mesh & Orthomosaic)"
     )
     parser.add_argument("--images", "--photos-dir", dest="images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
-    parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
+    parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/<project_name>)")
     parser.add_argument("--project-name", default=None, help="Base name for the project file, 3D model, textures, point cloud, and reports (default: folder name of the project)")
     parser.add_argument("--profile", action="store_true", help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing")
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
