@@ -25,6 +25,7 @@ from __future__ import annotations
 import ctypes
 import os
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -272,6 +273,102 @@ STAGES_EXPORT = [
 # ---------------------------------------------------------------------------
 # Horizontal Pipeline Stepper (Dynamic Milestones Tracker)
 # ---------------------------------------------------------------------------
+IPC_SENTINEL_PREFIX = "@@AUTOMETASHAPE_STAGE:"
+IPC_SENTINEL_SUFFIX = "@@"
+
+RECON_TAG_REGEX = re.compile(r"^\s*\[([1-7][a-z0-9]*)/[6-7]\]\s*(.*)", re.IGNORECASE)
+EXPORT_TAG_REGEX = re.compile(
+    r"^\s*\[(import|model info|mesh|color calibration|texture|delighting|1/2|2/2|point cloud|dem|orthomosaic|fbx|ply|dxf|tie points|tiled model|contours|report)\]\s*(.*)",
+    re.IGNORECASE,
+)
+
+RECON_TAG_MAP = {
+    "1": ("ingest", "Ingesting photos & blur filter"),
+    "2": ("match", "GPU Feature Matching"),
+    "3": ("align", "Camera Alignment & Tie Points"),
+    "3b": ("align", "Alignment & Bounding Box Crop"),
+    "4": ("depth", "MVS Dense Stereopsis"),
+    "4b": ("point_cloud", "Generating Dense Point Cloud"),
+    "5": ("mesh", "Fusing Surface Mesh Geometry"),
+    "6": ("texture", "Baking 8K Texture Atlas"),
+    "6b": ("tiled_model", "Building Hierarchical 3D Tiled Model"),
+    "7b": ("dem", "Building Digital Elevation Model"),
+    "7b2": ("dem", "Generating Topographic Contours"),
+    "7c": ("ortho", "Generating True Orthomosaic"),
+    "7d": ("point_cloud", "Exporting Dense Point Cloud Deliverable"),
+    "7e": ("export", "Exporting Official Quality PDF Report"),
+    "7": ("export", "Exporting GLB, OBJ & Production Assets"),
+}
+
+EXPORT_TAG_MAP = {
+    "import": ("project", "Loading Metashape Project"),
+    "model info": ("mesh", "Validating 3D Mesh Geometry"),
+    "mesh": ("mesh", "Validating 3D Mesh Geometry"),
+    "color calibration": ("texture", "Radiometric Color Calibration"),
+    "texture": ("texture", "Re-baking Texture Atlas"),
+    "delighting": ("texture", "Delighting & Shadow Removal"),
+    "1/2": ("models", "Exporting Binary GLB"),
+    "2/2": ("models", "Exporting Wavefront OBJ & TIFF"),
+    "fbx": ("models", "Exporting Autodesk FBX"),
+    "ply": ("models", "Exporting Stanford PLY"),
+    "dxf": ("models", "Exporting AutoCAD DXF"),
+    "tie points": ("models", "Exporting Sparse Tie Points"),
+    "point cloud": ("deliverables", "Exporting Dense Point Cloud"),
+    "dem": ("deliverables", "Exporting GeoTIFF Elevation Model"),
+    "orthomosaic": ("deliverables", "Exporting GeoTIFF Orthomosaic"),
+    "tiled model": ("deliverables", "Building & Exporting 3D Tiles"),
+    "contours": ("deliverables", "Exporting Topographic Contours"),
+    "report": ("deliverables", "Exporting Official PDF Report"),
+}
+
+
+def parse_ipc_line(line: str, mode: str = "recon") -> tuple[str, str] | None:
+    """Parses a subprocess log line into an explicit stage key and description.
+
+    Guarantees:
+    - 100% exact match for explicit IPC sentinel tokens (@@AUTOMETASHAPE_STAGE:key:desc@@).
+    - Strictly anchored regex for [X/Y] stage tags.
+    - Zero loose substring matching: lines containing configuration parameters,
+      flags, or C++ internals (e.g. 'Elevation: ENABLED | Orthomosaic: ENABLED')
+      return None and NEVER trigger fake stage transitions.
+    """
+    stripped = line.strip()
+    if not stripped:
+        return None
+
+    # 1. Primary: Explicit Machine-Readable IPC Sentinel Token
+    if stripped.startswith(IPC_SENTINEL_PREFIX) and stripped.endswith(IPC_SENTINEL_SUFFIX):
+        payload = stripped[len(IPC_SENTINEL_PREFIX) : -len(IPC_SENTINEL_SUFFIX)].strip()
+        parts = payload.split(":", 1)
+        key = parts[0].strip().lower()
+        desc = parts[1].strip() if len(parts) > 1 else ""
+        return (key, desc)
+
+    # 2. Secondary: Strictly Anchored [X/Y] Tags
+    if mode == "recon":
+        if stripped.startswith("[Auto-Crop"):
+            return ("align", "Alignment & Bounding Box Crop")
+
+        m = RECON_TAG_REGEX.match(stripped)
+        if m:
+            tag = m.group(1).lower()
+            if tag in RECON_TAG_MAP:
+                key, default_desc = RECON_TAG_MAP[tag]
+                desc = m.group(2).strip() or default_desc
+                return (key, desc)
+
+    elif mode == "export":
+        m = EXPORT_TAG_REGEX.match(stripped)
+        if m:
+            tag = m.group(1).lower()
+            if tag in EXPORT_TAG_MAP:
+                key, default_desc = EXPORT_TAG_MAP[tag]
+                desc = m.group(2).strip() or default_desc
+                return (key, desc)
+
+    return None
+
+
 class StudioPipelineStepper(tk.Frame):
     """Refined milestone trajectory tracking all pipeline stages with honest 1:1 mapping."""
 
@@ -3861,197 +3958,87 @@ class AutoMetashapeStudio:
         self.root.after(0, _apply)
 
     def _parse_stepper(self, line: str) -> None:
-        l = line.lower()
+        """Parses subprocess stdout lines and enqueues structured milestone events."""
         mode = self.worker_mode or self.active_mode
-        if mode == "recon":
-            target_key = None
-            desc = ""
-            if "[pause_crop]" in line:
-                self.root.after(0, self._on_pipeline_paused_for_crop)
-                return
-            elif "[success]" in l and "entire pipeline finished" in l:
-                self._complete_stepper_mode("recon")
-                return
-            # Match exact bracketed stage tags first without substring collision
-            elif "[1/7]" in line or "[1/6]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "ingest" if "ingest" in recon_keys else "align"
-                desc = "Ingesting photos & blur filter"
-            elif "[2/7]" in line or "[2/6]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "match" if "match" in recon_keys else "align"
-                desc = "GPU Feature Matching"
-            elif "[3b/7]" in line or "[auto-crop]" in line:
-                target_key = "align"
-                desc = "Alignment & Bounding Box Crop"
-            elif "[3/7]" in line or "[3/6]" in line:
-                target_key = "align"
-                desc = "Camera Alignment & Tie Points"
-            elif "[4b/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "point_cloud" if "point_cloud" in recon_keys else "depth"
-                desc = "Generating Dense Point Cloud"
-            elif "[4/7]" in line or "[4/6]" in line:
-                target_key = "depth"
-                desc = "MVS Dense Stereopsis"
-            elif "[5/7]" in line or "[5/6]" in line:
-                target_key = "mesh"
-                desc = "Fusing Surface Mesh Geometry"
-            elif "[6b/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "tiled_model" if "tiled_model" in recon_keys else "texture"
-                desc = "Building Hierarchical 3D Tiled Model"
-            elif "[6/7]" in line or "[6/6]" in line:
-                target_key = "texture"
-                desc = "Baking 8K Texture Atlas"
-            elif "[7b2/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "dem" if "dem" in recon_keys else "export"
-                desc = "Generating Topographic Contours"
-            elif "[7b/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "dem" if "dem" in recon_keys else "export"
-                desc = "Building & Exporting GeoTIFF DEM"
-            elif "[7c/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "ortho" if "ortho" in recon_keys else "export"
-                desc = "Building & Exporting GeoTIFF Orthomosaic"
-            elif "[7d/7]" in line:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "point_cloud" if "point_cloud" in recon_keys else "export"
-                desc = "Exporting Dense Point Cloud Deliverable"
-            elif "[7e/7]" in line:
-                target_key = "export"
-                desc = "Exporting Official Quality PDF Report"
-            elif "[7/7]" in line:
-                target_key = "export"
-                desc = "Exporting GLB, OBJ & Production Assets"
-            # Fallback text matches if logs arrive without bracket prefix
-            elif "surface mesh" in l:
-                target_key = "mesh"
-                desc = "Fusing Surface Mesh Geometry"
-            elif "dense point cloud" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "point_cloud" if "point_cloud" in recon_keys else "depth"
-                desc = "Generating Dense Point Cloud"
-            elif "depth maps" in l or "skipping steps 1-3" in l:
-                target_key = "depth"
-                desc = "MVS Dense Stereopsis"
-            elif ("baking" in l and "texture" in l) or "re-baking texture atlas" in l:
-                target_key = "texture"
-                desc = "Baking 8K Texture Atlas"
-            elif "tiled model" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "tiled_model" if "tiled_model" in recon_keys else "texture"
-                desc = "Building Hierarchical 3D Tiled Model"
-            elif "digital elevation model" in l or "dem generation" in l or "geotiff dem" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "dem" if "dem" in recon_keys else "export"
-                desc = "Building & Exporting GeoTIFF DEM"
-            elif "contour shapes" in l or "topographic contours" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "dem" if "dem" in recon_keys else "export"
-                desc = "Generating Topographic Contours"
-            elif "orthomosaic" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "ortho" if "ortho" in recon_keys else "export"
-                desc = "Building & Exporting GeoTIFF Orthomosaic"
-            elif "quality report" in l or "official calibration" in l:
-                target_key = "export"
-                desc = "Exporting Official Quality PDF Report"
-            elif "exporting production assets" in l or "saved binary glb" in l:
-                target_key = "export"
-                desc = "Exporting GLB, OBJ & Production Assets"
-            elif "aligning cameras" in l:
-                target_key = "align"
-                desc = "Camera Alignment & Tie Points"
-            elif "gpu feature matching" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "match" if "match" in recon_keys else "align"
-                desc = "GPU Feature Matching"
-            elif "ingesting photos" in l or "ingesting chunk" in l:
-                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
-                target_key = "ingest" if "ingest" in recon_keys else "align"
-                desc = "Ingesting photos & blur filter"
+        stripped = line.strip()
+        if not stripped:
+            return
 
-            if target_key:
-                idx = self._find_stage_index_by_key("recon", target_key)
-                if idx >= 0:
-                    self._update_stepper_mode("recon", idx, desc)
-                    if getattr(self, "batch_running", False) and hasattr(self, "stepper_multi") and self.batch_queue and 0 <= self.batch_current_idx < len(self.batch_queue):
-                        cur_p = self.batch_queue[self.batch_current_idx]["name"]
-                        total_st = len(self.mode_states["recon"]["stages"])
-                        self.stepper_multi.set_active(self.batch_current_idx, f"{cur_p} (Stage {idx+1}/{total_st})")
+        # 1. Pause for manual bounding box crop event
+        if "@@AUTOMETASHAPE_PAUSE_CROP@@" in stripped or "[pause_crop]" in stripped.lower():
+            self.root.after(0, self._on_pipeline_paused_for_crop)
+            return
 
-        elif mode == "export":
-            target_key = None
-            desc = ""
-            if "project:" in l or "loading metashape project" in l or "[import]" in l or "re-linked model saved" in l:
-                target_key = "project"
-                desc = "Loading Metashape Project"
-            elif "[model info]" in l or "polygonal faces" in l or "[mesh]" in l:
-                target_key = "mesh"
-                desc = "Validating 3D Mesh Geometry"
-            elif "[color calibration]" in l:
-                target_key = "texture"
-                desc = "Radiometric Color Calibration"
-            elif "[texture]" in l or "texture atlas" in l or "re-baking" in l:
-                target_key = "texture"
-                desc = "Re-baking Texture Atlas"
-            elif "[delighting]" in l or "ambient shadows" in l:
-                target_key = "texture"
-                desc = "Delighting & Shadow Removal"
-            elif "[1/2]" in line or "binary gltf" in l or ".glb" in l:
-                target_key = "models"
-                desc = "Exporting Binary GLB"
-            elif "[2/2]" in line or "wavefront obj" in l or ".obj" in l:
-                target_key = "models"
-                desc = "Exporting Wavefront OBJ & TIFF"
-            elif "[fbx]" in l:
-                target_key = "models"
-                desc = "Exporting Autodesk FBX"
-            elif "[ply]" in l:
-                target_key = "models"
-                desc = "Exporting Stanford PLY"
-            elif "[dxf]" in l:
-                target_key = "models"
-                desc = "Exporting AutoCAD DXF"
-            elif "[tie points]" in l:
-                target_key = "models"
-                desc = "Exporting Sparse Tie Points"
-            elif "[point cloud]" in l or "dense point cloud" in l:
-                target_key = "deliverables"
-                desc = "Exporting Dense Point Cloud"
-            elif "[dem]" in l or "geotiff elevation" in l:
-                target_key = "deliverables"
-                desc = "Exporting GeoTIFF Elevation Model"
-            elif "[orthomosaic]" in l:
-                target_key = "deliverables"
-                desc = "Exporting GeoTIFF Orthomosaic"
-            elif "[tiled model]" in l:
-                target_key = "deliverables"
-                desc = "Building & Exporting 3D Tiles"
-            elif "[contours]" in l:
-                target_key = "deliverables"
-                desc = "Exporting Topographic Contours"
-            elif "[report]" in l:
-                target_key = "deliverables"
-                desc = "Exporting Official PDF Report"
-            elif "[success]" in l:
-                self._complete_stepper_mode("export")
-                return
+        # 2. Pipeline / Export complete event
+        if (
+            "@@AUTOMETASHAPE_COMPLETE@@" in stripped
+            or (
+                "[success]" in stripped.lower()
+                and any(k in stripped.lower() for k in ["entire pipeline finished", "production assets exported"])
+            )
+        ):
+            self.log_queue.put(("__STAGE_COMPLETE__", mode))
+            return
 
-            if target_key:
-                idx = self._find_stage_index_by_key("export", target_key)
-                if idx >= 0:
-                    self._update_stepper_mode("export", idx, desc)
+        # 3. Monotonic stage transition event
+        parsed = parse_ipc_line(line, mode=mode)
+        if parsed is not None:
+            stage_key, desc = parsed
+            self.log_queue.put(("__STAGE_EVENT__", mode, stage_key, desc))
 
+    def _handle_stage_transition(self, mode: str, target_key: str, desc: str) -> None:
+        """Applies a pipeline milestone transition atomically on the main GUI thread."""
+        if mode not in getattr(self, "mode_states", {}):
+            return
+        idx = self._find_stage_index_by_key(mode, target_key)
+        if idx < 0:
+            return
 
+        st = self.mode_states[mode]
+        cur_idx = st.get("active_idx", -1)
+        if idx < cur_idx:
+            # Monotonic gate: do not rewind active milestone
+            return
+
+        st["active_idx"] = idx
+        st["desc"] = desc
+        st["is_done"] = False
+        st["is_paused"] = False
+        if 0 <= idx < len(st["stages"]):
+            num = st["stages"][idx][0]
+            name = st["stages"][idx][1]
+            st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
+            st["status_fg"] = UITheme.ACCENT_CYAN
+
+        # Atomically update single-project photogrammetry trajectory stepper
+        if self.active_mode == mode and hasattr(self, "stepper"):
+            self.stepper.set_active(idx, desc)
+
+        # Atomically update multi-project batch stepper synchronously on main thread
+        if (
+            getattr(self, "batch_running", False)
+            and hasattr(self, "stepper_multi")
+            and self.batch_queue
+            and 0 <= self.batch_current_idx < len(self.batch_queue)
+        ):
+            cur_p = self.batch_queue[self.batch_current_idx]["name"]
+            total_st = len(st["stages"])
+            self.stepper_multi.set_active(self.batch_current_idx, f"{cur_p} (Stage {idx+1}/{total_st})")
 
     def _consume_log_queue(self) -> None:
         while not self.log_queue.empty():
             try:
                 line = self.log_queue.get_nowait()
+                if isinstance(line, tuple):
+                    msg_type = line[0]
+                    if msg_type == "__STAGE_EVENT__":
+                        _, mode, target_key, desc = line
+                        self._handle_stage_transition(mode, target_key, desc)
+                    elif msg_type == "__STAGE_COMPLETE__":
+                        _, mode = line
+                        self._complete_stepper_mode(mode)
+                    continue
+
                 if line.startswith("__STATUS_PHOTO__"):
                     self.lbl_photo_status.set(line[len("__STATUS_PHOTO__"):])
                 elif line == "__TASK_DONE_SUCCESS__":
@@ -4061,6 +4048,11 @@ class AutoMetashapeStudio:
                 elif line == "__TASK_DONE_ERROR__":
                     if not getattr(self, "user_cancelled", False):
                         self._on_finished(success=False, user_cancelled=False)
+                elif line.startswith(IPC_SENTINEL_PREFIX) and line.endswith(IPC_SENTINEL_SUFFIX):
+                    payload = line[len(IPC_SENTINEL_PREFIX) : -len(IPC_SENTINEL_SUFFIX)].strip()
+                    parts = payload.split(":", 1)
+                    stage_desc = parts[1].strip() if len(parts) > 1 else parts[0].strip()
+                    self._log(f"\n[MILESTONE] {stage_desc}", "stage")
                 else:
                     tag = None
                     if any(s in line for s in ["[1/7]", "[2/7]", "[3/7]", "[4/7]", "[4b/7]", "[5/7]", "[6/7]", "[6b/7]", "[7/7]", "[7b/7]", "[7b2/7]", "[7c/7]", "[7d/7]", "[7e/7]", "[1/6]", "[2/6]", "[3/6]", "[4/6]", "[5/6]", "[6/6]", "[1/2]", "[2/2]", "[Auto-Crop]", "[EXPORT]", "[Point Cloud]", "[DEM]", "[Orthomosaic]", "[Contours]", "[Tiled Model]"]):

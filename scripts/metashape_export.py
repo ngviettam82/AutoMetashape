@@ -22,6 +22,24 @@ except ImportError:
     Metashape = None
 
 
+# ---------------------------------------------------------------------------
+# Machine-Readable IPC Milestone Protocol Sentinels
+# ---------------------------------------------------------------------------
+IPC_SENTINEL_PREFIX = "@@AUTOMETASHAPE_STAGE:"
+IPC_SENTINEL_SUFFIX = "@@"
+IPC_COMPLETE = "@@AUTOMETASHAPE_COMPLETE@@"
+
+
+def emit_ipc_stage(stage_key: str, description: str) -> None:
+    """Emits an explicit machine-readable IPC milestone sentinel to stdout for GUI tracking."""
+    print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{description}{IPC_SENTINEL_SUFFIX}", flush=True)
+
+
+def emit_ipc_event(sentinel: str) -> None:
+    """Emits an explicit machine-readable IPC control event to stdout."""
+    print(sentinel, flush=True)
+
+
 if Metashape is not None:
     POINT_CLOUD_FORMAT_MAP = {
         "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
@@ -153,6 +171,7 @@ def export_project_assets(
     print(f"  Destination: {output_dir}")
     print("=========================================================================", flush=True)
 
+    emit_ipc_stage("project", f"Loading Metashape Project: {os.path.basename(project_path)}")
     doc = Metashape.Document()
     files_dir = project_path.replace(".psx", ".files")
     lock_file = os.path.join(files_dir, "lock")
@@ -223,6 +242,7 @@ def export_project_assets(
 
     mesh_verts = len(chunk.model.vertices)
     mesh_faces = len(chunk.model.faces)
+    emit_ipc_stage("mesh", f"Validating 3D Mesh Geometry ({mesh_verts:,} vertices, {mesh_faces:,} faces)")
     print(f"[Model Info] Geometry: {mesh_verts:,} vertices, {mesh_faces:,} polygonal faces.", flush=True)
 
     if smooth_mesh and chunk.model:
@@ -241,6 +261,9 @@ def export_project_assets(
         current_pages = len(chunk.model.textures)
     elif hasattr(chunk.model, "texture") and chunk.model.texture():
         current_pages = 1
+
+    if calibrate_colors or rebake_texture or current_pages == 0 or (remove_lighting and chunk.model):
+        emit_ipc_stage("texture", "Processing Texture Atlas & Delighting")
 
     if calibrate_colors:
         print("\n[Color Calibration] Executing radiometric calibration & white balance...", flush=True)
@@ -282,6 +305,7 @@ def export_project_assets(
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
     # 1. Export Binary GLTF/GLB
+    emit_ipc_stage("models", "Exporting Binary glTF & Wavefront OBJ Models")
     print("\n[1/2] Exporting Binary glTF (.glb) with embedded PBR textures...", flush=True)
     t_glb = time.time()
     chunk.exportModel(
@@ -310,6 +334,7 @@ def export_project_assets(
     print(f"  Saved: {obj_out} ({obj_size:.2f} MB) in {(time.time() - t_obj):.1f}s.", flush=True)
 
     # 3. Optional Dense Point Cloud Export
+    emit_ipc_stage("deliverables", "Exporting Production Deliverables (Cloud, DEM, Ortho, Report)")
     if export_point_cloud and chunk.point_cloud and chunk.point_cloud.point_count > 0:
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
         pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
@@ -509,6 +534,7 @@ def export_project_assets(
         print(f"  Saved Report: {report_out} ({os.path.getsize(report_out)/(1024*1024):.2f} MB)", flush=True)
 
     print("\n[SUCCESS] Production assets exported successfully!", flush=True)
+    emit_ipc_event(IPC_COMPLETE)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

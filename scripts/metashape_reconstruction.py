@@ -30,6 +30,25 @@ except ImportError:
     Metashape = None
 
 
+# ---------------------------------------------------------------------------
+# Machine-Readable IPC Milestone Protocol Sentinels
+# ---------------------------------------------------------------------------
+IPC_SENTINEL_PREFIX = "@@AUTOMETASHAPE_STAGE:"
+IPC_SENTINEL_SUFFIX = "@@"
+IPC_PAUSE_CROP = "@@AUTOMETASHAPE_PAUSE_CROP@@"
+IPC_COMPLETE = "@@AUTOMETASHAPE_COMPLETE@@"
+
+
+def emit_ipc_stage(stage_key: str, description: str) -> None:
+    """Emits an explicit machine-readable IPC milestone sentinel to stdout for GUI tracking."""
+    print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{description}{IPC_SENTINEL_SUFFIX}", flush=True)
+
+
+def emit_ipc_event(sentinel: str) -> None:
+    """Emits an explicit machine-readable IPC control event to stdout."""
+    print(sentinel, flush=True)
+
+
 # Comprehensive list of all image and camera RAW formats supported by Agisoft Metashape
 SUPPORTED_IMAGE_EXTS = (
     # Standard raster formats
@@ -1366,6 +1385,7 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
         except Exception:
             pass
 
+    emit_ipc_event(IPC_PAUSE_CROP)
     print("\n=========================================================================", flush=True)
     print("  [PAUSE_CROP] PAUSED FOR MANUAL BOUNDING BOX IN AGISOFT METASHAPE PRO", flush=True)
     print("  Project checkpoint saved to:", flush=True)
@@ -1912,6 +1932,7 @@ def run_reconstruction(
             for idx, (grp_name, filepaths) in enumerate(groups.items()):
                 sub_chunk = doc.addChunk()
                 sub_chunk.label = f"Flight_{idx+1}_{grp_name}"
+                emit_ipc_stage("ingest", f"Ingesting Chunk {idx+1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos")
                 print(f"\n[1/7] Ingesting Chunk {idx+1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos...", flush=True)
                 sub_chunk.addPhotos(filepaths)
                 print(f"  Loaded {len(sub_chunk.cameras):,} cameras into '{sub_chunk.label}'.", flush=True)
@@ -1928,6 +1949,7 @@ def run_reconstruction(
 
             # Step 2: Feature Detection & Matching per chunk
             for idx, c in enumerate(created_chunks):
+                emit_ipc_stage("match", f"GPU Feature Matching for Chunk {idx+1}/{len(created_chunks)}")
                 print(f"\n[2/7] GPU Feature Matching for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', {len(c.cameras):,} cameras)...", flush=True)
                 t_match = time.time()
                 c.matchPhotos(
@@ -1946,6 +1968,7 @@ def run_reconstruction(
 
             # Step 3: Camera Alignment per chunk
             for idx, c in enumerate(created_chunks):
+                emit_ipc_stage("align", f"Aligning Cameras for Chunk {idx+1}/{len(created_chunks)}")
                 print(f"\n[3/7] Aligning Cameras for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', Adaptive Fitting: {adaptive_fitting})...", flush=True)
                 t_align = time.time()
                 c.alignCameras(adaptive_fitting=adaptive_fitting)
@@ -2065,6 +2088,7 @@ def run_reconstruction(
                 all_imgs.extend(imgs)
             all_imgs = sorted(all_imgs)
 
+            emit_ipc_stage("ingest", f"Ingesting {len(all_imgs)} images across: {images_dir}")
             print(f"\n[1/7] Ingesting {len(all_imgs)} images found across: {images_dir}", flush=True)
             chunk.addPhotos(all_imgs)
             print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
@@ -2093,6 +2117,7 @@ def run_reconstruction(
             if not align_photos:
                 print("\n[INFO] Photo feature matching and camera alignment skipped by workflow selection.", flush=True)
             else:
+                emit_ipc_stage("match", "Executing GPU Feature Matching")
                 print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
                 t_match = time.time()
                 chunk.matchPhotos(
@@ -2109,6 +2134,7 @@ def run_reconstruction(
                 )
                 print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
+                emit_ipc_stage("align", "Camera Alignment & Bundle Adjustment")
                 print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
                 t_align = time.time()
                 chunk.alignCameras(adaptive_fitting=adaptive_fitting)
@@ -2196,10 +2222,12 @@ def run_reconstruction(
                     depth_count = 0
 
         if has_depth_maps:
+            emit_ipc_stage("depth", f"Reusing existing MVS Depth Maps ({depth_count} depth maps)")
             print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({depth_count} depth maps).", flush=True)
         else:
             depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
             filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
+            emit_ipc_stage("depth", f"Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()})")
             print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
             t_depth = time.time()
             chunk.buildDepthMaps(
@@ -2215,8 +2243,10 @@ def run_reconstruction(
     if build_point_cloud:
         has_point_cloud = chunk.point_cloud is not None and chunk.point_cloud.point_count > 0
         if has_point_cloud:
+            emit_ipc_stage("point_cloud", f"Reusing existing Dense Point Cloud ({chunk.point_cloud.point_count:,} points)")
             print(f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).", flush=True)
         else:
+            emit_ipc_stage("point_cloud", "Generating Dense Point Cloud from Depth Maps")
             print(f"\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
             t_pc = time.time()
             chunk.buildPointCloud(
@@ -2269,8 +2299,10 @@ def run_reconstruction(
 
         has_model = chunk.model is not None
         if has_model:
+            emit_ipc_stage("mesh", f"Reusing existing Surface Mesh ({len(chunk.model.vertices):,} vertices)")
             print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
         else:
+            emit_ipc_stage("mesh", f"Reconstructing Arbitrary Surface Mesh (Target: {custom_faces:,} faces)")
             print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
             t_mesh = time.time()
             if custom_faces > 0:
@@ -2340,13 +2372,17 @@ def run_reconstruction(
     if not build_texture or chunk.model is None:
         pass
     elif current_pages == texture_pages and not rebake_texture:
+        emit_ipc_stage("texture", f"Reusing existing Texture Atlas ({current_pages} pages)")
         print(f"\n[6/7] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
     else:
         if current_pages > 0 and current_pages != texture_pages:
+            emit_ipc_stage("texture", f"Re-baking Texture Atlas to requested {texture_pages} pages")
             print(f"\n[6/7] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...", flush=True)
         elif rebake_texture:
+            emit_ipc_stage("texture", f"Force re-baking Texture Atlas ({texture_pages} pages)")
             print(f"\n[6/7] Force re-baking texture atlas as requested ({texture_pages} pages)...", flush=True)
         else:
+            emit_ipc_stage("texture", f"Baking {texture_pages}x 8192x8192 (8K) Texture Atlas")
             print(f"\n[6/7] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
 
         if calibrate_colors:
@@ -2393,6 +2429,7 @@ def run_reconstruction(
         try:
             has_tiled = getattr(chunk, "tiled_model", None) is not None
             if not has_tiled:
+                emit_ipc_stage("tiled_model", f"Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})")
                 print(f"\n[6b/7] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
                 t_tile = time.time()
                 chunk.buildTiledModel(
@@ -2426,6 +2463,7 @@ def run_reconstruction(
         try:
             has_dem = getattr(chunk, "elevation", None) is not None
             if not has_dem:
+                emit_ipc_stage("dem", "Building Digital Elevation Model (DEM/DSM)")
                 print(f"\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
                 t_dem = time.time()
                 proj = Metashape.OrthoProjection()
@@ -2454,6 +2492,7 @@ def run_reconstruction(
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7b/7] [CHECKPOINT] Saved DEM inside project: {psx_out}", flush=True)
             else:
+                emit_ipc_stage("dem", "Reusing existing Digital Elevation Model from checkpoint")
                 print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
 
             if export_dem:
@@ -2506,6 +2545,7 @@ def run_reconstruction(
         try:
             has_ortho = chunk.orthomosaic is not None
             if not has_ortho:
+                emit_ipc_stage("ortho", "Generating Orthomosaic from Reconstructed Surface Mesh")
                 print(f"\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
                 t_ortho = time.time()
                 proj = Metashape.OrthoProjection()
@@ -2537,6 +2577,7 @@ def run_reconstruction(
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7c/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
             else:
+                emit_ipc_stage("ortho", f"Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px)")
                 print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
             if export_ortho:
@@ -2560,6 +2601,7 @@ def run_reconstruction(
             print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
 
     # Production Asset Export
+    emit_ipc_stage("export", "Exporting Production Assets (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
     print("\n=========================================================================")
     print("  [7/7] EXPORTING PRODUCTION ASSETS (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
     print("=========================================================================")
@@ -2684,6 +2726,7 @@ def run_reconstruction(
 
     total_time = (time.time() - t_start) / 60.0
     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
+    emit_ipc_event(IPC_COMPLETE)
 
     if survey_physics and pro_plan:
         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
