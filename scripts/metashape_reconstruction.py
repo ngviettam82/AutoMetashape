@@ -1027,14 +1027,13 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
 
 
 def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
-    """Crops chunk.region horizontally to the smallest enclosing square of camera GPS poses,
-    preserving vertical (Z) bounds completely uncropped to protect roof and ground features.
-
-    This is the default cropping method, minimizing manual alignment steps to virtually zero.
+    """Crops chunk.region horizontally to the smallest area horizontal square enclosing all camera images,
+    filtering outliers (such as GPS 0,0, missing coordinates, or distant takeoff points), while preserving
+    the full vertical elevation range so ground terrain and structures are protected.
 
     Args:
         chunk: Active Metashape.Chunk.
-        padding: Safety margin padding applied to square dimensions and height (default: 0.05 / 5%).
+        padding: Safety margin padding applied to square dimensions (default: 0.05 / 5%).
 
     Returns:
         True if bounding box was successfully updated; False if skipped.
@@ -1044,59 +1043,128 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         print("  [Auto-Crop-GPS] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
 
-    print(f"\n[Auto-Crop-GPS] Computing camera horizontal envelope from {len(aligned_cams)} cameras...", flush=True)
+    print(f"\n[Auto-Crop-GPS] Computing minimum area horizontal enclosing square from {len(aligned_cams)} cameras...", flush=True)
+
+    # 1. Filter invalid GPS outliers (e.g. GPS (0, 0) or unreferenced cameras)
+    valid_cams = []
+    for c in aligned_cams:
+        if c.reference and c.reference.location:
+            loc = c.reference.location
+            if abs(loc.x) < 1e-4 and abs(loc.y) < 1e-4:
+                continue
+        valid_cams.append(c)
+
+    if len(valid_cams) < 2:
+        valid_cams = aligned_cams
 
     rot = chunk.region.rot
-    rot_t = rot.t()  # World to local level coordinate frame
+    rot_t = rot.t()  # Local horizontal level coordinate frame (Z is Up)
 
-    # 1. Transform camera poses to local horizontal frame
-    cam_local_x, cam_local_y = [], []
-    for c in aligned_cams:
-        loc = rot_t * c.center
-        cam_local_x.append(loc.x)
-        cam_local_y.append(loc.y)
+    # Transform camera centers to local coordinate frame
+    cam_locs = [rot_t * c.center for c in valid_cams]
+    xs = [p.x for p in cam_locs]
+    ys = [p.y for p in cam_locs]
+    cam_zs = [p.z for p in cam_locs]
 
-    cam_local_x.sort()
-    cam_local_y.sort()
+    # Reject extreme spatial outliers (e.g. distant takeoff / transit location) via MAD
+    sorted_xs = sorted(xs)
+    sorted_ys = sorted(ys)
+    med_x = sorted_xs[len(sorted_xs) // 2]
+    med_y = sorted_ys[len(sorted_ys) // 2]
+    dists = [math.hypot(x - med_x, y - med_y) for x, y in zip(xs, ys)]
+    sorted_dists = sorted(dists)
+    med_d = sorted_dists[len(sorted_dists) // 2]
+    devs_d = sorted([abs(d - med_d) for d in dists])
+    mad_d = devs_d[len(devs_d) // 2]
+    sigma_d = 1.4826 * mad_d
 
-    # Apply robust MAD bounding to reject distant takeoff/landing outlier cameras (e.g. 10% outlier poses)
-    min_cx, max_cx = robust_bounds(cam_local_x, k=3.0)
-    min_cy, max_cy = robust_bounds(cam_local_y, k=3.0)
+    inlier_xs, inlier_ys, inlier_zs = [], [], []
+    for x, y, z, d in zip(xs, ys, cam_zs, dists):
+        # Prune only true outliers (extreme deviation exceeding 5-sigma and 1000m)
+        if sigma_d > 1e-3 and (d - med_d) > max(1000.0, 5.0 * sigma_d):
+            continue
+        inlier_xs.append(x)
+        inlier_ys.append(y)
+        inlier_zs.append(z)
 
-    span_x = max_cx - min_cx
-    span_y = max_cy - min_cy
-    mid_x = (min_cx + max_cx) * 0.5
-    mid_y = (min_cy + max_cy) * 0.5
+    if len(inlier_xs) < 2:
+        inlier_xs, inlier_ys, inlier_zs = xs, ys, cam_zs
 
-    # Smallest square enclosing camera footprint (with padding)
-    side = max(span_x, span_y) * (1.0 + 2.0 * padding)
-    half_side = side * 0.5
+    # 2. Find orientation in the horizontal plane that produces the SMALLEST AREA SQUARE
+    best_side = float("inf")
+    best_theta = 0.0
+    best_bounds = (0.0, 0.0, 0.0, 0.0)
 
-    sq_min_x = mid_x - half_side
-    sq_max_x = mid_x + half_side
-    sq_min_y = mid_y - half_side
-    sq_max_y = mid_y + half_side
+    for step in range(180):  # 0.0 to 89.5 degrees in 0.5 deg steps
+        theta = math.radians(step * 0.5)
+        cos_t = math.cos(theta)
+        sin_t = math.sin(theta)
+        rx = [x * cos_t + y * sin_t for x, y in zip(inlier_xs, inlier_ys)]
+        ry = [-x * sin_t + y * cos_t for x, y in zip(inlier_xs, inlier_ys)]
+        min_rx, max_rx = min(rx), max(rx)
+        min_ry, max_ry = min(ry), max(ry)
+        span = max(max_rx - min_rx, max_ry - min_ry)
+        if span < best_side:
+            best_side = span
+            best_theta = theta
+            best_bounds = (min_rx, max_rx, min_ry, max_ry)
 
-    # Preserve uncropped vertical (Z) extent from default post-alignment region
-    orig_region = chunk.region
-    orig_local_center = rot_t * orig_region.center
-    orig_mid_z = orig_local_center.z
-    orig_span_z = orig_region.size.z
+    side = best_side * (1.0 + 2.0 * padding)
 
-    # 2. Assign new region: horizontal square crop (X, Y) with uncropped vertical (Z)
-    mid_local = Metashape.Vector([mid_x, mid_y, orig_mid_z])
-    new_center = rot * mid_local
-    new_size = Metashape.Vector([side, side, orig_span_z])
+    # Compute center of the smallest square in the rotated frame
+    mid_rx = (best_bounds[0] + best_bounds[1]) * 0.5
+    mid_ry = (best_bounds[2] + best_bounds[3]) * 0.5
+
+    # Rotate center back to the unrotated horizontal frame
+    cos_t = math.cos(best_theta)
+    sin_t = math.sin(best_theta)
+    mid_x = mid_rx * cos_t - mid_ry * sin_t
+    mid_y = mid_rx * sin_t + mid_ry * cos_t
+
+    # 3. Preserve vertical extent covering terrain and roof features
+    pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []
+    if pts:
+        pt_zs = [(rot_t * p.coord[:3]).z for p in pts]
+        pt_zs.sort()
+        med_pz = pt_zs[len(pt_zs) // 2]
+        devs_pz = sorted([abs(z - med_pz) for z in pt_zs])
+        mad_pz = devs_pz[len(devs_pz) // 2]
+        sigma_pz = 1.4826 * mad_pz
+        if sigma_pz > 1e-3:
+            filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz]
+        else:
+            filtered_pt_zs = pt_zs
+        all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)
+    else:
+        all_zs = inlier_zs
+
+    min_z = min(all_zs)
+    max_z = max(all_zs)
+    span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))
+    mid_z = (min_z + max_z) * 0.5
+
+    # 4. Construct oriented region rotation matrix and assign to chunk
+    Rz = Metashape.Matrix([
+        [cos_t, -sin_t, 0.0],
+        [sin_t,  cos_t, 0.0],
+        [  0.0,    0.0, 1.0]
+    ])
+    new_rot = rot * Rz
+    new_center = rot * Metashape.Vector([mid_x, mid_y, mid_z])
+    new_size = Metashape.Vector([side, side, span_z])
 
     region = chunk.region
+    region.rot = new_rot
     region.center = new_center
     region.size = new_size
     chunk.region = region
 
-    print(f"  [Auto-Crop-GPS] Successfully cropped horizontal region to Camera GPS Square!", flush=True)
-    print(f"  Square Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
-    print(f"  Horizontal Footprint: ({side:.2f}m x {side:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
-    print(f"  Vertical Extent (Uncropped): {orig_span_z:.2f}m (Z Center: {orig_mid_z:.2f}m)", flush=True)
+    scale = chunk.transform.scale if chunk.transform and chunk.transform.scale else 1.0
+    print(f"  [Auto-Crop-GPS] Smallest enclosing horizontal square successfully calculated!", flush=True)
+    print(f"  Images Included: {len(inlier_xs)}/{len(aligned_cams)} (Outliers Pruned: {len(aligned_cams) - len(inlier_xs)})", flush=True)
+    print(f"  Optimal Angle: {math.degrees(best_theta):.1f} deg (Minimum Area Square)", flush=True)
+    print(f"  Horizontal Size: {side * scale:.2f}m x {side * scale:.2f}m [Padding: {int(padding * 100)}%]", flush=True)
+    print(f"  Vertical Extent: {span_z * scale:.2f}m (Z: [{min_z * scale:.2f}m, {max_z * scale:.2f}m])", flush=True)
     return True
 
 

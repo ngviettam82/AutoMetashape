@@ -89,6 +89,25 @@ class TestCliArgs(unittest.TestCase):
             ])
             self.assertEqual(args.reference_preselection_mode, mode)
 
+    def test_recon_parser_crop_choices(self) -> None:
+        """Defend crop-method choices including gps-square and none."""
+        parser = build_recon_parser()
+        default_args = parser.parse_args(["--images", "dummy_images"])
+        self.assertIsNone(default_args.crop_method)
+
+        for method in ("gps-square", "structure", "manual", "none"):
+            args = parser.parse_args([
+                "--images", "dummy_images",
+                "--crop-method", method,
+            ])
+            self.assertEqual(args.crop_method, method)
+
+        no_crop_args = parser.parse_args([
+            "--images", "dummy_images",
+            "--no-crop",
+        ])
+        self.assertTrue(no_crop_args.no_crop)
+
     def test_recon_parser_presets(self) -> None:
         """Defend supported presets including building alias."""
         parser = build_recon_parser()

@@ -111,11 +111,12 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 2. **Camera Alignment & Radiometric Calibration**:
    - Matching Quality: Medium (`downscale=2`) for optimal memory scaling.
    - Keypoint Limit: 40,000 (or 60,000 for $>30\text{MP}$); Tiepoint Limit: 25,000 tiepoints; Guided Matching enabled by default.
+   - Reference Preselection Mode (`--reference-preselection-mode estimated`): Configures camera pair matching using `ReferencePreselectionEstimated` by default, projecting estimated camera frustums onto terrain to robustly pair photos across multi-drone, multi-altitude, or oblique inspection flights without camera dropping.
    - Single-Chunk Default (`--multi-chunk disable`): Solves all images globally in one bundle adjustment to prevent false alignment or chunk-merging offsets.
    - Radiometric Calibration (`--calibrate-colors`): Performs camera color and white balance equalization across frames via `chunk.calibrateColors()`.
 
 3. **Bounding Box Cropping Strategies**:
-   - `gps-square` (Default for Building): Horizontal square enclosing all camera GPS coordinates while leaving vertical altitude $Z$ uncropped.
+   - `gps-square` (Default for Building): Smallest area horizontal enclosing square containing all valid camera image positions (filtering outliers like GPS 0,0, null coordinates, or distant takeoff points), rotating in the horizontal plane to minimize footprint while preserving full vertical elevation range so ground terrain and structures are never clipped.
    - `none` (Default for Map & Aerial Surveys): Retains the entire surveyed spatial footprint without clipping perimeter terrain.
    - `structure` (Iteratively Reweighted Least Squares): Computes the 3D line-of-sight intersection of all camera optical viewing axes.
    - `manual`: Saves project and pauses for manual region box positioning in Metashape Pro GUI.
@@ -123,6 +124,7 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 4. **GPU Depth Maps & Dense Point Cloud**:
    - Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs.
    - Dense Point Cloud (`buildPointCloud`): Fuses depth maps into a 3D point cloud with RGB vertex colors and confidence indices.
+   - Decoupled Geomatics Architecture: In-project generation (`--build-point-cloud`, `--build-dem`, `--ortho`) is strictly separated from disk file export (`--export-point-cloud`, `--export-dem`, `--export-ortho`), allowing point clouds and orthomosaics to remain permanently in the native `.psx` database without writing multi-gigabyte disk files unless explicitly requested.
    - Slope-Adaptive Ground Point Classification (`--classify-ground`): Separates bare-earth topography from vegetation and structures using slope-adaptive parameters (`cell_size`, `max_angle`, `max_distance`).
    - AI Semantic Classification (`--classify-points`): Applies multi-class deep learning classification assigning points to ASPRS standard classes (Ground, Low Veg, High Veg, Building, Road, Car).
    - Point Cloud Export: Exports dense point clouds in `.laz`, `.las`, `.ply`, `.e57`, or `.xyz` and sparse tie points via `--export-tie-points`.
