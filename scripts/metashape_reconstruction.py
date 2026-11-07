@@ -1540,9 +1540,9 @@ def run_reconstruction(
     ground_cell_size: float = None,
     ground_max_angle: float = None,
     ground_max_distance: float = None,
-    build_orthomosaic: bool = False,
+    build_orthomosaic: bool = None,
     export_ortho: bool = True,
-    build_dem: bool = False,
+    build_dem: bool = None,
     export_dem: bool = False,
     build_point_cloud: bool = True,
     export_point_cloud: bool = False,
@@ -1646,10 +1646,11 @@ def run_reconstruction(
         custom_faces = 2000000
     if texture_pages is None:
         texture_pages = 22
+    is_pro_preset = (preset == "pro" or is_auto)
     if build_orthomosaic is None:
-        build_orthomosaic = False
+        build_orthomosaic = True if is_pro_preset else False
     if build_dem is None:
-        build_dem = False
+        build_dem = True if is_pro_preset else False
     if build_point_cloud is None:
         build_point_cloud = True
     if classify_ground is None:
@@ -2689,7 +2690,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")
     parser.add_argument("--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold")
     # DEM / Elevation Options
-    parser.add_argument("--build-dem", action="store_true", default=False, help="Build Digital Elevation Model (DEM/DSM)")
+    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM) (default: True in 'pro' preset)")
     parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
     parser.add_argument("--export-dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
     # Orthomosaic Options
@@ -2698,8 +2699,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--build-orthomosaic",
         dest="build_orthomosaic",
         action="store_true",
-        default=False,
-        help="Build orthomosaic from reconstructed mesh and save in project (default: False)",
+        default=None,
+        help="Build orthomosaic from reconstructed mesh and save in project (default: True in 'pro' preset)",
     )
     parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic building")
     parser.add_argument("--export-ortho", dest="export_ortho", action="store_true", default=True, help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)")

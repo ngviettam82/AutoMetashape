@@ -801,15 +801,15 @@ class AutoMetashapeStudio:
         # Export Deliverables Checklist (Default: False · Only make project Metashape)
         self.var_export_glb = tk.BooleanVar(value=False)
         self.var_export_obj = tk.BooleanVar(value=False)
-        self.var_build_ortho = tk.BooleanVar(value=False)
+        self.var_build_ortho = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_ortho = self.var_build_ortho  # Backward-compatible alias
         self.var_export_ortho = tk.BooleanVar(value=False)
-        self.var_build_point_cloud = tk.BooleanVar(value=True)  # Internal stereopsis
+        self.var_build_point_cloud = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_export_point_cloud = tk.BooleanVar(value=False)
         self.var_pc_format = tk.StringVar(value="laz")
         self.var_classify_ground = tk.BooleanVar(value=False)
         self.var_classify_points = tk.BooleanVar(value=False)
-        self.var_build_dem = tk.BooleanVar(value=False)
+        self.var_build_dem = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_export_dem = tk.BooleanVar(value=False)
         self.var_export_report = tk.BooleanVar(value=False)
 
@@ -840,6 +840,7 @@ class AutoMetashapeStudio:
         self.var_tile_size = tk.StringVar(value="256")
 
         self.var_build_contours = tk.BooleanVar(value=False)
+        self.var_export_contours = tk.BooleanVar(value=False)
         self.var_contour_interval = tk.StringVar(value="1.0")
         self.var_contours_format = tk.StringVar(value="shp")
 
@@ -890,6 +891,8 @@ class AutoMetashapeStudio:
             self.var_build_ortho,
             self.var_export_ortho,
             self.var_export_tiles,
+            self.var_build_contours,
+            self.var_export_contours,
             self.var_build_tiled_model,
             self.var_build_contours,
             self.var_export_report,
@@ -1636,7 +1639,7 @@ class AutoMetashapeStudio:
         tk.Label(col2, text="GEOMATICS & MAPS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
         _c(col2, "True Orthomosaic (GeoTIFF)", self.var_export_ortho)
         _c(col2, "Digital Elevation Model (DEM)", self.var_export_dem)
-        _c(col2, "Topographic Contours (.shp)", self.var_build_contours)
+        _c(col2, "Topographic Contours (.shp)", self.var_export_contours)
 
         # Col 3: Clouds, Tiles & Reports
         tk.Label(col3, text="CLOUDS, TILES & REPORT", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
@@ -1665,7 +1668,7 @@ class AutoMetashapeStudio:
         self.var_export_dxf.set(False)
         self.var_export_ortho.set(False)
         self.var_export_dem.set(False)
-        self.var_build_contours.set(False)
+        self.var_export_contours.set(False)
         self.var_export_point_cloud.set(False)
         self.var_export_tie_points.set(False)
         self.var_export_tiles.set(False)
@@ -1680,7 +1683,7 @@ class AutoMetashapeStudio:
         self.var_export_dxf.set(True)
         self.var_export_ortho.set(True)
         self.var_export_dem.set(True)
-        self.var_build_contours.set(True)
+        self.var_export_contours.set(True)
         self.var_export_point_cloud.set(True)
         self.var_export_tie_points.set(True)
         self.var_export_tiles.set(True)
@@ -1766,6 +1769,10 @@ class AutoMetashapeStudio:
                 self.var_build_ortho.set(False)
                 self.var_export_ortho.set(False)
                 self.var_build_contours.set(False)
+                self.var_export_contours.set(False)
+
+            if not self.var_build_contours.get():
+                self.var_export_contours.set(False)
 
             if not self.var_build_ortho.get():
                 self.var_export_ortho.set(False)
@@ -1803,6 +1810,11 @@ class AutoMetashapeStudio:
             if self.var_export_tiles.get() and not self.var_build_tiled_model.get():
                 self.var_build_tiled_model.set(True)
                 self._on_workflow_stage_toggled("tiled_model")
+        if hasattr(self, "var_export_contours") and hasattr(self, "var_build_contours"):
+            if self.var_export_contours.get() and not self.var_build_contours.get():
+                self.var_build_contours.set(True)
+                self.var_build_dem.set(True)
+                self._on_workflow_stage_toggled("contours")
 
         exp_vars = [
             getattr(self, "var_export_glb", None),
@@ -2075,7 +2087,6 @@ class AutoMetashapeStudio:
         chk_pc1.pack(fill=tk.X, pady=(2, 2))
         tk.Label(chk_pc1, text="Point Cloud Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Combobox(chk_pc1, textvariable=self.var_pc_format, values=["laz", "las", "ply", "e57", "xyz"], state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 14))
-        _c(chk_pc1, "Export Sparse Tie Points", self.var_export_tie_points).pack(side=tk.LEFT)
 
         chk_pc2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_pc2.pack(fill=tk.X, pady=(2, 4))
@@ -2719,6 +2730,8 @@ class AutoMetashapeStudio:
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_build_point_cloud.set(True)
+            self.var_build_dem.set(True)
+            self.var_build_ortho.set(True)
             self.var_classify_ground.set(False)
             if hasattr(self, "var_stage_align"):
                 self.var_stage_align.set(True)
@@ -2860,7 +2873,7 @@ class AutoMetashapeStudio:
         ])
 
         if not is_custom:
-            # Pro Preset: Granular ingest/match breakdown with dynamic geomatics milestones
+            # Pro Preset: Full Autonomous Geomatics Standard (Ingest -> Match -> Align -> Depth -> Cloud -> Mesh -> Texture -> DEM -> Ortho -> Save/Export)
             keys.extend(["ingest", "match", "align", "depth"])
             stages.extend([
                 (str(step_num), "Ingest", "Photos & blur filter"),
@@ -2870,7 +2883,8 @@ class AutoMetashapeStudio:
             ])
             step_num += 4
 
-            if do_pc and getattr(self, "var_export_point_cloud", tk.BooleanVar()).get():
+            # Dense Point Cloud built by default in Pro
+            if do_pc:
                 keys.append("point_cloud")
                 stages.append((str(step_num), "Cloud", "Dense 3D points"))
                 step_num += 1
@@ -2887,11 +2901,13 @@ class AutoMetashapeStudio:
                 stages.append((str(step_num), "Tiled", "Cesium 3D Tiles"))
                 step_num += 1
 
+            # DEM built by default in Pro
             if do_dem:
                 keys.append("dem")
                 stages.append((str(step_num), "DEM", "GeoTIFF elevation"))
                 step_num += 1
 
+            # Orthomosaic built by default in Pro
             if do_ortho:
                 keys.append("ortho")
                 stages.append((str(step_num), "Ortho", "GeoTIFF ortho"))
@@ -3531,7 +3547,7 @@ class AutoMetashapeStudio:
         else:
             cmd.append("--no-dem")
 
-        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+        if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
             cmd.append("--build-contours")
             cmd.extend(["--contour-interval", self.var_contour_interval.get()])
             cmd.extend(["--contours-format", self.var_contours_format.get()])
