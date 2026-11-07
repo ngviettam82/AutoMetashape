@@ -786,6 +786,7 @@ class AutoMetashapeStudio:
         self.var_depth_filtering = tk.StringVar(value="moderate")
         self.var_multi_chunk = tk.StringVar(value="disable")
         self.var_chunk_align_method = tk.StringVar(value="camera")
+        self.var_presel_mode = tk.StringVar(value="estimated")
 
         self.var_guided = tk.BooleanVar(value=True)
         self.var_rolling = tk.BooleanVar(value=True)
@@ -2011,6 +2012,9 @@ class AutoMetashapeStudio:
         tk.Label(grid_align, text="Chunk Align:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=2, sticky=tk.W, pady=3)
         ttk.Combobox(grid_align, textvariable=self.var_chunk_align_method, values=["camera", "point"], state="readonly", width=10).grid(row=1, column=3, padx=(4, 14), pady=3)
 
+        tk.Label(grid_align, text="Preselection:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=1, column=4, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_align, textvariable=self.var_presel_mode, values=["estimated", "source", "sequential"], state="readonly", width=8).grid(row=1, column=5, padx=4, pady=3)
+
         chk_align_1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_align_1.pack(fill=tk.X, pady=(2, 2))
         _c(chk_align_1, "Guided Image Matching", self.var_guided).pack(side=tk.LEFT, padx=(0, 10))
@@ -2717,6 +2721,8 @@ class AutoMetashapeStudio:
             self.var_tiepoint_limit.set("25000")
             if hasattr(self, "var_filter_tiepoints"):
                 self.var_filter_tiepoints.set(True)
+            if hasattr(self, "var_presel_mode"):
+                self.var_presel_mode.set("estimated")
             self.var_faces.set("2000000")
             self.var_tex_pages.set("22")
             self.var_crop.set("gps-square")
@@ -3476,6 +3482,8 @@ class AutoMetashapeStudio:
                 cmd.append("--no-build-mesh")
             if hasattr(self, "var_stage_texture") and not self.var_stage_texture.get():
                 cmd.append("--no-build-texture")
+            if hasattr(self, "var_presel_mode") and self.var_presel_mode.get():
+                cmd.extend(["--reference-preselection-mode", self.var_presel_mode.get()])
             if hasattr(self, "var_guided") and not self.var_guided.get():
                 cmd.append("--no-guided-matching")
             if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip():

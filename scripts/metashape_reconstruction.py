@@ -119,6 +119,12 @@ SURFACE_TYPE_MAP = {
     "heightfield": Metashape.SurfaceType.HeightField,
 }
 
+PRESEL_MODE_MAP = {
+    "estimated": Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
+    "source": Metashape.ReferencePreselectionMode.ReferencePreselectionSource,
+    "sequential": Metashape.ReferencePreselectionMode.ReferencePreselectionSequential,
+}
+
 
 def compute_utm_epsg(lon: float, lat: float) -> int:
     """Calculates the standard WGS 84 / UTM Zone EPSG code for a given longitude and latitude."""
@@ -1515,6 +1521,7 @@ def run_reconstruction(
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
     adaptive_fitting: bool = True,
+    reference_preselection_mode: str = "estimated",
     filter_tiepoints: bool = True,
     depth_quality: str = "high",
     depth_filtering: str = "moderate",
@@ -1782,6 +1789,10 @@ def run_reconstruction(
             raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
 
         align_downscale = ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)
+        presel_mode_enum = PRESEL_MODE_MAP.get(
+            (reference_preselection_mode or "estimated").lower(),
+            Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
+        )
 
         use_multi_chunk = False
         if multi_chunk == "force" and len(groups) >= 1:
@@ -1825,6 +1836,7 @@ def run_reconstruction(
                     downscale=align_downscale,
                     generic_preselection=True,
                     reference_preselection=True,
+                    reference_preselection_mode=presel_mode_enum,
                     keypoint_limit=keypoint_limit,
                     keypoint_limit_per_mpx=keypoint_limit_per_mpx,
                     tiepoint_limit=tiepoint_limit,
@@ -1989,6 +2001,7 @@ def run_reconstruction(
                     downscale=align_downscale,
                     generic_preselection=True,
                     reference_preselection=True,
+                    reference_preselection_mode=presel_mode_enum,
                     keypoint_limit=keypoint_limit,
                     keypoint_limit_per_mpx=keypoint_limit_per_mpx,
                     tiepoint_limit=tiepoint_limit,
@@ -2609,6 +2622,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--keypoint-limit", type=int, default=200000, help="Max keypoints per image (default: 200000)")
     parser.add_argument("--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)")
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
+    parser.add_argument(
+        "--reference-preselection-mode",
+        dest="reference_preselection_mode",
+        choices=["estimated", "source", "sequential"],
+        default="estimated",
+        help="Reference preselection mode for photo matching: 'estimated' (default: robust for multi-drone/oblique flights), 'source' (raw EXIF GPS), or 'sequential'",
+    )
     parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="high", help="Depth map quality (default: high)")
     parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
     parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 2,000,000 in 'pro' preset)")
@@ -2789,6 +2809,7 @@ if __name__ == "__main__":
         filter_stationary_points=args.filter_stationary_points,
         guided_matching=args.guided_matching,
         adaptive_fitting=args.adaptive_fitting,
+        reference_preselection_mode=args.reference_preselection_mode,
         filter_tiepoints=args.filter_tiepoints,
         depth_quality=args.depth_quality,
         depth_filtering=args.depth_filtering,
