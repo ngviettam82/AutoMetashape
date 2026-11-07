@@ -2308,84 +2308,6 @@ def run_reconstruction(
         except Exception as e_tile:
             print(f"  [6b/7] [WARNING] 3D Tiled Model generation/export issue: {e_tile}. Continuing...", flush=True)
 
-    # Production Asset Export
-    print("\n=========================================================================")
-    print("  [7/7] EXPORTING PRODUCTION ASSETS (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
-    print("=========================================================================")
-    glb_out = os.path.join(output_dir, f"{project_name}.glb")
-    obj_out = os.path.join(output_dir, f"{project_name}.obj")
-
-    if export_glb and chunk.model:
-        try:
-            chunk.exportModel(
-                glb_out,
-                format=Metashape.ModelFormat.ModelFormatGLTF,
-                embed_texture=True,
-                save_normals=True,
-                save_colors=True,
-            )
-            print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_glb:
-            print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
-
-    if export_obj and chunk.model:
-        try:
-            chunk.exportModel(
-                obj_out,
-                format=Metashape.ModelFormat.ModelFormatOBJ,
-                texture_format=Metashape.ImageFormat.ImageFormatTIFF,
-                save_texture=True,
-                save_normals=True,
-                save_colors=True,
-            )
-            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_obj:
-            print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
-
-    has_any_export = any([
-        export_glb, export_obj, export_fbx, export_ply, export_dxf,
-        export_tie_points, export_dem or build_dem, build_contours,
-        build_orthomosaic, export_point_cloud, export_report, build_tiled_model
-    ])
-    if not has_any_export:
-        print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
-
-    if export_fbx and chunk.model:
-        fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
-        print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
-        try:
-            chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
-            print(f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_fbx:
-            print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
-
-    if export_ply and chunk.model:
-        ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
-        print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
-        try:
-            chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
-            print(f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_ply:
-            print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
-
-    if export_dxf and chunk.model:
-        dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
-        print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
-        try:
-            chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
-            print(f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_dxf:
-            print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
-
-    if export_tie_points and chunk.tie_points:
-        tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
-        print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
-        try:
-            chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
-            print(f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out)/(1024*1024):.2f} MB)", flush=True)
-        except Exception as e_tp:
-            print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
-
     # Step 7b: Digital Elevation Model (DEM) Generation & GeoTIFF Export
     if build_dem:
         try:
@@ -2517,6 +2439,84 @@ def run_reconstruction(
             print(f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
         except Exception as e_ortho:
             print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
+
+    # Production Asset Export
+    print("\n=========================================================================")
+    print("  [7/7] EXPORTING PRODUCTION ASSETS (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
+    print("=========================================================================")
+    glb_out = os.path.join(output_dir, f"{project_name}.glb")
+    obj_out = os.path.join(output_dir, f"{project_name}.obj")
+
+    if export_glb and chunk.model:
+        try:
+            chunk.exportModel(
+                glb_out,
+                format=Metashape.ModelFormat.ModelFormatGLTF,
+                embed_texture=True,
+                save_normals=True,
+                save_colors=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_glb:
+            print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
+
+    if export_obj and chunk.model:
+        try:
+            chunk.exportModel(
+                obj_out,
+                format=Metashape.ModelFormat.ModelFormatOBJ,
+                texture_format=Metashape.ImageFormat.ImageFormatTIFF,
+                save_texture=True,
+                save_normals=True,
+                save_colors=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_obj:
+            print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
+
+    has_any_export = any([
+        export_glb, export_obj, export_fbx, export_ply, export_dxf,
+        export_tie_points, export_dem or build_dem, build_contours,
+        build_orthomosaic, export_point_cloud, export_report, build_tiled_model
+    ])
+    if not has_any_export:
+        print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
+
+    if export_fbx and chunk.model:
+        fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
+        print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
+        try:
+            chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
+            print(f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_fbx:
+            print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
+
+    if export_ply and chunk.model:
+        ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
+        print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
+        try:
+            chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
+            print(f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_ply:
+            print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
+
+    if export_dxf and chunk.model:
+        dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
+        print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
+        try:
+            chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
+            print(f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_dxf:
+            print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
+
+    if export_tie_points and chunk.tie_points:
+        tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
+        print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
+        try:
+            chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
+            print(f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_tp:
+            print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
     # Step 7d: Dense Point Cloud Export
     if export_point_cloud or build_point_cloud:

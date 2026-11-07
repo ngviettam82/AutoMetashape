@@ -394,7 +394,7 @@ class StudioPipelineStepper(tk.Frame):
 
         self.reset()
 
-    def reset(self) -> None:
+    def reset(self, is_export: bool = False) -> None:
         self.current_active_idx = -1
         self.is_done = False
         self.is_paused = False
@@ -415,7 +415,7 @@ class StudioPipelineStepper(tk.Frame):
             self.stage_indicators[i].config(text=f"{num}.", fg=UITheme.TEXT_DIM)
             self.stage_titles[i].config(fg=UITheme.TEXT_MUTED)
             self.stage_subtitles[i].config(fg=UITheme.TEXT_DIM)
-        default_status = "Status: Ready to reconstruct" if len(self.stages) == 7 else "Status: Ready to export"
+        default_status = "Status: Ready to export" if is_export else "Status: Ready to reconstruct"
         self.lbl_pipeline_status.config(
             text=default_status,
             fg=UITheme.TEXT_SECONDARY,
@@ -867,6 +867,7 @@ class AutoMetashapeStudio:
 
         # Master Export Folder & Unified Multi-Project Queue
         self.var_export_root = tk.StringVar(value="")
+        self.var_export_root.trace_add("write", lambda *_: self._render_queue_items())
         self.project_items: list[dict] = []
         self.batch_running: bool = False
         self.batch_queue: list[dict] = []
@@ -2367,9 +2368,6 @@ class AutoMetashapeStudio:
             "count": cnt,
             "var_checked": var_chk,
         })
-        if not self.var_export_root.get().strip():
-            suggested_export = os.path.dirname(os.path.normpath(folder))
-            self.var_export_root.set(suggested_export)
         if len(self.project_items) == 1:
             self.var_images_dir.set(folder)
         self._update_queue_ui()
@@ -3053,6 +3051,7 @@ class AutoMetashapeStudio:
         cur_mode = getattr(self, "active_mode", "recon")
         cur_stages = self.mode_states[cur_mode]["stages"]
         self.stepper.build_stages(cur_stages)
+        self.stepper.reset(is_export=(cur_mode == "export"))
 
         if cur_mode == "recon":
             self.card_stepper.set_subtitle(f"{len(cur_stages)}-stage automated photogrammetry trajectory")
@@ -3257,14 +3256,8 @@ class AutoMetashapeStudio:
 
         # When a new project folder is loaded, reset recon progress to clean state if not currently running
         if not self.is_running:
-            self.stepper.reset()
-            self.mode_states["recon"] = self.stepper.get_state()
+            self._reset_stepper_mode("recon")
             self.lbl_status.config(text="● Ready", fg=UITheme.TEXT_SECONDARY)
-
-        # Auto-populate master export folder if empty
-        if not self.var_export_root.get().strip():
-            suggested_export = os.path.dirname(os.path.normpath(folder))
-            self.var_export_root.set(suggested_export)
 
         # Auto-sync project_items with images_dir
         p_name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
@@ -3651,6 +3644,7 @@ class AutoMetashapeStudio:
                 return
 
         # 4. Launch unified queue reconstruction (consistent for 1 or N projects)
+        self._reset_stepper_mode("recon")
         self.batch_running = True
         self.batch_queue = active_projects
         self.batch_current_idx = 0
@@ -3683,12 +3677,13 @@ class AutoMetashapeStudio:
 
         self._log(f"\n[{current_num}/{total_items}] Starting Batch Project: {proj_name} ({img_dir})", "stage")
         self.stepper_multi.set_active(self.batch_current_idx, f"Processing {proj_name} ({current_num}/{total_items})")
-        self.stepper.reset()
+        self._reset_stepper_mode("recon")
 
         cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
         self.frame_crop_banner.pack_forget()
         self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
     def _start_export(self) -> None:
+        self._reset_stepper_mode("export")
         psx = self.var_psx_path.get().strip()
         if not psx or not os.path.isfile(psx):
             messagebox.showwarning("Input Required", "Please select a valid Metashape project (.psx).")
@@ -3811,6 +3806,21 @@ class AutoMetashapeStudio:
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _reset_stepper_mode(self, mode: str) -> None:
+        if hasattr(self, "mode_states") and mode in self.mode_states:
+            st = self.mode_states[mode]
+            st["active_idx"] = -1
+            st["is_done"] = False
+            st["is_paused"] = False
+            st["pause_idx"] = -1
+            st["pause_msg"] = ""
+            st["desc"] = ""
+            st["status_text"] = "Status: Ready to reconstruct" if mode == "recon" else "Status: Ready to export"
+            st["status_fg"] = UITheme.TEXT_SECONDARY
+            st["timer_text"] = "Elapsed: --:--"
+        if getattr(self, "active_mode", "recon") == mode and hasattr(self, "stepper"):
+            self.stepper.reset(is_export=(mode == "export"))
+
     def _update_stepper_mode(self, mode: str, idx: int, desc: str) -> None:
         def _apply():
             if mode in self.mode_states:
@@ -3856,47 +3866,47 @@ class AutoMetashapeStudio:
             elif "[success]" in l and "entire pipeline finished" in l:
                 self._complete_stepper_mode("recon")
                 return
-            # Match bracketed stage tags first for exact milestone routing
-            elif "[1/7]" in line or "[1/6]" in line or "ingesting photos" in l or "ingesting chunk" in l:
+            # Match exact bracketed stage tags first without substring collision
+            elif "[1/7]" in line or "[1/6]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "ingest" if "ingest" in recon_keys else "align"
                 desc = "Ingesting photos & blur filter"
-            elif "[2/7]" in line or "[2/6]" in line or "gpu feature matching" in l:
+            elif "[2/7]" in line or "[2/6]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "match" if "match" in recon_keys else "align"
                 desc = "GPU Feature Matching"
             elif "[3b/7]" in line or "[auto-crop]" in line:
                 target_key = "align"
                 desc = "Alignment & Bounding Box Crop"
-            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
+            elif "[3/7]" in line or "[3/6]" in line:
                 target_key = "align"
                 desc = "Camera Alignment & Tie Points"
-            elif "[4b/7]" in line or "dense point cloud" in l:
+            elif "[4b/7]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "point_cloud" if "point_cloud" in recon_keys else "depth"
                 desc = "Generating Dense Point Cloud"
-            elif "[4/7]" in line or "[4/6]" in line or "depth maps" in l:
+            elif "[4/7]" in line or "[4/6]" in line:
                 target_key = "depth"
                 desc = "MVS Dense Stereopsis"
-            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
+            elif "[5/7]" in line or "[5/6]" in line:
                 target_key = "mesh"
                 desc = "Fusing Surface Mesh Geometry"
-            elif "[6b/7]" in line or "tiled model" in l:
+            elif "[6b/7]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "tiled_model" if "tiled_model" in recon_keys else "texture"
                 desc = "Building Hierarchical 3D Tiled Model"
-            elif "[6/7]" in line or "[6/6]" in line or ("baking" in l and "texture" in l):
+            elif "[6/7]" in line or "[6/6]" in line:
                 target_key = "texture"
                 desc = "Baking 8K Texture Atlas"
-            elif "[7b2/7]" in line or "topographic contours" in l:
+            elif "[7b2/7]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Generating Topographic Contours"
-            elif "[7b/7]" in line or "geotiff dem" in l or "digital elevation model" in l:
+            elif "[7b/7]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF DEM"
-            elif "[7c/7]" in line or "orthomosaic" in l:
+            elif "[7c/7]" in line:
                 recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
                 target_key = "ortho" if "ortho" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF Orthomosaic"
