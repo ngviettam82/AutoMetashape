@@ -1255,89 +1255,14 @@ class AutoMetashapeStudio:
     def _build_folder_card(self, parent: tk.Widget) -> None:
         self.card_folder = StudioCard(
             parent,
-            title="1. Project Photos & Export Destination",
-            subtitle="Select project photos, manage batch queue, and specify export folder",
+            title="1. Survey Projects & Export Destination",
+            subtitle="Add drone flight photo folders to process and configure master export folder",
         )
         self.card_folder.pack(fill=tk.X, pady=(0, 6))
 
-        # 1. Primary Raw Photos Row
-        row_img = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
-        row_img.pack(fill=tk.X, pady=(0, 2))
-
-        lbl_img_title = tk.Label(
-            row_img,
-            text="Primary Project Photos Directory",
-            font=("Segoe UI", 9, "bold"),
-            bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_PRIMARY,
-        )
-        lbl_img_title.pack(side=tk.LEFT)
-
-        btn_browse_img = tk.Button(
-            row_img,
-            text="Browse...",
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            cursor="hand2",
-            command=self._browse_images_dir,
-        )
-        btn_browse_img.pack(side=tk.RIGHT)
-
-        btn_add_proj = tk.Button(
-            row_img,
-            text="+ Add Project to Queue...",
-            font=("Segoe UI", 8, "bold"),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.ACCENT_CYAN,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER,
-            padx=10,
-            pady=2,
-            cursor="hand2",
-            command=self._add_project_to_queue,
-        )
-        btn_add_proj.pack(side=tk.RIGHT, padx=(0, 6))
-
         self.var_images_dir.trace_add("write", self._on_images_dir_changed)
-        ent_img = tk.Entry(
-            self.card_folder.body,
-            textvariable=self.var_images_dir,
-            font=("Segoe UI", 9),
-            bg=UITheme.BG_INPUT,
-            fg=UITheme.TEXT_PRIMARY,
-            insertbackground="white",
-            bd=1,
-            relief=tk.SOLID,
-            highlightbackground=UITheme.BORDER_CONTROL,
-        )
-        ent_img.pack(fill=tk.X, pady=(3, 4))
 
-        # Photo count & size summary line
-        self.stats_frame = tk.Frame(self.card_folder.body, bg=UITheme.BG_ROOT, padx=8, pady=4)
-        self.stats_frame.pack(fill=tk.X, pady=(0, 6))
-
-        lbl_stats = tk.Label(
-            self.stats_frame,
-            textvariable=self.lbl_photo_status,
-            font=("Segoe UI", 8),
-            bg=UITheme.BG_ROOT,
-            fg=UITheme.TEXT_SECONDARY,
-            anchor=tk.W,
-        )
-        lbl_stats.pack(fill=tk.X)
-
-        # 2. Multi-Project Queue Box (Container)
+        # 1. Unified Survey Projects Queue Container (Always visible & authoritative for all runs)
         self.frame_queue_container = tk.Frame(
             self.card_folder.body,
             bg=UITheme.BG_ROOT,
@@ -1347,7 +1272,7 @@ class AutoMetashapeStudio:
             padx=8,
             pady=6,
         )
-        self.frame_queue_container.pack_forget()
+        self.frame_queue_container.pack(fill=tk.X, pady=(0, 6))
 
         row_q_header = tk.Frame(self.frame_queue_container, bg=UITheme.BG_ROOT)
         row_q_header.pack(fill=tk.X, pady=(0, 4))
@@ -1376,22 +1301,6 @@ class AutoMetashapeStudio:
             command=self._clear_project_queue,
         )
         btn_q_clear.pack(side=tk.RIGHT, padx=(4, 0))
-
-        btn_q_add = tk.Button(
-            row_q_header,
-            text="+ Add Project...",
-            font=("Segoe UI", 7, "bold"),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.ACCENT_CYAN,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=0,
-            padx=6,
-            pady=1,
-            cursor="hand2",
-            command=self._add_project_to_queue,
-        )
-        btn_q_add.pack(side=tk.RIGHT, padx=(4, 0))
 
         btn_q_none = tk.Button(
             row_q_header,
@@ -1423,7 +1332,25 @@ class AutoMetashapeStudio:
             cursor="hand2",
             command=lambda: self._set_all_queue_checked(True),
         )
-        btn_q_all.pack(side=tk.RIGHT)
+        btn_q_all.pack(side=tk.RIGHT, padx=(4, 0))
+
+        btn_q_add = tk.Button(
+            row_q_header,
+            text="+ Add Project...",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.ACCENT_CYAN,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._add_project_to_queue,
+        )
+        btn_q_add.pack(side=tk.RIGHT, padx=(0, 6))
 
         # Scrollable items frame
         self.canvas_queue = tk.Canvas(
@@ -1431,7 +1358,7 @@ class AutoMetashapeStudio:
             bg=UITheme.BG_INPUT,
             bd=0,
             highlightthickness=0,
-            height=120,
+            height=125,
         )
         queue_scroll = ttk.Scrollbar(self.frame_queue_container, orient=tk.VERTICAL, command=self.canvas_queue.yview)
         self.frame_queue_items = tk.Frame(self.canvas_queue, bg=UITheme.BG_INPUT)
@@ -1446,7 +1373,7 @@ class AutoMetashapeStudio:
 
         lbl_q_hint = tk.Label(
             self.frame_queue_container,
-            text="ℹ Check or uncheck projects to selectively include them in the reconstruction run.",
+            text="ℹ Check or uncheck projects to include them. Each project exports to <Export Folder>/<ProjectName>/",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_DIM,
@@ -1454,7 +1381,10 @@ class AutoMetashapeStudio:
         )
         lbl_q_hint.pack(fill=tk.X, pady=(4, 0))
 
-        # 3. Master Export Destination Folder
+        # Render initial empty state
+        self._render_queue_items()
+
+        # 2. Master Export Destination Folder
         row_out = tk.Frame(self.card_folder.body, bg=UITheme.BG_SURFACE)
         row_out.pack(fill=tk.X, pady=(6, 2))
 
@@ -2401,12 +2331,8 @@ class AutoMetashapeStudio:
         return []
 
     def _browse_images_dir(self) -> None:
-        chosen = filedialog.askdirectory(
-            title="Select Raw Photos Directory",
-            initialdir=self.var_images_dir.get().strip() or os.path.expanduser("~"),
-        )
-        if chosen:
-            self.var_images_dir.set(os.path.normpath(chosen))
+        """Add survey project to queue via directory picker."""
+        self._add_project_to_queue()
 
     def _browse_export_root(self) -> None:
         chosen = filedialog.askdirectory(
@@ -2427,18 +2353,6 @@ class AutoMetashapeStudio:
         else:
             folder = os.path.normpath(folder)
 
-        # If queue is empty but primary input has a valid folder, add it first as Item 1
-        prim_dir = self.var_images_dir.get().strip()
-        if not self.project_items and prim_dir and os.path.isdir(prim_dir) and os.path.normpath(prim_dir) != folder:
-            p_name = infer_project_name(images_dir=prim_dir) if infer_project_name else os.path.basename(prim_dir)
-            p_cnt = self._quick_count_photos(prim_dir)
-            self.project_items.append({
-                "path": os.path.normpath(prim_dir),
-                "name": p_name,
-                "count": p_cnt,
-                "var_checked": tk.BooleanVar(value=True),
-            })
-
         # Check duplicate
         if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
             messagebox.showinfo("Project Already Queued", f"The folder '{folder}' is already in the project queue.")
@@ -2453,11 +2367,20 @@ class AutoMetashapeStudio:
             "count": cnt,
             "var_checked": var_chk,
         })
+        if not self.var_export_root.get().strip():
+            suggested_export = os.path.dirname(os.path.normpath(folder))
+            self.var_export_root.set(suggested_export)
+        if len(self.project_items) == 1:
+            self.var_images_dir.set(folder)
         self._update_queue_ui()
 
     def _remove_queue_item(self, idx: int) -> None:
         if 0 <= idx < len(self.project_items):
             del self.project_items[idx]
+            if self.project_items:
+                self.var_images_dir.set(self.project_items[0]["path"])
+            else:
+                self.var_images_dir.set("")
             self._update_queue_ui()
 
     def _set_all_queue_checked(self, checked: bool) -> None:
@@ -2467,13 +2390,17 @@ class AutoMetashapeStudio:
 
     def _clear_project_queue(self) -> None:
         self.project_items.clear()
+        self.var_images_dir.set("")
         self._update_queue_ui()
 
     def _on_queue_item_toggled(self, toggled_idx: int | None = None) -> None:
         """Handle individual or batch check toggles in-place without destroying widgets or flickering."""
         active = [p for p in self.project_items if p["var_checked"].get()]
         total = len(self.project_items)
-        self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
+        if total == 0:
+            self.lbl_queue_status.set("0 projects in queue · Ready to add projects")
+        else:
+            self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
 
         # Update row visual indicators in-place
         for p in self.project_items:
@@ -2500,12 +2427,10 @@ class AutoMetashapeStudio:
     def _update_queue_ui(self) -> None:
         total = len(self.project_items)
         active = [p for p in self.project_items if p["var_checked"].get()]
-        self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
-
-        if total > 0:
-            self.frame_queue_container.pack(fill=tk.X, pady=(4, 6), after=self.stats_frame)
+        if total == 0:
+            self.lbl_queue_status.set("0 projects in queue · Ready to add projects")
         else:
-            self.frame_queue_container.pack_forget()
+            self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
 
         self._render_queue_items()
         self._sync_stepper_view()
@@ -2515,6 +2440,25 @@ class AutoMetashapeStudio:
             return
         for child in self.frame_queue_items.winfo_children():
             child.destroy()
+
+        if not self.project_items:
+            empty_frame = tk.Frame(self.frame_queue_items, bg=UITheme.BG_INPUT, pady=20)
+            empty_frame.pack(fill=tk.BOTH, expand=True)
+            tk.Label(
+                empty_frame,
+                text="📂 No survey projects added to queue",
+                font=("Segoe UI", 9, "bold"),
+                bg=UITheme.BG_INPUT,
+                fg=UITheme.TEXT_MUTED,
+            ).pack(pady=(0, 2))
+            tk.Label(
+                empty_frame,
+                text="Click '+ Add Project...' above to select your drone photos folder.",
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_INPUT,
+                fg=UITheme.TEXT_DIM,
+            ).pack()
+            return
 
         export_root = self.var_export_root.get().strip()
 
@@ -3307,7 +3251,8 @@ class AutoMetashapeStudio:
     def _on_images_dir_changed(self, *_args) -> None:
         folder = self.var_images_dir.get().strip()
         if not folder or not os.path.isdir(folder):
-            self.lbl_photo_status.set("No valid folder selected. Click 'Browse...' to select survey photos.")
+            if hasattr(self, "lbl_photo_status"):
+                self.lbl_photo_status.set("No valid folder selected. Click '+ Add Project...' to add survey photos.")
             return
 
         # When a new project folder is loaded, reset recon progress to clean state if not currently running
@@ -3321,14 +3266,23 @@ class AutoMetashapeStudio:
             suggested_export = os.path.dirname(os.path.normpath(folder))
             self.var_export_root.set(suggested_export)
 
-        # Update primary queue item if queue already initialized
+        # Auto-sync project_items with images_dir
         p_name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
+        p_cnt = self._quick_count_photos(folder)
         if self.project_items:
-            self.project_items[0]["path"] = os.path.normpath(folder)
-            self.project_items[0]["name"] = p_name
-            self._update_queue_ui()
+            if os.path.normpath(self.project_items[0]["path"]) != os.path.normpath(folder):
+                self.project_items[0]["path"] = os.path.normpath(folder)
+                self.project_items[0]["name"] = p_name
+                self.project_items[0]["count"] = p_cnt
+                self._update_queue_ui()
         else:
-            self._sync_stepper_view()
+            self.project_items.append({
+                "path": os.path.normpath(folder),
+                "name": p_name,
+                "count": p_cnt,
+                "var_checked": tk.BooleanVar(value=True),
+            })
+            self._update_queue_ui()
 
         self.lbl_photo_status.set("Scanning directory and subfolders for supported photos...")
 
@@ -3696,26 +3650,13 @@ class AutoMetashapeStudio:
                 self._log("[CANCEL] Reconstruction cancelled by user to preserve existing project files.", "warning")
                 return
 
-        # 4. Launch single or batch reconstruction
-        if len(active_projects) == 1:
-            item = active_projects[0]
-            img_dir = item["path"]
-            proj_name = item["name"]
-            out_dir = os.path.join(export_root, proj_name)
-            os.makedirs(out_dir, exist_ok=True)
-            cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
-            if hasattr(self, "stepper_multi"):
-                self.stepper_multi.set_active(0, f"Processing {proj_name} (1/1)")
-            self.stepper.reset()
-            self.frame_crop_banner.pack_forget()
-            self._spawn_worker(cmd, f"3D Reconstruction ({proj_name})")
-        else:
-            self.batch_running = True
-            self.batch_queue = active_projects
-            self.batch_current_idx = 0
-            stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(self.batch_queue)]
-            self.stepper_multi.build_stages(stages_multi)
-            self._run_next_batch_item()
+        # 4. Launch unified queue reconstruction (consistent for 1 or N projects)
+        self.batch_running = True
+        self.batch_queue = active_projects
+        self.batch_current_idx = 0
+        stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(self.batch_queue)]
+        self.stepper_multi.build_stages(stages_multi)
+        self._run_next_batch_item()
 
     def _run_next_batch_item(self) -> None:
         if not self.batch_running or self.batch_current_idx >= len(self.batch_queue):
@@ -3723,9 +3664,10 @@ class AutoMetashapeStudio:
             if hasattr(self, "stepper_multi"):
                 self.stepper_multi.set_all_done()
             self._log("\n" + "=" * 70, "success")
-            self._log(f"[BATCH COMPLETE] All {len(self.batch_queue)} survey projects processed successfully!", "success")
+            n_proj = len(self.batch_queue)
+            self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} processed successfully!", "success")
             self._log("=" * 70 + "\n", "success")
-            messagebox.showinfo("Batch Complete", f"All {len(self.batch_queue)} survey projects have been processed successfully!")
+            messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been processed successfully!")
             self._on_finished(success=True)
             return
 
@@ -4271,9 +4213,10 @@ class AutoMetashapeStudio:
                         self.stepper.set_all_done()
                     self.lbl_status.config(text="✓ Status: Batch Complete", fg=UITheme.ACCENT_GREEN_TXT)
                     self._log("\n" + "=" * 70, "success")
-                    self._log(f"[BATCH COMPLETE] All {len(self.batch_queue)} survey projects processed successfully!", "success")
+                    n_proj = len(self.batch_queue)
+                    self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} processed successfully!", "success")
                     self._log("=" * 70 + "\n", "success")
-                    messagebox.showinfo("Batch Complete", f"All {len(self.batch_queue)} survey projects have been processed successfully!")
+                    messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been processed successfully!")
             else:
                 self.batch_running = False
                 self.lbl_status.config(text="▲ Status: Batch Process Failed", fg="#f87171")
