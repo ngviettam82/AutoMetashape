@@ -1541,6 +1541,7 @@ def run_reconstruction(
     ground_max_angle: float = None,
     ground_max_distance: float = None,
     build_orthomosaic: bool = False,
+    export_ortho: bool = True,
     build_dem: bool = False,
     export_dem: bool = False,
     build_point_cloud: bool = True,
@@ -2343,19 +2344,22 @@ def run_reconstruction(
             else:
                 print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
 
-            dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
-            print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF DEM to: {dem_out}...", flush=True)
-            comp = Metashape.ImageCompression()
-            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
-            comp.tiff_big = True
-            chunk.exportRaster(
-                path=dem_out,
-                source_data=Metashape.DataSource.ElevationData,
-                image_format=Metashape.ImageFormat.ImageFormatTIFF,
-                image_compression=comp,
-                save_world=True,
-            )
-            print(f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+            if export_dem:
+                dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
+                print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF DEM to: {dem_out}...", flush=True)
+                comp = Metashape.ImageCompression()
+                comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+                comp.tiff_big = True
+                chunk.exportRaster(
+                    path=dem_out,
+                    source_data=Metashape.DataSource.ElevationData,
+                    image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                    image_compression=comp,
+                    save_world=True,
+                )
+                print(f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+            else:
+                print("  [7b/7] [INFO] DEM saved in project checkpoint. GeoTIFF file export skipped as requested.", flush=True)
         except Exception as e_dem:
             print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
 
@@ -2423,20 +2427,23 @@ def run_reconstruction(
             else:
                 print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
-            ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
-            print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
-            comp = Metashape.ImageCompression()
-            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
-            comp.tiff_big = True
-            chunk.exportRaster(
-                path=ortho_out,
-                source_data=Metashape.DataSource.OrthomosaicData,
-                image_format=Metashape.ImageFormat.ImageFormatTIFF,
-                image_compression=comp,
-                save_world=True,
-                save_alpha=True,
-            )
-            print(f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+            if export_ortho:
+                ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
+                print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+                comp = Metashape.ImageCompression()
+                comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+                comp.tiff_big = True
+                chunk.exportRaster(
+                    path=ortho_out,
+                    source_data=Metashape.DataSource.OrthomosaicData,
+                    image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                    image_compression=comp,
+                    save_world=True,
+                    save_alpha=True,
+                )
+                print(f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+            else:
+                print("  [7c/7] [INFO] Orthomosaic saved in project checkpoint. GeoTIFF file export skipped as requested.", flush=True)
         except Exception as e_ortho:
             print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
 
@@ -2692,9 +2699,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="build_orthomosaic",
         action="store_true",
         default=False,
-        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: False)",
+        help="Build orthomosaic from reconstructed mesh and save in project (default: False)",
     )
-    parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic export")
+    parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic building")
+    parser.add_argument("--export-ortho", dest="export_ortho", action="store_true", default=True, help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)")
+    parser.add_argument("--no-export-ortho", dest="export_ortho", action="store_false", help="Disable GeoTIFF True Orthomosaic file export")
     # Quality Report Options
     parser.add_argument("--export-report", dest="export_report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report (default: False)")
     parser.add_argument("--no-report", "--no-export-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
@@ -2804,6 +2813,7 @@ if __name__ == "__main__":
         build_orthomosaic=args.build_orthomosaic,
         build_dem=args.build_dem,
         export_dem=args.export_dem,
+        export_ortho=getattr(args, "export_ortho", True),
         build_point_cloud=args.build_point_cloud,
         export_point_cloud=args.export_point_cloud,
         point_cloud_format=args.point_cloud_format,

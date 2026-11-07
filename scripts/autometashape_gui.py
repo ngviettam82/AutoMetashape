@@ -801,7 +801,9 @@ class AutoMetashapeStudio:
         # Export Deliverables Checklist (Default: False · Only make project Metashape)
         self.var_export_glb = tk.BooleanVar(value=False)
         self.var_export_obj = tk.BooleanVar(value=False)
-        self.var_ortho = tk.BooleanVar(value=False)
+        self.var_build_ortho = tk.BooleanVar(value=False)
+        self.var_ortho = self.var_build_ortho  # Backward-compatible alias
+        self.var_export_ortho = tk.BooleanVar(value=False)
         self.var_build_point_cloud = tk.BooleanVar(value=True)  # Internal stereopsis
         self.var_export_point_cloud = tk.BooleanVar(value=False)
         self.var_pc_format = tk.StringVar(value="laz")
@@ -833,6 +835,7 @@ class AutoMetashapeStudio:
         self.var_export_tie_points = tk.BooleanVar(value=False)
 
         self.var_build_tiled_model = tk.BooleanVar(value=False)
+        self.var_export_tiles = tk.BooleanVar(value=False)
         self.var_tiled_model_format = tk.StringVar(value="cesium")
         self.var_tile_size = tk.StringVar(value="256")
 
@@ -884,7 +887,9 @@ class AutoMetashapeStudio:
             self.var_export_point_cloud,
             self.var_build_dem,
             self.var_export_dem,
-            self.var_ortho,
+            self.var_build_ortho,
+            self.var_export_ortho,
+            self.var_export_tiles,
             self.var_build_tiled_model,
             self.var_build_contours,
             self.var_export_report,
@@ -1296,44 +1301,12 @@ class AutoMetashapeStudio:
             activebackground=UITheme.BORDER_HOVER,
             activeforeground="white",
             bd=0,
-            padx=6,
-            pady=1,
+            padx=8,
+            pady=2,
             cursor="hand2",
             command=self._clear_project_queue,
         )
         btn_q_clear.pack(side=tk.RIGHT, padx=(4, 0))
-
-        btn_q_none = tk.Button(
-            row_q_header,
-            text="Deselect All",
-            font=("Segoe UI", 7),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_MUTED,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=0,
-            padx=6,
-            pady=1,
-            cursor="hand2",
-            command=lambda: self._set_all_queue_checked(False),
-        )
-        btn_q_none.pack(side=tk.RIGHT, padx=(4, 0))
-
-        btn_q_all = tk.Button(
-            row_q_header,
-            text="Select All",
-            font=("Segoe UI", 7),
-            bg=UITheme.BG_SURFACE_RAISED,
-            fg=UITheme.TEXT_PRIMARY,
-            activebackground=UITheme.BORDER_HOVER,
-            activeforeground="white",
-            bd=0,
-            padx=6,
-            pady=1,
-            cursor="hand2",
-            command=lambda: self._set_all_queue_checked(True),
-        )
-        btn_q_all.pack(side=tk.RIGHT, padx=(4, 0))
 
         btn_q_add = tk.Button(
             row_q_header,
@@ -1346,7 +1319,7 @@ class AutoMetashapeStudio:
             bd=1,
             relief=tk.SOLID,
             highlightbackground=UITheme.ACCENT_CYAN,
-            padx=10,
+            padx=12,
             pady=2,
             cursor="hand2",
             command=self._add_project_to_queue,
@@ -1374,7 +1347,7 @@ class AutoMetashapeStudio:
 
         lbl_q_hint = tk.Label(
             self.frame_queue_container,
-            text="ℹ Check or uncheck projects to include them. Each project exports to <Export Folder>/<ProjectName>/",
+            text="ℹ Projects in queue are reconstructed sequentially. Outputs saved to: <Export Folder>/<ProjectName>/",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_DIM,
@@ -1661,7 +1634,7 @@ class AutoMetashapeStudio:
 
         # Col 2: Geomatics & Maps
         tk.Label(col2, text="GEOMATICS & MAPS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
-        _c(col2, "True Orthomosaic (GeoTIFF)", self.var_ortho)
+        _c(col2, "True Orthomosaic (GeoTIFF)", self.var_export_ortho)
         _c(col2, "Digital Elevation Model (DEM)", self.var_export_dem)
         _c(col2, "Topographic Contours (.shp)", self.var_build_contours)
 
@@ -1669,7 +1642,7 @@ class AutoMetashapeStudio:
         tk.Label(col3, text="CLOUDS, TILES & REPORT", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
         _c(col3, "Dense Point Cloud (.laz)", self.var_export_point_cloud)
         _c(col3, "Sparse Tie Points (.ply)", self.var_export_tie_points)
-        _c(col3, "Hierarchical 3D Tiles (LOD)", self.var_build_tiled_model)
+        _c(col3, "Hierarchical 3D Tiles (LOD)", self.var_export_tiles)
         _c(col3, "Quality Report PDF (.pdf)", self.var_export_report)
 
         # Footnote
@@ -1690,13 +1663,12 @@ class AutoMetashapeStudio:
         self.var_export_fbx.set(False)
         self.var_export_ply.set(False)
         self.var_export_dxf.set(False)
-        self.var_ortho.set(False)
+        self.var_export_ortho.set(False)
         self.var_export_dem.set(False)
-        self.var_build_dem.set(False)
         self.var_build_contours.set(False)
         self.var_export_point_cloud.set(False)
         self.var_export_tie_points.set(False)
-        self.var_build_tiled_model.set(False)
+        self.var_export_tiles.set(False)
         self.var_export_report.set(False)
         self._on_recon_export_checklist_changed()
 
@@ -1706,13 +1678,12 @@ class AutoMetashapeStudio:
         self.var_export_fbx.set(True)
         self.var_export_ply.set(True)
         self.var_export_dxf.set(True)
-        self.var_ortho.set(True)
+        self.var_export_ortho.set(True)
         self.var_export_dem.set(True)
-        self.var_build_dem.set(True)
         self.var_build_contours.set(True)
         self.var_export_point_cloud.set(True)
         self.var_export_tie_points.set(True)
-        self.var_build_tiled_model.set(True)
+        self.var_export_tiles.set(True)
         self.var_export_report.set(True)
         self._on_recon_export_checklist_changed()
 
@@ -1736,7 +1707,7 @@ class AutoMetashapeStudio:
             elif changed_stage == "tiled_model" and self.var_build_tiled_model.get():
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
-            elif changed_stage == "ortho" and self.var_ortho.get():
+            elif changed_stage == "ortho" and self.var_build_ortho.get():
                 self.var_build_dem.set(True)
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
@@ -1762,9 +1733,11 @@ class AutoMetashapeStudio:
                 self.var_stage_mesh.set(False)
                 self.var_stage_texture.set(False)
                 self.var_build_tiled_model.set(False)
+                self.var_export_tiles.set(False)
                 self.var_build_dem.set(False)
                 self.var_export_dem.set(False)
-                self.var_ortho.set(False)
+                self.var_build_ortho.set(False)
+                self.var_export_ortho.set(False)
                 self.var_build_contours.set(False)
 
             if not self.var_stage_depth.get():
@@ -1773,9 +1746,11 @@ class AutoMetashapeStudio:
                 self.var_stage_mesh.set(False)
                 self.var_stage_texture.set(False)
                 self.var_build_tiled_model.set(False)
+                self.var_export_tiles.set(False)
                 self.var_build_dem.set(False)
                 self.var_export_dem.set(False)
-                self.var_ortho.set(False)
+                self.var_build_ortho.set(False)
+                self.var_export_ortho.set(False)
                 self.var_build_contours.set(False)
 
             if not self.var_stage_mesh.get():
@@ -1787,8 +1762,19 @@ class AutoMetashapeStudio:
                 self.var_export_dxf.set(False)
 
             if not self.var_build_dem.get():
-                self.var_ortho.set(False)
+                self.var_export_dem.set(False)
+                self.var_build_ortho.set(False)
+                self.var_export_ortho.set(False)
                 self.var_build_contours.set(False)
+
+            if not self.var_build_ortho.get():
+                self.var_export_ortho.set(False)
+
+            if not self.var_build_point_cloud.get():
+                self.var_export_point_cloud.set(False)
+
+            if not self.var_build_tiled_model.get():
+                self.var_export_tiles.set(False)
 
         finally:
             self._in_cascade_sync = False
@@ -1805,14 +1791,18 @@ class AutoMetashapeStudio:
             if self.var_export_dem.get() and not self.var_build_dem.get():
                 self.var_build_dem.set(True)
                 self._on_workflow_stage_toggled("dem")
+        if hasattr(self, "var_export_ortho") and hasattr(self, "var_build_ortho"):
+            if self.var_export_ortho.get() and not self.var_build_ortho.get():
+                self.var_build_ortho.set(True)
+                self._on_workflow_stage_toggled("ortho")
         if hasattr(self, "var_export_point_cloud") and hasattr(self, "var_build_point_cloud"):
             if self.var_export_point_cloud.get() and not self.var_build_point_cloud.get():
                 self.var_build_point_cloud.set(True)
                 self._on_workflow_stage_toggled("point_cloud")
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get() and hasattr(self, "var_stage_depth") and not self.var_stage_depth.get():
-            self._on_workflow_stage_toggled("tiled_model")
-        if hasattr(self, "var_ortho") and self.var_ortho.get() and hasattr(self, "var_build_dem") and not self.var_build_dem.get():
-            self._on_workflow_stage_toggled("ortho")
+        if hasattr(self, "var_export_tiles") and hasattr(self, "var_build_tiled_model"):
+            if self.var_export_tiles.get() and not self.var_build_tiled_model.get():
+                self.var_build_tiled_model.set(True)
+                self._on_workflow_stage_toggled("tiled_model")
 
         exp_vars = [
             getattr(self, "var_export_glb", None),
@@ -1921,7 +1911,7 @@ class AutoMetashapeStudio:
         _wf_chk(grid_wf, "5. Build Texture", self.var_stage_texture, "texture").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
         _wf_chk(grid_wf, "6. Build Tiled Model", self.var_build_tiled_model, "tiled_model").grid(row=1, column=1, sticky="w", padx=(0, 6), pady=2)
         _wf_chk(grid_wf, "7. Build DEM", self.var_build_dem, "dem").grid(row=1, column=2, sticky="w", padx=(0, 6), pady=2)
-        _wf_chk(grid_wf, "8. Build Orthomosaic", self.var_ortho, "ortho").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "8. Build Orthomosaic", self.var_build_ortho, "ortho").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
 
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
@@ -2321,14 +2311,13 @@ class AutoMetashapeStudio:
 
     def _get_active_projects(self) -> list[dict]:
         if self.project_items:
-            checked = [p for p in self.project_items if p["var_checked"].get()]
-            return checked
+            return list(self.project_items)
         # Fallback to single primary folder if queue is empty
         img_dir = self.var_images_dir.get().strip()
         if img_dir and os.path.isdir(img_dir):
             name = infer_project_name(images_dir=img_dir) if infer_project_name else os.path.basename(img_dir)
             cnt = self._quick_count_photos(img_dir)
-            return [{"path": img_dir, "name": name, "count": cnt, "var_checked": tk.BooleanVar(value=True)}]
+            return [{"path": img_dir, "name": name, "count": cnt}]
         return []
 
     def _browse_images_dir(self) -> None:
@@ -2361,12 +2350,10 @@ class AutoMetashapeStudio:
 
         name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
         cnt = self._quick_count_photos(folder)
-        var_chk = tk.BooleanVar(value=True)
         self.project_items.append({
             "path": folder,
             "name": name,
             "count": cnt,
-            "var_checked": var_chk,
         })
         if len(self.project_items) == 1:
             self.var_images_dir.set(folder)
@@ -2381,54 +2368,19 @@ class AutoMetashapeStudio:
                 self.var_images_dir.set("")
             self._update_queue_ui()
 
-    def _set_all_queue_checked(self, checked: bool) -> None:
-        for p in self.project_items:
-            p["var_checked"].set(checked)
-        self._on_queue_item_toggled()
-
     def _clear_project_queue(self) -> None:
         self.project_items.clear()
         self.var_images_dir.set("")
         self._update_queue_ui()
 
-    def _on_queue_item_toggled(self, toggled_idx: int | None = None) -> None:
-        """Handle individual or batch check toggles in-place without destroying widgets or flickering."""
-        active = [p for p in self.project_items if p["var_checked"].get()]
-        total = len(self.project_items)
-        if total == 0:
-            self.lbl_queue_status.set("0 projects in queue · Ready to add projects")
-        else:
-            self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
-
-        # Update row visual indicators in-place
-        for p in self.project_items:
-            chk = p["var_checked"].get()
-            btn_chk = p.get("btn_chk")
-            if btn_chk and btn_chk.winfo_exists():
-                btn_chk.config(
-                    text="☑" if chk else "☐",
-                    fg=UITheme.ACCENT_CYAN if chk else UITheme.TEXT_MUTED,
-                )
-            lbl_name = p.get("lbl_name")
-            if lbl_name and lbl_name.winfo_exists():
-                lbl_name.config(
-                    fg=UITheme.TEXT_PRIMARY if chk else UITheme.TEXT_MUTED,
-                )
-            row_frame = p.get("row_frame")
-            if row_frame and row_frame.winfo_exists():
-                row_frame.config(
-                    highlightbackground=UITheme.ACCENT_CYAN if chk else UITheme.BORDER,
-                )
-
-        self._sync_stepper_view()
-
     def _update_queue_ui(self) -> None:
         total = len(self.project_items)
-        active = [p for p in self.project_items if p["var_checked"].get()]
         if total == 0:
             self.lbl_queue_status.set("0 projects in queue · Ready to add projects")
+        elif total == 1:
+            self.lbl_queue_status.set("1 survey project queued for processing")
         else:
-            self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
+            self.lbl_queue_status.set(f"{total} survey projects queued for batch processing")
 
         self._render_queue_items()
         self._sync_stepper_view()
@@ -2461,60 +2413,48 @@ class AutoMetashapeStudio:
         export_root = self.var_export_root.get().strip()
 
         for i, item in enumerate(self.project_items):
-            chk_val = item["var_checked"].get()
             row = tk.Frame(
                 self.frame_queue_items,
                 bg=UITheme.BG_SURFACE_RAISED,
                 bd=1,
                 relief=tk.SOLID,
-                highlightbackground=UITheme.ACCENT_CYAN if chk_val else UITheme.BORDER,
+                highlightbackground=UITheme.BORDER,
             )
             row.pack(fill=tk.X, padx=4, pady=2)
             item["row_frame"] = row
 
-            def _make_toggle(idx=i):
-                return lambda e=None: self._toggle_queue_item(idx)
-
-            # High-contrast, crystal-clear checkbox button with prominent tick glyph
-            btn_chk = tk.Button(
+            # Project Sequence Badge: #1, #2, ...
+            lbl_pos = tk.Label(
                 row,
-                text="☑" if chk_val else "☐",
-                font=("Segoe UI", 11, "bold"),
-                bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.ACCENT_CYAN if chk_val else UITheme.TEXT_MUTED,
-                activebackground=UITheme.BG_SURFACE_RAISED,
-                activeforeground=UITheme.ACCENT_CYAN,
-                bd=0,
-                padx=4,
-                pady=0,
-                cursor="hand2",
-                command=_make_toggle(i),
+                text=f"#{i + 1}",
+                font=("Segoe UI", 8, "bold"),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.ACCENT_CYAN,
+                padx=6,
+                pady=1,
             )
-            btn_chk.pack(side=tk.LEFT, padx=(2, 4))
-            item["btn_chk"] = btn_chk
+            lbl_pos.pack(side=tk.LEFT, padx=(4, 6), pady=3)
 
+            # Project folder name
             lbl_name = tk.Label(
                 row,
-                text=item["name"],
+                text=f"📁 {item['name']}",
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.TEXT_PRIMARY if chk_val else UITheme.TEXT_MUTED,
-                cursor="hand2",
+                fg=UITheme.TEXT_PRIMARY,
             )
-            lbl_name.pack(side=tk.LEFT, padx=(2, 6))
-            lbl_name.bind("<Button-1>", _make_toggle(i))
+            lbl_name.pack(side=tk.LEFT, padx=(2, 8))
             item["lbl_name"] = lbl_name
 
+            # Photos count pill
             lbl_cnt = tk.Label(
                 row,
-                text=f"{item.get('count', 0)} photos",
+                text=f"{item.get('count', 0):,} photos",
                 font=("Segoe UI", 7),
                 bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.ACCENT_CYAN,
-                cursor="hand2",
+                fg=UITheme.TEXT_SECONDARY,
             )
-            lbl_cnt.pack(side=tk.LEFT, padx=(0, 6))
-            lbl_cnt.bind("<Button-1>", _make_toggle(i))
+            lbl_cnt.pack(side=tk.LEFT, padx=(0, 8))
 
             # Status check for existing target folder
             target_out = os.path.join(export_root, item["name"]) if export_root else ""
@@ -2522,8 +2462,8 @@ class AutoMetashapeStudio:
             if has_existing:
                 lbl_st = tk.Label(
                     row,
-                    text="⚠️ Folder exists",
-                    font=("Segoe UI", 7),
+                    text="⚠️ Target exists",
+                    font=("Segoe UI", 7, "bold"),
                     bg=UITheme.BG_SURFACE_RAISED,
                     fg=UITheme.ACCENT_AMBER_TXT,
                 )
@@ -2537,10 +2477,10 @@ class AutoMetashapeStudio:
                 )
             lbl_st.pack(side=tk.LEFT, padx=(0, 6))
 
-            # Remove button
+            # Remove from queue button
             btn_del = tk.Button(
                 row,
-                text="×",
+                text="✕",
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_SURFACE_RAISED,
                 fg=UITheme.TEXT_MUTED,
@@ -2548,17 +2488,11 @@ class AutoMetashapeStudio:
                 activeforeground="white",
                 bd=0,
                 padx=6,
-                pady=0,
+                pady=1,
                 cursor="hand2",
                 command=lambda idx=i: self._remove_queue_item(idx),
             )
-            btn_del.pack(side=tk.RIGHT, padx=4)
-
-    def _toggle_queue_item(self, idx: int) -> None:
-        if 0 <= idx < len(self.project_items):
-            cur = self.project_items[idx]["var_checked"].get()
-            self.project_items[idx]["var_checked"].set(not cur)
-            self._on_queue_item_toggled(idx)
+            btn_del.pack(side=tk.RIGHT, padx=4, pady=2)
 
     # -----------------------------------------------------------------------
     # Stepper Card
@@ -2856,7 +2790,8 @@ class AutoMetashapeStudio:
                     self.var_rolling.set(plan["rolling_shutter"])
                     self.var_surface_type.set(plan["surface_type"])
                     self.var_remove_lighting.set(plan["remove_lighting"])
-                    self.var_ortho.set(plan["build_orthomosaic"])
+                    self.var_build_ortho.set(plan["build_orthomosaic"])
+                    self.var_export_ortho.set(plan["build_orthomosaic"])
                     self.var_build_dem.set(plan["build_dem"])
                     self.var_build_point_cloud.set(plan["build_point_cloud"])
                     self.var_classify_ground.set(plan["classify_ground"])
@@ -2882,54 +2817,110 @@ class AutoMetashapeStudio:
         """Dynamically compute photogrammetry stages matching selected workflow operations."""
         is_custom = getattr(self, "selected_preset_key", "pro") == "custom"
 
-        # Standard Pro Preset: 7 standard photogrammetry milestones
+        keys: list[str] = []
+        stages: list[tuple[str, str, str]] = []
+        step_num = 1
+
+        # Check all workflow and export deliverable flags
+        do_align = getattr(self, "var_stage_align", tk.BooleanVar(value=True)).get()
+        do_depth = getattr(self, "var_stage_depth", tk.BooleanVar(value=True)).get()
+        do_pc = (
+            getattr(self, "var_build_point_cloud", tk.BooleanVar(value=False)).get()
+            or getattr(self, "var_export_point_cloud", tk.BooleanVar(value=False)).get()
+        )
+        do_mesh = getattr(self, "var_stage_mesh", tk.BooleanVar(value=True)).get()
+        do_tex = getattr(self, "var_stage_texture", tk.BooleanVar(value=True)).get()
+        do_tiled = (
+            getattr(self, "var_build_tiled_model", tk.BooleanVar(value=False)).get()
+            or getattr(self, "var_export_tiles", tk.BooleanVar(value=False)).get()
+        )
+        do_ortho = (
+            getattr(self, "var_build_ortho", getattr(self, "var_ortho", tk.BooleanVar(value=False))).get()
+            or getattr(self, "var_export_ortho", tk.BooleanVar(value=False)).get()
+        )
+        do_dem = (
+            getattr(self, "var_build_dem", tk.BooleanVar(value=False)).get()
+            or getattr(self, "var_export_dem", tk.BooleanVar(value=False)).get()
+            or getattr(self, "var_build_contours", tk.BooleanVar(value=False)).get()
+            or do_ortho
+        )
+
+        has_deliverables = any([
+            getattr(self, "var_export_glb", tk.BooleanVar()).get(),
+            getattr(self, "var_export_obj", tk.BooleanVar()).get(),
+            getattr(self, "var_export_fbx", tk.BooleanVar()).get(),
+            getattr(self, "var_export_ply", tk.BooleanVar()).get(),
+            getattr(self, "var_export_dxf", tk.BooleanVar()).get(),
+            getattr(self, "var_export_dem", tk.BooleanVar()).get(),
+            getattr(self, "var_export_ortho", tk.BooleanVar()).get(),
+            getattr(self, "var_export_point_cloud", tk.BooleanVar()).get(),
+            getattr(self, "var_export_tiles", tk.BooleanVar()).get(),
+            getattr(self, "var_export_report", tk.BooleanVar()).get(),
+            getattr(self, "var_build_contours", tk.BooleanVar()).get(),
+        ])
+
         if not is_custom:
-            keys: list[str] = ["ingest", "match", "align", "depth", "mesh", "texture", "export"]
-            stages: list[tuple[str, str, str]] = [
-                ("1", "Ingest", "Photos & blur filter"),
-                ("2", "Match", "GPU feature matching"),
-                ("3", "Align", "Cameras & tie points"),
-                ("4", "Depth", "Dense depth maps"),
-                ("5", "Mesh", "2M arbitrary mesh"),
-                ("6", "Texture", "22-page 8K atlas"),
-                ("7", "Export", "Project & deliverables"),
-            ]
+            # Pro Preset: Granular ingest/match breakdown with dynamic geomatics milestones
+            keys.extend(["ingest", "match", "align", "depth"])
+            stages.extend([
+                (str(step_num), "Ingest", "Photos & blur filter"),
+                (str(step_num + 1), "Match", "GPU feature matching"),
+                (str(step_num + 2), "Align", "Cameras & tie points"),
+                (str(step_num + 3), "Depth", "Dense depth maps"),
+            ])
+            step_num += 4
+
+            if do_pc and getattr(self, "var_export_point_cloud", tk.BooleanVar()).get():
+                keys.append("point_cloud")
+                stages.append((str(step_num), "Cloud", "Dense 3D points"))
+                step_num += 1
+
+            keys.extend(["mesh", "texture"])
+            stages.extend([
+                (str(step_num), "Mesh", "2M arbitrary mesh"),
+                (str(step_num + 1), "Texture", "22-page 8K atlas"),
+            ])
+            step_num += 2
+
+            if do_tiled:
+                keys.append("tiled_model")
+                stages.append((str(step_num), "Tiled", "Cesium 3D Tiles"))
+                step_num += 1
+
+            if do_dem:
+                keys.append("dem")
+                stages.append((str(step_num), "DEM", "GeoTIFF elevation"))
+                step_num += 1
+
+            if do_ortho:
+                keys.append("ortho")
+                stages.append((str(step_num), "Ortho", "GeoTIFF ortho"))
+                step_num += 1
+
+            keys.append("export")
+            if has_deliverables:
+                stages.append((str(step_num), "Export", "Project & deliverables"))
+            else:
+                stages.append((str(step_num), "Save", "Save project .psx"))
+
             return keys, stages
 
         # Custom Preset: 1:1 granular Metashape workflow stages
-        keys: list[str] = []
-        stages: list[tuple[str, str, str]] = []
-
-        do_align = getattr(self, "var_stage_align", tk.BooleanVar(value=True)).get()
-        do_depth = getattr(self, "var_stage_depth", tk.BooleanVar(value=True)).get()
-        do_pc = getattr(self, "var_build_point_cloud", tk.BooleanVar(value=False)).get()
-        do_mesh = getattr(self, "var_stage_mesh", tk.BooleanVar(value=True)).get()
-        do_tex = getattr(self, "var_stage_texture", tk.BooleanVar(value=True)).get()
-        do_tiled = getattr(self, "var_build_tiled_model", tk.BooleanVar(value=False)).get()
-        do_dem = getattr(self, "var_build_dem", tk.BooleanVar(value=False)).get()
-        do_ortho = getattr(self, "var_ortho", tk.BooleanVar(value=False)).get()
-
-        step_num = 1
-
-        # 1. Align Photos
         if do_align:
             keys.append("align")
             stages.append((str(step_num), "Align", "Cameras & tie points"))
             step_num += 1
 
-        # 2. Depth Maps
         if do_depth:
             keys.append("depth")
             stages.append((str(step_num), "Depth", "MVS dense stereopsis"))
             step_num += 1
 
-        # 3. Dense Point Cloud
         if do_pc and do_depth:
             keys.append("point_cloud")
             stages.append((str(step_num), "Cloud", "Dense 3D points"))
             step_num += 1
 
-        # 4. Surface Mesh
         if do_mesh:
             face_str = "2M arbitrary"
             if hasattr(self, "var_faces") and self.var_faces.get():
@@ -2939,7 +2930,6 @@ class AutoMetashapeStudio:
             stages.append((str(step_num), "Mesh", face_str))
             step_num += 1
 
-        # 5. Texture Atlas
         if do_tex:
             pages_str = "22-page 8K"
             if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
@@ -2948,36 +2938,20 @@ class AutoMetashapeStudio:
             stages.append((str(step_num), "Texture", pages_str))
             step_num += 1
 
-        # 6. 3D Tiled Model
         if do_tiled:
             keys.append("tiled_model")
             stages.append((str(step_num), "Tiled", "Cesium 3D Tiles"))
             step_num += 1
 
-        # 7. Digital Elevation Model (DEM)
         if do_dem:
             keys.append("dem")
             stages.append((str(step_num), "DEM", "GeoTIFF elevation"))
             step_num += 1
 
-        # 8. Orthomosaic
         if do_ortho:
             keys.append("ortho")
             stages.append((str(step_num), "Ortho", "GeoTIFF ortho"))
             step_num += 1
-
-        # 9. Deliverables / Save Project
-        has_deliverables = any([
-            getattr(self, "var_export_glb", tk.BooleanVar()).get(),
-            getattr(self, "var_export_obj", tk.BooleanVar()).get(),
-            getattr(self, "var_export_fbx", tk.BooleanVar()).get(),
-            getattr(self, "var_export_ply", tk.BooleanVar()).get(),
-            getattr(self, "var_export_dxf", tk.BooleanVar()).get(),
-            getattr(self, "var_export_dem", tk.BooleanVar()).get(),
-            getattr(self, "var_export_point_cloud", tk.BooleanVar()).get(),
-            getattr(self, "var_export_report", tk.BooleanVar()).get(),
-            getattr(self, "var_build_contours", tk.BooleanVar()).get(),
-        ])
 
         keys.append("export")
         if has_deliverables:
@@ -3088,12 +3062,12 @@ class AutoMetashapeStudio:
 
         if n_active > 1:
             if hasattr(self, "lbl_multi_stepper_header"):
-                self.lbl_multi_stepper_header.config(text=f"MULTI-PROJECT BATCH QUEUE ({n_active} PROJECTS SELECTED)")
+                self.lbl_multi_stepper_header.config(text=f"MULTI-PROJECT BATCH QUEUE ({n_active} PROJECTS QUEUED)")
             if hasattr(self, "lbl_recon_stepper_header"):
                 self.lbl_recon_stepper_header.config(text="CURRENT PROJECT PHOTOGRAMMETRY TRAJECTORY")
             self.card_stepper.set_title("Multi-Project Batch Execution")
             self.card_stepper.set_subtitle(
-                f"Batch queue ({n_active} projects selected) & real-time stage trajectory"
+                f"Batch queue ({n_active} projects queued) & real-time stage trajectory"
             )
             if not self.is_running:
                 stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(active)]
@@ -3109,7 +3083,7 @@ class AutoMetashapeStudio:
             p_name = active[0]["name"]
             p_cnt = active[0].get("count", 0)
             if hasattr(self, "lbl_multi_stepper_header"):
-                self.lbl_multi_stepper_header.config(text="ACTIVE PROJECT QUEUE (1 PROJECT SELECTED)")
+                self.lbl_multi_stepper_header.config(text="ACTIVE PROJECT QUEUE (1 PROJECT QUEUED)")
             if hasattr(self, "lbl_recon_stepper_header"):
                 self.lbl_recon_stepper_header.config(text=f"PHOTOGRAMMETRY TRAJECTORY: {p_name}")
             self.card_stepper.set_title("Pipeline Milestones")
@@ -3128,17 +3102,17 @@ class AutoMetashapeStudio:
                 )
         else:
             if hasattr(self, "lbl_multi_stepper_header"):
-                self.lbl_multi_stepper_header.config(text="PROJECT QUEUE (0 PROJECTS SELECTED)")
+                self.lbl_multi_stepper_header.config(text="PROJECT QUEUE (0 PROJECTS QUEUED)")
             if hasattr(self, "lbl_recon_stepper_header"):
                 self.lbl_recon_stepper_header.config(text="PHOTOGRAMMETRY TRAJECTORY (NO PROJECT)")
             self.card_stepper.set_title("Pipeline Milestones")
-            self.card_stepper.set_subtitle("Select or add at least one project to begin")
+            self.card_stepper.set_subtitle("Add at least one survey project to begin")
             if not self.is_running:
                 stages_multi = [("1", "No Project", "0 photos")]
                 if self.stepper_multi.stages != stages_multi:
                     self.stepper_multi.build_stages(stages_multi)
                 self.btn_start.config(
-                    text="Start Reconstruction (No Project Selected)",
+                    text="Start Reconstruction (No Projects in Queue)",
                     bg=UITheme.BG_SURFACE_RAISED,
                     fg=UITheme.TEXT_MUTED,
                     state=tk.DISABLED,
@@ -3273,7 +3247,6 @@ class AutoMetashapeStudio:
                 "path": os.path.normpath(folder),
                 "name": p_name,
                 "count": p_cnt,
-                "var_checked": tk.BooleanVar(value=True),
             })
             self._update_queue_ui()
 
@@ -3540,14 +3513,21 @@ class AutoMetashapeStudio:
         if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
             cmd.append("--export-tie-points")
 
-        if hasattr(self, "var_ortho") and self.var_ortho.get():
+        if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
             cmd.append("--ortho")
+            if hasattr(self, "var_export_ortho") and self.var_export_ortho.get():
+                cmd.append("--export-ortho")
+            else:
+                cmd.append("--no-export-ortho")
         else:
             cmd.append("--no-ortho")
 
         if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
             cmd.append("--build-dem")
-            cmd.append("--export-dem")
+            if hasattr(self, "var_export_dem") and self.var_export_dem.get():
+                cmd.append("--export-dem")
+            else:
+                cmd.append("--no-export-dem")
         else:
             cmd.append("--no-dem")
 
@@ -3925,7 +3905,8 @@ class AutoMetashapeStudio:
                 target_key = "mesh"
                 desc = "Fusing Surface Mesh Geometry"
             elif "dense point cloud" in l:
-                target_key = "depth"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "point_cloud" if "point_cloud" in recon_keys else "depth"
                 desc = "Generating Dense Point Cloud"
             elif "depth maps" in l or "skipping steps 1-3" in l:
                 target_key = "depth"
@@ -3934,16 +3915,20 @@ class AutoMetashapeStudio:
                 target_key = "texture"
                 desc = "Baking 8K Texture Atlas"
             elif "tiled model" in l:
-                target_key = "texture"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "tiled_model" if "tiled_model" in recon_keys else "texture"
                 desc = "Building Hierarchical 3D Tiled Model"
             elif "digital elevation model" in l or "dem generation" in l or "geotiff dem" in l:
-                target_key = "export"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF DEM"
             elif "contour shapes" in l or "topographic contours" in l:
-                target_key = "export"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Generating Topographic Contours"
             elif "orthomosaic" in l:
-                target_key = "export"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "ortho" if "ortho" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF Orthomosaic"
             elif "quality report" in l or "official calibration" in l:
                 target_key = "export"
