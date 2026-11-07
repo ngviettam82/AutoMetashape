@@ -740,7 +740,7 @@ def print_pro_engineering_report(physics: dict, plan: dict, usgs_stats: dict = N
         pts_init = usgs_stats.get('initial_points', 0)
         pts_final = usgs_stats.get('final_points', 0)
         print("--------------------------------------------------------------------------------")
-        print("  USGS 4-Pass Bundle:  Pass 1 (RU<=12) -> Pass 2 (PA<=2.5) -> Pass 3 (RE<=0.35) -> Pass 4 (Multiplicity>=3)")
+        print("  USGS 4-Pass Bundle:  Pass 1 (RU<=15) -> Pass 2 (PA<=3.0) -> Pass 3 (RE<=0.50) -> Pass 4 (Multiplicity>=2, <=10% prune)")
         print(f"  Reprojection RMS:    Initial: {initial_rms:.3f} px  ->  Optimized: {final_rms:.3f} px  (RMS Reduction: {pct_imp:.1f}%)")
         print(f"  Multi-ray Multiplicity: {pts_final:,} robust tie points locked in (pruned {pts_init - pts_final:,} fragile/outlier rays)")
     print("=" * 80 + "\n", flush=True)

@@ -209,19 +209,19 @@ class StudioCard(tk.Frame):
 STAGES_RECON = [
     ("1", "Ingest", "Photos & blur filter"),
     ("2", "Match", "GPU feature matching"),
-    ("3", "Align", "Cameras & crop"),
+    ("3", "Align", "Cameras & tie points"),
     ("4", "Depth", "Dense stereopsis"),
     ("5", "Mesh", "Surface mesh"),
     ("6", "Texture", "Texture atlas"),
-    ("7", "Export", "GLB, OBJ & TIFF"),
+    ("7", "Export", "Production assets"),
 ]
 
 STAGES_EXPORT = [
     ("1", "Project", "Load .psx project"),
-    ("2", "Verify", "Validate 3D mesh"),
-    ("3", "Texture", "Re-bake atlas"),
-    ("4", "glTF", "Export binary GLB"),
-    ("5", "Wavefront", "Export OBJ & TIFF"),
+    ("2", "Mesh", "Validate geometry"),
+    ("3", "Texture", "Atlas & delighting"),
+    ("4", "3D Models", "Export GLB & OBJ"),
+    ("5", "Deliverables", "Ortho, DEM & cloud"),
 ]
 
 STAGES_MULTI = [
@@ -590,8 +590,8 @@ class AutoMetashapeStudio:
 
         # Dynamic tab stage keys and state cache
         self.mode_stage_keys: dict[str, list[str]] = {
-            "recon": ["ingest", "match", "align", "depth", "point_cloud", "mesh", "texture", "export", "report"],
-            "export": ["project", "mesh", "texture", "glb", "obj", "point_cloud"],
+            "recon": ["ingest", "match", "align", "depth", "mesh", "texture", "export"],
+            "export": ["project", "mesh", "texture", "models", "deliverables"],
             "multi": ["discover", "select", "execute", "done"],
         }
         self.mode_states = {
@@ -2238,7 +2238,7 @@ class AutoMetashapeStudio:
         # Show config parameter card ONLY if Custom preset is chosen
         if hasattr(self, "card_adv"):
             if key == "custom":
-                self.card_adv.pack(fill=tk.X, pady=(0, 6))
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
                 if not getattr(self, "adv_expanded", False):
                     self._toggle_advanced()
             else:
@@ -2341,7 +2341,7 @@ class AutoMetashapeStudio:
                     self._log(f"  Survey Overlap:    {ov_text}", "text")
                     self._log(f"  Dynamic Range:     Shadow clip: {phys.get('shadow_clip_ratio', 0)*100:.1f}% | Delighting: {'ACTIVATED' if plan.get('remove_lighting') else 'Not required'}", "text")
                     self._log(f"  Topographic Relief:Span: {phys.get('horizontal_span_m', 0):.1f}m | Delta Z: {phys.get('alt_span_m', 0):.1f}m | R={phys.get('relief_ratio', 0):.3f} -> {plan.get('surface_type', 'arbitrary').upper()}", "text")
-                    self._log(f"  USGS Optimization: 4-Pass Gradual Selection (RU<=12 -> PA<=2.5 -> RE<=0.35 -> Multiplicity>=3)", "stage")
+                    self._log(f"  USGS Optimization: Gentle Gradual Selection (RU<=15 -> PA<=3.0 -> RE<=0.50 -> Rays>=2, <=10% prune)", "stage")
                     self._log("=" * 70 + "\n", "stage")
 
                     # Automatically sync parameters into UI
@@ -2374,104 +2374,77 @@ class AutoMetashapeStudio:
         threading.Thread(target=_worker, daemon=True).start()
 
     def get_dynamic_recon_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Dynamically compute photogrammetry stages based on active options."""
-        keys: list[str] = ["ingest", "match", "align", "depth"]
+        """Dynamically compute canonical 7 photogrammetry stages with active subtitles."""
+        keys: list[str] = ["ingest", "match", "align", "depth", "mesh", "texture", "export"]
+
+        depth_sub = "Depth maps & cloud" if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) else "Dense depth maps"
+
+        face_str = "2M arbitrary"
+        if hasattr(self, "var_faces") and self.var_faces.get():
+            val = str(self.var_faces.get()).strip()
+            face_str = f"{int(val):,} faces" if val.isdigit() else "Arbitrary surface"
+        mesh_sub = f"{face_str} mesh"
+
+        pages_str = "22-page 8K"
+        if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
+            pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
+        tex_sub = f"{pages_str} atlas"
+
+        exp_parts = ["GLB", "OBJ"]
+        if hasattr(self, "var_build_dem") and self.var_build_dem.get():
+            exp_parts.append("DEM")
+        if hasattr(self, "var_ortho") and self.var_ortho.get():
+            exp_parts.append("Ortho")
+        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
+            exp_parts.append("Cloud")
+        export_sub = ", ".join(exp_parts[:3])
+        if len(exp_parts) > 3:
+            export_sub += " & more"
+
         stages: list[tuple[str, str, str]] = [
             ("1", "Ingest", "Photos & blur filter"),
             ("2", "Match", "GPU feature matching"),
-            ("3", "Align", "Cameras & crop"),
-            ("4", "Depth", "Dense stereopsis"),
+            ("3", "Align", "Cameras & tie points"),
+            ("4", "Depth", depth_sub),
+            ("5", "Mesh", mesh_sub),
+            ("6", "Texture", tex_sub),
+            ("7", "Export", export_sub),
         ]
-
-        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
-            keys.append("point_cloud")
-            stages.append((str(len(stages) + 1), "Point Cloud", "Dense 3D point cloud"))
-
-        keys.append("mesh")
-        stages.append((str(len(stages) + 1), "Mesh", "Surface mesh"))
-
-        keys.append("texture")
-        stages.append((str(len(stages) + 1), "Texture", "Texture atlas"))
-
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-            keys.append("tiled_model")
-            stages.append((str(len(stages) + 1), "Tiled Model", "Hierarchical 3D tiles"))
-
-        keys.append("export")
-        stages.append((str(len(stages) + 1), "Export", "GLB, OBJ & TIFF"))
-
-        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
-            keys.append("dem")
-            stages.append((str(len(stages) + 1), "DEM", "GeoTIFF DEM"))
-
-        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
-            keys.append("contours")
-            stages.append((str(len(stages) + 1), "Contours", "Topographic vectors"))
-
-        if hasattr(self, "var_ortho") and self.var_ortho.get():
-            keys.append("orthomosaic")
-            stages.append((str(len(stages) + 1), "Orthomosaic", "GeoTIFF aerial ortho"))
-
-        if hasattr(self, "var_export_report") and self.var_export_report.get():
-            keys.append("report")
-            stages.append((str(len(stages) + 1), "Report", "Calibration PDF report"))
-
         return keys, stages
 
     def get_dynamic_export_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Dynamically compute export stages based on active deliverables."""
-        keys: list[str] = ["project", "mesh"]
+        """Dynamically compute export stages matching the 5-step export pipeline."""
+        keys: list[str] = ["project", "mesh", "texture", "models", "deliverables"]
+
+        tex_sub = "Re-bake & delight" if (hasattr(self, "var_exp_rebake") and self.var_exp_rebake.get()) else "Verify texture"
+
+        models_sub = "GLB & OBJ"
+        extra_models = []
+        if hasattr(self, "var_exp_export_fbx") and self.var_exp_export_fbx.get():
+            extra_models.append("FBX")
+        if hasattr(self, "var_exp_export_ply") and self.var_exp_export_ply.get():
+            extra_models.append("PLY")
+        if extra_models:
+            models_sub += f", {', '.join(extra_models)}"
+
+        deliv_parts = []
+        if hasattr(self, "var_exp_ortho") and self.var_exp_ortho.get():
+            deliv_parts.append("Ortho")
+        if hasattr(self, "var_exp_dem") and self.var_exp_dem.get():
+            deliv_parts.append("DEM")
+        if hasattr(self, "var_exp_point_cloud") and self.var_exp_point_cloud.get():
+            deliv_parts.append("Cloud")
+        if hasattr(self, "var_exp_report") and self.var_exp_report.get():
+            deliv_parts.append("Report")
+        deliv_sub = ", ".join(deliv_parts) if deliv_parts else "Ortho, DEM & cloud"
+
         stages: list[tuple[str, str, str]] = [
             ("1", "Project", "Load .psx project"),
-            ("2", "Verify", "Validate 3D mesh"),
+            ("2", "Mesh", "Validate geometry"),
+            ("3", "Texture", tex_sub),
+            ("4", "3D Models", models_sub),
+            ("5", "Deliverables", deliv_sub),
         ]
-
-        if hasattr(self, "var_exp_rebake") and self.var_exp_rebake.get():
-            keys.append("texture")
-            stages.append((str(len(stages) + 1), "Texture", "Re-bake atlas"))
-
-        if hasattr(self, "var_exp_remove_lighting") and self.var_exp_remove_lighting.get():
-            keys.append("delight")
-            stages.append((str(len(stages) + 1), "Delight", "Remove lighting"))
-
-        keys.append("glb")
-        stages.append((str(len(stages) + 1), "glTF", "Export binary GLB"))
-
-        keys.append("obj")
-        stages.append((str(len(stages) + 1), "Wavefront", "Export OBJ & TIFF"))
-
-        if hasattr(self, "var_exp_point_cloud") and self.var_exp_point_cloud.get():
-            keys.append("point_cloud")
-            stages.append((str(len(stages) + 1), "Point Cloud", "Export dense cloud"))
-
-        if hasattr(self, "var_exp_dem") and self.var_exp_dem.get():
-            keys.append("dem")
-            stages.append((str(len(stages) + 1), "DEM", "Export GeoTIFF DEM"))
-
-        if hasattr(self, "var_exp_ortho") and self.var_exp_ortho.get():
-            keys.append("orthomosaic")
-            stages.append((str(len(stages) + 1), "Orthomosaic", "Export Orthomosaic"))
-
-        if hasattr(self, "var_exp_tiled_model") and self.var_exp_tiled_model.get():
-            keys.append("tiled_model")
-            stages.append((str(len(stages) + 1), "Tiled Model", "Export 3D tiles"))
-
-        if hasattr(self, "var_exp_contours") and self.var_exp_contours.get():
-            keys.append("contours")
-            stages.append((str(len(stages) + 1), "Contours", "Export contours"))
-
-        if hasattr(self, "var_exp_export_fbx") and self.var_exp_export_fbx.get():
-            keys.append("fbx")
-            stages.append((str(len(stages) + 1), "FBX", "Export Autodesk FBX"))
-
-        if hasattr(self, "var_exp_export_ply") and self.var_exp_export_ply.get():
-            keys.append("ply")
-            stages.append((str(len(stages) + 1), "PLY", "Export Stanford PLY"))
-
-        if hasattr(self, "var_exp_report") and self.var_exp_report.get():
-            keys.append("report")
-            stages.append((str(len(stages) + 1), "Report", "Export PDF report"))
-
         return keys, stages
 
     def get_dynamic_multi_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
@@ -2572,7 +2545,7 @@ class AutoMetashapeStudio:
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
             if getattr(self, "selected_preset_key", "pro") == "custom":
-                self.card_adv.pack(fill=tk.X, pady=(0, 6))
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
             else:
                 self.card_adv.pack_forget()
             self.btn_start.config(
@@ -2683,6 +2656,20 @@ class AutoMetashapeStudio:
             self.multi_discovered_projects.append(proj_info)
             self._populate_multi_project_rows()
 
+    def _is_model_output_dir(self, dir_path: str, dir_name: str) -> bool:
+        low = dir_name.lower()
+        if low.startswith(("model", "propreset", "preset", "output", "export", "result", "deliverable", "batch_")):
+            return True
+        if low in {"output", "outputs", "export", "exports", "result", "results", "__pycache__", ".git"}:
+            return True
+        try:
+            for entry in os.scandir(dir_path):
+                if entry.is_file() and entry.name.lower().endswith((".glb", ".obj", ".fbx", ".ply")):
+                    return True
+        except Exception:
+            pass
+        return False
+
     def _analyze_project_dir(self, dir_path: str) -> dict:
         dir_path = os.path.normpath(dir_path)
         name = os.path.basename(dir_path)
@@ -2690,10 +2677,6 @@ class AutoMetashapeStudio:
         direct_photos = 0
         has_psx = False
         models = []
-
-        EXCLUDED_DIR_NAMES = {
-            "output", "outputs", "export", "exports", "result", "results", "__pycache__"
-        }
 
         try:
             for entry in os.scandir(dir_path):
@@ -2710,7 +2693,7 @@ class AutoMetashapeStudio:
                     elif ext == ".psx":
                         has_psx = True
                 elif entry.is_dir():
-                    if lower_name.startswith("model") or lower_name in EXCLUDED_DIR_NAMES:
+                    if self._is_model_output_dir(entry.path, entry.name):
                         models.append(entry.name)
                         try:
                             for sub in os.scandir(entry.path):
@@ -2718,14 +2701,13 @@ class AutoMetashapeStudio:
                                     has_psx = True
                         except Exception:
                             pass
-                    elif not lower_name.startswith(".") and not lower_name.endswith(".files") and not lower_name.endswith(".tmp"):
+                    elif not lower_name.startswith(".") and not lower_name.endswith((".files", ".tmp", ".temp")):
                         # Recursively count all survey photos across all flight folders (nadir, ob1, DCIM, etc.)
                         for root, dirs, files in os.walk(entry.path):
                             dirs[:] = [
                                 d for d in dirs
                                 if not d.startswith(".")
-                                and not d.lower().startswith("model")
-                                and d.lower() not in EXCLUDED_DIR_NAMES
+                                and not self._is_model_output_dir(os.path.join(root, d), d)
                                 and not d.lower().endswith((".files", ".tmp", ".temp"))
                             ]
                             for f in files:
@@ -2763,18 +2745,16 @@ class AutoMetashapeStudio:
 
         self._log(f"[Multi-Project Studio] Scanning root directory: {root_dir}", "stage")
         self.multi_discovered_projects.clear()
-        EXCLUDED = {"model", "models", "output", "outputs", "export", "exports", "result", "results", "__pycache__", ".git"}
 
-        # 1. Inspect direct subdirectories
+        # 1. Inspect direct subdirectories, cleanly excluding all output / deliverable directories
         sub_dirs = []
         try:
             for entry in os.scandir(root_dir):
                 if (
                     entry.is_dir()
                     and not entry.name.startswith(".")
-                    and entry.name.lower() not in EXCLUDED
-                    and not entry.name.lower().startswith("model")
-                    and not entry.name.lower().endswith(".files")
+                    and not self._is_model_output_dir(entry.path, entry.name)
+                    and not entry.name.lower().endswith((".files", ".tmp", ".temp"))
                 ):
                     sub_dirs.append(entry)
         except Exception as e:
@@ -2786,7 +2766,7 @@ class AutoMetashapeStudio:
         if sub_dirs:
             flight_tokens = ("nadir", "oblique", "ob1", "ob2", "ob3", "ob4", "flight", "pass", "dji", "dcim", "100media")
             flight_matches = sum(1 for d in sub_dirs if any(tok in d.name.lower() for tok in flight_tokens))
-            if flight_matches == len(sub_dirs):
+            if flight_matches == len(sub_dirs) or (len(sub_dirs) > 1 and flight_matches >= len(sub_dirs) - 1):
                 is_single_survey_with_flights = True
 
         root_info = self._analyze_project_dir(root_dir)
@@ -3273,9 +3253,9 @@ class AutoMetashapeStudio:
             ])
             if hasattr(self, "var_guided") and not self.var_guided.get():
                 cmd.append("--no-guided-matching")
-            if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip() != "40000":
+            if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip():
                 cmd.extend(["--keypoint-limit", self.var_keypoint_limit.get().strip()])
-            if hasattr(self, "var_tiepoint_limit") and self.var_tiepoint_limit.get().strip() != "25000":
+            if hasattr(self, "var_tiepoint_limit") and self.var_tiepoint_limit.get().strip():
                 cmd.extend(["--tiepoint-limit", self.var_tiepoint_limit.get().strip()])
             if hasattr(self, "var_adaptive_fitting") and not self.var_adaptive_fitting.get():
                 cmd.append("--no-adaptive-fitting")
@@ -3519,57 +3499,98 @@ class AutoMetashapeStudio:
         if mode == "recon":
             target_key = None
             desc = ""
-            if "[1/7]" in line or "[1/6]" in line or "ingesting photos" in l or "ingesting chunk" in l:
-                target_key = "ingest"
-                desc = "Ingesting photos & blur filter"
-            elif "[2/7]" in line or "[2/6]" in line or "gpu feature matching" in l:
-                target_key = "match"
-                desc = "GPU Feature Matching"
-            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
-                target_key = "align"
-                desc = "Camera Alignment & Bundle Adjustment"
-            elif "[auto-crop]" in line:
-                target_key = "align"
-                desc = "Alignment & Bounding Box Crop"
-            elif "[pause_crop]" in line:
+            if "[pause_crop]" in line:
                 self.root.after(0, self._on_pipeline_paused_for_crop)
                 return
-            elif "[4b/7]" in line or "dense point cloud" in l:
-                target_key = "point_cloud"
-                desc = "Generating Dense Point Cloud"
-            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
-                target_key = "mesh"
-                desc = "Fusing Surface Mesh & Closing Holes"
-            elif "skipping steps 1-3" in l or "[4/7]" in line or "[4/6]" in line or "depth maps" in l:
-                target_key = "depth"
-                desc = "MVS Dense Stereopsis"
-            elif "[6/7]" in line or "[6/6]" in line or ("baking" in l and "texture" in l) or "re-baking texture atlas" in l:
-                target_key = "texture"
-                desc = "Baking 8K Texture Atlas"
-            elif "[6b/7]" in line or "hierarchical 3d tiled model" in l or "tiled model" in l:
-                target_key = "tiled_model"
-                desc = "Building Hierarchical 3D Tiled Model"
-            elif "[7/7]" in line or "exporting production assets" in l or "saved binary glb" in l:
-                target_key = "export"
-                desc = "Exporting GLB, OBJ & Production Assets"
-            elif "[7b/7]" in line or "digital elevation model" in l or "dem generation" in l or "geotiff dem" in l:
-                target_key = "dem"
-                desc = "Building & Exporting GeoTIFF DEM"
-            elif "[7b2/7]" in line or "contour shapes" in l or "topographic contours" in l:
-                target_key = "contours"
-                desc = "Generating Topographic Contours"
-            elif "[7c/7]" in line or "orthomosaic" in l:
-                target_key = "orthomosaic"
-                desc = "Building & Exporting GeoTIFF Orthomosaic"
-            elif "[7d/7]" in line or "exporting dense point cloud" in l:
-                target_key = "point_cloud" if "point_cloud" in self.mode_stage_keys.get("recon", []) else "export"
-                desc = "Exporting Dense Point Cloud Deliverable"
-            elif "[7e/7]" in line or "quality report" in l or "official calibration" in l:
-                target_key = "report"
-                desc = "Exporting Official Quality PDF Report"
             elif "[success]" in l and "entire pipeline finished" in l:
                 self._complete_stepper_mode("recon")
                 return
+            # Match bracketed stage tags first for exact milestone routing
+            elif "[1/7]" in line or "[1/6]" in line:
+                target_key = "ingest"
+                desc = "Ingesting photos & blur filter"
+            elif "[2/7]" in line or "[2/6]" in line:
+                target_key = "match"
+                desc = "GPU Feature Matching"
+            elif "[3b/7]" in line or "[auto-crop]" in line:
+                target_key = "align"
+                desc = "Alignment & Bounding Box Crop"
+            elif "[3/7]" in line or "[3/6]" in line:
+                target_key = "align"
+                desc = "Camera Alignment & Tie Points"
+            elif "[4b/7]" in line:
+                target_key = "depth"
+                desc = "Generating Dense Point Cloud"
+            elif "[4/7]" in line or "[4/6]" in line:
+                target_key = "depth"
+                desc = "MVS Dense Stereopsis"
+            elif "[5/7]" in line or "[5/6]" in line:
+                target_key = "mesh"
+                desc = "Fusing Surface Mesh Geometry"
+            elif "[6b/7]" in line:
+                target_key = "texture"
+                desc = "Building Hierarchical 3D Tiled Model"
+            elif "[6/7]" in line or "[6/6]" in line:
+                target_key = "texture"
+                desc = "Baking 8K Texture Atlas"
+            elif "[7b2/7]" in line:
+                target_key = "export"
+                desc = "Generating Topographic Contours"
+            elif "[7b/7]" in line:
+                target_key = "export"
+                desc = "Building & Exporting GeoTIFF DEM"
+            elif "[7c/7]" in line:
+                target_key = "export"
+                desc = "Building & Exporting GeoTIFF Orthomosaic"
+            elif "[7d/7]" in line:
+                target_key = "export"
+                desc = "Exporting Dense Point Cloud Deliverable"
+            elif "[7e/7]" in line:
+                target_key = "export"
+                desc = "Exporting Official Quality PDF Report"
+            elif "[7/7]" in line:
+                target_key = "export"
+                desc = "Exporting GLB, OBJ & Production Assets"
+            # Fallback text matches if logs arrive without bracket prefix
+            elif "surface mesh" in l:
+                target_key = "mesh"
+                desc = "Fusing Surface Mesh Geometry"
+            elif "dense point cloud" in l:
+                target_key = "depth"
+                desc = "Generating Dense Point Cloud"
+            elif "depth maps" in l or "skipping steps 1-3" in l:
+                target_key = "depth"
+                desc = "MVS Dense Stereopsis"
+            elif ("baking" in l and "texture" in l) or "re-baking texture atlas" in l:
+                target_key = "texture"
+                desc = "Baking 8K Texture Atlas"
+            elif "tiled model" in l:
+                target_key = "texture"
+                desc = "Building Hierarchical 3D Tiled Model"
+            elif "digital elevation model" in l or "dem generation" in l or "geotiff dem" in l:
+                target_key = "export"
+                desc = "Building & Exporting GeoTIFF DEM"
+            elif "contour shapes" in l or "topographic contours" in l:
+                target_key = "export"
+                desc = "Generating Topographic Contours"
+            elif "orthomosaic" in l:
+                target_key = "export"
+                desc = "Building & Exporting GeoTIFF Orthomosaic"
+            elif "quality report" in l or "official calibration" in l:
+                target_key = "export"
+                desc = "Exporting Official Quality PDF Report"
+            elif "exporting production assets" in l or "saved binary glb" in l:
+                target_key = "export"
+                desc = "Exporting GLB, OBJ & Production Assets"
+            elif "aligning cameras" in l:
+                target_key = "align"
+                desc = "Camera Alignment & Tie Points"
+            elif "gpu feature matching" in l:
+                target_key = "match"
+                desc = "GPU Feature Matching"
+            elif "ingesting photos" in l or "ingesting chunk" in l:
+                target_key = "ingest"
+                desc = "Ingesting photos & blur filter"
 
             if target_key:
                 idx = self._find_stage_index_by_key("recon", target_key)
@@ -3586,42 +3607,49 @@ class AutoMetashapeStudio:
                 target_key = "mesh"
                 desc = "Validating 3D Mesh Geometry"
             elif "[color calibration]" in l:
+                target_key = "texture"
                 desc = "Radiometric Color Calibration"
             elif "[texture]" in l or "texture atlas" in l or "re-baking" in l:
                 target_key = "texture"
                 desc = "Re-baking Texture Atlas"
             elif "[delighting]" in l or "ambient shadows" in l:
-                target_key = "delight"
+                target_key = "texture"
                 desc = "Delighting & Shadow Removal"
             elif "[1/2]" in line or "binary gltf" in l or ".glb" in l:
-                target_key = "glb"
+                target_key = "models"
                 desc = "Exporting Binary GLB"
             elif "[2/2]" in line or "wavefront obj" in l or ".obj" in l:
-                target_key = "obj"
+                target_key = "models"
                 desc = "Exporting Wavefront OBJ & TIFF"
-            elif "[point cloud]" in l or "dense point cloud" in l:
-                target_key = "point_cloud"
-                desc = "Exporting Dense Point Cloud"
-            elif "[dem]" in l or "geotiff elevation" in l:
-                target_key = "dem"
-                desc = "Exporting GeoTIFF Elevation Model"
-            elif "[orthomosaic]" in l:
-                target_key = "orthomosaic"
-                desc = "Exporting GeoTIFF Orthomosaic"
-            elif "[tiled model]" in l:
-                target_key = "tiled_model"
-                desc = "Building & Exporting 3D Tiles"
-            elif "[contours]" in l:
-                target_key = "contours"
-                desc = "Exporting Topographic Contours"
             elif "[fbx]" in l:
-                target_key = "fbx"
+                target_key = "models"
                 desc = "Exporting Autodesk FBX"
             elif "[ply]" in l:
-                target_key = "ply"
+                target_key = "models"
                 desc = "Exporting Stanford PLY"
+            elif "[dxf]" in l:
+                target_key = "models"
+                desc = "Exporting AutoCAD DXF"
+            elif "[tie points]" in l:
+                target_key = "models"
+                desc = "Exporting Sparse Tie Points"
+            elif "[point cloud]" in l or "dense point cloud" in l:
+                target_key = "deliverables"
+                desc = "Exporting Dense Point Cloud"
+            elif "[dem]" in l or "geotiff elevation" in l:
+                target_key = "deliverables"
+                desc = "Exporting GeoTIFF Elevation Model"
+            elif "[orthomosaic]" in l:
+                target_key = "deliverables"
+                desc = "Exporting GeoTIFF Orthomosaic"
+            elif "[tiled model]" in l:
+                target_key = "deliverables"
+                desc = "Building & Exporting 3D Tiles"
+            elif "[contours]" in l:
+                target_key = "deliverables"
+                desc = "Exporting Topographic Contours"
             elif "[report]" in l:
-                target_key = "report"
+                target_key = "deliverables"
                 desc = "Exporting Official PDF Report"
             elif "[success]" in l:
                 self._complete_stepper_mode("export")
