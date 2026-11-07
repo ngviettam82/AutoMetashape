@@ -2527,8 +2527,8 @@ def run_reconstruction(
 
     has_any_export = any([
         export_glb, export_obj, export_fbx, export_ply, export_dxf,
-        export_tie_points, export_dem or build_dem, build_contours,
-        build_orthomosaic, export_point_cloud, export_report, build_tiled_model
+        export_tie_points, export_dem, export_ortho,
+        export_point_cloud, export_report, build_contours, build_tiled_model
     ])
     if not has_any_export:
         print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
@@ -2570,7 +2570,7 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
     # Step 7d: Dense Point Cloud Export
-    if export_point_cloud or build_point_cloud:
+    if export_point_cloud:
         if chunk.point_cloud and chunk.point_cloud.point_count > 0:
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
@@ -2586,6 +2586,8 @@ def run_reconstruction(
                 save_point_classification=True,
             )
             print(f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} ({os.path.getsize(pc_out)/(1024*1024):.2f} MB)", flush=True)
+    elif build_point_cloud:
+        print(f"  [7d/7] [INFO] Dense point cloud preserved in project checkpoint. {point_cloud_format.upper() if point_cloud_format else 'LAZ'} file export skipped as requested.", flush=True)
 
     # Step 7e: Executive PDF Quality & Calibration Report
     if export_report:

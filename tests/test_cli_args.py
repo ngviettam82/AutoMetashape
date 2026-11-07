@@ -43,6 +43,37 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.build_dem)
         self.assertTrue(args.export_dem)
 
+    def test_recon_parser_point_cloud_decoupling(self) -> None:
+        """Defend decoupling between building point cloud and exporting point cloud file."""
+        parser = build_recon_parser()
+
+        # Case 1: Built natively into project, but not exported to disk file
+        args_no_export = parser.parse_args([
+            "--images", "dummy_images",
+            "--build-point-cloud",
+            "--no-export-point-cloud",
+        ])
+        self.assertTrue(args_no_export.build_point_cloud)
+        self.assertFalse(args_no_export.export_point_cloud)
+
+        # Case 2: Explicitly exported
+        args_export = parser.parse_args([
+            "--images", "dummy_images",
+            "--build-point-cloud",
+            "--export-point-cloud",
+        ])
+        self.assertTrue(args_export.build_point_cloud)
+        self.assertTrue(args_export.export_point_cloud)
+
+        # Case 3: Fully disabled
+        args_disabled = parser.parse_args([
+            "--images", "dummy_images",
+            "--no-point-cloud",
+            "--no-export-point-cloud",
+        ])
+        self.assertFalse(args_disabled.build_point_cloud)
+        self.assertFalse(args_disabled.export_point_cloud)
+
     def test_recon_parser_reference_preselection_modes(self) -> None:
         """Defend reference preselection mode choices."""
         parser = build_recon_parser()
