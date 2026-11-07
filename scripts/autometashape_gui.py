@@ -1799,17 +1799,21 @@ class AutoMetashapeStudio:
             elif changed_stage == "mesh" and self.var_stage_mesh.get():
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
+            elif changed_stage == "point_cloud" and self.var_build_point_cloud.get():
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
+            elif changed_stage == "tiled_model" and self.var_build_tiled_model.get():
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
+            elif changed_stage == "ortho" and self.var_ortho.get():
+                self.var_build_dem.set(True)
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
+            elif changed_stage in ("dem", "contours") and (self.var_build_dem.get() or self.var_build_contours.get()):
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
             elif changed_stage == "depth" and self.var_stage_depth.get():
                 self.var_stage_align.set(True)
-
-            # Check point cloud, dem, tiled model dependencies on depth maps and align
-            if (self.var_build_point_cloud.get() or self.var_build_tiled_model.get()) and not self.var_stage_depth.get():
-                if changed_stage in ("point_cloud", "tiled_model"):
-                    self.var_stage_depth.set(True)
-                    self.var_stage_align.set(True)
-            if (self.var_ortho.get() or self.var_build_dem.get() or self.var_build_contours.get()) and not self.var_stage_align.get():
-                if changed_stage in ("ortho", "dem", "contours"):
-                    self.var_stage_align.set(True)
 
             # Check 3D surface model deliverables dependency on mesh
             has_mesh_deliverables = any(v.get() for v in [self.var_export_glb, self.var_export_obj, self.var_export_fbx, self.var_export_ply, self.var_export_dxf])
@@ -1822,16 +1826,26 @@ class AutoMetashapeStudio:
             # 2. Backward cascade: If an upstream prerequisite is disabled, disable dependent downstream stages
             if not self.var_stage_align.get():
                 self.var_stage_depth.set(False)
+                self.var_build_point_cloud.set(False)
+                self.var_export_point_cloud.set(False)
+                self.var_stage_mesh.set(False)
+                self.var_stage_texture.set(False)
+                self.var_build_tiled_model.set(False)
                 self.var_build_dem.set(False)
                 self.var_export_dem.set(False)
                 self.var_ortho.set(False)
                 self.var_build_contours.set(False)
 
             if not self.var_stage_depth.get():
-                self.var_stage_mesh.set(False)
                 self.var_build_point_cloud.set(False)
                 self.var_export_point_cloud.set(False)
+                self.var_stage_mesh.set(False)
+                self.var_stage_texture.set(False)
                 self.var_build_tiled_model.set(False)
+                self.var_build_dem.set(False)
+                self.var_export_dem.set(False)
+                self.var_ortho.set(False)
+                self.var_build_contours.set(False)
 
             if not self.var_stage_mesh.get():
                 self.var_stage_texture.set(False)
@@ -1840,6 +1854,10 @@ class AutoMetashapeStudio:
                 self.var_export_fbx.set(False)
                 self.var_export_ply.set(False)
                 self.var_export_dxf.set(False)
+
+            if not self.var_build_dem.get():
+                self.var_ortho.set(False)
+                self.var_build_contours.set(False)
 
         finally:
             self._in_cascade_sync = False
@@ -1889,6 +1907,10 @@ class AutoMetashapeStudio:
                     fg=UITheme.ACCENT_CYAN,
                 )
 
+        if not getattr(self, "_in_cascade_sync", False):
+            self._sync_dynamic_stepper()
+            self._sync_stepper_view()
+
 
     # -----------------------------------------------------------------------
     # Step 3: Collapsible Advanced Pipeline Settings
@@ -1924,9 +1946,6 @@ class AutoMetashapeStudio:
             fg=UITheme.TEXT_MUTED,
         ).pack(side=tk.LEFT, padx=8)
 
-        row_wf1 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
-        row_wf1.pack(fill=tk.X, pady=2)
-
         def _wf_chk(parent_w, text: str, var: tk.Variable, stage_key: str):
             return tk.Checkbutton(
                 parent_w,
@@ -1935,17 +1954,26 @@ class AutoMetashapeStudio:
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_ROOT,
                 fg=UITheme.TEXT_PRIMARY,
-                selectcolor=UITheme.BG_SURFACE,
+                selectcolor=UITheme.BG_SURFACE_RAISED,
                 activebackground=UITheme.BG_ROOT,
                 activeforeground=UITheme.ACCENT_CYAN,
                 bd=0,
                 command=lambda k=stage_key: self._on_workflow_stage_toggled(k),
             )
 
+        row_wf1 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
+        row_wf1.pack(fill=tk.X, pady=1)
         _wf_chk(row_wf1, "1. Align Photos", self.var_stage_align, "align").pack(side=tk.LEFT, padx=(0, 10))
         _wf_chk(row_wf1, "2. Build Depth Maps", self.var_stage_depth, "depth").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "3. Build Mesh", self.var_stage_mesh, "mesh").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "4. Build Texture", self.var_stage_texture, "texture").pack(side=tk.LEFT)
+        _wf_chk(row_wf1, "3. Build Point Cloud", self.var_build_point_cloud, "point_cloud").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf1, "4. Build Mesh", self.var_stage_mesh, "mesh").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf1, "5. Build Texture", self.var_stage_texture, "texture").pack(side=tk.LEFT)
+
+        row_wf2 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
+        row_wf2.pack(fill=tk.X, pady=(2, 1))
+        _wf_chk(row_wf2, "6. Build Tiled Model", self.var_build_tiled_model, "tiled_model").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf2, "7. Build DEM", self.var_build_dem, "dem").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf2, "8. Build Orthomosaic", self.var_ortho, "ortho").pack(side=tk.LEFT)
 
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
@@ -2825,6 +2853,7 @@ class AutoMetashapeStudio:
             pass
 
         self._sync_dynamic_stepper()
+        self._sync_stepper_view()
 
     def _diagnose_survey_physics(self) -> None:
         """Audits survey telemetry, optics, GSD, and shutter physics in background thread."""
@@ -2902,74 +2931,102 @@ class AutoMetashapeStudio:
 
     def get_dynamic_recon_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
         """Dynamically compute photogrammetry stages matching selected workflow operations."""
+        is_custom = getattr(self, "selected_preset_key", "pro") == "custom"
+
+        # Standard Pro Preset: 7 standard photogrammetry milestones
+        if not is_custom:
+            keys: list[str] = ["ingest", "match", "align", "depth", "mesh", "texture", "export"]
+            stages: list[tuple[str, str, str]] = [
+                ("1", "Ingest", "Photos & blur filter"),
+                ("2", "Match", "GPU feature matching"),
+                ("3", "Align", "Cameras & tie points"),
+                ("4", "Depth", "Dense depth maps"),
+                ("5", "Mesh", "2M arbitrary mesh"),
+                ("6", "Texture", "22-page 8K atlas"),
+                ("7", "Export", "Project & deliverables"),
+            ]
+            return keys, stages
+
+        # Custom Preset: 1:1 granular Metashape workflow stages
         keys: list[str] = []
         stages: list[tuple[str, str, str]] = []
 
-        is_custom = getattr(self, "selected_preset_key", "pro") == "custom"
-        do_align = getattr(self, "var_stage_align", tk.BooleanVar(value=True)).get() if is_custom else True
-        do_depth = getattr(self, "var_stage_depth", tk.BooleanVar(value=True)).get() if is_custom else True
-        do_mesh = getattr(self, "var_stage_mesh", tk.BooleanVar(value=True)).get() if is_custom else True
-        do_tex = getattr(self, "var_stage_texture", tk.BooleanVar(value=True)).get() if is_custom else True
+        do_align = getattr(self, "var_stage_align", tk.BooleanVar(value=True)).get()
+        do_depth = getattr(self, "var_stage_depth", tk.BooleanVar(value=True)).get()
+        do_pc = getattr(self, "var_build_point_cloud", tk.BooleanVar(value=False)).get()
+        do_mesh = getattr(self, "var_stage_mesh", tk.BooleanVar(value=True)).get()
+        do_tex = getattr(self, "var_stage_texture", tk.BooleanVar(value=True)).get()
+        do_tiled = getattr(self, "var_build_tiled_model", tk.BooleanVar(value=False)).get()
+        do_dem = getattr(self, "var_build_dem", tk.BooleanVar(value=False)).get()
+        do_ortho = getattr(self, "var_ortho", tk.BooleanVar(value=False)).get()
 
         step_num = 1
-        # 1. Ingest & Camera Alignment
+
+        # 1. Align Photos
         if do_align:
-            keys.append("ingest")
-            stages.append((str(step_num), "Ingest", "Photos & blur filter"))
-            step_num += 1
-
-            keys.append("match")
-            stages.append((str(step_num), "Match", "GPU feature matching"))
-            step_num += 1
-
             keys.append("align")
             stages.append((str(step_num), "Align", "Cameras & tie points"))
-            step_num += 1
-        else:
-            keys.append("ingest")
-            stages.append((str(step_num), "Project", "Load project & photos"))
             step_num += 1
 
         # 2. Depth Maps
         if do_depth:
-            depth_sub = "Depth maps & cloud" if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) else "Dense depth maps"
             keys.append("depth")
-            stages.append((str(step_num), "Depth", depth_sub))
+            stages.append((str(step_num), "Depth", "MVS dense stereopsis"))
             step_num += 1
 
-        # 3. Surface Mesh
+        # 3. Dense Point Cloud
+        if do_pc and do_depth:
+            keys.append("point_cloud")
+            stages.append((str(step_num), "Cloud", "Dense 3D points"))
+            step_num += 1
+
+        # 4. Surface Mesh
         if do_mesh:
             face_str = "2M arbitrary"
             if hasattr(self, "var_faces") and self.var_faces.get():
                 val = str(self.var_faces.get()).strip()
                 face_str = f"{int(val):,} faces" if val.isdigit() else "Arbitrary surface"
-            mesh_sub = f"{face_str} mesh"
             keys.append("mesh")
-            stages.append((str(step_num), "Mesh", mesh_sub))
+            stages.append((str(step_num), "Mesh", face_str))
             step_num += 1
 
-        # 4. Texture Atlas
+        # 5. Texture Atlas
         if do_tex:
             pages_str = "22-page 8K"
             if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
                 pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
-            tex_sub = f"{pages_str} atlas"
             keys.append("texture")
-            stages.append((str(step_num), "Texture", tex_sub))
+            stages.append((str(step_num), "Texture", pages_str))
             step_num += 1
 
-        # 5. Deliverables / Save Project
+        # 6. 3D Tiled Model
+        if do_tiled:
+            keys.append("tiled_model")
+            stages.append((str(step_num), "Tiled", "Cesium 3D Tiles"))
+            step_num += 1
+
+        # 7. Digital Elevation Model (DEM)
+        if do_dem:
+            keys.append("dem")
+            stages.append((str(step_num), "DEM", "GeoTIFF elevation"))
+            step_num += 1
+
+        # 8. Orthomosaic
+        if do_ortho:
+            keys.append("ortho")
+            stages.append((str(step_num), "Ortho", "GeoTIFF ortho"))
+            step_num += 1
+
+        # 9. Deliverables / Save Project
         has_deliverables = any([
             getattr(self, "var_export_glb", tk.BooleanVar()).get(),
             getattr(self, "var_export_obj", tk.BooleanVar()).get(),
             getattr(self, "var_export_fbx", tk.BooleanVar()).get(),
             getattr(self, "var_export_ply", tk.BooleanVar()).get(),
             getattr(self, "var_export_dxf", tk.BooleanVar()).get(),
-            getattr(self, "var_ortho", tk.BooleanVar()).get(),
             getattr(self, "var_export_dem", tk.BooleanVar()).get(),
             getattr(self, "var_export_point_cloud", tk.BooleanVar()).get(),
             getattr(self, "var_export_report", tk.BooleanVar()).get(),
-            getattr(self, "var_build_tiled_model", tk.BooleanVar()).get(),
             getattr(self, "var_build_contours", tk.BooleanVar()).get(),
         ])
 
@@ -3847,44 +3904,52 @@ class AutoMetashapeStudio:
                 self._complete_stepper_mode("recon")
                 return
             # Match bracketed stage tags first for exact milestone routing
-            elif "[1/7]" in line or "[1/6]" in line:
-                target_key = "ingest"
+            elif "[1/7]" in line or "[1/6]" in line or "ingesting photos" in l or "ingesting chunk" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "ingest" if "ingest" in recon_keys else "align"
                 desc = "Ingesting photos & blur filter"
-            elif "[2/7]" in line or "[2/6]" in line:
-                target_key = "match"
+            elif "[2/7]" in line or "[2/6]" in line or "gpu feature matching" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "match" if "match" in recon_keys else "align"
                 desc = "GPU Feature Matching"
             elif "[3b/7]" in line or "[auto-crop]" in line:
                 target_key = "align"
                 desc = "Alignment & Bounding Box Crop"
-            elif "[3/7]" in line or "[3/6]" in line:
+            elif "[3/7]" in line or "[3/6]" in line or "aligning cameras" in l:
                 target_key = "align"
                 desc = "Camera Alignment & Tie Points"
-            elif "[4b/7]" in line:
-                target_key = "depth"
+            elif "[4b/7]" in line or "dense point cloud" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "point_cloud" if "point_cloud" in recon_keys else "depth"
                 desc = "Generating Dense Point Cloud"
-            elif "[4/7]" in line or "[4/6]" in line:
+            elif "[4/7]" in line or "[4/6]" in line or "depth maps" in l:
                 target_key = "depth"
                 desc = "MVS Dense Stereopsis"
-            elif "[5/7]" in line or "[5/6]" in line:
+            elif "[5/7]" in line or "[5/6]" in line or "surface mesh" in l:
                 target_key = "mesh"
                 desc = "Fusing Surface Mesh Geometry"
-            elif "[6b/7]" in line:
-                target_key = "texture"
+            elif "[6b/7]" in line or "tiled model" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "tiled_model" if "tiled_model" in recon_keys else "texture"
                 desc = "Building Hierarchical 3D Tiled Model"
-            elif "[6/7]" in line or "[6/6]" in line:
+            elif "[6/7]" in line or "[6/6]" in line or ("baking" in l and "texture" in l):
                 target_key = "texture"
                 desc = "Baking 8K Texture Atlas"
-            elif "[7b2/7]" in line:
-                target_key = "export"
+            elif "[7b2/7]" in line or "topographic contours" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Generating Topographic Contours"
-            elif "[7b/7]" in line:
-                target_key = "export"
+            elif "[7b/7]" in line or "geotiff dem" in l or "digital elevation model" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "dem" if "dem" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF DEM"
-            elif "[7c/7]" in line:
-                target_key = "export"
+            elif "[7c/7]" in line or "orthomosaic" in l:
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "ortho" if "ortho" in recon_keys else "export"
                 desc = "Building & Exporting GeoTIFF Orthomosaic"
             elif "[7d/7]" in line:
-                target_key = "export"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "point_cloud" if "point_cloud" in recon_keys else "export"
                 desc = "Exporting Dense Point Cloud Deliverable"
             elif "[7e/7]" in line:
                 target_key = "export"
@@ -3927,10 +3992,12 @@ class AutoMetashapeStudio:
                 target_key = "align"
                 desc = "Camera Alignment & Tie Points"
             elif "gpu feature matching" in l:
-                target_key = "match"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "match" if "match" in recon_keys else "align"
                 desc = "GPU Feature Matching"
             elif "ingesting photos" in l or "ingesting chunk" in l:
-                target_key = "ingest"
+                recon_keys = getattr(self, "mode_stage_keys", {}).get("recon", [])
+                target_key = "ingest" if "ingest" in recon_keys else "align"
                 desc = "Ingesting photos & blur filter"
 
             if target_key:
