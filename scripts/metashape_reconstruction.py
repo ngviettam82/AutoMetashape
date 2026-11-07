@@ -1505,6 +1505,10 @@ def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
     align_quality: str = "high",
+    align_photos: bool = True,
+    build_depth_maps: bool = True,
+    build_mesh: bool = True,
+    build_texture: bool = True,
     keypoint_limit: int = 200000,
     keypoint_limit_per_mpx: int = 15000,
     tiepoint_limit: int = 25000,
@@ -2059,7 +2063,9 @@ def run_reconstruction(
                 chunk = doc.chunk
 
     # Step 4: Multi-View Stereo Dense Depth Maps
-    has_depth_maps = False
+    if not build_depth_maps:
+        print("\n[INFO] GPU MVS Depth Maps generation skipped by workflow selection.", flush=True)
+    has_depth_maps = False if build_depth_maps else True
     depth_count = 0
     if chunk.depth_maps is not None:
         try:
@@ -2130,6 +2136,8 @@ def run_reconstruction(
             print(f"[CHECKPOINT] Saved dense point cloud checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
+    if not build_mesh:
+        print("\n[INFO] 3D Surface Meshing skipped by workflow selection.", flush=True)
     chunk = doc.chunk
     if chunk.model is None:
         cand_obj = os.path.join(output_dir, f"{project_name}.obj")
@@ -2142,7 +2150,9 @@ def run_reconstruction(
             print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
 
     has_model = chunk.model is not None
-    if has_model:
+    if not build_mesh:
+        has_model = False
+    elif has_model:
         print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
     else:
         print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
@@ -2202,6 +2212,8 @@ def run_reconstruction(
         print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
+    if not build_texture:
+        print("\n[INFO] Texture Atlas generation skipped by workflow selection.", flush=True)
     current_pages = 0
     if chunk.model:
         if hasattr(chunk.model, "textures") and chunk.model.textures:
@@ -2209,7 +2221,9 @@ def run_reconstruction(
         elif hasattr(chunk.model, "texture") and chunk.model.texture():
             current_pages = 1
 
-    if current_pages == texture_pages and not rebake_texture:
+    if not build_texture or chunk.model is None:
+        pass
+    elif current_pages == texture_pages and not rebake_texture:
         print(f"\n[6/7] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
     else:
         if current_pages > 0 and current_pages != texture_pages:
@@ -2744,6 +2758,10 @@ if __name__ == "__main__":
         images_dir=args.images,
         output_dir=args.output,
         align_quality=args.align_quality,
+        align_photos=args.align_photos,
+        build_depth_maps=args.build_depth_maps,
+        build_mesh=args.build_mesh,
+        build_texture=args.build_texture,
         keypoint_limit=args.keypoint_limit,
         tiepoint_limit=args.tiepoint_limit,
         filter_stationary_points=args.filter_stationary_points,

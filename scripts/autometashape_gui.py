@@ -771,6 +771,11 @@ class AutoMetashapeStudio:
 
     def _init_variables(self) -> None:
         self.var_images_dir = tk.StringVar()
+        # Core Photogrammetry Workflow Steps (Metashape Process Toggles)
+        self.var_stage_align = tk.BooleanVar(value=True)
+        self.var_stage_depth = tk.BooleanVar(value=True)
+        self.var_stage_mesh = tk.BooleanVar(value=True)
+        self.var_stage_texture = tk.BooleanVar(value=True)
         self.var_align_quality = tk.StringVar(value="high")
         self.var_keypoint_limit = tk.StringVar(value="200000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
@@ -870,6 +875,10 @@ class AutoMetashapeStudio:
 
         # Synchronize dynamic pipeline milestones whenever options toggle
         for _v in [
+            self.var_stage_align,
+            self.var_stage_depth,
+            self.var_stage_mesh,
+            self.var_stage_texture,
             self.var_build_point_cloud,
             self.var_export_point_cloud,
             self.var_build_dem,
@@ -1776,7 +1785,73 @@ class AutoMetashapeStudio:
         self.var_export_report.set(True)
         self._on_recon_export_checklist_changed()
 
+    def _on_workflow_stage_toggled(self, changed_stage: str = "") -> None:
+        """Enforces Metashape mathematical dependency cascade across workflow steps."""
+        if getattr(self, "_in_cascade_sync", False):
+            return
+        self._in_cascade_sync = True
+        try:
+            # 1. Forward cascade: If a downstream stage is enabled, enable all required upstream prerequisites
+            if changed_stage == "texture" and self.var_stage_texture.get():
+                self.var_stage_mesh.set(True)
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
+            elif changed_stage == "mesh" and self.var_stage_mesh.get():
+                self.var_stage_depth.set(True)
+                self.var_stage_align.set(True)
+            elif changed_stage == "depth" and self.var_stage_depth.get():
+                self.var_stage_align.set(True)
+
+            # Check point cloud, dem, tiled model dependencies on depth maps and align
+            if (self.var_build_point_cloud.get() or self.var_build_tiled_model.get()) and not self.var_stage_depth.get():
+                if changed_stage in ("point_cloud", "tiled_model"):
+                    self.var_stage_depth.set(True)
+                    self.var_stage_align.set(True)
+            if (self.var_ortho.get() or self.var_build_dem.get() or self.var_build_contours.get()) and not self.var_stage_align.get():
+                if changed_stage in ("ortho", "dem", "contours"):
+                    self.var_stage_align.set(True)
+
+            # Check 3D surface model deliverables dependency on mesh
+            has_mesh_deliverables = any(v.get() for v in [self.var_export_glb, self.var_export_obj, self.var_export_fbx, self.var_export_ply, self.var_export_dxf])
+            if has_mesh_deliverables and not self.var_stage_mesh.get():
+                if changed_stage == "deliverables":
+                    self.var_stage_mesh.set(True)
+                    self.var_stage_depth.set(True)
+                    self.var_stage_align.set(True)
+
+            # 2. Backward cascade: If an upstream prerequisite is disabled, disable dependent downstream stages
+            if not self.var_stage_align.get():
+                self.var_stage_depth.set(False)
+                self.var_build_dem.set(False)
+                self.var_export_dem.set(False)
+                self.var_ortho.set(False)
+                self.var_build_contours.set(False)
+
+            if not self.var_stage_depth.get():
+                self.var_stage_mesh.set(False)
+                self.var_build_point_cloud.set(False)
+                self.var_export_point_cloud.set(False)
+                self.var_build_tiled_model.set(False)
+
+            if not self.var_stage_mesh.get():
+                self.var_stage_texture.set(False)
+                self.var_export_glb.set(False)
+                self.var_export_obj.set(False)
+                self.var_export_fbx.set(False)
+                self.var_export_ply.set(False)
+                self.var_export_dxf.set(False)
+
+        finally:
+            self._in_cascade_sync = False
+
+        self._on_recon_export_checklist_changed()
+        self._sync_dynamic_stepper()
+        self._sync_stepper_view()
+
     def _on_recon_export_checklist_changed(self) -> None:
+        has_3d = any(v.get() for v in [self.var_export_glb, self.var_export_obj, self.var_export_fbx, self.var_export_ply, self.var_export_dxf])
+        if has_3d and hasattr(self, "var_stage_mesh") and not self.var_stage_mesh.get():
+            self._on_workflow_stage_toggled("deliverables")
         if hasattr(self, "var_export_dem") and hasattr(self, "var_build_dem"):
             if self.var_export_dem.get():
                 self.var_build_dem.set(True)
@@ -1827,6 +1902,50 @@ class AutoMetashapeStudio:
         # Advanced config card is only visible when the user selects the Custom preset
         if getattr(self, "selected_preset_key", "pro") == "custom":
             self.card_adv.pack(fill=tk.X, pady=(0, 6))
+
+        # Metashape Workflow Operations Selector (Always visible in Custom preset)
+        box_workflow = tk.Frame(self.card_adv.body, bg=UITheme.BG_ROOT, bd=1, relief=tk.SOLID, padx=8, pady=6)
+        box_workflow.pack(fill=tk.X, pady=(0, 6))
+
+        hdr_wf = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
+        hdr_wf.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(
+            hdr_wf,
+            text="WORKFLOW OPERATIONS (METASHAPE PROCESSES)",
+            font=("Segoe UI", 7, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.ACCENT_CYAN,
+        ).pack(side=tk.LEFT)
+        tk.Label(
+            hdr_wf,
+            text="Select operations to run · Prerequisites auto-cascade",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+        ).pack(side=tk.LEFT, padx=8)
+
+        row_wf1 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
+        row_wf1.pack(fill=tk.X, pady=2)
+
+        def _wf_chk(parent_w, text: str, var: tk.Variable, stage_key: str):
+            return tk.Checkbutton(
+                parent_w,
+                text=text,
+                variable=var,
+                font=("Segoe UI", 8, "bold"),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_PRIMARY,
+                selectcolor=UITheme.BG_SURFACE,
+                activebackground=UITheme.BG_ROOT,
+                activeforeground=UITheme.ACCENT_CYAN,
+                bd=0,
+                command=lambda k=stage_key: self._on_workflow_stage_toggled(k),
+            )
+
+        _wf_chk(row_wf1, "1. Align Photos", self.var_stage_align, "align").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf1, "2. Build Depth Maps", self.var_stage_depth, "depth").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf1, "3. Build Mesh", self.var_stage_mesh, "mesh").pack(side=tk.LEFT, padx=(0, 10))
+        _wf_chk(row_wf1, "4. Build Texture", self.var_stage_texture, "texture").pack(side=tk.LEFT)
 
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
@@ -2637,6 +2756,16 @@ class AutoMetashapeStudio:
             self.var_ghosting.set(True)
             self.var_build_point_cloud.set(True)
             self.var_classify_ground.set(False)
+            if hasattr(self, "var_stage_align"):
+                self.var_stage_align.set(True)
+            if hasattr(self, "var_stage_depth"):
+                self.var_stage_depth.set(True)
+            if hasattr(self, "var_stage_mesh"):
+                self.var_stage_mesh.set(True)
+            if hasattr(self, "var_stage_texture"):
+                self.var_stage_texture.set(True)
+            self._sync_dynamic_stepper()
+            self._sync_stepper_view()
             # Default to not exporting anything; export checklist owns deliverable decisions
         elif key == "custom":
             # Custom preset preserves current manual user parameters
@@ -2719,31 +2848,84 @@ class AutoMetashapeStudio:
         threading.Thread(target=_worker, daemon=True).start()
 
     def get_dynamic_recon_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
-        """Dynamically compute canonical 7 photogrammetry stages with active subtitles."""
-        keys: list[str] = ["ingest", "match", "align", "depth", "mesh", "texture", "export"]
+        """Dynamically compute photogrammetry stages matching selected workflow operations."""
+        keys: list[str] = []
+        stages: list[tuple[str, str, str]] = []
 
-        depth_sub = "Depth maps & cloud" if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) else "Dense depth maps"
+        is_custom = getattr(self, "selected_preset_key", "pro") == "custom"
+        do_align = getattr(self, "var_stage_align", tk.BooleanVar(value=True)).get() if is_custom else True
+        do_depth = getattr(self, "var_stage_depth", tk.BooleanVar(value=True)).get() if is_custom else True
+        do_mesh = getattr(self, "var_stage_mesh", tk.BooleanVar(value=True)).get() if is_custom else True
+        do_tex = getattr(self, "var_stage_texture", tk.BooleanVar(value=True)).get() if is_custom else True
 
-        face_str = "2M arbitrary"
-        if hasattr(self, "var_faces") and self.var_faces.get():
-            val = str(self.var_faces.get()).strip()
-            face_str = f"{int(val):,} faces" if val.isdigit() else "Arbitrary surface"
-        mesh_sub = f"{face_str} mesh"
+        step_num = 1
+        # 1. Ingest & Camera Alignment
+        if do_align:
+            keys.append("ingest")
+            stages.append((str(step_num), "Ingest", "Photos & blur filter"))
+            step_num += 1
 
-        pages_str = "22-page 8K"
-        if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
-            pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
-        tex_sub = f"{pages_str} atlas"
+            keys.append("match")
+            stages.append((str(step_num), "Match", "GPU feature matching"))
+            step_num += 1
 
-        stages: list[tuple[str, str, str]] = [
-            ("1", "Ingest", "Photos & blur filter"),
-            ("2", "Match", "GPU feature matching"),
-            ("3", "Align", "Cameras & tie points"),
-            ("4", "Depth", depth_sub),
-            ("5", "Mesh", mesh_sub),
-            ("6", "Texture", tex_sub),
-            ("7", "Export", "Project & deliverables"),
-        ]
+            keys.append("align")
+            stages.append((str(step_num), "Align", "Cameras & tie points"))
+            step_num += 1
+        else:
+            keys.append("ingest")
+            stages.append((str(step_num), "Project", "Load project & photos"))
+            step_num += 1
+
+        # 2. Depth Maps
+        if do_depth:
+            depth_sub = "Depth maps & cloud" if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) else "Dense depth maps"
+            keys.append("depth")
+            stages.append((str(step_num), "Depth", depth_sub))
+            step_num += 1
+
+        # 3. Surface Mesh
+        if do_mesh:
+            face_str = "2M arbitrary"
+            if hasattr(self, "var_faces") and self.var_faces.get():
+                val = str(self.var_faces.get()).strip()
+                face_str = f"{int(val):,} faces" if val.isdigit() else "Arbitrary surface"
+            mesh_sub = f"{face_str} mesh"
+            keys.append("mesh")
+            stages.append((str(step_num), "Mesh", mesh_sub))
+            step_num += 1
+
+        # 4. Texture Atlas
+        if do_tex:
+            pages_str = "22-page 8K"
+            if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
+                pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
+            tex_sub = f"{pages_str} atlas"
+            keys.append("texture")
+            stages.append((str(step_num), "Texture", tex_sub))
+            step_num += 1
+
+        # 5. Deliverables / Save Project
+        has_deliverables = any([
+            getattr(self, "var_export_glb", tk.BooleanVar()).get(),
+            getattr(self, "var_export_obj", tk.BooleanVar()).get(),
+            getattr(self, "var_export_fbx", tk.BooleanVar()).get(),
+            getattr(self, "var_export_ply", tk.BooleanVar()).get(),
+            getattr(self, "var_export_dxf", tk.BooleanVar()).get(),
+            getattr(self, "var_ortho", tk.BooleanVar()).get(),
+            getattr(self, "var_export_dem", tk.BooleanVar()).get(),
+            getattr(self, "var_export_point_cloud", tk.BooleanVar()).get(),
+            getattr(self, "var_export_report", tk.BooleanVar()).get(),
+            getattr(self, "var_build_tiled_model", tk.BooleanVar()).get(),
+            getattr(self, "var_build_contours", tk.BooleanVar()).get(),
+        ])
+
+        keys.append("export")
+        if has_deliverables:
+            stages.append((str(step_num), "Export", "Production assets"))
+        else:
+            stages.append((str(step_num), "Save", "Save project .psx"))
+
         return keys, stages
 
     def get_dynamic_export_stages(self) -> tuple[list[str], list[tuple[str, str, str]]]:
@@ -3203,6 +3385,14 @@ class AutoMetashapeStudio:
                 "--depth-quality", self.var_depth_quality.get(),
                 "--depth-filtering", self.var_depth_filtering.get(),
             ])
+            if hasattr(self, "var_stage_align") and not self.var_stage_align.get():
+                cmd.append("--no-align-photos")
+            if hasattr(self, "var_stage_depth") and not self.var_stage_depth.get():
+                cmd.append("--no-build-depth-maps")
+            if hasattr(self, "var_stage_mesh") and not self.var_stage_mesh.get():
+                cmd.append("--no-build-mesh")
+            if hasattr(self, "var_stage_texture") and not self.var_stage_texture.get():
+                cmd.append("--no-build-texture")
             if hasattr(self, "var_guided") and not self.var_guided.get():
                 cmd.append("--no-guided-matching")
             if hasattr(self, "var_keypoint_limit") and self.var_keypoint_limit.get().strip():
@@ -3668,7 +3858,8 @@ class AutoMetashapeStudio:
                     self._update_stepper_mode("recon", idx, desc)
                     if getattr(self, "batch_running", False) and hasattr(self, "stepper_multi") and self.batch_queue and 0 <= self.batch_current_idx < len(self.batch_queue):
                         cur_p = self.batch_queue[self.batch_current_idx]["name"]
-                        self.stepper_multi.set_active(self.batch_current_idx, f"{cur_p} (Stage {idx+1}/7)")
+                        total_st = len(self.mode_states["recon"]["stages"])
+                        self.stepper_multi.set_active(self.batch_current_idx, f"{cur_p} (Stage {idx+1}/{total_st})")
 
         elif mode == "export":
             target_key = None
