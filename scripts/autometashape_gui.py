@@ -1871,8 +1871,17 @@ class AutoMetashapeStudio:
         if has_3d and hasattr(self, "var_stage_mesh") and not self.var_stage_mesh.get():
             self._on_workflow_stage_toggled("deliverables")
         if hasattr(self, "var_export_dem") and hasattr(self, "var_build_dem"):
-            if self.var_export_dem.get():
+            if self.var_export_dem.get() and not self.var_build_dem.get():
                 self.var_build_dem.set(True)
+                self._on_workflow_stage_toggled("dem")
+        if hasattr(self, "var_export_point_cloud") and hasattr(self, "var_build_point_cloud"):
+            if self.var_export_point_cloud.get() and not self.var_build_point_cloud.get():
+                self.var_build_point_cloud.set(True)
+                self._on_workflow_stage_toggled("point_cloud")
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get() and hasattr(self, "var_stage_depth") and not self.var_stage_depth.get():
+            self._on_workflow_stage_toggled("tiled_model")
+        if hasattr(self, "var_ortho") and self.var_ortho.get() and hasattr(self, "var_build_dem") and not self.var_build_dem.get():
+            self._on_workflow_stage_toggled("ortho")
 
         exp_vars = [
             getattr(self, "var_export_glb", None),
@@ -1918,12 +1927,19 @@ class AutoMetashapeStudio:
     def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
         self.card_adv = StudioCard(
             parent,
-            title="4. Custom Pipeline Parameters",
-            subtitle="Manual calibration, face density, and processing flags (Custom Preset)",
+            title="3. Custom Workflow & Parameters",
+            subtitle="Metashape workflow stages, calibration, and processing parameters",
         )
         # Advanced config card is only visible when the user selects the Custom preset
         if getattr(self, "selected_preset_key", "pro") == "custom":
-            self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            after_w = getattr(self, "card_preset", None)
+            if after_w:
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_w)
+            else:
+                self.card_adv.pack(fill=tk.X, pady=(0, 6))
+            if hasattr(self, "card_recon_export"):
+                self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_adv)
+                self.card_recon_export.set_title("4. Export Deliverables Checklist")
 
         # Metashape Workflow Operations Selector (Always visible in Custom preset)
         box_workflow = tk.Frame(self.card_adv.body, bg=UITheme.BG_ROOT, bd=1, relief=tk.SOLID, padx=8, pady=6)
@@ -1961,19 +1977,20 @@ class AutoMetashapeStudio:
                 command=lambda k=stage_key: self._on_workflow_stage_toggled(k),
             )
 
-        row_wf1 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
-        row_wf1.pack(fill=tk.X, pady=1)
-        _wf_chk(row_wf1, "1. Align Photos", self.var_stage_align, "align").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "2. Build Depth Maps", self.var_stage_depth, "depth").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "3. Build Point Cloud", self.var_build_point_cloud, "point_cloud").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "4. Build Mesh", self.var_stage_mesh, "mesh").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf1, "5. Build Texture", self.var_stage_texture, "texture").pack(side=tk.LEFT)
+        grid_wf = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
+        grid_wf.pack(fill=tk.X, pady=(2, 2))
+        for col_idx in range(4):
+            grid_wf.columnconfigure(col_idx, weight=1, uniform="wf_col")
 
-        row_wf2 = tk.Frame(box_workflow, bg=UITheme.BG_ROOT)
-        row_wf2.pack(fill=tk.X, pady=(2, 1))
-        _wf_chk(row_wf2, "6. Build Tiled Model", self.var_build_tiled_model, "tiled_model").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf2, "7. Build DEM", self.var_build_dem, "dem").pack(side=tk.LEFT, padx=(0, 10))
-        _wf_chk(row_wf2, "8. Build Orthomosaic", self.var_ortho, "ortho").pack(side=tk.LEFT)
+        _wf_chk(grid_wf, "1. Align Photos", self.var_stage_align, "align").grid(row=0, column=0, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "2. Build Depth Maps", self.var_stage_depth, "depth").grid(row=0, column=1, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "3. Build Point Cloud", self.var_build_point_cloud, "point_cloud").grid(row=0, column=2, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "4. Build Mesh", self.var_stage_mesh, "mesh").grid(row=0, column=3, sticky="w", padx=(0, 6), pady=2)
+
+        _wf_chk(grid_wf, "5. Build Texture", self.var_stage_texture, "texture").grid(row=1, column=0, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "6. Build Tiled Model", self.var_build_tiled_model, "tiled_model").grid(row=1, column=1, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "7. Build DEM", self.var_build_dem, "dem").grid(row=1, column=2, sticky="w", padx=(0, 6), pady=2)
+        _wf_chk(grid_wf, "8. Build Orthomosaic", self.var_ortho, "ortho").grid(row=1, column=3, sticky="w", padx=(0, 6), pady=2)
 
         bar_toggle = tk.Frame(self.card_adv.body, bg=UITheme.BG_SURFACE)
         bar_toggle.pack(fill=tk.X)
@@ -2124,15 +2141,9 @@ class AutoMetashapeStudio:
         ttk.Combobox(grid_model2, textvariable=self.var_surface_type, values=["arbitrary", "heightfield"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         chk_model = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_model.pack(fill=tk.X, pady=(2, 2))
+        chk_model.pack(fill=tk.X, pady=(2, 4))
         _c(chk_model, "Close Mesh Holes", self.var_close_holes).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_model, "Laplacian Mesh Smoothing", self.var_smooth_mesh).pack(side=tk.LEFT, padx=(0, 10))
-
-        chk_model_exp = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_model_exp.pack(fill=tk.X, pady=(2, 4))
-        _c(chk_model_exp, "Export FBX", self.var_export_fbx).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_model_exp, "Export PLY", self.var_export_ply).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_model_exp, "Export DXF", self.var_export_dxf).pack(side=tk.LEFT)
+        _c(chk_model, "Laplacian Mesh Smoothing", self.var_smooth_mesh).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
         # Process 4: Dense Point Cloud & Classification
@@ -2141,17 +2152,14 @@ class AutoMetashapeStudio:
 
         chk_pc1 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_pc1.pack(fill=tk.X, pady=(2, 2))
-        _c(chk_pc1, "Build Dense Point Cloud", self.var_build_point_cloud).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_pc1, "Export Point Cloud", self.var_export_point_cloud).pack(side=tk.LEFT, padx=(0, 10))
-
-        tk.Label(chk_pc1, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT, padx=(4, 2))
-        ttk.Combobox(chk_pc1, textvariable=self.var_pc_format, values=["laz", "las", "ply", "e57", "xyz"], state="readonly", width=6).pack(side=tk.LEFT)
+        tk.Label(chk_pc1, text="Point Cloud Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Combobox(chk_pc1, textvariable=self.var_pc_format, values=["laz", "las", "ply", "e57", "xyz"], state="readonly", width=8).pack(side=tk.LEFT, padx=(0, 14))
+        _c(chk_pc1, "Export Sparse Tie Points", self.var_export_tie_points).pack(side=tk.LEFT)
 
         chk_pc2 = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_pc2.pack(fill=tk.X, pady=(2, 4))
-        _c(chk_pc2, "Classify Ground Points", self.var_classify_ground).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_pc2, "Classify Points (Multiclass AI)", self.var_classify_points).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_pc2, "Export Sparse Tie Points", self.var_export_tie_points).pack(side=tk.LEFT)
+        _c(chk_pc2, "Classify Ground Points (Slope-Adaptive)", self.var_classify_ground).pack(side=tk.LEFT, padx=(0, 10))
+        _c(chk_pc2, "Classify Points (Multiclass AI)", self.var_classify_points).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
         # Process 5: Hierarchical 3D Tiled Model (LOD Web GIS)
@@ -2160,21 +2168,15 @@ class AutoMetashapeStudio:
 
         chk_tiled = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_tiled.pack(fill=tk.X, pady=(2, 4))
-        _c(chk_tiled, "Build 3D Tiled Model (LOD)", self.var_build_tiled_model).pack(side=tk.LEFT, padx=(0, 10))
-        tk.Label(chk_tiled, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        tk.Label(chk_tiled, text="Tiles Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT, padx=(0, 6))
         ttk.Combobox(chk_tiled, textvariable=self.var_tiled_model_format, values=["cesium", "tls", "slpk", "osgb"], state="readonly", width=8).pack(side=tk.LEFT, padx=(4, 10))
-        tk.Label(chk_tiled, text="Tile Size:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
+        tk.Label(chk_tiled, text="Tile Size (px):", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
         ttk.Combobox(chk_tiled, textvariable=self.var_tile_size, values=["256", "512"], state="readonly", width=6).pack(side=tk.LEFT, padx=4)
 
         # -------------------------------------------------------------------
         # Process 6: Elevation (DEM) & Topographic Contours
         # -------------------------------------------------------------------
         _make_sec_header(self.body_adv, "ELEVATION & CONTOURS", "6. Elevation Model (DEM) & Topographic Contours", top_pad=8)
-
-        chk_dem = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
-        chk_dem.pack(fill=tk.X, pady=(2, 2))
-        _c(chk_dem, "Generate Orthomosaic GeoTIFF", self.var_ortho).pack(side=tk.LEFT, padx=(0, 10))
-        _c(chk_dem, "Generate Digital Elevation Model (DEM)", self.var_build_dem).pack(side=tk.LEFT)
 
         chk_cnt = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_cnt.pack(fill=tk.X, pady=(2, 4))
@@ -2202,13 +2204,12 @@ class AutoMetashapeStudio:
         _c(chk_tex, "Delighting (Remove Shadows)", self.var_remove_lighting).pack(side=tk.LEFT)
 
         # -------------------------------------------------------------------
-        # Process 8: Quality Report & Lifecycle
+        # Process 8: Lifecycle Management
         # -------------------------------------------------------------------
-        _make_sec_header(self.body_adv, "REPORT", "8. Quality Report & Lifecycle", top_pad=8)
+        _make_sec_header(self.body_adv, "LIFECYCLE", "8. Lifecycle Management", top_pad=8)
 
         chk_lifecycle = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_lifecycle.pack(fill=tk.X, pady=(2, 6))
-        _c(chk_lifecycle, "Export Calibration & Quality PDF Report", self.var_export_report).pack(side=tk.LEFT, padx=(0, 10))
         _c(chk_lifecycle, "Resume from checkpoint (skip completed steps)", self.var_resume).pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
@@ -2785,12 +2786,18 @@ class AutoMetashapeStudio:
         # Show config parameter card ONLY if Custom preset is chosen
         if hasattr(self, "card_adv"):
             if key == "custom":
-                after_widget = getattr(self, "card_recon_export", self.card_preset)
-                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_widget)
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                self.card_adv.set_title("3. Custom Workflow & Parameters")
+                if hasattr(self, "card_recon_export"):
+                    self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_adv)
+                    self.card_recon_export.set_title("4. Export Deliverables Checklist")
                 if not getattr(self, "adv_expanded", False):
                     self._toggle_advanced()
             else:
                 self.card_adv.pack_forget()
+                if hasattr(self, "card_recon_export"):
+                    self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                    self.card_recon_export.set_title("3. Export Deliverables Checklist")
         for p_key, card in self.preset_cards.items():
             outer = card["outer"]
             inner = card["inner"]
@@ -3210,13 +3217,17 @@ class AutoMetashapeStudio:
             self.card_export.pack_forget()
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
-            if hasattr(self, "card_recon_export"):
-                self.card_recon_export.pack(fill=tk.X, pady=(0, 6))
             if getattr(self, "selected_preset_key", "pro") == "custom":
-                after_w = getattr(self, "card_recon_export", self.card_preset)
-                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_w)
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                self.card_adv.set_title("3. Custom Workflow & Parameters")
+                if hasattr(self, "card_recon_export"):
+                    self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_adv)
+                    self.card_recon_export.set_title("4. Export Deliverables Checklist")
             else:
                 self.card_adv.pack_forget()
+                if hasattr(self, "card_recon_export"):
+                    self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                    self.card_recon_export.set_title("3. Export Deliverables Checklist")
         elif mode == "export":
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
