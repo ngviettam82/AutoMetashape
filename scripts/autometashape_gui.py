@@ -755,15 +755,18 @@ class AutoMetashapeStudio:
         self.var_pause_crop = tk.BooleanVar(value=False)
         self.var_rebake = tk.BooleanVar(value=False)
         self.var_resume = tk.BooleanVar(value=False)
+        # Export Deliverables Checklist (Default: False · Only make project Metashape)
+        self.var_export_glb = tk.BooleanVar(value=False)
+        self.var_export_obj = tk.BooleanVar(value=False)
         self.var_ortho = tk.BooleanVar(value=False)
-        self.var_build_point_cloud = tk.BooleanVar(value=True)
-        self.var_export_point_cloud = tk.BooleanVar(value=True)
+        self.var_build_point_cloud = tk.BooleanVar(value=True)  # Internal stereopsis
+        self.var_export_point_cloud = tk.BooleanVar(value=False)
         self.var_pc_format = tk.StringVar(value="laz")
         self.var_classify_ground = tk.BooleanVar(value=False)
         self.var_classify_points = tk.BooleanVar(value=False)
         self.var_build_dem = tk.BooleanVar(value=False)
         self.var_export_dem = tk.BooleanVar(value=False)
-        self.var_export_report = tk.BooleanVar(value=True)
+        self.var_export_report = tk.BooleanVar(value=False)
 
         self.var_exp_point_cloud = tk.BooleanVar(value=True)
         self.var_exp_pc_format = tk.StringVar(value="laz")
@@ -1157,6 +1160,7 @@ class AutoMetashapeStudio:
         # Populate Left Column (Configuration & Parameters)
         self._build_folder_card(self.col_left)
         self._build_presets_card(self.col_left)
+        self._build_recon_export_checklist_card(self.col_left)
         self._build_advanced_settings_card(self.col_left)
         self._build_export_card(self.col_left)
         self._build_multi_project_card(self.col_left)
@@ -1464,12 +1468,230 @@ class AutoMetashapeStudio:
             card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER)
 
     # -----------------------------------------------------------------------
+    # Step 3: Export Deliverables Checklist Card (Default: Project Only)
+    # -----------------------------------------------------------------------
+    def _build_recon_export_checklist_card(self, parent: tk.Widget) -> None:
+        self.card_recon_export = StudioCard(
+            parent,
+            title="3. Export Deliverables Checklist",
+            subtitle="Select deliverables to export to disk (Default: None · Metashape project only)",
+        )
+        self.card_recon_export.pack(fill=tk.X, pady=(0, 6))
+
+        # Action bar: Quick selection chips & summary badge
+        bar_actions = tk.Frame(self.card_recon_export.body, bg=UITheme.BG_SURFACE)
+        bar_actions.pack(fill=tk.X, pady=(0, 6))
+
+        btn_none = tk.Button(
+            bar_actions,
+            text="Clear (Project Only)",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_SECONDARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            relief=tk.FLAT,
+            command=self._clear_recon_export_checklist,
+        )
+        btn_none.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_std = tk.Button(
+            bar_actions,
+            text="Standard 3D (GLB + OBJ)",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            relief=tk.FLAT,
+            command=self._set_standard_3d_exports,
+        )
+        btn_std.pack(side=tk.LEFT, padx=(0, 4))
+
+        btn_all = tk.Button(
+            bar_actions,
+            text="Select All Deliverables",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            relief=tk.FLAT,
+            command=self._select_all_recon_exports,
+        )
+        btn_all.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.lbl_recon_export_summary = tk.Label(
+            bar_actions,
+            text="Default: Native Metashape Project (.psx) only",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_MUTED,
+            anchor=tk.E,
+        )
+        self.lbl_recon_export_summary.pack(side=tk.RIGHT, fill=tk.X, expand=True)
+
+        # 3-column structured grid of checklist options
+        cols_container = tk.Frame(self.card_recon_export.body, bg=UITheme.BG_SURFACE)
+        cols_container.pack(fill=tk.X, pady=(2, 4))
+
+        col1 = tk.Frame(cols_container, bg=UITheme.BG_ROOT, padx=8, pady=6, bd=1, relief=tk.FLAT)
+        col1.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 3))
+
+        col2 = tk.Frame(cols_container, bg=UITheme.BG_ROOT, padx=8, pady=6, bd=1, relief=tk.FLAT)
+        col2.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 3))
+
+        col3 = tk.Frame(cols_container, bg=UITheme.BG_ROOT, padx=8, pady=6, bd=1, relief=tk.FLAT)
+        col3.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(3, 0))
+
+        def _c(p, txt, var):
+            cb = tk.Checkbutton(
+                p,
+                text=txt,
+                variable=var,
+                font=("Segoe UI", 8),
+                bg=UITheme.BG_ROOT,
+                fg=UITheme.TEXT_PRIMARY,
+                selectcolor=UITheme.BG_SURFACE,
+                activebackground=UITheme.BG_ROOT,
+                activeforeground=UITheme.TEXT_PRIMARY,
+                bd=0,
+                anchor=tk.W,
+                command=self._on_recon_export_checklist_changed,
+            )
+            cb.pack(fill=tk.X, pady=1)
+            return cb
+
+        # Col 1: 3D Surface Models
+        tk.Label(col1, text="3D SURFACE MODELS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
+        _c(col1, "Binary glTF (.glb)", self.var_export_glb)
+        _c(col1, "Wavefront OBJ (.obj + TIFF)", self.var_export_obj)
+        _c(col1, "Autodesk FBX (.fbx)", self.var_export_fbx)
+        _c(col1, "Stanford PLY (.ply)", self.var_export_ply)
+        _c(col1, "AutoCAD DXF (.dxf)", self.var_export_dxf)
+
+        # Col 2: Geomatics & Maps
+        tk.Label(col2, text="GEOMATICS & MAPS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
+        _c(col2, "True Orthomosaic (GeoTIFF)", self.var_ortho)
+        _c(col2, "Digital Elevation Model (DEM)", self.var_export_dem)
+        _c(col2, "Topographic Contours (.shp)", self.var_build_contours)
+
+        # Col 3: Clouds, Tiles & Reports
+        tk.Label(col3, text="CLOUDS, TILES & REPORT", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
+        _c(col3, "Dense Point Cloud (.laz)", self.var_export_point_cloud)
+        _c(col3, "Sparse Tie Points (.ply)", self.var_export_tie_points)
+        _c(col3, "Hierarchical 3D Tiles (LOD)", self.var_build_tiled_model)
+        _c(col3, "Quality Report PDF (.pdf)", self.var_export_report)
+
+        # Footnote
+        lbl_info = tk.Label(
+            self.card_recon_export.body,
+            text="ℹ Metashape native project (.psx) is always saved. If all options remain unchecked, the project is fully saved without writing extra files to disk.",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_DIM,
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        lbl_info.pack(fill=tk.X, pady=(4, 0))
+
+    def _clear_recon_export_checklist(self) -> None:
+        self.var_export_glb.set(False)
+        self.var_export_obj.set(False)
+        self.var_export_fbx.set(False)
+        self.var_export_ply.set(False)
+        self.var_export_dxf.set(False)
+        self.var_ortho.set(False)
+        self.var_export_dem.set(False)
+        self.var_build_dem.set(False)
+        self.var_build_contours.set(False)
+        self.var_export_point_cloud.set(False)
+        self.var_export_tie_points.set(False)
+        self.var_build_tiled_model.set(False)
+        self.var_export_report.set(False)
+        self._on_recon_export_checklist_changed()
+
+    def _set_standard_3d_exports(self) -> None:
+        self._clear_recon_export_checklist()
+        self.var_export_glb.set(True)
+        self.var_export_obj.set(True)
+        self._on_recon_export_checklist_changed()
+
+    def _select_all_recon_exports(self) -> None:
+        self.var_export_glb.set(True)
+        self.var_export_obj.set(True)
+        self.var_export_fbx.set(True)
+        self.var_export_ply.set(True)
+        self.var_export_dxf.set(True)
+        self.var_ortho.set(True)
+        self.var_export_dem.set(True)
+        self.var_build_dem.set(True)
+        self.var_build_contours.set(True)
+        self.var_export_point_cloud.set(True)
+        self.var_export_tie_points.set(True)
+        self.var_build_tiled_model.set(True)
+        self.var_export_report.set(True)
+        self._on_recon_export_checklist_changed()
+
+    def _on_recon_export_checklist_changed(self) -> None:
+        if hasattr(self, "var_export_dem") and hasattr(self, "var_build_dem"):
+            if self.var_export_dem.get():
+                self.var_build_dem.set(True)
+
+        exp_vars = [
+            getattr(self, "var_export_glb", None),
+            getattr(self, "var_export_obj", None),
+            getattr(self, "var_export_fbx", None),
+            getattr(self, "var_export_ply", None),
+            getattr(self, "var_export_dxf", None),
+            getattr(self, "var_ortho", None),
+            getattr(self, "var_export_dem", None),
+            getattr(self, "var_build_contours", None),
+            getattr(self, "var_export_point_cloud", None),
+            getattr(self, "var_export_tie_points", None),
+            getattr(self, "var_build_tiled_model", None),
+            getattr(self, "var_export_report", None),
+        ]
+        count = sum(1 for v in exp_vars if v and v.get())
+
+        if hasattr(self, "lbl_recon_export_summary"):
+            if count == 0:
+                self.lbl_recon_export_summary.config(
+                    text="Default: Native Metashape Project (.psx) only",
+                    fg=UITheme.TEXT_MUTED,
+                )
+            elif count == 1:
+                self.lbl_recon_export_summary.config(
+                    text="1 deliverable selected for export",
+                    fg=UITheme.ACCENT_CYAN,
+                )
+            else:
+                self.lbl_recon_export_summary.config(
+                    text=f"{count} deliverables selected for export",
+                    fg=UITheme.ACCENT_CYAN,
+                )
+        self._sync_dynamic_stepper()
+
+
+    # -----------------------------------------------------------------------
     # Step 3: Collapsible Advanced Pipeline Settings
     # -----------------------------------------------------------------------
     def _build_advanced_settings_card(self, parent: tk.Widget) -> None:
         self.card_adv = StudioCard(
             parent,
-            title="3. Custom Pipeline Parameters",
+            title="4. Custom Pipeline Parameters",
             subtitle="Manual calibration, face density, and processing flags (Custom Preset)",
         )
         # Advanced config card is only visible when the user selects the Custom preset
@@ -2238,7 +2460,8 @@ class AutoMetashapeStudio:
         # Show config parameter card ONLY if Custom preset is chosen
         if hasattr(self, "card_adv"):
             if key == "custom":
-                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                after_widget = getattr(self, "card_recon_export", self.card_preset)
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_widget)
                 if not getattr(self, "adv_expanded", False):
                     self._toggle_advanced()
             else:
@@ -2287,12 +2510,9 @@ class AutoMetashapeStudio:
             self.var_close_holes.set(False)
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
-            self.var_ortho.set(True)
-            self.var_build_dem.set(True)
             self.var_build_point_cloud.set(True)
-            self.var_export_point_cloud.set(True)
             self.var_classify_ground.set(False)
-            self.var_export_report.set(True)
+            # Default to not exporting anything; export checklist owns deliverable decisions
         elif key == "custom":
             # Custom preset preserves current manual user parameters
             pass
@@ -2390,16 +2610,34 @@ class AutoMetashapeStudio:
             pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
         tex_sub = f"{pages_str} atlas"
 
-        exp_parts = ["GLB", "OBJ"]
-        if hasattr(self, "var_build_dem") and self.var_build_dem.get():
-            exp_parts.append("DEM")
+        exp_parts = []
+        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
+            exp_parts.append("GLB")
+        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
+            exp_parts.append("OBJ")
+        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+            exp_parts.append("FBX")
+        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+            exp_parts.append("PLY")
         if hasattr(self, "var_ortho") and self.var_ortho.get():
             exp_parts.append("Ortho")
-        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
+        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+            exp_parts.append("DEM")
+        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
             exp_parts.append("Cloud")
-        export_sub = ", ".join(exp_parts[:3])
-        if len(exp_parts) > 3:
-            export_sub += " & more"
+        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+            exp_parts.append("Contours")
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+            exp_parts.append("Tiles")
+        if hasattr(self, "var_export_report") and self.var_export_report.get():
+            exp_parts.append("Report")
+
+        if not exp_parts:
+            export_sub = "Metashape project only"
+        elif len(exp_parts) <= 3:
+            export_sub = ", ".join(exp_parts)
+        else:
+            export_sub = f"{exp_parts[0]}, {exp_parts[1]} & {len(exp_parts)-2} more"
 
         stages: list[tuple[str, str, str]] = [
             ("1", "Ingest", "Photos & blur filter"),
@@ -2544,8 +2782,11 @@ class AutoMetashapeStudio:
             self.card_multi.pack_forget()
             self.card_folder.pack(fill=tk.X, pady=(0, 6))
             self.card_preset.pack(fill=tk.X, pady=(0, 6))
+            if hasattr(self, "card_recon_export"):
+                self.card_recon_export.pack(fill=tk.X, pady=(0, 6))
             if getattr(self, "selected_preset_key", "pro") == "custom":
-                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
+                after_w = getattr(self, "card_recon_export", self.card_preset)
+                self.card_adv.pack(fill=tk.X, pady=(0, 6), after=after_w)
             else:
                 self.card_adv.pack_forget()
             self.btn_start.config(
@@ -2560,6 +2801,8 @@ class AutoMetashapeStudio:
             self.btn_tab_multi.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.card_folder.pack_forget()
             self.card_preset.pack_forget()
+            if hasattr(self, "card_recon_export"):
+                self.card_recon_export.pack_forget()
             self.card_adv.pack_forget()
             self.card_multi.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
@@ -2579,6 +2822,8 @@ class AutoMetashapeStudio:
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
             self.card_folder.pack_forget()
             self.card_preset.pack_forget()
+            if hasattr(self, "card_recon_export"):
+                self.card_recon_export.pack_forget()
             self.card_adv.pack_forget()
             self.card_export.pack_forget()
             self.card_multi.pack(fill=tk.X, pady=(0, 6))
@@ -2979,8 +3224,37 @@ class AutoMetashapeStudio:
             "--crop-method",
             crop,
             "--build-point-cloud",
-            "--export-point-cloud",
         ]
+        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
+            cmd.append("--export-glb")
+        else:
+            cmd.append("--no-export-glb")
+
+        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
+            cmd.append("--export-obj")
+        else:
+            cmd.append("--no-export-obj")
+
+        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
+            cmd.append("--export-point-cloud")
+        else:
+            cmd.append("--no-export-point-cloud")
+
+        if hasattr(self, "var_ortho") and self.var_ortho.get():
+            cmd.append("--ortho")
+        else:
+            cmd.append("--no-ortho")
+
+        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+            cmd.append("--build-dem")
+            cmd.append("--export-dem")
+        else:
+            cmd.append("--no-dem")
+
+        if hasattr(self, "var_export_report") and self.var_export_report.get():
+            cmd.append("--export-report")
+        else:
+            cmd.append("--no-report")
 
         self.stepper.reset()
         if total_items <= 7:
@@ -3271,18 +3545,6 @@ class AutoMetashapeStudio:
                 cmd.append("--no-fill-holes")
             if not self.var_ghosting.get():
                 cmd.append("--no-ghosting-filter")
-            if self.var_ortho.get():
-                cmd.append("--ortho")
-            if hasattr(self, "var_build_dem") and self.var_build_dem.get():
-                cmd.append("--build-dem")
-            if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-                cmd.append("--build-tiled-model")
-                cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
-                cmd.extend(["--tile-size", self.var_tile_size.get()])
-            if hasattr(self, "var_build_contours") and self.var_build_contours.get():
-                cmd.append("--build-contours")
-                cmd.extend(["--contour-interval", self.var_contour_interval.get()])
-                cmd.extend(["--contours-format", self.var_contours_format.get()])
             if hasattr(self, "var_surface_type") and self.var_surface_type.get() != "arbitrary":
                 cmd.extend(["--surface-type", self.var_surface_type.get()])
             if hasattr(self, "var_detect_markers") and self.var_detect_markers.get():
@@ -3296,14 +3558,47 @@ class AutoMetashapeStudio:
                 cmd.append("--smooth-mesh")
             if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
                 cmd.append("--remove-lighting")
-            if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
-                cmd.append("--export-fbx")
-            if hasattr(self, "var_export_ply") and self.var_export_ply.get():
-                cmd.append("--export-ply")
-            if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
-                cmd.append("--export-dxf")
-            if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
-                cmd.append("--export-tie-points")
+
+        # Export Deliverables Checklist: pass explicit flags across all presets
+        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
+            cmd.append("--export-glb")
+        else:
+            cmd.append("--no-export-glb")
+
+        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
+            cmd.append("--export-obj")
+        else:
+            cmd.append("--no-export-obj")
+
+        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+            cmd.append("--export-fbx")
+        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+            cmd.append("--export-ply")
+        if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
+            cmd.append("--export-dxf")
+        if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
+            cmd.append("--export-tie-points")
+
+        if hasattr(self, "var_ortho") and self.var_ortho.get():
+            cmd.append("--ortho")
+        else:
+            cmd.append("--no-ortho")
+
+        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+            cmd.append("--build-dem")
+            cmd.append("--export-dem")
+        else:
+            cmd.append("--no-dem")
+
+        if hasattr(self, "var_build_contours") and self.var_build_contours.get():
+            cmd.append("--build-contours")
+            cmd.extend(["--contour-interval", self.var_contour_interval.get()])
+            cmd.extend(["--contours-format", self.var_contours_format.get()])
+
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+            cmd.append("--build-tiled-model")
+            cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+            cmd.extend(["--tile-size", self.var_tile_size.get()])
 
         # Global runtime & deliverable options applicable across all modes
         if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
@@ -3320,7 +3615,9 @@ class AutoMetashapeStudio:
             cmd.append("--classify-ground")
         if hasattr(self, "var_classify_points") and self.var_classify_points.get():
             cmd.append("--classify-points")
-        if hasattr(self, "var_export_report") and not self.var_export_report.get():
+        if hasattr(self, "var_export_report") and self.var_export_report.get():
+            cmd.append("--export-report")
+        else:
             cmd.append("--no-report")
         if self.var_pause_crop.get():
             cmd.append("--pause-after-crop")

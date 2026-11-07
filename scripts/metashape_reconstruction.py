@@ -1513,16 +1513,18 @@ def run_reconstruction(
     ground_cell_size: float = None,
     ground_max_angle: float = None,
     ground_max_distance: float = None,
-    build_orthomosaic: bool = None,
-    build_dem: bool = None,
+    build_orthomosaic: bool = False,
+    build_dem: bool = False,
     export_dem: bool = False,
     build_point_cloud: bool = True,
-    export_point_cloud: bool = True,
+    export_point_cloud: bool = False,
     point_cloud_format: str = "laz",
     classify_ground: bool = None,
     classify_points: bool = False,
     filter_point_confidence: int = None,
-    export_report: bool = True,
+    export_report: bool = False,
+    export_glb: bool = False,
+    export_obj: bool = False,
     report_title: str = None,
     surface_type: str = "arbitrary",
     detect_markers: bool = False,
@@ -2273,24 +2275,40 @@ def run_reconstruction(
     glb_out = os.path.join(output_dir, f"{project_name}.glb")
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
-    chunk.exportModel(
-        glb_out,
-        format=Metashape.ModelFormat.ModelFormatGLTF,
-        embed_texture=True,
-        save_normals=True,
-        save_colors=True,
-    )
-    print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
+    if export_glb and chunk.model:
+        try:
+            chunk.exportModel(
+                glb_out,
+                format=Metashape.ModelFormat.ModelFormatGLTF,
+                embed_texture=True,
+                save_normals=True,
+                save_colors=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_glb:
+            print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
 
-    chunk.exportModel(
-        obj_out,
-        format=Metashape.ModelFormat.ModelFormatOBJ,
-        texture_format=Metashape.ImageFormat.ImageFormatTIFF,
-        save_texture=True,
-        save_normals=True,
-        save_colors=True,
-    )
-    print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+    if export_obj and chunk.model:
+        try:
+            chunk.exportModel(
+                obj_out,
+                format=Metashape.ModelFormat.ModelFormatOBJ,
+                texture_format=Metashape.ImageFormat.ImageFormatTIFF,
+                save_texture=True,
+                save_normals=True,
+                save_colors=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_obj:
+            print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
+
+    has_any_export = any([
+        export_glb, export_obj, export_fbx, export_ply, export_dxf,
+        export_tie_points, export_dem or build_dem, build_contours,
+        build_orthomosaic, export_point_cloud, export_report, build_tiled_model
+    ])
+    if not has_any_export:
+        print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
 
     if export_fbx and chunk.model:
         fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
@@ -2524,11 +2542,12 @@ def run_reconstruction(
         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Build and return the comprehensive command-line argument parser for AutoMetashape."""
     parser = argparse.ArgumentParser(
         description="AutoMetashape: Autonomous High-Precision Photogrammetry Pipeline (Survey Profiling, Point Cloud, Mesh & Orthomosaic)"
     )
-    parser.add_argument("--images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
+    parser.add_argument("--images", "--photos-dir", dest="images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
     parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/model)")
     parser.add_argument("--project-name", default=None, help="Base name for the project file, 3D model, textures, point cloud, and reports (default: folder name of the project)")
     parser.add_argument("--profile", action="store_true", help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing")
@@ -2613,17 +2632,23 @@ if __name__ == "__main__":
         action="store_true",
         help="Disable bounding box cropping (reconstruct full uncropped scene)",
     )
+    # 3D Model Export Options (Default: False · Metashape project only)
+    parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=False, help="Export binary glTF 3D model (.glb)")
+    parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary GLB export")
+    parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=False, help="Export Wavefront OBJ model + 8K TIFF textures (.obj)")
+    parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ export")
     # Point Cloud Options
     parser.add_argument("--build-point-cloud", dest="build_point_cloud", action="store_true", default=True, help="Generate dense point cloud from depth maps (default: True)")
     parser.add_argument("--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation")
-    parser.add_argument("--export-point-cloud", dest="export_point_cloud", action="store_true", default=True, help="Export dense point cloud file (default: True)")
+    parser.add_argument("--export-point-cloud", dest="export_point_cloud", action="store_true", default=False, help="Export dense point cloud file (default: False)")
     parser.add_argument("--no-export-point-cloud", dest="export_point_cloud", action="store_false", help="Disable dense point cloud export")
     parser.add_argument("--point-cloud-format", choices=["laz", "las", "ply", "e57", "xyz"], default="laz", help="Format for exported dense point cloud (default: laz)")
     parser.add_argument("--classify-ground", action="store_true", default=None, help="Classify ground vs non-ground points in dense point cloud")
     parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")
     parser.add_argument("--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold")
     # DEM / Elevation Options
-    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM)")
+    parser.add_argument("--build-dem", action="store_true", default=False, help="Build Digital Elevation Model (DEM/DSM)")
+    parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
     parser.add_argument("--export-dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
     # Orthomosaic Options
     parser.add_argument(
@@ -2631,12 +2656,13 @@ if __name__ == "__main__":
         "--build-orthomosaic",
         dest="build_orthomosaic",
         action="store_true",
-        default=None,
-        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: enabled in 'pro' preset)",
+        default=False,
+        help="Build orthomosaic from reconstructed mesh and export GeoTIFF (default: False)",
     )
+    parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic export")
     # Quality Report Options
-    parser.add_argument("--export-report", dest="export_report", action="store_true", default=True, help="Export official Metashape PDF calibration & quality report (default: True)")
-    parser.add_argument("--no-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
+    parser.add_argument("--export-report", dest="export_report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report (default: False)")
+    parser.add_argument("--no-report", "--no-export-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
     parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
     # Extended Metashape Functions: Targets, GCPs, Colors, Tiled Model, Contours & Delighting
     parser.add_argument("--detect-markers", action="store_true", default=False, help="Detect coded target markers or AprilTags")
@@ -2684,6 +2710,11 @@ if __name__ == "__main__":
         action="store_true",
         help="Deprecated: restart from scratch is now the default; use --resume to resume from checkpoint",
     )
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     if args.profile:
@@ -2737,6 +2768,8 @@ if __name__ == "__main__":
         build_point_cloud=args.build_point_cloud,
         export_point_cloud=args.export_point_cloud,
         point_cloud_format=args.point_cloud_format,
+        export_glb=args.export_glb,
+        export_obj=args.export_obj,
         classify_ground=args.classify_ground,
         classify_points=args.classify_points,
         filter_point_confidence=args.filter_point_confidence,
