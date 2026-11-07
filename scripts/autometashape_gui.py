@@ -2440,10 +2440,32 @@ class AutoMetashapeStudio:
         self.project_items.clear()
         self._update_queue_ui()
 
-    def _on_queue_item_toggled(self) -> None:
+    def _on_queue_item_toggled(self, toggled_idx: int | None = None) -> None:
+        """Handle individual or batch check toggles in-place without destroying widgets or flickering."""
         active = [p for p in self.project_items if p["var_checked"].get()]
         total = len(self.project_items)
         self.lbl_queue_status.set(f"{len(active)} of {total} projects selected for processing")
+
+        # Update row visual indicators in-place
+        for p in self.project_items:
+            chk = p["var_checked"].get()
+            btn_chk = p.get("btn_chk")
+            if btn_chk and btn_chk.winfo_exists():
+                btn_chk.config(
+                    text="☑" if chk else "☐",
+                    fg=UITheme.ACCENT_CYAN if chk else UITheme.TEXT_MUTED,
+                )
+            lbl_name = p.get("lbl_name")
+            if lbl_name and lbl_name.winfo_exists():
+                lbl_name.config(
+                    fg=UITheme.TEXT_PRIMARY if chk else UITheme.TEXT_MUTED,
+                )
+            row_frame = p.get("row_frame")
+            if row_frame and row_frame.winfo_exists():
+                row_frame.config(
+                    highlightbackground=UITheme.ACCENT_CYAN if chk else UITheme.BORDER,
+                )
+
         self._sync_stepper_view()
 
     def _update_queue_ui(self) -> None:
@@ -2468,28 +2490,49 @@ class AutoMetashapeStudio:
         export_root = self.var_export_root.get().strip()
 
         for i, item in enumerate(self.project_items):
-            row = tk.Frame(self.frame_queue_items, bg=UITheme.BG_SURFACE_RAISED, bd=1, relief=tk.SOLID, highlightbackground=UITheme.BORDER)
-            row.pack(fill=tk.X, padx=4, pady=2)
-
-            cb = tk.Checkbutton(
-                row,
-                variable=item["var_checked"],
+            chk_val = item["var_checked"].get()
+            row = tk.Frame(
+                self.frame_queue_items,
                 bg=UITheme.BG_SURFACE_RAISED,
-                selectcolor=UITheme.BG_SURFACE,
-                activebackground=UITheme.BG_SURFACE_RAISED,
-                bd=0,
-                command=self._on_queue_item_toggled,
+                bd=1,
+                relief=tk.SOLID,
+                highlightbackground=UITheme.ACCENT_CYAN if chk_val else UITheme.BORDER,
             )
-            cb.pack(side=tk.LEFT, padx=(4, 2))
+            row.pack(fill=tk.X, padx=4, pady=2)
+            item["row_frame"] = row
+
+            def _make_toggle(idx=i):
+                return lambda e=None: self._toggle_queue_item(idx)
+
+            # High-contrast, crystal-clear checkbox button with prominent tick glyph
+            btn_chk = tk.Button(
+                row,
+                text="☑" if chk_val else "☐",
+                font=("Segoe UI", 11, "bold"),
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.ACCENT_CYAN if chk_val else UITheme.TEXT_MUTED,
+                activebackground=UITheme.BG_SURFACE_RAISED,
+                activeforeground=UITheme.ACCENT_CYAN,
+                bd=0,
+                padx=4,
+                pady=0,
+                cursor="hand2",
+                command=_make_toggle(i),
+            )
+            btn_chk.pack(side=tk.LEFT, padx=(2, 4))
+            item["btn_chk"] = btn_chk
 
             lbl_name = tk.Label(
                 row,
                 text=item["name"],
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_SURFACE_RAISED,
-                fg=UITheme.TEXT_PRIMARY,
+                fg=UITheme.TEXT_PRIMARY if chk_val else UITheme.TEXT_MUTED,
+                cursor="hand2",
             )
             lbl_name.pack(side=tk.LEFT, padx=(2, 6))
+            lbl_name.bind("<Button-1>", _make_toggle(i))
+            item["lbl_name"] = lbl_name
 
             lbl_cnt = tk.Label(
                 row,
@@ -2497,8 +2540,10 @@ class AutoMetashapeStudio:
                 font=("Segoe UI", 7),
                 bg=UITheme.BG_SURFACE_RAISED,
                 fg=UITheme.ACCENT_CYAN,
+                cursor="hand2",
             )
             lbl_cnt.pack(side=tk.LEFT, padx=(0, 6))
+            lbl_cnt.bind("<Button-1>", _make_toggle(i))
 
             # Status check for existing target folder
             target_out = os.path.join(export_root, item["name"]) if export_root else ""
@@ -2538,6 +2583,12 @@ class AutoMetashapeStudio:
             )
             btn_del.pack(side=tk.RIGHT, padx=4)
 
+    def _toggle_queue_item(self, idx: int) -> None:
+        if 0 <= idx < len(self.project_items):
+            cur = self.project_items[idx]["var_checked"].get()
+            self.project_items[idx]["var_checked"].set(not cur)
+            self._on_queue_item_toggled(idx)
+
     # -----------------------------------------------------------------------
     # Stepper Card
     # -----------------------------------------------------------------------
@@ -2549,11 +2600,13 @@ class AutoMetashapeStudio:
         )
         self.card_stepper.pack(fill=tk.X, pady=(0, 6))
 
-        # 1. Multi-project batch stepper container (visible when > 1 projects selected)
+        # 1. Multi-project batch stepper container (ALWAYS visible to prevent window resize/flicker)
         self.frame_multi_stepper = tk.Frame(self.card_stepper.body, bg=UITheme.BG_SURFACE)
+        self.frame_multi_stepper.pack(fill=tk.X, pady=(0, 4))
+
         self.lbl_multi_stepper_header = tk.Label(
             self.frame_multi_stepper,
-            text="MULTI-PROJECT BATCH PROGRESS",
+            text="PROJECT QUEUE PROGRESS",
             font=("Segoe UI", 7, "bold"),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.ACCENT_CYAN,
@@ -2562,22 +2615,22 @@ class AutoMetashapeStudio:
         self.lbl_multi_stepper_header.pack(fill=tk.X, pady=(0, 2))
         self.stepper_multi = StudioPipelineStepper(self.frame_multi_stepper)
         self.stepper_multi.pack(fill=tk.X, pady=(0, 4))
-        self.frame_multi_stepper.pack_forget()
 
         # 2. Active project photogrammetry process stepper container
         self.frame_recon_stepper = tk.Frame(self.card_stepper.body, bg=UITheme.BG_SURFACE)
+        self.frame_recon_stepper.pack(fill=tk.X)
+
         self.lbl_recon_stepper_header = tk.Label(
             self.frame_recon_stepper,
-            text="CURRENT PROJECT PHOTOGRAMMETRY PROCESS (7 STAGES)",
+            text="PHOTOGRAMMETRY PROCESS TRAJECTORY",
             font=("Segoe UI", 7, "bold"),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_SECONDARY,
             anchor=tk.W,
         )
-        self.lbl_recon_stepper_header.pack_forget()
+        self.lbl_recon_stepper_header.pack(fill=tk.X, pady=(0, 2))
         self.stepper = StudioPipelineStepper(self.frame_recon_stepper)
         self.stepper.pack(fill=tk.X)
-        self.frame_recon_stepper.pack(fill=tk.X)
 
     # -----------------------------------------------------------------------
     # Console Feed & Deliverables
@@ -3000,16 +3053,16 @@ class AutoMetashapeStudio:
 
     def _sync_stepper_view(self) -> None:
         """Dynamically adapt milestone steppers and Start button based on mode and queue size."""
-        if not hasattr(self, "card_stepper"):
+        if not hasattr(self, "card_stepper") or not hasattr(self, "stepper_multi"):
             return
 
         if self.active_mode == "export":
-            if hasattr(self, "frame_multi_stepper"):
-                self.frame_multi_stepper.pack_forget()
+            if hasattr(self, "lbl_multi_stepper_header"):
+                self.lbl_multi_stepper_header.config(text="ACTIVE PROJECT EXPORT")
             if hasattr(self, "lbl_recon_stepper_header"):
-                self.lbl_recon_stepper_header.pack_forget()
-            self.card_stepper.set_title("Pipeline Milestones")
-            self.card_stepper.set_subtitle("5-stage asset export & re-bake trajectory")
+                self.lbl_recon_stepper_header.config(text="PRODUCTION ASSET EXPORT TRAJECTORY")
+            self.card_stepper.set_title("Asset Export Milestones")
+            self.card_stepper.set_subtitle("Production asset export & re-bake trajectory")
             if not self.is_running:
                 self.btn_start.config(
                     text="Export Assets",
@@ -3017,6 +3070,9 @@ class AutoMetashapeStudio:
                     fg=UITheme.BG_ROOT,
                     state=tk.NORMAL,
                 )
+                stages_multi = [("1", "Selected Project", "Metashape .psx")]
+                if self.stepper_multi.stages != stages_multi:
+                    self.stepper_multi.build_stages(stages_multi)
             return
 
         # Reconstruction mode
@@ -3024,38 +3080,61 @@ class AutoMetashapeStudio:
         n_active = len(active)
 
         if n_active > 1:
-            # Dual steppers: Multi-Project Progress on top, 7-Stage Process below
-            if hasattr(self, "frame_multi_stepper"):
-                self.frame_multi_stepper.pack(fill=tk.X, pady=(0, 4), before=self.frame_recon_stepper)
+            if hasattr(self, "lbl_multi_stepper_header"):
+                self.lbl_multi_stepper_header.config(text=f"MULTI-PROJECT BATCH QUEUE ({n_active} PROJECTS SELECTED)")
             if hasattr(self, "lbl_recon_stepper_header"):
-                self.lbl_recon_stepper_header.pack(fill=tk.X, pady=(0, 2), before=self.stepper)
-            self.card_stepper.set_title("Multi-Project Execution & Milestones")
+                self.lbl_recon_stepper_header.config(text="CURRENT PROJECT PHOTOGRAMMETRY TRAJECTORY")
+            self.card_stepper.set_title("Multi-Project Batch Execution")
             self.card_stepper.set_subtitle(
-                f"Batch queue ({n_active} projects) & real-time stage trajectory"
+                f"Batch queue ({n_active} projects selected) & real-time stage trajectory"
             )
             if not self.is_running:
                 stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(active)]
-                self.stepper_multi.build_stages(stages_multi)
+                if self.stepper_multi.stages != stages_multi:
+                    self.stepper_multi.build_stages(stages_multi)
                 self.btn_start.config(
                     text=f"Start Batch Reconstruction ({n_active} Projects)",
                     bg=UITheme.ACCENT_CYAN,
                     fg=UITheme.BG_ROOT,
                     state=tk.NORMAL,
                 )
-        else:
-            # Single project: clean 1-stepper view
-            if hasattr(self, "frame_multi_stepper"):
-                self.frame_multi_stepper.pack_forget()
+        elif n_active == 1:
+            p_name = active[0]["name"]
+            p_cnt = active[0].get("count", 0)
+            if hasattr(self, "lbl_multi_stepper_header"):
+                self.lbl_multi_stepper_header.config(text="ACTIVE PROJECT QUEUE (1 PROJECT SELECTED)")
             if hasattr(self, "lbl_recon_stepper_header"):
-                self.lbl_recon_stepper_header.pack_forget()
+                self.lbl_recon_stepper_header.config(text=f"PHOTOGRAMMETRY TRAJECTORY: {p_name}")
             self.card_stepper.set_title("Pipeline Milestones")
-            self.card_stepper.set_subtitle("7-stage automated photogrammetry trajectory")
+            self.card_stepper.set_subtitle(
+                f"Project '{p_name}' ({p_cnt} photos) & real-time stage trajectory"
+            )
             if not self.is_running:
+                stages_multi = [("1", p_name, f"{p_cnt} photos")]
+                if self.stepper_multi.stages != stages_multi:
+                    self.stepper_multi.build_stages(stages_multi)
                 self.btn_start.config(
                     text="Start Reconstruction",
                     bg=UITheme.ACCENT_GREEN,
                     fg="white",
                     state=tk.NORMAL,
+                )
+        else:
+            if hasattr(self, "lbl_multi_stepper_header"):
+                self.lbl_multi_stepper_header.config(text="PROJECT QUEUE (0 PROJECTS SELECTED)")
+            if hasattr(self, "lbl_recon_stepper_header"):
+                self.lbl_recon_stepper_header.config(text="PHOTOGRAMMETRY TRAJECTORY (NO PROJECT)")
+            self.card_stepper.set_title("Pipeline Milestones")
+            self.card_stepper.set_subtitle("Select or add at least one project to begin")
+            if not self.is_running:
+                stages_multi = [("1", "No Project", "0 photos")]
+                if self.stepper_multi.stages != stages_multi:
+                    self.stepper_multi.build_stages(stages_multi)
+                self.btn_start.config(
+                    text="Start Reconstruction (No Project Selected)",
+                    bg=UITheme.BG_SURFACE_RAISED,
+                    fg=UITheme.TEXT_MUTED,
+                    state=tk.DISABLED,
                 )
 
     def _set_mode(self, mode: str) -> None:
@@ -3557,6 +3636,8 @@ class AutoMetashapeStudio:
             out_dir = os.path.join(export_root, proj_name)
             os.makedirs(out_dir, exist_ok=True)
             cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
+            if hasattr(self, "stepper_multi"):
+                self.stepper_multi.set_active(0, f"Processing {proj_name} (1/1)")
             self.stepper.reset()
             self.frame_crop_banner.pack_forget()
             self._spawn_worker(cmd, f"3D Reconstruction ({proj_name})")

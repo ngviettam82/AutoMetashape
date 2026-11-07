@@ -1978,37 +1978,40 @@ def run_reconstruction(
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
-            print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
-            t_match = time.time()
-            chunk.matchPhotos(
-                downscale=align_downscale,
-                generic_preselection=True,
-                reference_preselection=True,
-                keypoint_limit=keypoint_limit,
-                keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                tiepoint_limit=tiepoint_limit,
-                mask_tiepoints=False,
-                filter_stationary_points=filter_stationary_points,
-                guided_matching=guided_matching,
-            )
-            print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
-
-            print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
-            t_align = time.time()
-            chunk.alignCameras(adaptive_fitting=adaptive_fitting)
-            aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
-            enabled_count = sum(1 for c in chunk.cameras if c.enabled)
-            print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
-
-            if rolling_shutter:
-                for s in chunk.sensors:
-                    s.rolling_shutter = Metashape.Shutter.Model.Regularized
-                print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
-
-            if filter_tiepoints:
-                usgs_stats = filter_tie_points(chunk)
+            if not align_photos:
+                print("\n[INFO] Photo feature matching and camera alignment skipped by workflow selection.", flush=True)
             else:
-                print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
+                print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
+                t_match = time.time()
+                chunk.matchPhotos(
+                    downscale=align_downscale,
+                    generic_preselection=True,
+                    reference_preselection=True,
+                    keypoint_limit=keypoint_limit,
+                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                    tiepoint_limit=tiepoint_limit,
+                    mask_tiepoints=False,
+                    filter_stationary_points=filter_stationary_points,
+                    guided_matching=guided_matching,
+                )
+                print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
+
+                print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
+                t_align = time.time()
+                chunk.alignCameras(adaptive_fitting=adaptive_fitting)
+                aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
+                enabled_count = sum(1 for c in chunk.cameras if c.enabled)
+                print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+
+                if rolling_shutter:
+                    for s in chunk.sensors:
+                        s.rolling_shutter = Metashape.Shutter.Model.Regularized
+                    print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+
+                if filter_tiepoints:
+                    usgs_stats = filter_tie_points(chunk)
+                else:
+                    print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
         def _safe_reopen():
             files_dir = psx_out.replace(".psx", ".files")
@@ -2065,34 +2068,35 @@ def run_reconstruction(
     # Step 4: Multi-View Stereo Dense Depth Maps
     if not build_depth_maps:
         print("\n[INFO] GPU MVS Depth Maps generation skipped by workflow selection.", flush=True)
-    has_depth_maps = False if build_depth_maps else True
-    depth_count = 0
-    if chunk.depth_maps is not None:
-        try:
-            depth_count = len(chunk.depth_maps.keys()) if hasattr(chunk.depth_maps, "keys") else 0
-            has_depth_maps = depth_count > 0
-        except Exception:
-            has_depth_maps = bool(chunk.depth_maps)
-            try:
-                depth_count = len(chunk.depth_maps.keys())
-            except Exception:
-                depth_count = 0
-
-    if has_depth_maps:
-        print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({depth_count} depth maps).", flush=True)
     else:
-        depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
-        filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
-        print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
-        t_depth = time.time()
-        chunk.buildDepthMaps(
-            downscale=depth_downscale,
-            filter_mode=filter_mode_arg,
-            reuse_depth=False,
-        )
-        print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
-        chunk = save_checkpoint(doc, psx_out)
-        print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
+        has_depth_maps = False
+        depth_count = 0
+        if chunk.depth_maps is not None:
+            try:
+                depth_count = len(chunk.depth_maps.keys()) if hasattr(chunk.depth_maps, "keys") else 0
+                has_depth_maps = depth_count > 0
+            except Exception:
+                has_depth_maps = bool(chunk.depth_maps)
+                try:
+                    depth_count = len(chunk.depth_maps.keys())
+                except Exception:
+                    depth_count = 0
+
+        if has_depth_maps:
+            print(f"\n[4/7] Reusing existing MVS Depth Maps from checkpoint ({depth_count} depth maps).", flush=True)
+        else:
+            depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
+            filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
+            print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
+            t_depth = time.time()
+            chunk.buildDepthMaps(
+                downscale=depth_downscale,
+                filter_mode=filter_mode_arg,
+                reuse_depth=False,
+            )
+            print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
+            chunk = save_checkpoint(doc, psx_out)
+            print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 4b: Dense Point Cloud Generation & Classification
     if build_point_cloud:
@@ -2138,51 +2142,35 @@ def run_reconstruction(
     # Step 5: High-Precision Arbitrary Surface Meshing
     if not build_mesh:
         print("\n[INFO] 3D Surface Meshing skipped by workflow selection.", flush=True)
-    chunk = doc.chunk
-    if chunk.model is None:
-        cand_obj = os.path.join(output_dir, f"{project_name}.obj")
-        cand_obj_legacy = os.path.join(output_dir, "model.obj")
-        target_obj = cand_obj if os.path.isfile(cand_obj) else (cand_obj_legacy if os.path.isfile(cand_obj_legacy) else None)
-        if target_obj:
-            print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {target_obj}. Re-linking...", flush=True)
-            chunk.importModel(path=target_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
-            chunk = save_checkpoint(doc, psx_out)
-            print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
-
-    has_model = chunk.model is not None
-    if not build_mesh:
-        has_model = False
-    elif has_model:
-        print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
     else:
-        print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
-        t_mesh = time.time()
-        if custom_faces > 0:
-            face_count_arg = Metashape.FaceCount.CustomFaceCount
-            face_count_custom_arg = custom_faces
-            print(f"  Target Polygon Count: {custom_faces:,} faces", flush=True)
-        else:
-            face_count_arg = Metashape.FaceCount.MediumFaceCount
-            face_count_custom_arg = 200000
-            print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
+        chunk = doc.chunk
+        if chunk.model is None:
+            cand_obj = os.path.join(output_dir, f"{project_name}.obj")
+            cand_obj_legacy = os.path.join(output_dir, "model.obj")
+            target_obj = cand_obj if os.path.isfile(cand_obj) else (cand_obj_legacy if os.path.isfile(cand_obj_legacy) else None)
+            if target_obj:
+                print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {target_obj}. Re-linking...", flush=True)
+                chunk.importModel(path=target_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
+                chunk = save_checkpoint(doc, psx_out)
+                print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
 
-        surf_enum = SURFACE_TYPE_MAP.get(surface_type.lower(), Metashape.SurfaceType.Arbitrary)
-        try:
-            chunk.buildModel(
-                surface_type=surf_enum,
-                source_data=Metashape.DataSource.DepthMapsData,
-                interpolation=Metashape.Interpolation.EnabledInterpolation,
-                face_count=face_count_arg,
-                face_count_custom=face_count_custom_arg,
-                vertex_colors=True,
-                vertex_confidence=True,
-            )
-        except Exception as e:
-            print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
-            print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
-            orig_gpu_mask = Metashape.app.gpu_mask
+        has_model = chunk.model is not None
+        if has_model:
+            print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
+        else:
+            print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
+            t_mesh = time.time()
+            if custom_faces > 0:
+                face_count_arg = Metashape.FaceCount.CustomFaceCount
+                face_count_custom_arg = custom_faces
+                print(f"  Target Polygon Count: {custom_faces:,} faces", flush=True)
+            else:
+                face_count_arg = Metashape.FaceCount.MediumFaceCount
+                face_count_custom_arg = 200000
+                print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
+
+            surf_enum = SURFACE_TYPE_MAP.get(surface_type.lower(), Metashape.SurfaceType.Arbitrary)
             try:
-                Metashape.app.gpu_mask = 0
                 chunk.buildModel(
                     surface_type=surf_enum,
                     source_data=Metashape.DataSource.DepthMapsData,
@@ -2190,26 +2178,41 @@ def run_reconstruction(
                     face_count=face_count_arg,
                     face_count_custom=face_count_custom_arg,
                     vertex_colors=True,
+                    vertex_confidence=True,
                 )
-                print("  [Fallback] CPU surface meshing succeeded!", flush=True)
-            finally:
-                Metashape.app.gpu_mask = orig_gpu_mask
-                print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
-        if close_holes and chunk.model:
-            chunk.model.closeHoles(level=30)
-            print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
-        if smooth_mesh and chunk.model:
-            print(f"  Applying Laplacian mesh smoothing (strength: {smooth_strength})...", flush=True)
-            chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
-        if decimate_mesh and chunk.model and decimate_mesh > 0:
-            print(f"  Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
-            chunk.decimateModel(face_count=decimate_mesh)
+            except Exception as e:
+                print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
+                print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
+                orig_gpu_mask = Metashape.app.gpu_mask
+                try:
+                    Metashape.app.gpu_mask = 0
+                    chunk.buildModel(
+                        surface_type=surf_enum,
+                        source_data=Metashape.DataSource.DepthMapsData,
+                        interpolation=Metashape.Interpolation.EnabledInterpolation,
+                        face_count=face_count_arg,
+                        face_count_custom=face_count_custom_arg,
+                        vertex_colors=True,
+                    )
+                    print("  [Fallback] CPU surface meshing succeeded!", flush=True)
+                finally:
+                    Metashape.app.gpu_mask = orig_gpu_mask
+                    print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
+            if close_holes and chunk.model:
+                chunk.model.closeHoles(level=30)
+                print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
+            if smooth_mesh and chunk.model:
+                print(f"  Applying Laplacian mesh smoothing (strength: {smooth_strength})...", flush=True)
+                chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
+            if decimate_mesh and chunk.model and decimate_mesh > 0:
+                print(f"  Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
+                chunk.decimateModel(face_count=decimate_mesh)
 
-        mesh_verts = len(chunk.model.vertices)
-        mesh_faces = len(chunk.model.faces)
-        print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
-        chunk = save_checkpoint(doc, psx_out)
-        print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
+            mesh_verts = len(chunk.model.vertices)
+            mesh_faces = len(chunk.model.faces)
+            print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
+            chunk = save_checkpoint(doc, psx_out)
+            print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
     if not build_texture:
@@ -2581,6 +2584,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="pro",
         help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 22-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
     )
+    # Granular Workflow Steps (Metashape Process Stages)
+    parser.add_argument("--align-photos", dest="align_photos", action="store_true", default=True, help="Execute camera matching and alignment (default: True)")
+    parser.add_argument("--no-align-photos", dest="align_photos", action="store_false", help="Skip camera matching and alignment")
+    parser.add_argument("--build-depth-maps", dest="build_depth_maps", action="store_true", default=True, help="Execute GPU MVS dense depth maps calculation (default: True)")
+    parser.add_argument("--no-build-depth-maps", dest="build_depth_maps", action="store_false", help="Skip GPU MVS dense depth maps calculation")
+    parser.add_argument("--build-mesh", dest="build_mesh", action="store_true", default=True, help="Execute arbitrary 3D surface mesh reconstruction (default: True)")
+    parser.add_argument("--no-build-mesh", dest="build_mesh", action="store_false", help="Skip arbitrary 3D surface mesh reconstruction")
+    parser.add_argument("--build-texture", dest="build_texture", action="store_true", default=True, help="Execute multi-page 8K texture atlas baking (default: True)")
+    parser.add_argument("--no-build-texture", dest="build_texture", action="store_false", help="Skip multi-page 8K texture atlas baking")
     parser.add_argument("--pro", action="store_true", default=False, help="Execute the Pro Photogrammetry & Geomatics Engine")
     parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
     parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
