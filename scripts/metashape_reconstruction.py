@@ -24,7 +24,10 @@ import re
 import sys
 import threading
 import time
-import Metashape
+try:
+    import Metashape
+except ImportError:
+    Metashape = None
 
 
 # Comprehensive list of all image and camera RAW formats supported by Agisoft Metashape
@@ -75,55 +78,80 @@ DEPTH_DOWNSCALE_MAP = {
     "lowest": 16,
 }
 
-DEPTH_FILTER_MAP = {
-    "mild": Metashape.FilterMode.MildFiltering,
-    "moderate": Metashape.FilterMode.ModerateFiltering,
-    "aggressive": Metashape.FilterMode.AggressiveFiltering,
-}
+if Metashape is not None:
+    DEPTH_FILTER_MAP = {
+        "mild": Metashape.FilterMode.MildFiltering,
+        "moderate": Metashape.FilterMode.ModerateFiltering,
+        "aggressive": Metashape.FilterMode.AggressiveFiltering,
+    }
 
-POINT_CLOUD_FORMAT_MAP = {
-    "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
-    "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
-    "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
-    "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
-    "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
-}
+    POINT_CLOUD_FORMAT_MAP = {
+        "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
+        "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
+        "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
+        "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
+        "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
+    }
 
-TILED_MODEL_FORMAT_MAP = {
-    "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
-    "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
-    "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
-    "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
-}
+    TILED_MODEL_FORMAT_MAP = {
+        "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
+        "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
+        "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
+        "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
+    }
 
-SHAPES_FORMAT_MAP = {
-    "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
-    "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
-    "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
-    "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
-}
+    SHAPES_FORMAT_MAP = {
+        "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
+        "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
+        "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
+        "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
+    }
 
-TARGET_TYPE_MAP = {
-    "circular12": Metashape.TargetType.CircularTarget12bit,
-    "circular14": Metashape.TargetType.CircularTarget14bit,
-    "circular16": Metashape.TargetType.CircularTarget16bit,
-    "circular20": Metashape.TargetType.CircularTarget20bit,
-    "cross": Metashape.TargetType.CrossTarget,
-    "apriltag16h5": Metashape.TargetType.AprilTag16h5,
-    "apriltag25h9": Metashape.TargetType.AprilTag25h9,
-    "apriltag36h11": Metashape.TargetType.AprilTag36h11,
-}
+    TARGET_TYPE_MAP = {
+        "circular12": Metashape.TargetType.CircularTarget12bit,
+        "circular14": Metashape.TargetType.CircularTarget14bit,
+        "circular16": Metashape.TargetType.CircularTarget16bit,
+        "circular20": Metashape.TargetType.CircularTarget20bit,
+        "cross": Metashape.TargetType.CrossTarget,
+        "apriltag16h5": Metashape.TargetType.AprilTag16h5,
+        "apriltag25h9": Metashape.TargetType.AprilTag25h9,
+        "apriltag36h11": Metashape.TargetType.AprilTag36h11,
+    }
 
-SURFACE_TYPE_MAP = {
-    "arbitrary": Metashape.SurfaceType.Arbitrary,
-    "heightfield": Metashape.SurfaceType.HeightField,
-}
+    SURFACE_TYPE_MAP = {
+        "arbitrary": Metashape.SurfaceType.Arbitrary,
+        "heightfield": Metashape.SurfaceType.HeightField,
+    }
 
-PRESEL_MODE_MAP = {
-    "estimated": Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
-    "source": Metashape.ReferencePreselectionMode.ReferencePreselectionSource,
-    "sequential": Metashape.ReferencePreselectionMode.ReferencePreselectionSequential,
-}
+    PRESEL_MODE_MAP = {
+        "estimated": Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
+        "source": Metashape.ReferencePreselectionMode.ReferencePreselectionSource,
+        "sequential": Metashape.ReferencePreselectionMode.ReferencePreselectionSequential,
+    }
+else:
+    DEPTH_FILTER_MAP = {"mild": 1, "moderate": 2, "aggressive": 3}
+    POINT_CLOUD_FORMAT_MAP = {
+        "las": (None, ".las"),
+        "laz": (None, ".laz"),
+        "ply": (None, ".ply"),
+        "e57": (None, ".e57"),
+        "xyz": (None, ".xyz"),
+    }
+    TILED_MODEL_FORMAT_MAP = {
+        "cesium": (None, "tileset.json"),
+        "tls": (None, ".tls"),
+        "slpk": (None, ".slpk"),
+        "osgb": (None, ".zip"),
+    }
+    SHAPES_FORMAT_MAP = {
+        "shp": (None, ".shp"),
+        "dxf": (None, ".dxf"),
+        "geojson": (None, ".geojson"),
+        "kml": (None, ".kml"),
+    }
+    TARGET_TYPE_MAP = {}
+    SURFACE_TYPE_MAP = {"arbitrary": 0, "heightfield": 1}
+    PRESEL_MODE_MAP = {"estimated": 1, "source": 0, "sequential": 2}
 
 
 def compute_utm_epsg(lon: float, lat: float) -> int:
@@ -1600,6 +1628,8 @@ def run_reconstruction(
     survey_physics = None
     pro_plan = None
     usgs_stats = None
+    if preset == "building":
+        preset = "pro"
     if preset == "custom":
         is_auto = False
     else:
@@ -2601,7 +2631,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
     parser.add_argument(
         "--preset",
-        choices=["pro", "custom"],
+        choices=["pro", "custom", "building"],
         default="pro",
         help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 22-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
     )
@@ -2712,7 +2742,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # DEM / Elevation Options
     parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM) (default: True in 'pro' preset)")
     parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
-    parser.add_argument("--export-dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
+    parser.add_argument("--export-dem", dest="export_dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
+    parser.add_argument("--no-export-dem", dest="export_dem", action="store_false", help="Disable GeoTIFF Digital Elevation Model export")
     # Orthomosaic Options
     parser.add_argument(
         "--ortho",

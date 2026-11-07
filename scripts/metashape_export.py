@@ -16,30 +16,54 @@ from __future__ import annotations
 import argparse
 import os
 import time
-import Metashape
+try:
+    import Metashape
+except ImportError:
+    Metashape = None
 
 
-POINT_CLOUD_FORMAT_MAP = {
-    "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
-    "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
-    "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
-    "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
-    "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
-}
+if Metashape is not None:
+    POINT_CLOUD_FORMAT_MAP = {
+        "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
+        "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
+        "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
+        "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
+        "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
+    }
 
-TILED_MODEL_FORMAT_MAP = {
-    "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
-    "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
-    "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
-    "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
-}
+    TILED_MODEL_FORMAT_MAP = {
+        "cesium": (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"),
+        "tls": (Metashape.TiledModelFormat.TiledModelFormatTLS, ".tls"),
+        "slpk": (Metashape.TiledModelFormat.TiledModelFormatSLPK, ".slpk"),
+        "osgb": (Metashape.TiledModelFormat.TiledModelFormatOSGB, ".zip"),
+    }
 
-SHAPES_FORMAT_MAP = {
-    "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
-    "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
-    "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
-    "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
-}
+    SHAPES_FORMAT_MAP = {
+        "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
+        "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
+        "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
+        "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
+    }
+else:
+    POINT_CLOUD_FORMAT_MAP = {
+        "las": (None, ".las"),
+        "laz": (None, ".laz"),
+        "ply": (None, ".ply"),
+        "e57": (None, ".e57"),
+        "xyz": (None, ".xyz"),
+    }
+    TILED_MODEL_FORMAT_MAP = {
+        "cesium": (None, "tileset.json"),
+        "tls": (None, ".tls"),
+        "slpk": (None, ".slpk"),
+        "osgb": (None, ".zip"),
+    }
+    SHAPES_FORMAT_MAP = {
+        "shp": (None, ".shp"),
+        "dxf": (None, ".dxf"),
+        "geojson": (None, ".geojson"),
+        "kml": (None, ".kml"),
+    }
 
 
 def infer_project_name(
@@ -305,6 +329,23 @@ def export_project_assets(
     # 4. Optional DEM Export
     if export_dem:
         has_dem = getattr(chunk, "elevation", None) is not None
+        if not has_dem:
+            print("\n[DEM] Project contains no pre-built elevation model. Generating on-demand before export...", flush=True)
+            try:
+                src_data = Metashape.DataSource.DepthMapsData
+                if getattr(chunk, "point_cloud", None) is not None:
+                    src_data = Metashape.DataSource.PointCloudData
+                elif getattr(chunk, "depth_maps", None) is not None:
+                    src_data = Metashape.DataSource.DepthMapsData
+                elif getattr(chunk, "model", None) is not None:
+                    src_data = Metashape.DataSource.ModelData
+                chunk.buildDem(source_data=src_data)
+                doc.save()
+                has_dem = getattr(chunk, "elevation", None) is not None
+                print("  [DEM] Elevation model built and saved successfully.", flush=True)
+            except Exception as e_dem_build:
+                print(f"  [WARNING] Could not build DEM on-demand: {e_dem_build}.", flush=True)
+
         if has_dem:
             dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
             print(f"\n[DEM] Exporting GeoTIFF Elevation Model to: {dem_out}...", flush=True)
@@ -320,11 +361,28 @@ def export_project_assets(
             )
             print(f"  Saved DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
         else:
-            print("\n[DEM] Note: Project contains no built elevation model; skipping DEM export.", flush=True)
+            print("\n[DEM] Note: Project contains no elevation model; skipping DEM export.", flush=True)
 
     # 5. Optional Orthomosaic Export
     if export_orthomosaic:
-        if chunk.orthomosaic is not None:
+        has_ortho = getattr(chunk, "orthomosaic", None) is not None
+        if not has_ortho:
+            print("\n[Orthomosaic] Project contains no pre-built orthomosaic. Generating on-demand before export...", flush=True)
+            try:
+                if getattr(chunk, "elevation", None) is not None:
+                    surf_data = Metashape.DataSource.ElevationData
+                elif getattr(chunk, "model", None) is not None:
+                    surf_data = Metashape.DataSource.ModelData
+                else:
+                    surf_data = Metashape.DataSource.ElevationData
+                chunk.buildOrthomosaic(surface_data=surf_data)
+                doc.save()
+                has_ortho = getattr(chunk, "orthomosaic", None) is not None
+                print("  [Orthomosaic] Orthomosaic built and saved successfully.", flush=True)
+            except Exception as e_ortho_build:
+                print(f"  [WARNING] Could not build Orthomosaic on-demand: {e_ortho_build}.", flush=True)
+
+        if has_ortho:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
@@ -340,7 +398,7 @@ def export_project_assets(
             )
             print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
         else:
-            print("\n[Orthomosaic] Note: Project contains no built orthomosaic; skipping export.", flush=True)
+            print("\n[Orthomosaic] Note: Project contains no orthomosaic; skipping export.", flush=True)
 
     # Export FBX
     if export_fbx and chunk.model:
@@ -408,6 +466,22 @@ def export_project_assets(
     # Export Topographic Contours
     if export_contours:
         has_dem = getattr(chunk, "elevation", None) is not None
+        if not has_dem:
+            print("\n[Contours] Topographic contours require an elevation model. Generating DEM on-demand...", flush=True)
+            try:
+                src_data = Metashape.DataSource.DepthMapsData
+                if getattr(chunk, "point_cloud", None) is not None:
+                    src_data = Metashape.DataSource.PointCloudData
+                elif getattr(chunk, "depth_maps", None) is not None:
+                    src_data = Metashape.DataSource.DepthMapsData
+                elif getattr(chunk, "model", None) is not None:
+                    src_data = Metashape.DataSource.ModelData
+                chunk.buildDem(source_data=src_data)
+                doc.save()
+                has_dem = getattr(chunk, "elevation", None) is not None
+            except Exception as e_dem_cnt:
+                print(f"  [WARNING] Could not build DEM for contours: {e_dem_cnt}", flush=True)
+
         if has_dem:
             try:
                 print(f"\n[Contours] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
@@ -437,7 +511,8 @@ def export_project_assets(
     print("\n[SUCCESS] Production assets exported successfully!", flush=True)
 
 
-if __name__ == "__main__":
+def build_arg_parser() -> argparse.ArgumentParser:
+    """Constructs command-line argument parser for standalone production asset export."""
     parser = argparse.ArgumentParser(
         description="AutoMetashape Export CLI: Export production 3D assets from existing Metashape project (.psx)"
     )
@@ -472,6 +547,11 @@ if __name__ == "__main__":
     parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
     parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
     parser.add_argument("--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format")
+    return parser
+
+
+if __name__ == "__main__":
+    parser = build_arg_parser()
     args = parser.parse_args()
 
     export_project_assets(

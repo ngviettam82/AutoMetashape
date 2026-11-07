@@ -30,4 +30,12 @@ if !ERRORLEVEL! neq 0 (
     echo [ERROR] Skill validation failed.
     exit /b !ERRORLEVEL!
 )
+
+echo [BUILD] Running unit test suite...
+"!PYTHON_CMD!" -m unittest discover -s tests
+if !ERRORLEVEL! neq 0 (
+    echo [ERROR] Unit test suite failed.
+    exit /b !ERRORLEVEL!
+)
+
 echo [BUILD] AutoMetashape build completed successfully.

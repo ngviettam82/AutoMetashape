@@ -8,4 +8,6 @@ echo "[BUILD] Installing AutoMetashape package in editable mode..."
 python -m pip install -e .
 echo "[BUILD] Validating agent skills..."
 python tools/skills/cli.py check
+echo "[BUILD] Running unit test suite..."
+python -m unittest discover -s tests
 echo "[BUILD] AutoMetashape build completed successfully."

@@ -3464,6 +3464,8 @@ class AutoMetashapeStudio:
 
         if preset_key == "pro":
             cmd.extend(["--preset", "pro"])
+            if hasattr(self, "var_presel_mode") and self.var_presel_mode.get():
+                cmd.extend(["--reference-preselection-mode", self.var_presel_mode.get()])
         else:
             cmd.extend([
                 "--preset", "custom",
