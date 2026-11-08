@@ -143,6 +143,19 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.export_ply)
         self.assertTrue(args.export_dxf)
         self.assertTrue(args.export_tie_points)
+        self.assertTrue(args.export_glb)
+        self.assertTrue(args.export_obj)
+
+        # Defend PNG texture format and model export suppression
+        args_png = parser.parse_args([
+            "--project", "dummy.psx",
+            "--texture-format", "png",
+            "--no-export-glb",
+            "--no-export-obj",
+        ])
+        self.assertEqual(args_png.texture_format, "png")
+        self.assertFalse(args_png.export_glb)
+        self.assertFalse(args_png.export_obj)
 
 
 if __name__ == "__main__":

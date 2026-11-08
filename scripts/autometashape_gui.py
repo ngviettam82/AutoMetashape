@@ -2367,7 +2367,7 @@ class AutoMetashapeStudio:
         ttk.Combobox(row2, textvariable=self.var_exp_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=6).pack(side=tk.LEFT, padx=(4, 14))
 
         tk.Label(row2, text="Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).pack(side=tk.LEFT)
-        ttk.Combobox(row2, textvariable=self.var_exp_format, values=["tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
+        ttk.Combobox(row2, textvariable=self.var_exp_format, values=["png", "tiff", "jpeg"], state="readonly", width=8).pack(side=tk.LEFT, padx=4)
 
         # Extended Export Controls: Point Cloud, DEM, Ortho, Tiled, Contours, FBX/PLY, Report
         row3 = tk.Frame(self.card_export.body, bg=UITheme.BG_SURFACE)

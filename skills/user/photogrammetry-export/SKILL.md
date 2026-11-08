@@ -82,7 +82,7 @@ To re-bake UV mapping, a 16-page 8K texture atlas, and apply delighting (shadow 
 ```
 
 ### 4. Format Specifications
-- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.tif`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
+- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` / `.tif`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
 - **Dense Point Cloud (`.laz`, `.las`, `.ply`, `.e57`)**: `chunk.exportPointCloud()`, preserving coordinates, colors, normals, confidence, and classifications.
 - **Hierarchical 3D Tiled Model**: Cesium 3D Tiles (`tiled_model/tileset.json` + `.b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), OpenSceneGraph (`.osgb`).
 - **Topographic Contours (`.shp`, `.dxf`, `.geojson`, `.kml`)**: Vector contour polylines with metric elevation attributes.

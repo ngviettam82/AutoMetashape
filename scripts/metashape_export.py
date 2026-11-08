@@ -148,6 +148,8 @@ def export_project_assets(
     smooth_mesh: bool = False,
     smooth_strength: float = 3.0,
     decimate_mesh: int = None,
+    export_glb: bool = True,
+    export_obj: bool = True,
     export_fbx: bool = False,
     export_ply: bool = False,
     export_dxf: bool = False,
@@ -305,33 +307,42 @@ def export_project_assets(
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
     # 1. Export Binary GLTF/GLB
-    emit_ipc_stage("models", "Exporting Binary glTF & Wavefront OBJ Models")
-    print("\n[1/2] Exporting Binary glTF (.glb) with embedded PBR textures...", flush=True)
-    t_glb = time.time()
-    chunk.exportModel(
-        glb_out,
-        format=Metashape.ModelFormat.ModelFormatGLTF,
-        embed_texture=True,
-        save_normals=True,
-        save_colors=True,
-    )
-    glb_size = os.path.getsize(glb_out) / (1024 * 1024)
-    print(f"  Saved: {glb_out} ({glb_size:.2f} MB) in {(time.time() - t_glb):.1f}s.", flush=True)
+    if export_glb and chunk.model:
+        emit_ipc_stage("models", "Exporting Binary glTF (.glb) Model")
+        print("\n[1/2] Exporting Binary glTF (.glb) with embedded PBR textures...", flush=True)
+        t_glb = time.time()
+        chunk.exportModel(
+            glb_out,
+            format=Metashape.ModelFormat.ModelFormatGLTF,
+            embed_texture=True,
+            save_normals=True,
+            save_colors=True,
+        )
+        glb_size = os.path.getsize(glb_out) / (1024 * 1024)
+        print(f"  Saved: {glb_out} ({glb_size:.2f} MB) in {(time.time() - t_glb):.1f}s.", flush=True)
 
-    # 2. Export Wavefront OBJ + TIFF textures
-    tex_fmt = Metashape.ImageFormat.ImageFormatTIFF if texture_format.lower() == "tiff" else Metashape.ImageFormat.ImageFormatJPEG
-    print(f"\n[2/2] Exporting Wavefront OBJ (.obj + .mtl) with {texture_format.upper()} texture atlas...", flush=True)
-    t_obj = time.time()
-    chunk.exportModel(
-        obj_out,
-        format=Metashape.ModelFormat.ModelFormatOBJ,
-        texture_format=tex_fmt,
-        save_texture=True,
-        save_normals=True,
-        save_colors=True,
-    )
-    obj_size = os.path.getsize(obj_out) / (1024 * 1024)
-    print(f"  Saved: {obj_out} ({obj_size:.2f} MB) in {(time.time() - t_obj):.1f}s.", flush=True)
+    # 2. Export Wavefront OBJ + textures
+    if export_obj and chunk.model:
+        fmt_lower = texture_format.lower()
+        if fmt_lower == "png":
+            tex_fmt = Metashape.ImageFormat.ImageFormatPNG
+        elif fmt_lower == "tiff":
+            tex_fmt = Metashape.ImageFormat.ImageFormatTIFF
+        else:
+            tex_fmt = Metashape.ImageFormat.ImageFormatJPEG
+        emit_ipc_stage("models", f"Exporting Wavefront OBJ (.obj) with {texture_format.upper()} texture atlas")
+        print(f"\n[2/2] Exporting Wavefront OBJ (.obj + .mtl) with {texture_format.upper()} texture atlas...", flush=True)
+        t_obj = time.time()
+        chunk.exportModel(
+            obj_out,
+            format=Metashape.ModelFormat.ModelFormatOBJ,
+            texture_format=tex_fmt,
+            save_texture=True,
+            save_normals=True,
+            save_colors=True,
+        )
+        obj_size = os.path.getsize(obj_out) / (1024 * 1024)
+        print(f"  Saved: {obj_out} ({obj_size:.2f} MB) in {(time.time() - t_obj):.1f}s.", flush=True)
 
     # 3. Optional Dense Point Cloud Export
     emit_ipc_stage("deliverables", "Exporting Production Deliverables (Cloud, DEM, Ortho, Report)")
@@ -545,7 +556,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", required=True, help="Path to existing Metashape project file (.psx)")
     parser.add_argument("--output", default=None, help="Output directory for exported 3D assets (default: same folder as .psx)")
     parser.add_argument("--project-name", default=None, help="Base name for exported 3D model, textures, point cloud, and reports (default: folder project name)")
-    parser.add_argument("--texture-format", choices=["tiff", "jpeg"], default="tiff", help="Texture atlas format (default: tiff)")
+    parser.add_argument("--texture-format", choices=["png", "tiff", "jpeg"], default="tiff", help="Texture atlas format (default: tiff)")
+    parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=True, help="Export binary glTF (.glb) model (default: True)")
+    parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary glTF (.glb) export")
+    parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=True, help="Export Wavefront OBJ (.obj) model (default: True)")
+    parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ (.obj) export")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Re-bake UV parameterization and 8K texture atlas before export")
     parser.add_argument("--texture-pages", type=int, default=16, help="Number of 8K texture atlas pages if re-baking (default: 16)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling if re-baking (default: enabled)")
@@ -607,6 +622,8 @@ if __name__ == "__main__":
         smooth_mesh=args.smooth_mesh,
         smooth_strength=args.smooth_strength,
         decimate_mesh=args.decimate_mesh,
+        export_glb=args.export_glb,
+        export_obj=args.export_obj,
         export_fbx=args.export_fbx,
         export_ply=args.export_ply,
         export_dxf=args.export_dxf,
