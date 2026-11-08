@@ -1698,6 +1698,10 @@ def run_reconstruction(
     export_ply: bool = False,
     export_dxf: bool = False,
     export_tie_points: bool = False,
+    network_enable: bool = False,
+    network_host: str = "127.0.0.1",
+    network_port: int = 5840,
+    network_path: str = "",
     project_name: str | None = None,
 ):
     t_start = time.time()
@@ -1835,6 +1839,45 @@ def run_reconstruction(
         print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
     else:
         print("[Hardware] Running on CPU.", flush=True)
+
+    # Distributed Network Cluster Processing
+    if network_enable and Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
+        try:
+            print("\n=========================================================================")
+            print("  AUTOMETASHAPE: DISTRIBUTED NETWORK PROCESSING CLUSTER")
+            print(f"  Server Host: {network_host}:{network_port}")
+            if network_path:
+                print(f"  Storage Root (UNC): {network_path}")
+            print("=========================================================================", flush=True)
+
+            Metashape.app.settings.network_enable = True
+            Metashape.app.settings.network_host = str(network_host).strip()
+            Metashape.app.settings.network_port = int(network_port)
+            if network_path:
+                Metashape.app.settings.network_path = str(network_path).strip()
+
+            try:
+                if hasattr(Metashape, "NetworkClient"):
+                    net_client = Metashape.NetworkClient()
+                    if net_client.connect(f"{network_host}:{network_port}"):
+                        workers = net_client.workerList()
+                        active_w = [w for w in workers if not getattr(w, "paused", False)]
+                        print(f"  [Network Cluster] Connected to server successfully!", flush=True)
+                        print(f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_w)} active workers)", flush=True)
+                        for idx, w in enumerate(workers, 1):
+                            host_label = getattr(w, "host", "Node")
+                            print(f"    • Node {idx}: {host_label} (GPU: {getattr(w, 'gpu_mask', 1)}, Priority: {getattr(w, 'priority', 0)})", flush=True)
+                    else:
+                        print(f"  [Network Cluster] [NOTICE] Server connection pending at {network_host}:{network_port}. Metashape will connect during task execution.", flush=True)
+            except Exception as e_net_chk:
+                print(f"  [Network Cluster] [NOTICE] Network server check: {e_net_chk}. Configuration applied.", flush=True)
+        except Exception as e_net_init:
+            print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}", flush=True)
+    elif Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
+        try:
+            Metashape.app.settings.network_enable = False
+        except Exception:
+            pass
 
     doc = Metashape.Document()
     resumed = False
@@ -2895,6 +2938,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
     parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
     parser.add_argument("--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format")
+    # Distributed Network Processing Cluster Options
+    parser.add_argument("--network-enable", action="store_true", default=False, help="Enable distributed network processing across worker nodes")
+    parser.add_argument("--network-host", default="127.0.0.1", help="Metashape server hostname or IP address (default: 127.0.0.1)")
+    parser.add_argument("--network-port", type=int, default=5840, help="Metashape server port (default: 5840)")
+    parser.add_argument("--network-path", default="", help="Shared network root directory (UNC path, e.g. \\\\SERVER\\RealityScan)")
     # Multi-chunk options
     parser.add_argument(
         "--multi-chunk",
@@ -3011,5 +3059,9 @@ if __name__ == "__main__":
         export_ply=args.export_ply,
         export_dxf=args.export_dxf,
         export_tie_points=args.export_tie_points,
+        network_enable=args.network_enable,
+        network_host=args.network_host,
+        network_port=args.network_port,
+        network_path=args.network_path,
         project_name=args.project_name,
     )

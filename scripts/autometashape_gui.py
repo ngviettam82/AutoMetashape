@@ -963,6 +963,13 @@ class AutoMetashapeStudio:
         self.var_exp_pages = tk.StringVar(value="16")
         self.var_exp_rebake = tk.BooleanVar(value=True)
 
+        # Distributed Network Processing Cluster Variables
+        self.var_network_enable = tk.BooleanVar(value=False)
+        self.var_network_host = tk.StringVar(value="127.0.0.1")
+        self.var_network_port = tk.StringVar(value="5840")
+        self.var_network_path = tk.StringVar(value="")
+        self.lbl_network_status = tk.StringVar(value="● Standby: Cluster disabled (processing locally)")
+
         self.lbl_photo_status = tk.StringVar(
             value="No folder selected. Click 'Browse...' to choose your raw photos folder."
         )
@@ -1288,6 +1295,7 @@ class AutoMetashapeStudio:
         self._build_folder_card(self.col_left)
         self._build_presets_card(self.col_left)
         self._build_recon_export_checklist_card(self.col_left)
+        self._build_network_card(self.col_left)
         self._build_advanced_settings_card(self.col_left)
         self._build_export_card(self.col_left)
 
@@ -1788,6 +1796,259 @@ class AutoMetashapeStudio:
         self.var_export_report.set(True)
         self._on_recon_export_checklist_changed()
 
+    # -----------------------------------------------------------------------
+    # Step 4: Distributed Network Processing Cluster Card
+    # -----------------------------------------------------------------------
+    def _build_network_card(self, parent: tk.Widget) -> None:
+        self.card_network = StudioCard(
+            parent,
+            title="4. Distributed Network Cluster",
+            subtitle="Distribute stereo matching, depth maps, and tiling across LAN worker nodes",
+        )
+        self.card_network.pack(fill=tk.X, pady=(0, 6))
+
+        # 1. Master Enable Toggle
+        row_toggle = tk.Frame(self.card_network.body, bg=UITheme.BG_SURFACE)
+        row_toggle.pack(fill=tk.X, pady=(0, 4))
+
+        cb_enable = tk.Checkbutton(
+            row_toggle,
+            text="Enable Network Processing Cluster (Multi-PC)",
+            variable=self.var_network_enable,
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.ACCENT_CYAN,
+            selectcolor=UITheme.BG_ROOT,
+            activebackground=UITheme.BG_SURFACE,
+            activeforeground=UITheme.ACCENT_CYAN,
+            bd=0,
+            command=self._on_network_enable_toggled,
+        )
+        cb_enable.pack(side=tk.LEFT)
+
+        # 2. Network Cluster Config Body (Expandable container)
+        self.frame_net_body = tk.Frame(
+            self.card_network.body,
+            bg=UITheme.BG_ROOT,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=8,
+            pady=6,
+        )
+        if self.var_network_enable.get():
+            self.frame_net_body.pack(fill=tk.X, pady=(4, 0))
+
+        # Row A: Server Host & Port & Test Button
+        row_a = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_a.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(row_a, text="Server Host / IP:", font=("Segoe UI", 8), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(0, 4))
+        ent_host = tk.Entry(
+            row_a,
+            textvariable=self.var_network_host,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            width=16,
+        )
+        ent_host.pack(side=tk.LEFT, padx=(0, 8))
+
+        tk.Label(row_a, text="Port:", font=("Segoe UI", 8), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(0, 4))
+        ent_port = tk.Entry(
+            row_a,
+            textvariable=self.var_network_port,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            width=6,
+        )
+        ent_port.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_test = tk.Button(
+            row_a,
+            text="Test Server",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            command=self._test_network_server,
+        )
+        btn_test.pack(side=tk.LEFT)
+
+        # Row B: Shared Network Data Root (UNC Path)
+        row_b = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_b.pack(fill=tk.X, pady=(0, 4))
+
+        tk.Label(row_b, text="Shared Network Storage Root (UNC / Mapped Share):", font=("Segoe UI", 8), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY).pack(anchor=tk.W)
+
+        row_b_in = tk.Frame(row_b, bg=UITheme.BG_ROOT)
+        row_b_in.pack(fill=tk.X, pady=(2, 0))
+
+        ent_path = tk.Entry(
+            row_b_in,
+            textvariable=self.var_network_path,
+            font=("Segoe UI", 9),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+        )
+        ent_path.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6))
+
+        btn_browse_net = tk.Button(
+            row_b_in,
+            text="Browse...",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._browse_network_path,
+        )
+        btn_browse_net.pack(side=tk.RIGHT)
+
+        lbl_path_hint = tk.Label(
+            self.frame_net_body,
+            text="ℹ All nodes and server must read/write this path (e.g. \\\\SERVER\\RealityScan or Z:\\)",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            anchor=tk.W,
+        )
+        lbl_path_hint.pack(fill=tk.X, pady=(1, 4))
+
+        # Row C: Telemetry Status Banner
+        row_c = tk.Frame(self.frame_net_body, bg=UITheme.BG_SURFACE, bd=1, relief=tk.SOLID, highlightbackground=UITheme.BORDER, padx=6, pady=4)
+        row_c.pack(fill=tk.X, pady=(2, 4))
+
+        self.lbl_net_telemetry = tk.Label(
+            row_c,
+            textvariable=self.lbl_network_status,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_SECONDARY,
+            anchor=tk.W,
+        )
+        self.lbl_net_telemetry.pack(fill=tk.X)
+
+        # Row D: Quick Command Helpers
+        row_d = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_d.pack(fill=tk.X, pady=(2, 0))
+
+        btn_cp_srv = tk.Button(
+            row_d,
+            text="Copy Server Launch Command",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BG_SURFACE,
+            activeforeground="white",
+            bd=0,
+            cursor="hand2",
+            command=self._copy_server_command,
+        )
+        btn_cp_srv.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_cp_node = tk.Button(
+            row_d,
+            text="Copy Worker Node Command",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BG_SURFACE,
+            activeforeground="white",
+            bd=0,
+            cursor="hand2",
+            command=self._copy_node_command,
+        )
+        btn_cp_node.pack(side=tk.LEFT)
+
+    def _on_network_enable_toggled(self) -> None:
+        if self.var_network_enable.get():
+            self.frame_net_body.pack(fill=tk.X, pady=(4, 0))
+            host = self.var_network_host.get().strip() or "127.0.0.1"
+            port = self.var_network_port.get().strip() or "5840"
+            self.lbl_network_status.set(f"● Cluster Mode Armed: Target Server={host}:{port}")
+            self.lbl_net_telemetry.config(fg=UITheme.ACCENT_CYAN)
+        else:
+            self.frame_net_body.pack_forget()
+            self.lbl_network_status.set("● Standby: Cluster disabled (processing locally)")
+            self.lbl_net_telemetry.config(fg=UITheme.TEXT_SECONDARY)
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _browse_network_path(self) -> None:
+        folder = filedialog.askdirectory(
+            title="Select Shared Network Storage Root (UNC / Mapped Share)",
+            initialdir=self.var_network_path.get() or os.path.expanduser("~"),
+        )
+        if folder:
+            self.var_network_path.set(folder)
+
+    def _copy_server_command(self) -> None:
+        exe = self.metashape_exe or "metashape.exe"
+        port = self.var_network_port.get().strip() or "5840"
+        try:
+            dispatch_port = str(int(port) + 1)
+        except Exception:
+            dispatch_port = "5841"
+        cmd = f'"{exe}" --server --control 0.0.0.0:{port} --dispatch 0.0.0.0:{dispatch_port}'
+        self.root.clipboard_clear()
+        self.root.clipboard_append(cmd)
+        self.lbl_network_status.set("✓ Server launch command copied to clipboard!")
+        self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)
+
+    def _copy_node_command(self) -> None:
+        exe = self.metashape_exe or "metashape.exe"
+        host = self.var_network_host.get().strip() or "127.0.0.1"
+        port = self.var_network_port.get().strip() or "5840"
+        root = self.var_network_path.get().strip() or "\\\\SERVER\\RealityScan"
+        cmd = f'"{exe}" --worker --host {host}:{port} --root "{root}"'
+        self.root.clipboard_clear()
+        self.root.clipboard_append(cmd)
+        self.lbl_network_status.set("✓ Worker node command copied to clipboard!")
+        self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)
+
+    def _test_network_server(self) -> None:
+        host = self.var_network_host.get().strip() or "127.0.0.1"
+        port = self.var_network_port.get().strip() or "5840"
+        self.lbl_network_status.set(f"Connecting to {host}:{port}...")
+        self.lbl_net_telemetry.config(fg=UITheme.ACCENT_CYAN)
+
+        def _bg():
+            try:
+                import Metashape
+                client = Metashape.NetworkClient()
+                if client.connect(f"{host}:{port}"):
+                    workers = client.workerList()
+                    active_w = [w for w in workers if not getattr(w, "paused", False)]
+                    msg = f"● Online: {len(workers)} Nodes connected ({len(active_w)} active) at {host}:{port}"
+                    self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)))
+                else:
+                    msg = f"○ Unreachable: Could not connect to {host}:{port}. Ensure 'metashape.exe --server' is running."
+                    self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.STATUS_WARNING)))
+            except Exception as e:
+                msg = f"○ Connection Error: {e}"
+                self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.STATUS_ERROR)))
+
+        threading.Thread(target=_bg, daemon=True).start()
+
     def _on_workflow_stage_toggled(self, changed_stage: str = "") -> None:
         """Enforces Metashape mathematical dependency cascade across workflow steps."""
         if getattr(self, "_in_cascade_sync", False):
@@ -1971,6 +2232,8 @@ class AutoMetashapeStudio:
             if hasattr(self, "card_recon_export"):
                 self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_adv)
                 self.card_recon_export.set_title("4. Export Deliverables Checklist")
+                if hasattr(self, "card_network"):
+                    self.card_network.pack(fill=tk.X, pady=(0, 6), after=self.card_recon_export)
 
         # Metashape Workflow Operations Selector (Always visible in Custom preset)
         box_workflow = tk.Frame(self.card_adv.body, bg=UITheme.BG_ROOT, bd=1, relief=tk.SOLID, padx=8, pady=6)
@@ -2779,6 +3042,8 @@ class AutoMetashapeStudio:
                 if hasattr(self, "card_recon_export"):
                     self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_adv)
                     self.card_recon_export.set_title("4. Export Deliverables Checklist")
+                    if hasattr(self, "card_network"):
+                        self.card_network.pack(fill=tk.X, pady=(0, 6), after=self.card_recon_export)
                 if not getattr(self, "adv_expanded", False):
                     self._toggle_advanced()
             else:
@@ -2786,6 +3051,8 @@ class AutoMetashapeStudio:
                 if hasattr(self, "card_recon_export"):
                     self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
                     self.card_recon_export.set_title("3. Export Deliverables Checklist")
+                    if hasattr(self, "card_network"):
+                        self.card_network.pack(fill=tk.X, pady=(0, 6), after=self.card_recon_export)
         for p_key, card in self.preset_cards.items():
             outer = card["outer"]
             inner = card["inner"]
@@ -3264,6 +3531,8 @@ class AutoMetashapeStudio:
                 if hasattr(self, "card_recon_export"):
                     self.card_recon_export.pack(fill=tk.X, pady=(0, 6), after=self.card_preset)
                     self.card_recon_export.set_title("3. Export Deliverables Checklist")
+            if hasattr(self, "card_network"):
+                self.card_network.pack(fill=tk.X, pady=(0, 6))
         elif mode == "export":
             self.btn_tab_export.config(bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_PRIMARY)
             self.btn_tab_recon.config(bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_SECONDARY)
@@ -3271,6 +3540,8 @@ class AutoMetashapeStudio:
             self.card_preset.pack_forget()
             if hasattr(self, "card_recon_export"):
                 self.card_recon_export.pack_forget()
+            if hasattr(self, "card_network"):
+                self.card_network.pack_forget()
             self.card_adv.pack_forget()
             self.card_export.pack(fill=tk.X, pady=(0, 6))
             if not self.var_psx_path.get().strip():
@@ -3692,6 +3963,15 @@ class AutoMetashapeStudio:
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":
             cmd.extend(["--chunk-align-method", self.var_chunk_align_method.get()])
+
+        if hasattr(self, "var_network_enable") and self.var_network_enable.get():
+            cmd.append("--network-enable")
+            if hasattr(self, "var_network_host") and self.var_network_host.get().strip():
+                cmd.extend(["--network-host", self.var_network_host.get().strip()])
+            if hasattr(self, "var_network_port") and self.var_network_port.get().strip():
+                cmd.extend(["--network-port", self.var_network_port.get().strip()])
+            if hasattr(self, "var_network_path") and self.var_network_path.get().strip():
+                cmd.extend(["--network-path", self.var_network_path.get().strip()])
 
         return cmd
 

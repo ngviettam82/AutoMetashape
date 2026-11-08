@@ -118,6 +118,29 @@ class TestCliArgs(unittest.TestCase):
             ])
             self.assertEqual(args.preset, preset)
 
+    def test_recon_parser_network_cluster_args(self) -> None:
+        """Defend distributed network cluster CLI flags in reconstruction parser."""
+        parser = build_recon_parser()
+        # Default: disabled
+        default_args = parser.parse_args(["--images", "dummy_images"])
+        self.assertFalse(default_args.network_enable)
+        self.assertEqual(default_args.network_host, "127.0.0.1")
+        self.assertEqual(default_args.network_port, 5840)
+        self.assertEqual(default_args.network_path, "")
+
+        # Explicit network configuration
+        net_args = parser.parse_args([
+            "--images", "dummy_images",
+            "--network-enable",
+            "--network-host", "192.168.1.150",
+            "--network-port", "5842",
+            "--network-path", r"\\SERVER\RealityScan",
+        ])
+        self.assertTrue(net_args.network_enable)
+        self.assertEqual(net_args.network_host, "192.168.1.150")
+        self.assertEqual(net_args.network_port, 5842)
+        self.assertEqual(net_args.network_path, r"\\SERVER\RealityScan")
+
     def test_export_parser_arguments(self) -> None:
         """Defend standalone export argument parser accepts required and optional flags."""
         parser = build_export_parser()
