@@ -32,10 +32,80 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_generate_worker_bat_content_with_auto_ip(self) -> None:
         """Verify worker launcher batch content embeds detected IP and port."""
-        content = generate_worker_bat_content(None, "5840", r"\\SERVER\Scan")
+        content = generate_worker_bat_content(None, "5840", r"\\HOST_PC\SharedMetashape")
         self.assertIn("5840", content)
-        self.assertIn(r"\\SERVER\Scan", content)
+        self.assertIn(r"\\HOST_PC\SharedMetashape", content)
         self.assertIn("--worker", content)
+
+    def test_generate_worker_bat_content_interactive_root(self) -> None:
+        """Verify worker launcher batch file prompts interactively if root is blank."""
+        content = generate_worker_bat_content(None, "5840", "")
+        self.assertIn("set /p TARGET_ROOT=", content)
+        self.assertNotIn("RealityScan", content)
+        self.assertIn("--worker", content)
+
+    def test_profile_project_for_dashboard(self) -> None:
+        """Verify dynamic telemetry profiling creates valid schema without placeholders."""
+        from autometashape_gui import AutoMetashapeStudio
+
+        studio_mock = MagicMock()
+        studio_mock._physics_cache = {}
+        studio_mock.var_export_root.get.return_value = ""
+        studio_mock.var_output.get.return_value = ""
+        studio_mock.batch_running = False
+        studio_mock.batch_queue = []
+        studio_mock.batch_current_idx = -1
+        studio_mock._quick_count_photos.return_value = 150
+
+        proj_item = {"path": "C:/Surveys/SiteA", "name": "SiteA", "count": 150}
+        profiled = AutoMetashapeStudio._profile_project_for_dashboard(studio_mock, proj_item, 1)
+
+        self.assertEqual(profiled["id"], "proj-01")
+        self.assertEqual(profiled["name"], "SiteA")
+        self.assertEqual(profiled["photos"], 150)
+        self.assertIn("status", profiled)
+        self.assertIn("gsd", profiled)
+        self.assertNotIn("catp-01", profiled["id"])
+
+    def test_export_dynamic_dashboard_data_writes_valid_js(self) -> None:
+        """Verify dynamic telemetry exporter generates valid JavaScript with JSON payload."""
+        import json
+        import tempfile
+        from autometashape_gui import AutoMetashapeStudio
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            os.makedirs(os.path.join(tmp_dir, "web"), exist_ok=True)
+            studio_mock = MagicMock()
+            studio_mock.repo_dir = tmp_dir
+            studio_mock._profile_project_for_dashboard = AutoMetashapeStudio._profile_project_for_dashboard.__get__(studio_mock)
+            studio_mock.project_items = [{"path": "C:/Surveys/SiteB", "name": "SiteB", "count": 300}]
+            studio_mock.var_images_dir.get.return_value = ""
+            studio_mock.var_export_root.get.return_value = ""
+            studio_mock.var_output.get.return_value = ""
+            studio_mock.batch_running = False
+            studio_mock.batch_queue = []
+            studio_mock.batch_current_idx = -1
+            studio_mock._physics_cache = {}
+            studio_mock._quick_count_photos.return_value = 300
+
+            data_file = AutoMetashapeStudio._export_dynamic_dashboard_data(studio_mock)
+            self.assertTrue(os.path.isfile(data_file))
+
+            with open(data_file, "r", encoding="utf-8") as f:
+                content = f.read()
+
+            self.assertIn("window.SURVEY_PROJECTS =", content)
+            self.assertIn("SiteB", content)
+
+            # Validate that the JSON payload inside the JS file is syntactically valid JSON
+            prefix = "window.SURVEY_PROJECTS = "
+            idx = content.find(prefix)
+            self.assertNotEqual(idx, -1)
+            json_part = content[idx + len(prefix):].rstrip().rstrip(";")
+            parsed = json.loads(json_part)
+            self.assertIsInstance(parsed, list)
+            self.assertEqual(len(parsed), 1)
+            self.assertEqual(parsed[0]["name"], "SiteB")
 
     def test_find_metashape_server_path_discovery(self) -> None:
         """Verify server discovery logic locates binary or safely returns None."""

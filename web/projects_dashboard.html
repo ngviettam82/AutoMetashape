@@ -634,23 +634,23 @@
       <section class="kpi-strip">
         <div class="kpi-cell">
           <div class="kpi-label">Total Survey Photos</div>
-          <div class="kpi-value">4,518</div>
-          <div class="kpi-meta"><span class="kpi-highlight">97.8%</span> registered cameras</div>
+          <div class="kpi-value" id="kpi-photos">0</div>
+          <div class="kpi-meta" id="kpi-photos-meta"><span class="kpi-highlight" id="kpi-registered">--</span> registered cameras</div>
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">Active Projects</div>
-          <div class="kpi-value">6</div>
-          <div class="kpi-meta">4 completed · 1 queued · 1 active</div>
+          <div class="kpi-value" id="kpi-projects">0</div>
+          <div class="kpi-meta" id="kpi-projects-meta">0 completed · 0 queued · 0 active</div>
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">Total 3D Mesh Faces</div>
-          <div class="kpi-value">13.2M</div>
-          <div class="kpi-meta">Across 8 deliverables</div>
+          <div class="kpi-value" id="kpi-faces">--</div>
+          <div class="kpi-meta" id="kpi-faces-meta">Across 0 deliverables</div>
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">8K Texture Atlases</div>
-          <div class="kpi-value">48 <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span></div>
-          <div class="kpi-meta">100% 1:1 ground texel parity</div>
+          <div class="kpi-value" id="kpi-textures">-- <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span></div>
+          <div class="kpi-meta">1:1 ground texel parity</div>
         </div>
       </section>
 
@@ -659,29 +659,15 @@
         <div style="flex: 1;">
           <div class="data-band-title">Survey Dataset Ground Sampling Distance (GSD) Distribution</div>
           <div style="margin-top: 8px;">
-            <svg viewBox="0 0 600 48" style="width: 100%; height: 48px; display: block;" role="img" aria-label="GSD Distribution Chart">
-              <!-- Gridline -->
+            <svg id="gsd-svg-bars" viewBox="0 0 600 48" style="width: 100%; height: 48px; display: block;" role="img" aria-label="GSD Distribution Chart">
               <line x1="0" y1="44" x2="600" y2="44" stroke="#e6e6e6" stroke-width="1" />
-              <!-- Bars for each project: active project in #1d5fbf, others in #d4d4d4 -->
-              <rect x="20" y="10" width="64" height="34" rx="2" fill="#1d5fbf" />
-              <text x="52" y="6" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">1.21</text>
-              <rect x="120" y="16" width="64" height="28" rx="2" fill="#1d5fbf" opacity="0.9" />
-              <text x="152" y="12" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">1.45</text>
-              <rect x="220" y="6" width="64" height="38" rx="2" fill="#1d5fbf" opacity="0.8" />
-              <text x="252" y="4" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">0.98</text>
-              <rect x="320" y="4" width="64" height="40" rx="2" fill="#1d5fbf" opacity="0.8" />
-              <text x="352" y="2" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">0.72</text>
-              <rect x="420" y="22" width="64" height="22" rx="2" fill="#1d5fbf" opacity="0.6" />
-              <text x="452" y="18" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">1.82</text>
-              <rect x="520" y="10" width="64" height="34" rx="2" fill="#1d5fbf" opacity="0.6" />
-              <text x="552" y="6" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="#1d5fbf">1.15</text>
             </svg>
           </div>
         </div>
         <div style="text-align: right; min-width: 150px; padding-left: 16px;">
           <div style="font-size: 13px; color: var(--muted);">Optimal GSD Range</div>
           <div style="font-family: var(--mono); font-size: 16px; font-weight: 600; color: var(--chart-3); margin-top: 2px;">&lt; 1.5 cm/px</div>
-          <div style="font-size: 12px; color: var(--muted); margin-top: 2px;">5 of 6 surveyed</div>
+          <div style="font-size: 12px; color: var(--muted); margin-top: 2px;" id="gsd-summary-meta">Live telemetry</div>
         </div>
       </div>
 
@@ -725,31 +711,31 @@
     <!-- Telemetry Detail Drawer -->
     <aside class="drawer" id="project-drawer">
       <div>
-        <h2 class="drawer-title" id="drawer-name">Toa nha 1 (District HQ)</h2>
-        <div class="drawer-meta" id="drawer-path">C:\Users\ADMIN\Documents\Reality Scan\Metashape\00. CATP\Toa nha 1</div>
+        <h2 class="drawer-title" id="drawer-name">Select a Project</h2>
+        <div class="drawer-meta" id="drawer-path">No project selected</div>
       </div>
 
       <div class="drawer-section">
         <div class="drawer-subtitle">Sensor & Optics Telemetry</div>
         <div class="metric-row">
           <span class="metric-label">Sensor Model</span>
-          <span class="metric-val" id="drawer-sensor">DJI Neo (FC9470)</span>
+          <span class="metric-val" id="drawer-sensor">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Focal Length</span>
-          <span class="metric-val" id="drawer-focal">3.05 mm</span>
+          <span class="metric-val" id="drawer-focal">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Pixel Pitch</span>
-          <span class="metric-val" id="drawer-pitch">1.72 µm</span>
+          <span class="metric-val" id="drawer-pitch">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Flight Altitude (AGL)</span>
-          <span class="metric-val" id="drawer-alt">21.6 m</span>
+          <span class="metric-val" id="drawer-alt">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Ground Sampling Distance</span>
-          <span class="metric-val" id="drawer-gsd">1.21 cm/px</span>
+          <span class="metric-val" id="drawer-gsd">--</span>
         </div>
       </div>
 
@@ -757,19 +743,19 @@
         <div class="drawer-subtitle">Survey Geometry & Bundle Adjustment</div>
         <div class="metric-row">
           <span class="metric-label">Forward / Lateral Overlap</span>
-          <span class="metric-val" id="drawer-overlap">78.7% / 80.9%</span>
+          <span class="metric-val" id="drawer-overlap">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Topographic Relief Ratio</span>
-          <span class="metric-val" id="drawer-relief">R = 0.783 (Arbitrary)</span>
+          <span class="metric-val" id="drawer-relief">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">USGS Reprojection Error</span>
-          <span class="metric-val" id="drawer-reproj">0.136 px (Sub-pixel)</span>
+          <span class="metric-val" id="drawer-reproj">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Rolling Shutter Regularization</span>
-          <span class="metric-val" id="drawer-shutter">Enabled</span>
+          <span class="metric-val" id="drawer-shutter">--</span>
         </div>
       </div>
 
@@ -777,15 +763,15 @@
         <div class="drawer-subtitle">Solved Mesh Deliverables</div>
         <div class="metric-row">
           <span class="metric-label">Model 1 (Default)</span>
-          <span class="metric-val" id="drawer-mesh-default">1,157,844 faces · 8x 8K</span>
+          <span class="metric-val" id="drawer-mesh-default">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Model 2 (High-Res 5M)</span>
-          <span class="metric-val" id="drawer-mesh-5m">5,029,883 faces · 8x 8K</span>
+          <span class="metric-val" id="drawer-mesh-5m">--</span>
         </div>
         <div class="metric-row">
           <span class="metric-label">Texture Memory</span>
-          <span class="metric-val" id="drawer-tex-mem">1.44 GB Atlas</span>
+          <span class="metric-val" id="drawer-tex-mem">--</span>
         </div>
       </div>
 
@@ -802,7 +788,7 @@
     <!-- Floating Batch Action Bar -->
     <div class="batch-bar" id="batch-bar">
       <div class="batch-info">
-        <span id="selected-count-label">2 projects selected</span>
+        <span id="selected-count-label">0 projects selected</span>
         <span style="opacity: 0.5;">·</span>
         <span style="opacity: 0.85;">Preset: Pro Photogrammetry (Default & 5M)</span>
       </div>
@@ -813,177 +799,157 @@
     </div>
   </div>
 
+  <script src="projects_data.js"></script>
   <script>
-    const projects = [
-      {
-        id: "catp-01",
-        name: "00. CATP / Toa nha 1",
-        scope: "District Police Headquarters Building",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\00. CATP\\Toa nha 1",
-        sensor: "DJI Neo (FC9470)",
-        focal: "3.05 mm",
-        pitch: "1.72 µm",
-        altitude: "21.6 m AGL",
-        gsd: "1.21",
-        photos: 978,
-        aligned: 974,
-        faces: "1.16M / 5.03M",
-        status: "completed",
-        statusLabel: "Completed (Dual)",
-        deliverables: "Toa nha 1.glb, Toa nha 1.obj, 8x 8K TIFFs, Toa nha 1.psx, PDF",
-        overlap: "78.7% / 80.9%",
-        relief: "0.783 (Arbitrary)",
-        reproj: "0.136 px",
-        shutter: "Regularized",
-        meshDefault: "1,157,844 faces · 8x 8K",
-        mesh5m: "5,029,883 faces · 8x 8K",
-        texMem: "1.44 GB Atlas",
-        selected: true
-      },
-      {
-        id: "catp-02",
-        name: "00. CATP / Toa nha 2",
-        scope: "Logistics & Fleet Command Center",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\00. CATP\\Toa nha 2",
-        sensor: "DJI Mavic 3 Enterprise",
-        focal: "12.3 mm",
-        pitch: "3.30 µm",
-        altitude: "45.0 m AGL",
-        gsd: "1.45",
-        photos: 840,
-        aligned: 838,
-        faces: "2,000,000",
-        status: "completed",
-        statusLabel: "Completed",
-        deliverables: "GLB, OBJ, 4x 8K TIFFs, PSX, PDF",
-        overlap: "82.1% / 79.5%",
-        relief: "0.620 (Arbitrary)",
-        reproj: "0.185 px",
-        shutter: "Mechanical Leaf",
-        meshDefault: "2,000,000 faces · 4x 8K",
-        mesh5m: "5,000,000 faces · 8x 8K",
-        texMem: "720 MB Atlas",
-        selected: true
-      },
-      {
-        id: "catp-03",
-        name: "00. CATP / Toa nha 3 - Substation",
-        scope: "High-Voltage Power Distribution Station",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\00. CATP\\Toa nha 3",
-        sensor: "DJI Phantom 4 RTK",
-        focal: "8.8 mm",
-        pitch: "2.41 µm",
-        altitude: "32.0 m AGL",
-        gsd: "0.98",
-        photos: 420,
-        aligned: 419,
-        faces: "800,000",
-        status: "ready",
-        statusLabel: "Depth Maps Ready",
-        deliverables: "PSX, Depth Maps, Point Cloud",
-        overlap: "85.0% / 82.0%",
-        relief: "0.450 (Arbitrary)",
-        reproj: "0.142 px",
-        shutter: "Mechanical Leaf",
-        meshDefault: "800,000 faces · 4x 8K",
-        mesh5m: "Ready to mesh",
-        texMem: "Pending",
-        selected: false
-      },
-      {
-        id: "catp-04",
-        name: "00. CATP / Cong trinh Tay Bac",
-        scope: "Northwest Administrative Wing & Training Yard",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\00. CATP\\Tay Bac",
-        sensor: "DJI Matrice 350 RTK / P1",
-        focal: "35.0 mm",
-        pitch: "4.40 µm",
-        altitude: "60.0 m AGL",
-        gsd: "0.72",
-        photos: 1250,
-        aligned: 0,
-        faces: "Pending",
-        status: "queued",
-        statusLabel: "Queued",
-        deliverables: "None (Raw Survey Ingested)",
-        overlap: "80.0% / 80.0%",
-        relief: "0.850 (Arbitrary)",
-        reproj: "Pending",
-        shutter: "Mechanical Leaf",
-        meshDefault: "Inferred ~2.5M faces",
-        mesh5m: "Optional 5M",
-        texMem: "Pending",
-        selected: false
-      },
-      {
-        id: "catp-05",
-        name: "Site Survey 05 - Perimeter",
-        scope: "Boundary Walls & Guard Posts",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\05. Perimeter",
-        sensor: "DJI Mini 4 Pro",
-        focal: "6.7 mm",
-        pitch: "2.00 µm",
-        altitude: "28.0 m AGL",
-        gsd: "1.82",
-        photos: 380,
-        aligned: 375,
-        faces: "Computing...",
-        status: "processing",
-        statusLabel: "Meshing (68%)",
-        deliverables: "In-Progress (CUDA)",
-        overlap: "75.0% / 78.0%",
-        relief: "0.320 (Arbitrary)",
-        reproj: "0.210 px",
-        shutter: "Regularized",
-        meshDefault: "600,000 faces",
-        mesh5m: "Queued",
-        texMem: "Active",
-        selected: false
-      },
-      {
-        id: "catp-06",
-        name: "Industrial Hangar 02",
-        scope: "Vehicle Maintenance & Storage Bay",
-        path: "C:\\Users\\ADMIN\\Documents\\Reality Scan\\Metashape\\Hangar 02",
-        sensor: "DJI Air 3",
-        focal: "4.5 mm",
-        pitch: "1.90 µm",
-        altitude: "35.0 m AGL",
-        gsd: "1.15",
-        photos: 650,
-        aligned: 0,
-        faces: "None",
-        status: "unaligned",
-        statusLabel: "Needs Alignment",
-        deliverables: "Raw GPS Photos",
-        overlap: "76.0% / 74.0%",
-        relief: "0.510 (Arbitrary)",
-        reproj: "N/A",
-        shutter: "Regularized",
-        meshDefault: "Inferred ~1.0M faces",
-        mesh5m: "Optional",
-        texMem: "None",
-        selected: false
-      }
-    ];
+    const projects = (typeof window.SURVEY_PROJECTS !== 'undefined' && Array.isArray(window.SURVEY_PROJECTS))
+      ? window.SURVEY_PROJECTS
+      : [];
 
     let activeFilter = "all";
-    let activeProjectId = "catp-01";
+    let activeProjectId = projects.length > 0 ? projects[0].id : null;
+
+    function updateKpiStrip() {
+      const totalPhotos = projects.reduce((acc, p) => acc + (parseInt(p.photos) || 0), 0);
+      const totalAligned = projects.reduce((acc, p) => acc + (parseInt(p.aligned) || 0), 0);
+      const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "--";
+      const completedCount = projects.filter(p => p.status === 'completed').length;
+      const queuedCount = projects.filter(p => p.status === 'queued').length;
+      const activeCount = projects.filter(p => p.status === 'processing').length;
+
+      const elPhotos = document.getElementById("kpi-photos");
+      if (elPhotos) elPhotos.textContent = totalPhotos.toLocaleString();
+      const elReg = document.getElementById("kpi-registered");
+      if (elReg) elReg.textContent = regPct;
+
+      const elProjects = document.getElementById("kpi-projects");
+      if (elProjects) elProjects.textContent = projects.length;
+      const elProjMeta = document.getElementById("kpi-projects-meta");
+      if (elProjMeta) elProjMeta.textContent = `${completedCount} completed · ${queuedCount} queued · ${activeCount} active`;
+
+      let deliverableCount = 0;
+      let totalFacesNum = 0;
+      let hasFaceData = false;
+      projects.forEach(p => {
+        if (p.deliverables && !p.deliverables.toLowerCase().includes("none") && !p.deliverables.toLowerCase().includes("raw")) {
+          deliverableCount++;
+        }
+        if (p.faces && typeof p.faces === 'string') {
+          const match = p.faces.match(/([0-9.,]+)\s*M/i);
+          if (match) {
+            totalFacesNum += parseFloat(match[1]) * 1000000;
+            hasFaceData = true;
+          } else {
+            const rawNum = parseInt(p.faces.replace(/[^0-9]/g, ''));
+            if (!isNaN(rawNum) && rawNum > 0) {
+              totalFacesNum += rawNum;
+              hasFaceData = true;
+            }
+          }
+        } else if (typeof p.faces === 'number') {
+          totalFacesNum += p.faces;
+          hasFaceData = true;
+        }
+      });
+
+      const elFaces = document.getElementById("kpi-faces");
+      if (elFaces) {
+        if (hasFaceData && totalFacesNum > 0) {
+          elFaces.textContent = totalFacesNum >= 1000000
+            ? (totalFacesNum / 1000000).toFixed(1) + "M"
+            : totalFacesNum.toLocaleString();
+        } else {
+          elFaces.textContent = projects.length > 0 ? "Pending" : "--";
+        }
+      }
+      const elFacesMeta = document.getElementById("kpi-faces-meta");
+      if (elFacesMeta) {
+        elFacesMeta.textContent = `Across ${deliverableCount} deliverable${deliverableCount === 1 ? '' : 's'}`;
+      }
+
+      let totalAtlasPages = 0;
+      projects.forEach(p => {
+        if (p.meshDefault && p.meshDefault.includes("8K")) {
+          const m = p.meshDefault.match(/(\d+)x\s*8K/i);
+          totalAtlasPages += m ? parseInt(m[1]) : 8;
+        }
+      });
+      const elTextures = document.getElementById("kpi-textures");
+      if (elTextures) {
+        elTextures.innerHTML = `${totalAtlasPages > 0 ? totalAtlasPages : '--'} <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span>`;
+      }
+
+      const svg = document.getElementById("gsd-svg-bars");
+      if (svg) {
+        const lineHtml = '<line x1="0" y1="44" x2="600" y2="44" stroke="#e6e6e6" stroke-width="1" />';
+        if (projects.length === 0) {
+          svg.innerHTML = lineHtml + '<text x="300" y="28" text-anchor="middle" font-size="12" font-family="var(--font)" fill="#a0a0a0">No active survey datasets</text>';
+        } else {
+          const slice = projects.slice(0, 8);
+          const barWidth = Math.min(64, Math.max(32, Math.floor(520 / slice.length) - 16));
+          const gap = Math.floor((560 - slice.length * barWidth) / (slice.length + 1));
+          let barsHtml = lineHtml;
+          let optimalCount = 0;
+
+          slice.forEach((p, idx) => {
+            const gsdVal = parseFloat(p.gsd) || 1.0;
+            if (gsdVal < 1.5) optimalCount++;
+            const x = gap + idx * (barWidth + gap);
+            const h = Math.max(12, Math.min(38, Math.round(38 * (1.8 / Math.max(0.5, gsdVal)))));
+            const y = 44 - h;
+            const isSel = (p.id === activeProjectId);
+            const fill = isSel ? "#1d5fbf" : (p.status === "completed" ? "#247b50" : "#a1a1aa");
+            const opacity = isSel ? "1.0" : "0.75";
+            barsHtml += `<rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="2" fill="${fill}" opacity="${opacity}" />`;
+            barsHtml += `<text x="${x + barWidth / 2}" y="${Math.max(10, y - 4)}" text-anchor="middle" font-size="10" font-family="'Geist Mono', monospace" fill="${fill}">${gsdVal.toFixed(2)}</text>`;
+          });
+          svg.innerHTML = barsHtml;
+
+          const elGsdMeta = document.getElementById("gsd-summary-meta");
+          if (elGsdMeta) {
+            elGsdMeta.textContent = `${optimalCount} of ${projects.length} surveyed (< 1.5 cm/px)`;
+          }
+        }
+      }
+    }
 
     function renderTable() {
       const tbody = document.getElementById("projects-table-body");
       tbody.innerHTML = "";
 
-      const query = document.getElementById("search-input").value.toLowerCase();
+      const query = (document.getElementById("search-input").value || "").toLowerCase();
       const filtered = projects.filter(p => {
         const matchesFilter = activeFilter === "all" || p.status === activeFilter;
-        const matchesQuery = !query || p.name.toLowerCase().includes(query) || p.sensor.toLowerCase().includes(query);
+        const matchesQuery = !query ||
+          (p.name && p.name.toLowerCase().includes(query)) ||
+          (p.sensor && p.sensor.toLowerCase().includes(query)) ||
+          (p.path && p.path.toLowerCase().includes(query));
         return matchesFilter && matchesQuery;
       });
+
+      if (filtered.length === 0) {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `
+          <td colspan="8" style="text-align: center; padding: 48px 16px; color: var(--muted);">
+            <div style="font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px;">
+              ${projects.length === 0 ? "No Survey Projects Found" : "No Matching Projects"}
+            </div>
+            <div style="font-size: 13px;">
+              ${projects.length === 0
+                ? "Add drone survey project folders in AutoMetashape GUI or execute batch reconstructions to populate telemetry."
+                : "No projects match the current filter or search criteria."}
+            </div>
+          </td>
+        `;
+        tbody.appendChild(tr);
+        updateBatchBar();
+        updateKpiStrip();
+        return;
+      }
 
       filtered.forEach(p => {
         const tr = document.createElement("tr");
         if (p.selected) tr.classList.add("selected");
+        if (p.id === activeProjectId) tr.style.backgroundColor = "var(--active)";
         tr.style.cursor = "pointer";
 
         tr.innerHTML = `
@@ -991,17 +957,17 @@
             <input type="checkbox" class="checkbox row-check" data-id="${p.id}" ${p.selected ? "checked" : ""}>
           </td>
           <td>
-            <div class="project-name">${p.name}</div>
-            <div class="project-path">${p.path}</div>
+            <div class="project-name">${p.name || "Untitled Project"}</div>
+            <div class="project-path">${p.path || ""}</div>
           </td>
-          <td>${p.sensor}</td>
-          <td class="num">${p.photos.toLocaleString()}</td>
-          <td class="num">${p.gsd}</td>
-          <td class="num">${p.faces}</td>
+          <td>${p.sensor || "Unknown"}</td>
+          <td class="num">${(p.photos || 0).toLocaleString()}</td>
+          <td class="num">${p.gsd || "--"}</td>
+          <td class="num">${p.faces || "--"}</td>
           <td>
-            <span class="pill pill-${p.status}">${p.statusLabel}</span>
+            <span class="pill pill-${p.status || 'unaligned'}">${p.statusLabel || p.status || 'Ready'}</span>
           </td>
-          <td style="color: var(--muted); font-size: 13px;">${p.deliverables}</td>
+          <td style="color: var(--muted); font-size: 13px;">${p.deliverables || "--"}</td>
         `;
 
         tr.addEventListener("click", () => selectProject(p.id));
@@ -1019,27 +985,45 @@
       });
 
       updateBatchBar();
+      updateKpiStrip();
     }
 
     function selectProject(id) {
       activeProjectId = id;
       const p = projects.find(x => x.id === id);
-      if (!p) return;
+      if (!p) {
+        document.getElementById("drawer-name").textContent = "Select a Project";
+        document.getElementById("drawer-path").textContent = "No project selected";
+        document.getElementById("drawer-sensor").textContent = "--";
+        document.getElementById("drawer-focal").textContent = "--";
+        document.getElementById("drawer-pitch").textContent = "--";
+        document.getElementById("drawer-alt").textContent = "--";
+        document.getElementById("drawer-gsd").textContent = "--";
+        document.getElementById("drawer-overlap").textContent = "--";
+        document.getElementById("drawer-relief").textContent = "--";
+        document.getElementById("drawer-reproj").textContent = "--";
+        document.getElementById("drawer-shutter").textContent = "--";
+        document.getElementById("drawer-mesh-default").textContent = "--";
+        document.getElementById("drawer-mesh-5m").textContent = "--";
+        document.getElementById("drawer-tex-mem").textContent = "--";
+        return;
+      }
 
-      document.getElementById("drawer-name").textContent = p.name;
-      document.getElementById("drawer-path").textContent = p.path;
-      document.getElementById("drawer-sensor").textContent = p.sensor;
-      document.getElementById("drawer-focal").textContent = p.focal;
-      document.getElementById("drawer-pitch").textContent = p.pitch;
-      document.getElementById("drawer-alt").textContent = p.altitude;
-      document.getElementById("drawer-gsd").textContent = p.gsd + " cm/px";
-      document.getElementById("drawer-overlap").textContent = p.overlap;
-      document.getElementById("drawer-relief").textContent = p.relief;
-      document.getElementById("drawer-reproj").textContent = p.reproj;
-      document.getElementById("drawer-shutter").textContent = p.shutter;
-      document.getElementById("drawer-mesh-default").textContent = p.meshDefault;
-      document.getElementById("drawer-mesh-5m").textContent = p.mesh5m;
-      document.getElementById("drawer-tex-mem").textContent = p.texMem;
+      document.getElementById("drawer-name").textContent = p.name || "Untitled";
+      document.getElementById("drawer-path").textContent = p.path || "--";
+      document.getElementById("drawer-sensor").textContent = p.sensor || "--";
+      document.getElementById("drawer-focal").textContent = p.focal || "--";
+      document.getElementById("drawer-pitch").textContent = p.pitch || "--";
+      document.getElementById("drawer-alt").textContent = p.altitude || "--";
+      document.getElementById("drawer-gsd").textContent = p.gsd ? p.gsd + " cm/px" : "--";
+      document.getElementById("drawer-overlap").textContent = p.overlap || "--";
+      document.getElementById("drawer-relief").textContent = p.relief || "--";
+      document.getElementById("drawer-reproj").textContent = p.reproj || "--";
+      document.getElementById("drawer-shutter").textContent = p.shutter || "--";
+      document.getElementById("drawer-mesh-default").textContent = p.meshDefault || "--";
+      document.getElementById("drawer-mesh-5m").textContent = p.mesh5m || "--";
+      document.getElementById("drawer-tex-mem").textContent = p.texMem || "--";
+      updateKpiStrip();
     }
 
     function updateBatchBar() {
@@ -1051,16 +1035,18 @@
 
       if (count > 0) {
         bar.style.display = "flex";
-        label.textContent = `${count} project${count > 1 ? "s" : ""} selected`;
-        btnBatchRun.textContent = `Run Selected (${count})`;
+        if (label) label.textContent = `${count} project${count > 1 ? "s" : ""} selected`;
+        if (btnBatchRun) btnBatchRun.textContent = `Run Selected (${count})`;
       } else {
         bar.style.display = "none";
-        btnBatchRun.textContent = "Run Selected (0)";
+        if (btnBatchRun) btnBatchRun.textContent = "Run Selected (0)";
       }
 
       const checkAll = document.getElementById("check-all");
-      checkAll.checked = count === projects.length;
-      checkAll.indeterminate = count > 0 && count < projects.length;
+      if (checkAll) {
+        checkAll.checked = (projects.length > 0 && count === projects.length);
+        checkAll.indeterminate = count > 0 && count < projects.length;
+      }
     }
 
     document.getElementById("check-all").addEventListener("change", (e) => {
@@ -1082,19 +1068,63 @@
 
     document.getElementById("btn-copy-cli").addEventListener("click", () => {
       const selected = projects.filter(p => p.selected);
-      const cmds = selected.map(p => `& "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" -r scripts\\metashape_reconstruction.py --images "${p.path}" --project-name "${p.name.includes('/') ? p.name.split('/').pop().trim() : p.name}" --preset pro`).join("\n");
+      if (selected.length === 0) {
+        alert("No projects selected.");
+        return;
+      }
+      const cmds = selected.map(p => `& "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts\metashape_reconstruction.py --images "${p.path}" --project-name "${(p.name || '').includes('/') ? p.name.split('/').pop().trim() : (p.name || 'Project')}" --preset pro`).join("
+");
       navigator.clipboard.writeText(cmds);
       alert(`Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
     });
 
     document.getElementById("btn-execute-batch").addEventListener("click", () => {
       const selected = projects.filter(p => p.selected);
+      if (selected.length === 0) {
+        alert("No projects selected.");
+        return;
+      }
       alert(`Queued ${selected.length} projects for sequential autonomous reconstruction:
-${selected.map(p => "• " + p.name).join("\n")}`);
+${selected.map(p => "• " + (p.name || p.path)).join("
+")}`);
     });
 
+    const btnOpenMetashape = document.getElementById("btn-open-metashape");
+    if (btnOpenMetashape) {
+      btnOpenMetashape.addEventListener("click", () => {
+        const p = projects.find(x => x.id === activeProjectId);
+        if (p && p.path) {
+          navigator.clipboard.writeText(`& "metashape.exe" "${p.path}"`);
+          alert(`Project path copied to clipboard:
+${p.path}
+
+You can launch Metashape Pro with this project directly.`);
+        } else {
+          alert("Please select a project first.");
+        }
+      });
+    }
+
+    const btnInspectFolder = document.getElementById("btn-inspect-folder");
+    if (btnInspectFolder) {
+      btnInspectFolder.addEventListener("click", () => {
+        const p = projects.find(x => x.id === activeProjectId);
+        if (p && p.path) {
+          navigator.clipboard.writeText(p.path);
+          alert(`Copied path to clipboard:
+${p.path}`);
+        } else {
+          alert("Please select a project first.");
+        }
+      });
+    }
+
     renderTable();
-    selectProject("catp-01");
+    if (projects.length > 0) {
+      selectProject(projects[0].id);
+    } else {
+      selectProject(null);
+    }
   </script>
 </body>
 </html>
