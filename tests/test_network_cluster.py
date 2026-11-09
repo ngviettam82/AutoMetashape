@@ -15,7 +15,12 @@ from unittest.mock import MagicMock
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-from autometashape_gui import find_metashape_server_path, generate_worker_bat_content, get_primary_lan_ip
+from autometashape_gui import (
+    find_metashape_server_path,
+    generate_worker_bat_content,
+    get_primary_lan_ip,
+    pick_multiple_folders,
+)
 
 
 class TestNetworkCluster(unittest.TestCase):
@@ -267,6 +272,84 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertIn("--export-orthomosaic", cmd)
         self.assertIn("--texture-format", cmd)
         self.assertIn("png", cmd)
+
+    def test_pick_multiple_folders_fallback(self) -> None:
+        """Verify pick_multiple_folders falls back to filedialog when COM is mocked/fails."""
+        from unittest.mock import patch
+
+        with patch("tkinter.filedialog.askdirectory", return_value="C:/Mocked/Path"):
+            with patch("sys.platform", "linux"):
+                res = pick_multiple_folders(title="Test")
+                self.assertEqual(res, ["C:/Mocked/Path"])
+
+        with patch("tkinter.filedialog.askdirectory", return_value=""):
+            with patch("sys.platform", "linux"):
+                res_empty = pick_multiple_folders(title="Test")
+                self.assertEqual(res_empty, [])
+
+    def test_add_project_to_queue_multiple_folders(self) -> None:
+        """Verify multi-folder addition ingests multiple folders and avoids duplicates."""
+        import tempfile
+        from autometashape_gui import AutoMetashapeStudio
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            f1 = os.path.join(tmp_dir, "Survey_A")
+            f2 = os.path.join(tmp_dir, "Survey_B")
+            os.makedirs(f1, exist_ok=True)
+            os.makedirs(f2, exist_ok=True)
+            with open(os.path.join(f1, "img1.jpg"), "w") as f:
+                f.write("0")
+            with open(os.path.join(f2, "img2.jpg"), "w") as f:
+                f.write("0")
+
+            gui_mock = MagicMock()
+            gui_mock.project_items = []
+            var_dir = MagicMock()
+            var_dir.get.return_value = ""
+            gui_mock.var_images_dir = var_dir
+            gui_mock._quick_count_photos.side_effect = lambda path: 1
+
+            AutoMetashapeStudio._add_project_to_queue(gui_mock, [f1, f2])
+
+            self.assertEqual(len(gui_mock.project_items), 2)
+            self.assertEqual(os.path.normpath(gui_mock.project_items[0]["path"]), os.path.normpath(f1))
+            self.assertEqual(os.path.normpath(gui_mock.project_items[1]["path"]), os.path.normpath(f2))
+            var_dir.set.assert_called_with(f1)
+
+            # Re-adding f1 should not create duplicates
+            AutoMetashapeStudio._add_project_to_queue(gui_mock, [f1])
+            self.assertEqual(len(gui_mock.project_items), 2)
+
+    def test_add_project_to_queue_subfolder_expansion(self) -> None:
+        """Verify adding a parent directory with subprojects automatically expands them."""
+        import tempfile
+        from autometashape_gui import AutoMetashapeStudio
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            parent_dir = os.path.join(tmp_dir, "Campaign_Flight1")
+            sub_a = os.path.join(parent_dir, "Grid_East")
+            sub_b = os.path.join(parent_dir, "Grid_West")
+            os.makedirs(sub_a, exist_ok=True)
+            os.makedirs(sub_b, exist_ok=True)
+            with open(os.path.join(sub_a, "photo_a.jpg"), "w") as f:
+                f.write("0")
+            with open(os.path.join(sub_b, "photo_b.jpg"), "w") as f:
+                f.write("0")
+
+            gui_mock = MagicMock()
+            gui_mock.project_items = []
+            var_dir = MagicMock()
+            var_dir.get.return_value = ""
+            gui_mock.var_images_dir = var_dir
+            gui_mock._quick_count_photos.side_effect = lambda path: 1 if "Grid_" in path else 0
+
+            # Adding parent_dir (which has no direct images, only subfolders)
+            AutoMetashapeStudio._add_project_to_queue(gui_mock, [parent_dir])
+
+            self.assertEqual(len(gui_mock.project_items), 2)
+            names = [item["name"] for item in gui_mock.project_items]
+            self.assertIn("Grid_East", names)
+            self.assertIn("Grid_West", names)
 
 
 if __name__ == "__main__":

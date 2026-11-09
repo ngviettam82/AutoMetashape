@@ -241,6 +241,97 @@ def get_primary_lan_ip() -> str:
         s.close()
 
 
+def pick_multiple_folders(parent_hwnd=None, title: str = "Select Project Folders (Hold Ctrl/Shift to Select Multiple)") -> list[str]:
+    """Native Windows multi-folder selection dialog with fallback to single directory picker."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+            from ctypes import wintypes, POINTER, c_void_p, c_wchar_p, c_ulong, HRESULT, byref
+
+            ole32 = ctypes.windll.ole32
+            ole32.CoInitializeEx(None, 2)
+
+            class GUID(ctypes.Structure):
+                _fields_ = [
+                    ("Data1", wintypes.DWORD),
+                    ("Data2", wintypes.WORD),
+                    ("Data3", wintypes.WORD),
+                    ("Data4", wintypes.BYTE * 8)
+                ]
+
+            def str_to_guid(s: str):
+                import uuid
+                u = uuid.UUID(s)
+                b = u.bytes_le
+                return GUID(
+                    int.from_bytes(b[0:4], "little"),
+                    int.from_bytes(b[4:6], "little"),
+                    int.from_bytes(b[6:8], "little"),
+                    (wintypes.BYTE * 8)(*b[8:16])
+                )
+
+            clsid = str_to_guid("DC1C5A9C-E88A-4DDE-A5A1-60F82A20AEF7")
+            iid = str_to_guid("D57C7288-D4AD-4768-BE02-9D969532D960")
+
+            p_dialog = c_void_p()
+            hr = ole32.CoCreateInstance(byref(clsid), None, 1, byref(iid), byref(p_dialog))
+            if hr == 0 and p_dialog:
+                vtable = ctypes.cast(p_dialog, POINTER(POINTER(c_void_p))).contents
+
+                Show = ctypes.WINFUNCTYPE(HRESULT, c_void_p, wintypes.HWND)(vtable[3])
+                SetOptions = ctypes.WINFUNCTYPE(HRESULT, c_void_p, wintypes.DWORD)(vtable[9])
+                GetOptions = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(wintypes.DWORD))(vtable[10])
+                SetTitle = ctypes.WINFUNCTYPE(HRESULT, c_void_p, c_wchar_p)(vtable[17])
+                GetResults = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(c_void_p))(vtable[27])
+                Release = ctypes.WINFUNCTYPE(c_ulong, c_void_p)(vtable[2])
+
+                options = wintypes.DWORD()
+                GetOptions(p_dialog, byref(options))
+                FOS_PICKFOLDERS = 0x00000020
+                FOS_ALLOWMULTISELECT = 0x00000200
+                SetOptions(p_dialog, options.value | FOS_PICKFOLDERS | FOS_ALLOWMULTISELECT)
+
+                if title:
+                    SetTitle(p_dialog, title)
+
+                hr_show = Show(p_dialog, parent_hwnd)
+                if hr_show == 0:
+                    p_array = c_void_p()
+                    if GetResults(p_dialog, byref(p_array)) == 0 and p_array:
+                        arr_vt = ctypes.cast(p_array, POINTER(POINTER(c_void_p))).contents
+                        ArrRelease = ctypes.WINFUNCTYPE(c_ulong, c_void_p)(arr_vt[2])
+                        GetCount = ctypes.WINFUNCTYPE(HRESULT, c_void_p, POINTER(wintypes.DWORD))(arr_vt[7])
+                        GetItemAt = ctypes.WINFUNCTYPE(HRESULT, c_void_p, wintypes.DWORD, POINTER(c_void_p))(arr_vt[8])
+
+                        count = wintypes.DWORD()
+                        GetCount(p_array, byref(count))
+                        results = []
+                        for i in range(count.value):
+                            p_item = c_void_p()
+                            if GetItemAt(p_array, i, byref(p_item)) == 0 and p_item:
+                                item_vt = ctypes.cast(p_item, POINTER(POINTER(c_void_p))).contents
+                                ItemRelease = ctypes.WINFUNCTYPE(c_ulong, c_void_p)(item_vt[2])
+                                GetDisplayName = ctypes.WINFUNCTYPE(HRESULT, c_void_p, wintypes.DWORD, POINTER(c_void_p))(item_vt[5])
+
+                                p_str = c_void_p()
+                                # SIGDN_FILESYSPATH = 0x80058000
+                                if GetDisplayName(p_item, 0x80058000, byref(p_str)) == 0 and p_str:
+                                    results.append(ctypes.wstring_at(p_str))
+                                    ole32.CoTaskMemFree(p_str)
+                                ItemRelease(p_item)
+                        ArrRelease(p_array)
+                        Release(p_dialog)
+                        return results
+                Release(p_dialog)
+                return []
+        except Exception:
+            pass
+
+    from tkinter import filedialog
+    single = filedialog.askdirectory(title=title)
+    return [single] if single else []
+
+
 def generate_worker_bat_content(host: str | None = None, port: str = "5840", root_path: str = "") -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
     target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
@@ -1604,7 +1695,7 @@ class AutoMetashapeStudio:
 
         chk_pipelined = tk.Checkbutton(
             row_pipeline_opts,
-            text="⚡ Pipelined Compute-Export Overlap (Host exports while cluster starts next project)",
+            text="Pipelined Compute-Export Overlap (Host exports while cluster starts next project)",
             variable=self.var_pipelined_export,
             font=("Segoe UI", 8, "bold"),
             bg=UITheme.BG_ROOT,
@@ -1712,7 +1803,7 @@ class AutoMetashapeStudio:
 
         btn_diag = tk.Button(
             bar_diag,
-            text="🔬 Inspect Survey Physics & Optics Telemetry",
+            text="Inspect Survey Physics & Optics Telemetry",
             font=("Segoe UI", 8, "bold"),
             bg=UITheme.BG_SURFACE_RAISED,
             fg=UITheme.ACCENT_CYAN,
@@ -3330,30 +3421,136 @@ class AutoMetashapeStudio:
             self.var_export_root.set(norm)
             self._render_queue_items()
 
-    def _add_project_to_queue(self, folder: str | None = None) -> None:
-        if not folder:
-            chosen = filedialog.askdirectory(title="Select Drone Survey Project Folder to Add")
-            if not chosen or not os.path.isdir(chosen):
+    def _add_project_to_queue(self, folders: str | list[str] | None = None) -> None:
+        """Add one or multiple survey project folders to the queue with smart subfolder scanning."""
+        if folders is None:
+            hwnd = self.root.winfo_id() if hasattr(self, "root") else None
+            selected_folders = pick_multiple_folders(parent_hwnd=hwnd, title="Select Project Folders (Hold Ctrl/Shift to Select Multiple)")
+            if not selected_folders:
                 return
-            folder = os.path.normpath(chosen)
+        elif isinstance(folders, str):
+            selected_folders = [folders]
         else:
+            selected_folders = list(folders)
+
+        added_count = 0
+        total_photos_added = 0
+        exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng")
+
+        for folder in selected_folders:
+            if not folder or not os.path.isdir(folder):
+                continue
             folder = os.path.normpath(folder)
 
-        # Check duplicate
-        if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
-            messagebox.showinfo("Project Already Queued", f"The folder '{folder}' is already in the project queue.")
+            cnt = self._quick_count_photos(folder)
+
+            # Check direct photos vs subfolders
+            has_direct_photos = False
+            try:
+                has_direct_photos = any(
+                    f.lower().endswith(exts)
+                    for f in os.listdir(folder)
+                    if os.path.isfile(os.path.join(folder, f))
+                )
+            except Exception:
+                has_direct_photos = False
+
+            subdirs_with_photos = []
+            try:
+                for entry in sorted(os.listdir(folder)):
+                    sub_p = os.path.join(folder, entry)
+                    if os.path.isdir(sub_p) and not entry.lower().startswith((".", "export", "output", "model")):
+                        sub_cnt = self._quick_count_photos(sub_p)
+                        if sub_cnt > 0:
+                            subdirs_with_photos.append((sub_p, entry, sub_cnt))
+            except Exception:
+                subdirs_with_photos = []
+
+            # If folder has NO direct photos but has subfolders with photos, expand them!
+            if not has_direct_photos and len(subdirs_with_photos) >= 1:
+                for sub_p, sub_name, sub_cnt in subdirs_with_photos:
+                    if not any(os.path.normpath(p["path"]) == sub_p for p in self.project_items):
+                        name = infer_project_name(images_dir=sub_p) if infer_project_name else sub_name
+                        self.project_items.append({
+                            "path": sub_p,
+                            "name": name,
+                            "count": sub_cnt,
+                        })
+                        added_count += 1
+                        total_photos_added += sub_cnt
+            else:
+                if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
+                    continue
+
+                name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
+                self.project_items.append({
+                    "path": folder,
+                    "name": name,
+                    "count": cnt,
+                })
+                added_count += 1
+                total_photos_added += cnt
+
+        if self.project_items and not self.var_images_dir.get().strip():
+            self.var_images_dir.set(self.project_items[0]["path"])
+
+        self._update_queue_ui()
+        if added_count > 1:
+            self._log(f"[Queue] Added {added_count} survey projects ({total_photos_added:,} photos) to batch queue.", "info")
+        elif added_count == 1:
+            self._log(f"[Queue] Added project '{self.project_items[-1]['name']}' ({total_photos_added:,} photos) to batch queue.", "info")
+
+    def _scan_parent_directory(self) -> None:
+        """Scan a parent directory and automatically queue all survey project folders inside it."""
+        chosen = filedialog.askdirectory(title="Select Parent Folder to Batch Scan for Survey Projects")
+        if not chosen or not os.path.isdir(chosen):
             return
 
-        name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
-        cnt = self._quick_count_photos(folder)
-        self.project_items.append({
-            "path": folder,
-            "name": name,
-            "count": cnt,
-        })
-        if len(self.project_items) == 1:
-            self.var_images_dir.set(folder)
+        parent = os.path.normpath(chosen)
+        subprojects = []
+        try:
+            for entry in sorted(os.listdir(parent)):
+                sub_path = os.path.join(parent, entry)
+                if os.path.isdir(sub_path) and not entry.lower().startswith((".", "export", "output", "model")):
+                    cnt = self._quick_count_photos(sub_path)
+                    if cnt > 0:
+                        name = infer_project_name(images_dir=sub_path) if infer_project_name else entry
+                        subprojects.append({
+                            "path": sub_path,
+                            "name": name,
+                            "count": cnt,
+                        })
+        except Exception as e:
+            messagebox.showerror("Scan Error", f"Failed to scan directory:\n{e}")
+            return
+
+        if not subprojects:
+            parent_cnt = self._quick_count_photos(parent)
+            if parent_cnt > 0:
+                self._add_project_to_queue([parent])
+                return
+            messagebox.showinfo(
+                "No Projects Found",
+                f"No subfolders containing drone survey photos were found in:\n{parent}\n\n"
+                "Ensure survey photos (.jpg, .png, .tif, .dng) are inside subfolders.",
+            )
+            return
+
+        added = 0
+        total_photos = 0
+        for p in subprojects:
+            if not any(os.path.normpath(item["path"]) == p["path"] for item in self.project_items):
+                self.project_items.append(p)
+                added += 1
+                total_photos += p["count"]
+
+        if self.project_items and not self.var_images_dir.get().strip():
+            self.var_images_dir.set(self.project_items[0]["path"])
+
         self._update_queue_ui()
+        msg = f"Added {added} survey project(s) to the queue ({total_photos:,} total photos)."
+        self._log(f"[Batch Scan] {msg}", "info")
+        messagebox.showinfo("Batch Import Complete", msg)
 
     def _remove_queue_item(self, idx: int) -> None:
         if 0 <= idx < len(self.project_items):
@@ -3396,7 +3593,7 @@ class AutoMetashapeStudio:
             empty_frame.pack(fill=tk.BOTH, expand=True)
             tk.Label(
                 empty_frame,
-                text="📂 No survey projects added to queue",
+                text="No survey projects in batch queue",
                 font=("Segoe UI", 9, "bold"),
                 bg=UITheme.BG_INPUT,
                 fg=UITheme.TEXT_MUTED,
@@ -3438,7 +3635,7 @@ class AutoMetashapeStudio:
             # Project folder name
             lbl_name = tk.Label(
                 row,
-                text=f"📁 {item['name']}",
+                text=item['name'],
                 font=("Segoe UI", 8, "bold"),
                 bg=UITheme.BG_SURFACE_RAISED,
                 fg=UITheme.TEXT_PRIMARY,
@@ -3462,7 +3659,7 @@ class AutoMetashapeStudio:
             if has_existing:
                 lbl_st = tk.Label(
                     row,
-                    text="⚠️ Target exists",
+                    text="Target exists",
                     font=("Segoe UI", 7, "bold"),
                     bg=UITheme.BG_SURFACE_RAISED,
                     fg=UITheme.ACCENT_AMBER_TXT,
@@ -3470,7 +3667,7 @@ class AutoMetashapeStudio:
             else:
                 lbl_st = tk.Label(
                     row,
-                    text="✨ Ready (New)",
+                    text="Ready",
                     font=("Segoe UI", 7),
                     bg=UITheme.BG_SURFACE_RAISED,
                     fg=UITheme.TEXT_MUTED,

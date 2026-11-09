@@ -595,11 +595,11 @@
       <div class="nav-label">Workspaces</div>
       <a href="#" class="nav-link active">
         <span>Survey Projects</span>
-        <span class="nav-badge" id="badge-total">6</span>
+        <span class="nav-badge" id="badge-total">0</span>
       </a>
       <a href="#" class="nav-link">
         <span>Batch Execution</span>
-        <span class="nav-badge" id="badge-queue">1</span>
+        <span class="nav-badge" id="badge-queue">0</span>
       </a>
       <a href="#" class="nav-link">
         <span>Asset Catalog</span>
@@ -625,8 +625,9 @@
           <div class="header-sub">Manage, profile telemetry, and execute batch reconstructions across multiple survey datasets</div>
         </div>
         <div class="header-actions">
+          <button class="btn" id="btn-reload-data" title="Reload live telemetry data from disk">Reload Telemetry</button>
           <button class="btn" id="btn-scan">Scan Survey Directory</button>
-          <button class="btn btn-primary" id="btn-batch-run">Run Selected (2)</button>
+          <button class="btn btn-primary" id="btn-batch-run">Run Selected (0)</button>
         </div>
       </header>
 
@@ -674,10 +675,10 @@
       <!-- Toolbar -->
       <div class="toolbar">
         <div class="filter-tabs">
-          <button class="tab-btn active" data-filter="all">All (6)</button>
-          <button class="tab-btn" data-filter="completed">Completed (4)</button>
-          <button class="tab-btn" data-filter="queued">Queued (1)</button>
-          <button class="tab-btn" data-filter="processing">Processing (1)</button>
+          <button class="tab-btn active" data-filter="all">All (<span id="count-all">0</span>)</button>
+          <button class="tab-btn" data-filter="completed">Completed (<span id="count-completed">0</span>)</button>
+          <button class="tab-btn" data-filter="queued">Queued (<span id="count-queued">0</span>)</button>
+          <button class="tab-btn" data-filter="processing">Processing (<span id="count-processing">0</span>)</button>
         </div>
         <div class="search-box">
           <input type="text" class="search-input" id="search-input" placeholder="Search project, sensor, or location...">
@@ -821,10 +822,25 @@
       const elReg = document.getElementById("kpi-registered");
       if (elReg) elReg.textContent = regPct;
 
+      const allCount = projects.length;
       const elProjects = document.getElementById("kpi-projects");
-      if (elProjects) elProjects.textContent = projects.length;
+      if (elProjects) elProjects.textContent = allCount;
       const elProjMeta = document.getElementById("kpi-projects-meta");
       if (elProjMeta) elProjMeta.textContent = `${completedCount} completed · ${queuedCount} queued · ${activeCount} active`;
+
+      const elBadgeTotal = document.getElementById("badge-total");
+      if (elBadgeTotal) elBadgeTotal.textContent = allCount;
+      const elBadgeQueue = document.getElementById("badge-queue");
+      if (elBadgeQueue) elBadgeQueue.textContent = queuedCount;
+
+      const elCountAll = document.getElementById("count-all");
+      if (elCountAll) elCountAll.textContent = allCount;
+      const elCountCompleted = document.getElementById("count-completed");
+      if (elCountCompleted) elCountCompleted.textContent = completedCount;
+      const elCountQueued = document.getElementById("count-queued");
+      if (elCountQueued) elCountQueued.textContent = queuedCount;
+      const elCountProcessing = document.getElementById("count-processing");
+      if (elCountProcessing) elCountProcessing.textContent = activeCount;
 
       let deliverableCount = 0;
       let totalFacesNum = 0;
@@ -1111,11 +1127,56 @@ You can launch Metashape Pro with this project directly.`);
         const p = projects.find(x => x.id === activeProjectId);
         if (p && p.path) {
           navigator.clipboard.writeText(p.path);
-          alert(`Copied path to clipboard:
-${p.path}`);
+          alert(`Copied path to clipboard:\n${p.path}`);
         } else {
           alert("Please select a project first.");
         }
+      });
+    }
+
+    async function reloadTelemetry() {
+      const btn = document.getElementById("btn-reload-data");
+      const origText = btn ? btn.textContent : "Reload Telemetry";
+      if (btn) {
+        btn.textContent = "Loading...";
+        btn.disabled = true;
+      }
+      try {
+        const resp = await fetch(`projects_data.js?t=${Date.now()}`);
+        if (resp.ok) {
+          const text = await resp.text();
+          const scriptFunc = new Function(text);
+          scriptFunc();
+          if (Array.isArray(window.SURVEY_PROJECTS)) {
+            projects.length = 0;
+            projects.push(...window.SURVEY_PROJECTS);
+          }
+          renderTable();
+          if (projects.length > 0) {
+            selectProject(projects[0].id);
+          } else {
+            selectProject(null);
+          }
+        }
+      } catch (err) {
+        console.warn("Could not reload telemetry via fetch:", err);
+      } finally {
+        if (btn) {
+          btn.textContent = origText;
+          btn.disabled = false;
+        }
+      }
+    }
+
+    const btnReload = document.getElementById("btn-reload-data");
+    if (btnReload) {
+      btnReload.addEventListener("click", reloadTelemetry);
+    }
+
+    const btnScan = document.getElementById("btn-scan");
+    if (btnScan) {
+      btnScan.addEventListener("click", () => {
+        alert("To scan survey directories and launch batch reconstructions:\n\n1. Launch AutoMetashape Studio:\n   python scripts/autometashape_gui.py\n2. Click '+ Batch Scan...' or '+ Add Folders...'\n3. Click 'Run Batch Reconstructions'\n\nTelemetry will automatically sync to this dashboard.");
       });
     }
 
