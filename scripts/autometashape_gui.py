@@ -170,6 +170,113 @@ def find_metashape_path() -> str | None:
     return None
 
 
+def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
+    """Locate Metashape Server binary (metashape-server.exe or metashape-server)."""
+    if metashape_exe and os.path.isfile(metashape_exe):
+        exe_dir = os.path.dirname(metashape_exe)
+        for name in ("metashape-server.exe", "metashape-server"):
+            cand = os.path.join(exe_dir, name)
+            if os.path.isfile(cand):
+                return cand
+
+    for name in ("metashape-server.exe", "metashape-server"):
+        p = shutil.which(name)
+        if p and os.path.isfile(p):
+            return p
+
+    if sys.platform == "win32":
+        for base in [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("ProgramW6432"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ]:
+            if base:
+                cand = os.path.join(base, "Agisoft", "Metashape Pro", "metashape-server.exe")
+                if os.path.isfile(cand):
+                    return cand
+
+    return None
+
+
+def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
+    """Locate Agisoft Metashape Network Monitor GUI binary (monitor.exe or monitor)."""
+    if metashape_exe and os.path.isfile(metashape_exe):
+        exe_dir = os.path.dirname(metashape_exe)
+        for name in ("monitor.exe", "monitor"):
+            cand = os.path.join(exe_dir, name)
+            if os.path.isfile(cand):
+                return cand
+
+    for name in ("monitor.exe", "monitor"):
+        p = shutil.which(name)
+        if p and os.path.isfile(p):
+            return p
+
+    if sys.platform == "win32":
+        for base in [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("ProgramW6432"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ]:
+            if base:
+                cand = os.path.join(base, "Agisoft", "Metashape Pro", "monitor.exe")
+                if os.path.isfile(cand):
+                    return cand
+
+    return None
+
+
+def generate_worker_bat_content(host: str = "127.0.0.1", port: str = "5840", root_path: str = "") -> str:
+    """Generate self-contained Windows batch file content for remote LAN worker nodes."""
+    target_host = host.strip() or "127.0.0.1"
+    target_port = port.strip() or "5840"
+    target_root = root_path.strip() or r"\\SERVER\RealityScan"
+
+    return f"""@echo off
+setlocal enabledelayedexpansion
+title Metashape Distributed Cluster Worker Node
+
+echo =======================================================================
+echo   AutoMetashape Distributed Cluster - Worker Node Launcher
+echo   Cluster Target Server : {target_host}:{target_port}
+echo   Shared Network Root   : {target_root}
+echo =======================================================================
+echo.
+
+:: Detect Metashape installation on worker PC
+set "METASHAPE_EXE="
+if exist "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
+) else (
+    where metashape.exe >nul 2>nul
+    if !errorlevel! equ 0 (
+        set "METASHAPE_EXE=metashape.exe"
+    )
+)
+
+if "%METASHAPE_EXE%"=="" (
+    echo [ERROR] Metashape Pro executable not found in default path or PATH.
+    echo Please install Agisoft Metashape Pro or edit this batch file with your path.
+    pause
+    exit /b 1
+)
+
+echo [OK] Using Metashape binary: "%METASHAPE_EXE%"
+echo [CONNECTING] Connecting worker node to {target_host}:{target_port}...
+echo [READY] Worker is online and waiting for jobs from the server.
+echo Press Ctrl+C in this window at any time to disconnect this worker node.
+echo.
+
+"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "{target_root}"
+
+if !errorlevel! neq 0 (
+    echo.
+    echo [DISCONNECTED] Worker node disconnected with status code !errorlevel!.
+    pause
+)
+"""
+
+
 def format_file_size(size_bytes: int) -> str:
     """Format bytes into human-readable string."""
     if size_bytes < 1024:
@@ -963,12 +1070,16 @@ class AutoMetashapeStudio:
         self.var_exp_pages = tk.StringVar(value="16")
         self.var_exp_rebake = tk.BooleanVar(value=True)
 
-        # Distributed Network Processing Cluster Variables
+        # Distributed Network Processing Cluster Variables & Managed Daemons
         self.var_network_enable = tk.BooleanVar(value=False)
         self.var_network_host = tk.StringVar(value="127.0.0.1")
         self.var_network_port = tk.StringVar(value="5840")
         self.var_network_path = tk.StringVar(value="")
         self.lbl_network_status = tk.StringVar(value="● Standby: Cluster disabled (processing locally)")
+        self.server_proc: subprocess.Popen | None = None
+        self.worker_proc: subprocess.Popen | None = None
+        self.lbl_server_proc_status = tk.StringVar(value="○ Server: Stopped")
+        self.lbl_worker_proc_status = tk.StringVar(value="○ Local Worker: Stopped")
 
         self.lbl_photo_status = tk.StringVar(
             value="No folder selected. Click 'Browse...' to choose your raw photos folder."
@@ -1839,9 +1950,9 @@ class AutoMetashapeStudio:
         if self.var_network_enable.get():
             self.frame_net_body.pack(fill=tk.X, pady=(4, 0))
 
-        # Row A: Server Host & Port & Test Button
+        # Row A: Server Target Endpoint & Diagnostic Tools
         row_a = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
-        row_a.pack(fill=tk.X, pady=(0, 4))
+        row_a.pack(fill=tk.X, pady=(0, 5))
 
         tk.Label(row_a, text="Server Host / IP:", font=("Segoe UI", 8), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY).pack(side=tk.LEFT, padx=(0, 4))
         ent_host = tk.Entry(
@@ -1853,7 +1964,7 @@ class AutoMetashapeStudio:
             insertbackground="white",
             bd=1,
             relief=tk.SOLID,
-            width=16,
+            width=15,
         )
         ent_host.pack(side=tk.LEFT, padx=(0, 8))
 
@@ -1885,11 +1996,28 @@ class AutoMetashapeStudio:
             cursor="hand2",
             command=self._test_network_server,
         )
-        btn_test.pack(side=tk.LEFT)
+        btn_test.pack(side=tk.LEFT, padx=(0, 6))
+
+        # Agisoft Official Monitor GUI button
+        btn_monitor = tk.Button(
+            row_a,
+            text="Cluster Monitor GUI",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=2,
+            cursor="hand2",
+            command=self._open_network_monitor,
+        )
+        btn_monitor.pack(side=tk.LEFT)
 
         # Row B: Shared Network Data Root (UNC Path)
         row_b = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
-        row_b.pack(fill=tk.X, pady=(0, 4))
+        row_b.pack(fill=tk.X, pady=(0, 5))
 
         tk.Label(row_b, text="Shared Network Storage Root (UNC / Mapped Share):", font=("Segoe UI", 8), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY).pack(anchor=tk.W)
 
@@ -1926,49 +2054,145 @@ class AutoMetashapeStudio:
 
         lbl_path_hint = tk.Label(
             self.frame_net_body,
-            text="ℹ All nodes and server must read/write this path (e.g. \\\\SERVER\\RealityScan or Z:\\)",
+            text="ℹ All nodes and server must read/write this shared path (e.g. \\\\SERVER\\RealityScan or Z:\\)",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
             anchor=tk.W,
         )
-        lbl_path_hint.pack(fill=tk.X, pady=(1, 4))
+        lbl_path_hint.pack(fill=tk.X, pady=(0, 6))
 
-        # Row C: Telemetry Status Banner
-        row_c = tk.Frame(self.frame_net_body, bg=UITheme.BG_SURFACE, bd=1, relief=tk.SOLID, highlightbackground=UITheme.BORDER, padx=6, pady=4)
-        row_c.pack(fill=tk.X, pady=(2, 4))
-
-        self.lbl_net_telemetry = tk.Label(
-            row_c,
-            textvariable=self.lbl_network_status,
-            font=("Segoe UI", 8),
+        # Row C: Direct In-GUI Cluster Daemons Manager (Server & Local Worker)
+        frame_daemons = tk.Frame(
+            self.frame_net_body,
             bg=UITheme.BG_SURFACE,
-            fg=UITheme.TEXT_SECONDARY,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=8,
+            pady=6,
+        )
+        frame_daemons.pack(fill=tk.X, pady=(0, 6))
+
+        lbl_daemon_title = tk.Label(
+            frame_daemons,
+            text="IN-GUI CLUSTER DAEMONS (ONE-CLICK EXECUTION)",
+            font=("Segoe UI", 7, "bold"),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_MUTED,
             anchor=tk.W,
         )
-        self.lbl_net_telemetry.pack(fill=tk.X)
+        lbl_daemon_title.pack(fill=tk.X, pady=(0, 4))
 
-        # Row D: Quick Command Helpers
-        row_d = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
-        row_d.pack(fill=tk.X, pady=(2, 0))
+        # Daemon Sub-row 1: Local Metashape Server
+        row_srv = tk.Frame(frame_daemons, bg=UITheme.BG_SURFACE)
+        row_srv.pack(fill=tk.X, pady=(2, 3))
 
-        btn_cp_srv = tk.Button(
-            row_d,
-            text="Copy Server Launch Command",
-            font=("Segoe UI", 7),
+        self.lbl_server_badge = tk.Label(
+            row_srv,
+            textvariable=self.lbl_server_proc_status,
+            font=("Segoe UI", 8, "bold"),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
-            activebackground=UITheme.BG_SURFACE,
+            padx=6,
+            pady=2,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+        )
+        self.lbl_server_badge.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_toggle_server = tk.Button(
+            row_srv,
+            text="Start Local Server",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.ACCENT_CYAN,
+            activebackground=UITheme.BORDER_HOVER,
             activeforeground="white",
             bd=0,
+            padx=10,
+            pady=2,
             cursor="hand2",
-            command=self._copy_server_command,
+            command=self._toggle_local_server,
         )
-        btn_cp_srv.pack(side=tk.LEFT, padx=(0, 8))
+        self.btn_toggle_server.pack(side=tk.LEFT)
+
+        lbl_srv_desc = tk.Label(
+            row_srv,
+            text="Coordinates job distribution across LAN",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_MUTED,
+        )
+        lbl_srv_desc.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Daemon Sub-row 2: Local Worker Node
+        row_wkr = tk.Frame(frame_daemons, bg=UITheme.BG_SURFACE)
+        row_wkr.pack(fill=tk.X, pady=(2, 2))
+
+        self.lbl_worker_badge = tk.Label(
+            row_wkr,
+            textvariable=self.lbl_worker_proc_status,
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            padx=6,
+            pady=2,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+        )
+        self.lbl_worker_badge.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_toggle_worker = tk.Button(
+            row_wkr,
+            text="Start Local Worker",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=10,
+            pady=2,
+            cursor="hand2",
+            command=self._toggle_local_worker,
+        )
+        self.btn_toggle_worker.pack(side=tk.LEFT)
+
+        lbl_wkr_desc = tk.Label(
+            row_wkr,
+            text="Contributes this machine's GPU/CPU to tasks",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_MUTED,
+        )
+        lbl_wkr_desc.pack(side=tk.LEFT, padx=(8, 0))
+
+        # Row D: Remote Node Deployment Actions
+        row_d = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_d.pack(fill=tk.X, pady=(2, 4))
+
+        btn_export_bat = tk.Button(
+            row_d,
+            text="Export Worker Launcher (.bat)",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_SURFACE_RAISED,
+            fg=UITheme.TEXT_PRIMARY,
+            activebackground=UITheme.BORDER_HOVER,
+            activeforeground="white",
+            bd=0,
+            padx=8,
+            pady=3,
+            cursor="hand2",
+            command=self._export_worker_launcher_bat,
+        )
+        btn_export_bat.pack(side=tk.LEFT, padx=(0, 8))
 
         btn_cp_node = tk.Button(
             row_d,
-            text="Copy Worker Node Command",
+            text="Copy Worker Cmd",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
@@ -1978,7 +2202,35 @@ class AutoMetashapeStudio:
             cursor="hand2",
             command=self._copy_node_command,
         )
-        btn_cp_node.pack(side=tk.LEFT)
+        btn_cp_node.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_cp_srv = tk.Button(
+            row_d,
+            text="Copy Server Cmd",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            activebackground=UITheme.BG_SURFACE,
+            activeforeground="white",
+            bd=0,
+            cursor="hand2",
+            command=self._copy_server_command,
+        )
+        btn_cp_srv.pack(side=tk.LEFT)
+
+        # Row E: Telemetry Status Banner
+        row_e = tk.Frame(self.frame_net_body, bg=UITheme.BG_SURFACE, bd=1, relief=tk.SOLID, highlightbackground=UITheme.BORDER, padx=6, pady=4)
+        row_e.pack(fill=tk.X, pady=(2, 0))
+
+        self.lbl_net_telemetry = tk.Label(
+            row_e,
+            textvariable=self.lbl_network_status,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_SECONDARY,
+            anchor=tk.W,
+        )
+        self.lbl_net_telemetry.pack(fill=tk.X)
 
     def _on_network_enable_toggled(self) -> None:
         if self.var_network_enable.get():
@@ -2001,14 +2253,233 @@ class AutoMetashapeStudio:
         if folder:
             self.var_network_path.set(folder)
 
+    def _toggle_local_server(self) -> None:
+        """Start or stop the background Metashape Server daemon from the GUI."""
+        if self.server_proc is not None and self.server_proc.poll() is None:
+            # Server is running -> terminate it cleanly
+            try:
+                self.server_proc.terminate()
+                self.server_proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self.server_proc.kill()
+                except Exception:
+                    pass
+            self.server_proc = None
+            self.lbl_server_proc_status.set("○ Server: Stopped")
+            self.lbl_server_badge.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
+            self.btn_toggle_server.config(
+                text="Start Local Server",
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.ACCENT_CYAN,
+            )
+            self.lbl_network_status.set("● Local Metashape Server stopped")
+            self.lbl_net_telemetry.config(fg=UITheme.TEXT_SECONDARY)
+            self._log("[Network Cluster] Local Metashape Server stopped.", "stage")
+            return
+
+        # Server is not running -> Start it
+        port = self.var_network_port.get().strip() or "5840"
+        try:
+            int_port = int(port)
+        except ValueError:
+            messagebox.showerror("Invalid Port", f"Port must be a valid integer: {port}")
+            return
+
+        server_bin = find_metashape_server_path(self.metashape_exe)
+        if server_bin and os.path.isfile(server_bin):
+            cmd = [server_bin, "--host", f"0.0.0.0:{port}", "--no-database"]
+        elif self.metashape_exe and os.path.isfile(self.metashape_exe):
+            dispatch_port = str(int_port + 1)
+            cmd = [self.metashape_exe, "--server", "--control", f"0.0.0.0:{port}", "--dispatch", f"0.0.0.0:{dispatch_port}"]
+        else:
+            messagebox.showerror(
+                "Metashape Not Found",
+                "Neither metashape-server.exe nor metashape.exe could be located.\nPlease configure Metashape path first.",
+            )
+            return
+
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            self.server_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=creation_flags,
+            )
+            self.lbl_server_proc_status.set(f"● Server Active (PID: {self.server_proc.pid} | Port: {port})")
+            self.lbl_server_badge.config(bg=UITheme.ACCENT_GREEN_BG, fg=UITheme.ACCENT_GREEN_TXT)
+            self.btn_toggle_server.config(
+                text="Stop Server",
+                bg="#3d1818",
+                fg="#f87171",
+            )
+            self.lbl_network_status.set(f"● Local Server active (PID: {self.server_proc.pid}) listening on port {port}")
+            self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)
+            self._log(f"[Network Cluster] Local Metashape Server started (PID: {self.server_proc.pid}, Host: 0.0.0.0:{port})", "stage")
+
+            def _stream_server():
+                if self.server_proc and self.server_proc.stdout:
+                    for line in iter(self.server_proc.stdout.readline, ""):
+                        if not line:
+                            break
+                        clean = line.strip()
+                        if "Binding control" in clean or "waiting for" in clean or "error" in clean.lower():
+                            tag = "error" if "error" in clean.lower() else "stage"
+                            try:
+                                self.root.after(0, lambda c=clean, t=tag: self._log(f"[Server] {c}", t))
+                            except Exception:
+                                break
+
+            threading.Thread(target=_stream_server, daemon=True).start()
+
+        except Exception as e:
+            messagebox.showerror("Server Launch Failed", f"Failed to start Metashape server daemon:\n{e}")
+            self.server_proc = None
+
+    def _toggle_local_worker(self) -> None:
+        """Start or stop the background Metashape Worker node daemon from the GUI."""
+        if self.worker_proc is not None and self.worker_proc.poll() is None:
+            # Worker is running -> terminate cleanly
+            try:
+                self.worker_proc.terminate()
+                self.worker_proc.wait(timeout=2.0)
+            except Exception:
+                try:
+                    self.worker_proc.kill()
+                except Exception:
+                    pass
+            self.worker_proc = None
+            self.lbl_worker_proc_status.set("○ Local Worker: Stopped")
+            self.lbl_worker_badge.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
+            self.btn_toggle_worker.config(
+                text="Start Local Worker",
+                bg=UITheme.BG_SURFACE_RAISED,
+                fg=UITheme.TEXT_PRIMARY,
+            )
+            self.lbl_network_status.set("● Local Worker stopped")
+            self._log("[Network Cluster] Local Metashape Worker daemon stopped.", "stage")
+            return
+
+        # Worker is not running -> Start it
+        if not self.metashape_exe or not os.path.isfile(self.metashape_exe):
+            messagebox.showerror("Metashape Not Found", "Metashape Pro executable is required to start a worker node.")
+            return
+
+        host = self.var_network_host.get().strip() or "127.0.0.1"
+        port = self.var_network_port.get().strip() or "5840"
+        root_path = self.var_network_path.get().strip()
+        if not root_path:
+            msg = (
+                "No Shared Network Storage Root specified.\n\n"
+                "All worker nodes and the server must access project images and outputs via a shared UNC path "
+                "(e.g. \\\\SERVER\\RealityScan) or identical shared folder.\n\n"
+                "Would you like to select a shared storage folder now?"
+            )
+            if messagebox.askyesno("Shared Storage Root Required", msg):
+                self._browse_network_path()
+                root_path = self.var_network_path.get().strip()
+            if not root_path:
+                return
+
+        cmd = [self.metashape_exe, "--worker", "--host", f"{host}:{port}", "--root", root_path]
+        creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            self.worker_proc = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+                creationflags=creation_flags,
+            )
+            self.lbl_worker_proc_status.set(f"● Worker Active (PID: {self.worker_proc.pid})")
+            self.lbl_worker_badge.config(bg=UITheme.ACCENT_GREEN_BG, fg=UITheme.ACCENT_GREEN_TXT)
+            self.btn_toggle_worker.config(
+                text="Stop Worker",
+                bg="#3d1818",
+                fg="#f87171",
+            )
+            self.lbl_network_status.set(f"● Local Worker active (PID: {self.worker_proc.pid}) connected to {host}:{port}")
+            self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)
+            self._log(f"[Network Cluster] Local Metashape Worker started (PID: {self.worker_proc.pid}, Root: {root_path})", "stage")
+
+            def _stream_worker():
+                if self.worker_proc and self.worker_proc.stdout:
+                    for line in iter(self.worker_proc.stdout.readline, ""):
+                        if not line:
+                            break
+                        clean = line.strip()
+                        if "registration accepted" in clean or "connected to" in clean or "error" in clean.lower():
+                            tag = "error" if "error" in clean.lower() else "stage"
+                            try:
+                                self.root.after(0, lambda c=clean, t=tag: self._log(f"[Worker] {c}", t))
+                            except Exception:
+                                break
+
+            threading.Thread(target=_stream_worker, daemon=True).start()
+
+        except Exception as e:
+            messagebox.showerror("Worker Launch Failed", f"Failed to start Metashape worker daemon:\n{e}")
+            self.worker_proc = None
+
+    def _open_network_monitor(self) -> None:
+        """Launch the official Agisoft Metashape Network Monitor GUI application."""
+        mon_bin = find_metashape_monitor_path(self.metashape_exe)
+        if mon_bin and os.path.isfile(mon_bin):
+            subprocess.Popen([mon_bin])
+            self._log(f"[Network Cluster] Launched Agisoft Network Monitor GUI: {mon_bin}", "stage")
+        else:
+            messagebox.showinfo(
+                "Monitor Not Found",
+                "monitor.exe was not detected in the Metashape Pro installation directory.\n"
+                "Please verify your Metashape Professional installation.",
+            )
+
+    def _export_worker_launcher_bat(self) -> None:
+        """Export an automated zero-typing launch_worker.bat into shared storage for remote LAN PCs."""
+        host = self.var_network_host.get().strip() or "127.0.0.1"
+        port = self.var_network_port.get().strip() or "5840"
+        root_path = self.var_network_path.get().strip() or r"\\SERVER\RealityScan"
+
+        default_dir = root_path if os.path.isdir(root_path) else os.path.expanduser("~")
+        dest_file = filedialog.asksaveasfilename(
+            title="Export Remote Worker Launcher (.bat)",
+            initialdir=default_dir,
+            initialfile="launch_worker.bat",
+            defaultextension=".bat",
+            filetypes=[("Batch Script", "*.bat"), ("All Files", "*.*")],
+        )
+        if not dest_file:
+            return
+
+        bat_content = generate_worker_bat_content(host, port, root_path)
+        try:
+            with open(dest_file, "w", encoding="utf-8") as f:
+                f.write(bat_content)
+            self._log(f"[Network Cluster] Exported remote worker launcher script to: {dest_file}", "stage")
+            messagebox.showinfo(
+                "Launcher Exported",
+                f"Worker launcher successfully saved to:\n{dest_file}\n\n"
+                f"Any PC on your LAN with Metashape Pro installed can double-click this file to join the cluster!",
+            )
+        except Exception as e:
+            messagebox.showerror("Export Failed", f"Failed to save launcher batch file:\n{e}")
+
     def _copy_server_command(self) -> None:
         exe = self.metashape_exe or "metashape.exe"
         port = self.var_network_port.get().strip() or "5840"
-        try:
-            dispatch_port = str(int(port) + 1)
-        except Exception:
-            dispatch_port = "5841"
-        cmd = f'"{exe}" --server --control 0.0.0.0:{port} --dispatch 0.0.0.0:{dispatch_port}'
+        server_bin = find_metashape_server_path(self.metashape_exe)
+        if server_bin:
+            cmd = f'"{server_bin}" --host 0.0.0.0:{port} --no-database'
+        else:
+            try:
+                dispatch_port = str(int(port) + 1)
+            except Exception:
+                dispatch_port = "5841"
+            cmd = f'"{exe}" --server --control 0.0.0.0:{port} --dispatch 0.0.0.0:{dispatch_port}'
         self.root.clipboard_clear()
         self.root.clipboard_append(cmd)
         self.lbl_network_status.set("✓ Server launch command copied to clipboard!")
@@ -2032,6 +2503,29 @@ class AutoMetashapeStudio:
         self.lbl_net_telemetry.config(fg=UITheme.ACCENT_CYAN)
 
         def _bg():
+            import socket
+
+            try:
+                int_port = int(port)
+            except ValueError:
+                self.root.after(0, lambda: (self.lbl_network_status.set(f"○ Invalid port: {port}"), self.lbl_net_telemetry.config(fg=UITheme.STATUS_ERROR)))
+                return
+
+            sock_ok = False
+            try:
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(2.0)
+                res = sock.connect_ex((host, int_port))
+                sock.close()
+                sock_ok = (res == 0)
+            except Exception:
+                sock_ok = False
+
+            if not sock_ok:
+                msg = f"○ Unreachable: Could not connect to {host}:{port}. Ensure Metashape Server is running."
+                self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.STATUS_WARNING)))
+                return
+
             try:
                 import Metashape
                 client = Metashape.NetworkClient()
@@ -2040,14 +2534,46 @@ class AutoMetashapeStudio:
                     active_w = [w for w in workers if not getattr(w, "paused", False)]
                     msg = f"● Online: {len(workers)} Nodes connected ({len(active_w)} active) at {host}:{port}"
                     self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)))
-                else:
-                    msg = f"○ Unreachable: Could not connect to {host}:{port}. Ensure 'metashape.exe --server' is running."
-                    self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.STATUS_WARNING)))
-            except Exception as e:
-                msg = f"○ Connection Error: {e}"
-                self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.STATUS_ERROR)))
+                    return
+            except Exception:
+                pass
+
+            msg = f"● Online: Metashape Server port {port} is active and listening at {host}"
+            self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)))
 
         threading.Thread(target=_bg, daemon=True).start()
+
+    def _poll_cluster_daemons(self) -> None:
+        """Periodic health check ensuring GUI badges match real subprocess states."""
+        if self.server_proc is not None and self.server_proc.poll() is not None:
+            exit_code = self.server_proc.poll()
+            self.server_proc = None
+            self.lbl_server_proc_status.set(f"○ Server: Exited ({exit_code})")
+            if hasattr(self, "lbl_server_badge"):
+                self.lbl_server_badge.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
+            if hasattr(self, "btn_toggle_server"):
+                self.btn_toggle_server.config(
+                    text="Start Local Server",
+                    bg=UITheme.BG_SURFACE_RAISED,
+                    fg=UITheme.ACCENT_CYAN,
+                )
+            self.lbl_network_status.set(f"● Server daemon terminated (exit code: {exit_code})")
+            self._log(f"[Network Cluster] Local server daemon exited (code: {exit_code})", "warning")
+
+        if self.worker_proc is not None and self.worker_proc.poll() is not None:
+            exit_code = self.worker_proc.poll()
+            self.worker_proc = None
+            self.lbl_worker_proc_status.set(f"○ Local Worker: Exited ({exit_code})")
+            if hasattr(self, "lbl_worker_badge"):
+                self.lbl_worker_badge.config(bg=UITheme.BG_ROOT, fg=UITheme.TEXT_MUTED)
+            if hasattr(self, "btn_toggle_worker"):
+                self.btn_toggle_worker.config(
+                    text="Start Local Worker",
+                    bg=UITheme.BG_SURFACE_RAISED,
+                    fg=UITheme.TEXT_PRIMARY,
+                )
+            self.lbl_network_status.set(f"● Local worker node terminated (exit code: {exit_code})")
+            self._log(f"[Network Cluster] Local worker node exited (code: {exit_code})", "warning")
 
     def _on_workflow_stage_toggled(self, changed_stage: str = "") -> None:
         """Enforces Metashape mathematical dependency cascade across workflow steps."""
@@ -3792,6 +4318,8 @@ class AutoMetashapeStudio:
         if self.is_running and self.start_time > 0:
             elapsed = time.time() - self.start_time
             self.stepper.update_elapsed(elapsed)
+        if hasattr(self, "_poll_cluster_daemons"):
+            self._poll_cluster_daemons()
         self.root.after(1000, self._update_clock)
 
     # -----------------------------------------------------------------------
@@ -4026,7 +4554,19 @@ class AutoMetashapeStudio:
                 self._log("[CANCEL] Reconstruction cancelled by user to preserve existing project files.", "warning")
                 return
 
-        # 4. Launch unified queue reconstruction (consistent for 1 or N projects)
+        # 4. Check if network processing is armed and ensure local server availability
+        if hasattr(self, "var_network_enable") and self.var_network_enable.get():
+            host = self.var_network_host.get().strip() or "127.0.0.1"
+            if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+                if self.server_proc is None or self.server_proc.poll() is not None:
+                    if messagebox.askyesno(
+                        "Start Local Metashape Server?",
+                        "Network cluster processing is armed for localhost, but the local Metashape Server daemon is not running.\n\n"
+                        "Would you like AutoMetashape to start the local server daemon now?",
+                    ):
+                        self._toggle_local_server()
+
+        # 5. Launch unified queue reconstruction (consistent for 1 or N projects)
         self._reset_stepper_mode("recon")
         self.batch_running = True
         self.batch_queue = active_projects
@@ -4458,6 +4998,26 @@ class AutoMetashapeStudio:
             except Exception:
                 pass
             self._clean_project_locks()
+
+        # Safely terminate any local cluster daemons launched from the GUI
+        if hasattr(self, "worker_proc") and self.worker_proc and self.worker_proc.poll() is None:
+            try:
+                self.worker_proc.terminate()
+                time.sleep(0.2)
+                if self.worker_proc.poll() is None:
+                    self.worker_proc.kill()
+            except Exception:
+                pass
+
+        if hasattr(self, "server_proc") and self.server_proc and self.server_proc.poll() is None:
+            try:
+                self.server_proc.terminate()
+                time.sleep(0.2)
+                if self.server_proc.poll() is None:
+                    self.server_proc.kill()
+            except Exception:
+                pass
+
         self.root.destroy()
 
     def _on_finished(self, success: bool, user_cancelled: bool = False) -> None:

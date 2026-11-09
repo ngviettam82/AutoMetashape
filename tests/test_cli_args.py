@@ -180,6 +180,37 @@ class TestCliArgs(unittest.TestCase):
         self.assertFalse(args_png.export_glb)
         self.assertFalse(args_png.export_obj)
 
+    def test_metashape_cluster_binary_discovery(self) -> None:
+        """Verify metashape-server and monitor binary discovery functions."""
+        from autometashape_gui import find_metashape_monitor_path, find_metashape_path, find_metashape_server_path
+
+        ms_exe = find_metashape_path()
+        if ms_exe and os.path.isfile(ms_exe):
+            server_bin = find_metashape_server_path(ms_exe)
+            if server_bin:
+                self.assertTrue(os.path.isfile(server_bin))
+                self.assertIn("server", os.path.basename(server_bin).lower())
+
+            monitor_bin = find_metashape_monitor_path(ms_exe)
+            if monitor_bin:
+                self.assertTrue(os.path.isfile(monitor_bin))
+                self.assertIn("monitor", os.path.basename(monitor_bin).lower())
+
+    def test_generate_worker_bat_content(self) -> None:
+        """Verify automated launcher batch file generation."""
+        from autometashape_gui import generate_worker_bat_content
+
+        bat = generate_worker_bat_content(
+            host="192.168.1.100",
+            port="5840",
+            root_path=r"\\OFFICE-NAS\MetashapeProjects",
+        )
+        self.assertIn("192.168.1.100:5840", bat)
+        self.assertIn(r"\\OFFICE-NAS\MetashapeProjects", bat)
+        self.assertIn("--worker", bat)
+        self.assertIn("--root", bat)
+        self.assertIn("@echo off", bat)
+
 
 if __name__ == "__main__":
     unittest.main()
