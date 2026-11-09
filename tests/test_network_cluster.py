@@ -320,20 +320,20 @@ class TestNetworkCluster(unittest.TestCase):
             AutoMetashapeStudio._add_project_to_queue(gui_mock, [f1])
             self.assertEqual(len(gui_mock.project_items), 2)
 
-    def test_add_project_to_queue_subfolder_expansion(self) -> None:
-        """Verify adding a parent directory with subprojects automatically expands them."""
+    def test_add_project_to_queue_preserves_project_subfolders(self) -> None:
+        """Verify a selected project folder containing data subfolders is enqueued as a single project."""
         import tempfile
         from autometashape_gui import AutoMetashapeStudio
 
         with tempfile.TemporaryDirectory() as tmp_dir:
-            parent_dir = os.path.join(tmp_dir, "Campaign_Flight1")
-            sub_a = os.path.join(parent_dir, "Grid_East")
-            sub_b = os.path.join(parent_dir, "Grid_West")
+            proj_dir = os.path.join(tmp_dir, "Campaign_Bridge_Inspection")
+            sub_a = os.path.join(proj_dir, "100MEDIA")
+            sub_b = os.path.join(proj_dir, "101MEDIA")
             os.makedirs(sub_a, exist_ok=True)
             os.makedirs(sub_b, exist_ok=True)
-            with open(os.path.join(sub_a, "photo_a.jpg"), "w") as f:
+            with open(os.path.join(sub_a, "DJI_0001.JPG"), "w") as f:
                 f.write("0")
-            with open(os.path.join(sub_b, "photo_b.jpg"), "w") as f:
+            with open(os.path.join(sub_b, "DJI_0100.JPG"), "w") as f:
                 f.write("0")
 
             gui_mock = MagicMock()
@@ -341,15 +341,15 @@ class TestNetworkCluster(unittest.TestCase):
             var_dir = MagicMock()
             var_dir.get.return_value = ""
             gui_mock.var_images_dir = var_dir
-            gui_mock._quick_count_photos.side_effect = lambda path: 1 if "Grid_" in path else 0
+            gui_mock._quick_count_photos = AutoMetashapeStudio._quick_count_photos.__get__(gui_mock)
 
-            # Adding parent_dir (which has no direct images, only subfolders)
-            AutoMetashapeStudio._add_project_to_queue(gui_mock, [parent_dir])
+            # Adding proj_dir: must be added as 1 project, NOT split into subfolders!
+            AutoMetashapeStudio._add_project_to_queue(gui_mock, [proj_dir])
 
-            self.assertEqual(len(gui_mock.project_items), 2)
-            names = [item["name"] for item in gui_mock.project_items]
-            self.assertIn("Grid_East", names)
-            self.assertIn("Grid_West", names)
+            self.assertEqual(len(gui_mock.project_items), 1)
+            self.assertEqual(os.path.normpath(gui_mock.project_items[0]["path"]), os.path.normpath(proj_dir))
+            self.assertEqual(gui_mock.project_items[0]["name"], "Campaign_Bridge_Inspection")
+            self.assertEqual(gui_mock.project_items[0]["count"], 2)
 
 
 if __name__ == "__main__":

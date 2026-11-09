@@ -3422,10 +3422,18 @@ class AutoMetashapeStudio:
             self._render_queue_items()
 
     def _add_project_to_queue(self, folders: str | list[str] | None = None) -> None:
-        """Add one or multiple survey project folders to the queue with smart subfolder scanning."""
+        """Add one or multiple survey project folders to the queue.
+
+        Each selected folder represents a distinct photogrammetry project.
+        Subfolders inside a selected folder belong to that project (containing
+        its flight passes, camera groups, or raw captures) and are never split.
+        """
         if folders is None:
             hwnd = self.root.winfo_id() if hasattr(self, "root") else None
-            selected_folders = pick_multiple_folders(parent_hwnd=hwnd, title="Select Project Folders (Hold Ctrl/Shift to Select Multiple)")
+            selected_folders = pick_multiple_folders(
+                parent_hwnd=hwnd,
+                title="Select Survey Project Folder(s) (Hold Ctrl/Shift to Select Multiple)",
+            )
             if not selected_folders:
                 return
         elif isinstance(folders, str):
@@ -3435,61 +3443,24 @@ class AutoMetashapeStudio:
 
         added_count = 0
         total_photos_added = 0
-        exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng")
 
         for folder in selected_folders:
             if not folder or not os.path.isdir(folder):
                 continue
             folder = os.path.normpath(folder)
 
+            if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
+                continue
+
             cnt = self._quick_count_photos(folder)
-
-            # Check direct photos vs subfolders
-            has_direct_photos = False
-            try:
-                has_direct_photos = any(
-                    f.lower().endswith(exts)
-                    for f in os.listdir(folder)
-                    if os.path.isfile(os.path.join(folder, f))
-                )
-            except Exception:
-                has_direct_photos = False
-
-            subdirs_with_photos = []
-            try:
-                for entry in sorted(os.listdir(folder)):
-                    sub_p = os.path.join(folder, entry)
-                    if os.path.isdir(sub_p) and not entry.lower().startswith((".", "export", "output", "model")):
-                        sub_cnt = self._quick_count_photos(sub_p)
-                        if sub_cnt > 0:
-                            subdirs_with_photos.append((sub_p, entry, sub_cnt))
-            except Exception:
-                subdirs_with_photos = []
-
-            # If folder has NO direct photos but has subfolders with photos, expand them!
-            if not has_direct_photos and len(subdirs_with_photos) >= 1:
-                for sub_p, sub_name, sub_cnt in subdirs_with_photos:
-                    if not any(os.path.normpath(p["path"]) == sub_p for p in self.project_items):
-                        name = infer_project_name(images_dir=sub_p) if infer_project_name else sub_name
-                        self.project_items.append({
-                            "path": sub_p,
-                            "name": name,
-                            "count": sub_cnt,
-                        })
-                        added_count += 1
-                        total_photos_added += sub_cnt
-            else:
-                if any(os.path.normpath(p["path"]) == folder for p in self.project_items):
-                    continue
-
-                name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
-                self.project_items.append({
-                    "path": folder,
-                    "name": name,
-                    "count": cnt,
-                })
-                added_count += 1
-                total_photos_added += cnt
+            name = infer_project_name(images_dir=folder) if infer_project_name else os.path.basename(folder)
+            self.project_items.append({
+                "path": folder,
+                "name": name,
+                "count": cnt,
+            })
+            added_count += 1
+            total_photos_added += cnt
 
         if self.project_items and not self.var_images_dir.get().strip():
             self.var_images_dir.set(self.project_items[0]["path"])
@@ -3499,58 +3470,6 @@ class AutoMetashapeStudio:
             self._log(f"[Queue] Added {added_count} survey projects ({total_photos_added:,} photos) to batch queue.", "info")
         elif added_count == 1:
             self._log(f"[Queue] Added project '{self.project_items[-1]['name']}' ({total_photos_added:,} photos) to batch queue.", "info")
-
-    def _scan_parent_directory(self) -> None:
-        """Scan a parent directory and automatically queue all survey project folders inside it."""
-        chosen = filedialog.askdirectory(title="Select Parent Folder to Batch Scan for Survey Projects")
-        if not chosen or not os.path.isdir(chosen):
-            return
-
-        parent = os.path.normpath(chosen)
-        subprojects = []
-        try:
-            for entry in sorted(os.listdir(parent)):
-                sub_path = os.path.join(parent, entry)
-                if os.path.isdir(sub_path) and not entry.lower().startswith((".", "export", "output", "model")):
-                    cnt = self._quick_count_photos(sub_path)
-                    if cnt > 0:
-                        name = infer_project_name(images_dir=sub_path) if infer_project_name else entry
-                        subprojects.append({
-                            "path": sub_path,
-                            "name": name,
-                            "count": cnt,
-                        })
-        except Exception as e:
-            messagebox.showerror("Scan Error", f"Failed to scan directory:\n{e}")
-            return
-
-        if not subprojects:
-            parent_cnt = self._quick_count_photos(parent)
-            if parent_cnt > 0:
-                self._add_project_to_queue([parent])
-                return
-            messagebox.showinfo(
-                "No Projects Found",
-                f"No subfolders containing drone survey photos were found in:\n{parent}\n\n"
-                "Ensure survey photos (.jpg, .png, .tif, .dng) are inside subfolders.",
-            )
-            return
-
-        added = 0
-        total_photos = 0
-        for p in subprojects:
-            if not any(os.path.normpath(item["path"]) == p["path"] for item in self.project_items):
-                self.project_items.append(p)
-                added += 1
-                total_photos += p["count"]
-
-        if self.project_items and not self.var_images_dir.get().strip():
-            self.var_images_dir.set(self.project_items[0]["path"])
-
-        self._update_queue_ui()
-        msg = f"Added {added} survey project(s) to the queue ({total_photos:,} total photos)."
-        self._log(f"[Batch Scan] {msg}", "info")
-        messagebox.showinfo("Batch Import Complete", msg)
 
     def _remove_queue_item(self, idx: int) -> None:
         if 0 <= idx < len(self.project_items):

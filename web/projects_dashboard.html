@@ -626,7 +626,7 @@
         </div>
         <div class="header-actions">
           <button class="btn" id="btn-reload-data" title="Reload live telemetry data from disk">Reload Telemetry</button>
-          <button class="btn" id="btn-scan">Scan Survey Directory</button>
+          <button class="btn" id="btn-scan">Add Project Folders</button>
           <button class="btn btn-primary" id="btn-batch-run">Run Selected (0)</button>
         </div>
       </header>
@@ -1176,7 +1176,7 @@ You can launch Metashape Pro with this project directly.`);
     const btnScan = document.getElementById("btn-scan");
     if (btnScan) {
       btnScan.addEventListener("click", () => {
-        alert("To scan survey directories and launch batch reconstructions:\n\n1. Launch AutoMetashape Studio:\n   python scripts/autometashape_gui.py\n2. Click '+ Batch Scan...' or '+ Add Folders...'\n3. Click 'Run Batch Reconstructions'\n\nTelemetry will automatically sync to this dashboard.");
+        alert("To add survey projects and launch batch reconstructions:\n\n1. Launch AutoMetashape Studio:\n   python scripts/autometashape_gui.py\n2. Click '+ Add Project...' (hold Ctrl or Shift to select multiple project folders)\n3. Click 'Run Batch Reconstructions'\n\nTelemetry will automatically sync to this dashboard.");
       });
     }
 
