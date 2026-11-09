@@ -1125,10 +1125,10 @@ class AutoMetashapeStudio:
         self.var_resume = tk.BooleanVar(value=False)
         # Export Deliverables Checklist (Default: False · Only make project Metashape)
         self.var_export_glb = tk.BooleanVar(value=False)
-        self.var_export_obj = tk.BooleanVar(value=True)  # Default: Production Standard OBJ
+        self.var_export_obj = tk.BooleanVar(value=False)  # Default: False (Strictly tick-driven)
         self.var_build_ortho = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_ortho = self.var_build_ortho  # Backward-compatible alias
-        self.var_export_ortho = tk.BooleanVar(value=True)  # Default: Production Standard Ortho
+        self.var_export_ortho = tk.BooleanVar(value=False)  # Default: False (Strictly tick-driven)
         self.var_build_point_cloud = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_export_point_cloud = tk.BooleanVar(value=False)
         self.var_pc_format = tk.StringVar(value="laz")
@@ -1138,7 +1138,7 @@ class AutoMetashapeStudio:
         self.var_export_dem = tk.BooleanVar(value=False)
         self.var_export_report = tk.BooleanVar(value=False)
 
-        self.var_exp_point_cloud = tk.BooleanVar(value=True)
+        self.var_exp_point_cloud = tk.BooleanVar(value=False)
         self.var_exp_pc_format = tk.StringVar(value="laz")
         self.var_exp_dem = tk.BooleanVar(value=False)
         self.var_exp_ortho = tk.BooleanVar(value=False)
@@ -5237,12 +5237,18 @@ class AutoMetashapeStudio:
 
         if hasattr(self, "var_export_dem") and self.var_export_dem.get():
             cmd.append("--export-dem")
+        else:
+            cmd.append("--no-export-dem")
 
         if hasattr(self, "var_export_ortho") and self.var_export_ortho.get():
             cmd.append("--export-orthomosaic")
+        else:
+            cmd.append("--no-export-orthomosaic")
 
         if hasattr(self, "var_export_report") and self.var_export_report.get():
             cmd.append("--export-report")
+        else:
+            cmd.append("--no-report")
 
         if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
             cmd.append("--export-fbx")
@@ -5262,6 +5268,8 @@ class AutoMetashapeStudio:
             cmd.append("--export-point-cloud")
             if hasattr(self, "var_pc_format"):
                 cmd.extend(["--point-cloud-format", self.var_pc_format.get()])
+        else:
+            cmd.append("--no-export-point-cloud")
 
         if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
             cmd.append("--export-tie-points")

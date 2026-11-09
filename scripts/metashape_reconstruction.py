@@ -1664,7 +1664,7 @@ def run_reconstruction(
     ground_max_angle: float = None,
     ground_max_distance: float = None,
     build_orthomosaic: bool = None,
-    export_ortho: bool = True,
+    export_ortho: bool = False,
     build_dem: bool = None,
     export_dem: bool = False,
     build_point_cloud: bool = True,
@@ -3228,7 +3228,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Build orthomosaic from reconstructed mesh and save in project (default: True in 'pro' preset)",
     )
     parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic building")
-    parser.add_argument("--export-ortho", dest="export_ortho", action="store_true", default=True, help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)")
+    parser.add_argument("--export-ortho", dest="export_ortho", action="store_true", default=False, help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)")
     parser.add_argument("--no-export-ortho", dest="export_ortho", action="store_false", help="Disable GeoTIFF True Orthomosaic file export")
     # Quality Report Options
     parser.add_argument("--export-report", dest="export_report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report (default: False)")
@@ -3351,7 +3351,7 @@ if __name__ == "__main__":
         build_orthomosaic=args.build_orthomosaic,
         build_dem=args.build_dem,
         export_dem=args.export_dem,
-        export_ortho=getattr(args, "export_ortho", True),
+        export_ortho=getattr(args, "export_ortho", False),
         build_point_cloud=args.build_point_cloud,
         export_point_cloud=args.export_point_cloud,
         point_cloud_format=args.point_cloud_format,

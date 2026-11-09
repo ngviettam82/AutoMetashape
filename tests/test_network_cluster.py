@@ -414,6 +414,51 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertNotIn("--export-point-cloud", cmd)
         self.assertNotIn("--export-report", cmd)
 
+    def test_gui_export_checklist_strictly_defaults_to_all_false(self) -> None:
+        """Defend that all deliverable checkboxes in the GUI Export Table default to False."""
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            gui = AutoMetashapeStudio(root)
+            self.assertFalse(gui.var_export_glb.get())
+            self.assertFalse(gui.var_export_obj.get())
+            self.assertFalse(gui.var_export_ortho.get())
+            self.assertFalse(gui.var_export_dem.get())
+            self.assertFalse(gui.var_export_point_cloud.get())
+            self.assertFalse(gui.var_export_report.get())
+            self.assertFalse(gui.var_export_fbx.get())
+            self.assertFalse(gui.var_export_ply.get())
+            self.assertFalse(gui.var_export_dxf.get())
+            self.assertFalse(gui.var_export_tie_points.get())
+            self.assertFalse(gui.var_export_tiles.get())
+            self.assertFalse(gui.var_export_contours.get())
+
+            # Verify that with default checklist (all unticked), no export flags are passed
+            cmd_recon = gui._build_reconstruction_cmd(r"C:\Images", r"C:\Out", "TestProj")
+            self.assertIn("--no-export-glb", cmd_recon)
+            self.assertIn("--no-export-obj", cmd_recon)
+            self.assertIn("--no-export-dem", cmd_recon)
+            self.assertIn("--no-export-ortho", cmd_recon)
+            self.assertIn("--no-export-point-cloud", cmd_recon)
+            self.assertIn("--no-report", cmd_recon)
+            for flag in ("--export-glb", "--export-obj", "--export-dem", "--export-ortho", "--export-point-cloud", "--export-report", "--export-fbx", "--export-ply", "--export-dxf", "--export-tie-points", "--export-tiled-model", "--export-contours"):
+                self.assertNotIn(flag, cmd_recon)
+
+            cmd_export = gui._build_export_cmd_from_recon_settings(r"C:\Out\TestProj.psx", r"C:\Out", "TestProj")
+            self.assertIn("--no-export-glb", cmd_export)
+            self.assertIn("--no-export-obj", cmd_export)
+            self.assertIn("--no-export-dem", cmd_export)
+            self.assertIn("--no-export-orthomosaic", cmd_export)
+            self.assertIn("--no-export-point-cloud", cmd_export)
+            self.assertIn("--no-report", cmd_export)
+            for flag in ("--export-glb", "--export-obj", "--export-dem", "--export-orthomosaic", "--export-point-cloud", "--export-report", "--export-fbx", "--export-ply", "--export-dxf", "--export-tie-points", "--export-tiled-model", "--export-contours"):
+                self.assertNotIn(flag, cmd_export)
+        finally:
+            root.destroy()
+
     def test_preset_selection_does_not_clobber_user_export_table_choices(self) -> None:
         """Defend that selecting Pro preset does not overwrite the user's Export Table checklist."""
         import tkinter as tk

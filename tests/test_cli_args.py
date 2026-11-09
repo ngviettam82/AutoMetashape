@@ -43,6 +43,32 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.build_dem)
         self.assertTrue(args.export_dem)
 
+    def test_recon_parser_ortho_decoupling(self) -> None:
+        """Defend that building orthomosaic does not export GeoTIFF by default."""
+        parser = build_recon_parser()
+
+        # Default: no export
+        default_args = parser.parse_args(["--images", "dummy_images"])
+        self.assertFalse(default_args.export_ortho)
+
+        # Explicitly enabled export
+        export_args = parser.parse_args([
+            "--images", "dummy_images",
+            "--ortho",
+            "--export-ortho",
+        ])
+        self.assertTrue(export_args.build_orthomosaic)
+        self.assertTrue(export_args.export_ortho)
+
+        # Disabled export explicitly
+        no_export_args = parser.parse_args([
+            "--images", "dummy_images",
+            "--ortho",
+            "--no-export-ortho",
+        ])
+        self.assertTrue(no_export_args.build_orthomosaic)
+        self.assertFalse(no_export_args.export_ortho)
+
     def test_recon_parser_point_cloud_decoupling(self) -> None:
         """Defend decoupling between building point cloud and exporting point cloud file."""
         parser = build_recon_parser()
