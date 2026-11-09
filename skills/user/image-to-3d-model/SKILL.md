@@ -191,23 +191,80 @@ Host CPU:                                     [Export Project 1 (CPU)]      ─�
 
 ### 5. Distributed LAN Cluster Processing Protocol
 
-For multi-PC local area networks (LAN), Metashape Network Processing divides large computational stages (matching, depth maps, dense cloud) into parallel chunks across multiple worker machines.
+For multi-PC local area networks (LAN), Metashape Network Processing divides large computational stages (feature matching, depth maps, dense point clouds) into parallel subtasks across multiple worker machines.
 
-1. **Network CLI Parameters**:
-   - `--network-enable`: Arms distributed network processing.
-   - `--network-host <IP>`: Cluster coordinator host IP (auto-detected primary adapter IPv4, e.g. `10.2.8.43` or `192.168.1.100`, avoiding hardcoded `127.0.0.1`).
-   - `--network-port <PORT>`: Metashape server control port (default: `5840`).
-   - `--network-path <UNC_PATH>`: Shared network storage root accessible identically by all machines (e.g. `//HOST_PC/SharedMetashape` or mapped `Z:/`).
-2. **Self-Contained Worker Launch Script (`launch_worker.bat`)**:
-   - Generated directly from GUI via **Export launch_worker.bat**.
-   - Auto-detects local Metashape installation on worker PCs.
-   - Zero hardcoded placeholder paths: if the shared storage path was not configured upfront, the script prompts the operator interactively on the worker machine:
-     ```cmd
-     Enter Shared Network Storage path (e.g. //HOST_PC/SharedMetashape or Z:/):
-     ```
-3. **Dynamic Work-Stealing & Heterogeneous Hardware**:
-   - Metashape utilizes dynamic pull queues: fast GPUs (e.g. RTX 4090) pull and complete 4x more subtasks than medium GPUs (e.g. RTX 3060), automatically self-balancing.
-   - Weak machines with CPU-only or integrated Intel graphics should be excluded from depth map processing to prevent the tail-end barrier straggler trap.
+#### 5.1 Architecture & Network Prerequisites
+- **Coordinator / Server**: The Host PC runs the central server dispatching subtasks to available workers.
+- **Shared Network Storage**: All machines (Host PC and all worker PCs) must access survey photos and project files using an identical path. Use the native Windows UNC share: `\\HOST_PC\SharedMetashape`. Ensure Windows sharing permissions are granted (Read/Write to Everyone or Authenticated Users). Avoid local drive letters (e.g. `C:\...`) because worker PCs cannot resolve local paths on the host.
+- **Firewall Configuration**: Ensure TCP port 5840 is open for incoming connections on the Host PC:
+  ```powershell
+  New-NetFirewallRule -DisplayName "Metashape Server Port 5840" -Direction Inbound -LocalPort 5840 -Protocol TCP -Action Allow
+  ```
+
+#### 5.2 Starting the Server on the Host PC
+The server process coordinates task dispatching and job tracking. It is lightweight and consumes near-zero CPU/GPU.
+- **Via GUI**: In AutoMetashape Studio, scroll to **Distributed LAN Network Cluster** and click **Start Server**.
+- **Via CLI / PowerShell**:
+  ```powershell
+  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --server --control <HOST_IP>:5840 --dispatch <HOST_IP>:5840
+  ```
+
+#### 5.3 Starting a Local Worker on the Host PC (Resource Maximization)
+> [!IMPORTANT]
+> Running `--server` alone only runs the coordinator daemon and does **not** perform any 3D processing! If the Host PC has a powerful GPU (e.g. RTX 4080/4090) and high-core CPU, those resources will sit completely idle unless a worker process is also spawned on the Host PC.
+
+- **Via GUI**: Click **Start Local Worker** in the cluster panel.
+- **Via CLI / PowerShell**:
+  ```powershell
+  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --worker --host 127.0.0.1 --port 5840 --root "\\HOST_PC\SharedMetashape" --gpu-mask 1 --cpu-enable 1
+  ```
+  This engages the host PC's GPU and CPU cores at 100% capacity to crunch reconstruction tasks alongside external network workers.
+
+#### 5.4 Starting Remote Workers on Other LAN Machines
+- **Export Worker Launcher**: In AutoMetashape Studio, click **Export launch_worker.bat**.
+- **Distribute to Worker PCs**: Copy `launch_worker.bat` to any secondary PC on the LAN with Metashape installed.
+- **Run Worker**: Double-click `launch_worker.bat` on the worker machine. The script auto-detects `metashape.exe`, resolves the host IP, configures CPU fallback (`--cpu-enable 1`), and connects to the cluster server.
+- **Manual Remote CLI Launch**:
+  ```powershell
+  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --worker --host <HOST_IP> --port 5840 --root "\\HOST_PC\SharedMetashape" --gpu-mask 1 --cpu-enable 1
+  ```
+
+#### 5.5 Checking Connectivity & Connected Worker Discovery
+Before starting a multi-gigabyte reconstruction, verify network connectivity and worker registration:
+1. **Test Port Reachability from Worker PC**:
+   ```powershell
+   Test-NetConnection -ComputerName <HOST_IP> -Port 5840
+   ```
+   Must return `TcpTestSucceeded : True`. If it fails, check Windows Defender Firewall on the Host PC.
+2. **Test Shared Storage Access from Worker PC**:
+   ```powershell
+   Test-Path "\\HOST_PC\SharedMetashape"
+   ```
+   Must return `True`. Verify the worker can read and create files in the folder.
+3. **Inspect Connected Workers via Python API**:
+   ```python
+   import Metashape
+   client = Metashape.NetworkClient()
+   client.connect("<HOST_IP>", 5840)
+   workers = client.workerList() if hasattr(client, "workerList") else client.workers
+   print(f"Connected Workers ({len(workers)}):")
+   for w in workers:
+       addr = getattr(w, "host", getattr(w, "name", "Worker"))
+       print(f"  • Host: {addr} | Status: {getattr(w, 'status', 'Active')}")
+   ```
+4. **GUI Live Telemetry**: AutoMetashape Studio's cluster panel displays real-time badges showing all registered worker IPs, active tasks, and completion percentages.
+
+#### 5.6 Submitting Distributed Reconstructions & Pipelined Export Overlap
+Dispatch autonomous reconstruction to the active cluster:
+```powershell
+& "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py \
+    --images "\\HOST_PC\SharedMetashape\Surveys\Site_A" \
+    --preset pro \
+    --network-enable --network-host <HOST_IP> --network-port 5840 --network-path "\\HOST_PC\SharedMetashape" \
+    --no-export-glb --no-export-obj --no-export-dem --no-export-ortho
+```
+- **Dynamic Work-Stealing**: Faster nodes (e.g. RTX 4090) automatically pull and complete more depth map slices than medium nodes (e.g. RTX 3060), self-balancing without operator intervention.
+- **Pipelined Overlap**: Once the cluster finishes 3D meshing, the Host PC immediately delegates the next survey project to the cluster while concurrently running `scripts/metashape_export.py` on the Host CPU.
 
 ### 6. Web Studio Dynamic Telemetry Dashboard
 
@@ -247,9 +304,9 @@ The integrated Web Studio (`web/projects_dashboard.html`) provides real-time sur
 
 # Distributed LAN Network Cluster Reconstruction:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
-    --images "//HOST_PC/SharedMetashape/Site_A" \
+    --images "\\HOST_PC\SharedMetashape\Site_A" \
     --preset pro \
-    --network-enable --network-host 10.2.8.43 --network-port 5840 --network-path "//HOST_PC/SharedMetashape"
+    --network-enable --network-host 10.2.8.43 --network-port 5840 --network-path "\\HOST_PC\SharedMetashape"
 
 # Decoupled Pipelined Reconstruction (Export Suppressed for Host Background Overlap):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
