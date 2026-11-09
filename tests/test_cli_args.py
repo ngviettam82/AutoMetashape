@@ -141,6 +141,20 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(net_args.network_port, 5842)
         self.assertEqual(net_args.network_path, r"\\SERVER\RealityScan")
 
+    def test_recon_parser_independent_workers_arg(self) -> None:
+        """Defend --network-independent-workers CLI flag in reconstruction parser."""
+        parser = build_recon_parser()
+        default_args = parser.parse_args(["--images", "dummy_images"])
+        self.assertFalse(default_args.network_independent_workers)
+
+        indep_args = parser.parse_args([
+            "--images", "dummy_images",
+            "--network-enable",
+            "--network-independent-workers",
+        ])
+        self.assertTrue(indep_args.network_enable)
+        self.assertTrue(indep_args.network_independent_workers)
+
     def test_export_parser_arguments(self) -> None:
         """Defend standalone export argument parser accepts required and optional flags."""
         parser = build_export_parser()

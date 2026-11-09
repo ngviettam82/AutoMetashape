@@ -1218,6 +1218,7 @@ class AutoMetashapeStudio:
         self.active_background_exports: list[dict] = []
         self.bg_export_lock = threading.Lock()
         self.var_cluster_concurrent_projects = tk.IntVar(value=3)
+        self.var_network_independent_workers = tk.BooleanVar(value=False)
         self.active_cluster_jobs: list[dict] = []
         self.cluster_job_lock = threading.Lock()
         self.batch_submitted_idx: int = 0
@@ -2245,7 +2246,7 @@ class AutoMetashapeStudio:
         spn_conc = tk.Spinbox(
             row_queue_conc,
             from_=1,
-            to=4,
+            to=8,
             textvariable=self.var_cluster_concurrent_projects,
             font=("Segoe UI", 8),
             bg=UITheme.BG_SURFACE,
@@ -2259,13 +2260,42 @@ class AutoMetashapeStudio:
 
         lbl_queue_hint = tk.Label(
             row_queue_conc,
-            text="Interleaves up to 4 projects so worker nodes stay 100% busy across parallel cluster stages",
+            text="Interleaves up to 8 projects so worker nodes stay 100% busy across parallel cluster stages",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
             anchor=tk.W,
         )
         lbl_queue_hint.pack(side=tk.LEFT)
+
+        # Row B3: Cluster Strategy - Independent Worker Allocation vs Swarm
+        row_strategy = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_strategy.pack(fill=tk.X, pady=(0, 6))
+
+        cb_indep = tk.Checkbutton(
+            row_strategy,
+            text="Independent Worker Mode (Assign 1 full project per worker node)",
+            variable=self.var_network_independent_workers,
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_PRIMARY,
+            selectcolor=UITheme.BG_SURFACE,
+            activebackground=UITheme.BG_ROOT,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            bd=0,
+            anchor=tk.W,
+        )
+        cb_indep.pack(fill=tk.X)
+
+        tk.Label(
+            row_strategy,
+            text="Delegates full projects to individual workers to eliminate LAN latency and sync stalls. Uncheck for collaborative task sharing on 1-2 projects.",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            justify=tk.LEFT,
+            anchor=tk.W,
+        ).pack(fill=tk.X, pady=(1, 0))
 
         # Row C: Direct In-GUI Cluster Daemons Manager (Server & Local Worker)
         frame_daemons = tk.Frame(
@@ -5001,6 +5031,8 @@ class AutoMetashapeStudio:
                 cmd.extend(["--network-port", self.var_network_port.get().strip()])
             if hasattr(self, "var_network_path") and self.var_network_path.get().strip():
                 cmd.extend(["--network-path", self.var_network_path.get().strip()])
+            if hasattr(self, "var_network_independent_workers") and self.var_network_independent_workers.get():
+                cmd.append("--network-independent-workers")
 
         return cmd
 
@@ -5089,7 +5121,7 @@ class AutoMetashapeStudio:
         max_cluster_conc = 1
         if is_cluster:
             try:
-                max_cluster_conc = max(1, min(int(self.var_cluster_concurrent_projects.get()), 4))
+                max_cluster_conc = max(1, min(int(self.var_cluster_concurrent_projects.get()), 8))
             except Exception:
                 max_cluster_conc = 3
 

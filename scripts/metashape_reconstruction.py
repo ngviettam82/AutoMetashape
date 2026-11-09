@@ -1702,6 +1702,7 @@ def run_reconstruction(
     network_host: str = "127.0.0.1",
     network_port: int = 5840,
     network_path: str = "",
+    network_independent_workers: bool = False,
     project_name: str | None = None,
 ):
     t_start = time.time()
@@ -2007,6 +2008,12 @@ def run_reconstruction(
                 return False
             net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
             batch_id = net_client.createBatch(rel_psx, net_tasks)
+            if network_independent_workers:
+                try:
+                    net_client.setBatchWorkerLimit(batch_id, 1)
+                    print("  [Cluster] Mode: Independent Worker (worker_limit=1 locked to 1 node)", flush=True)
+                except Exception as e_limit:
+                    print(f"  [Cluster] Note: could not set batch worker limit: {e_limit}", flush=True)
             net_client.setBatchPaused(batch_id, False)
 
             t_task_start = time.time()
@@ -3253,6 +3260,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--network-enable", action="store_true", default=False, help="Enable distributed network processing across worker nodes")
     parser.add_argument("--network-host", default="127.0.0.1", help="Metashape server hostname or IP address (default: 127.0.0.1)")
     parser.add_argument("--network-port", type=int, default=5840, help="Metashape server port (default: 5840)")
+    parser.add_argument(
+        "--network-independent-workers",
+        action="store_true",
+        default=False,
+        help="Lock each project to an independent worker node (worker_limit=1) to eliminate cross-network synchronization pauses",
+    )
     parser.add_argument("--network-path", default="", help="Shared network root directory (UNC path, e.g. \\\\SERVER\\RealityScan)")
     # Multi-chunk options
     parser.add_argument(
@@ -3374,5 +3387,6 @@ if __name__ == "__main__":
         network_host=args.network_host,
         network_port=args.network_port,
         network_path=args.network_path,
+        network_independent_workers=args.network_independent_workers,
         project_name=args.project_name,
     )

@@ -559,22 +559,71 @@ class TestNetworkCluster(unittest.TestCase):
 
 
     def test_cluster_queue_concurrency_clamping(self) -> None:
-        """Verify cluster queue concurrency clamping between 1 and 4 when cluster active, and 1 when local."""
+        """Verify cluster queue concurrency clamping between 1 and 8 when cluster active, and 1 when local."""
         def calc_conc(val: int, is_cluster: bool) -> int:
             if not is_cluster:
                 return 1
-            return max(1, min(val, 4))
+            return max(1, min(val, 8))
 
         # Cluster mode enabled
         self.assertEqual(calc_conc(0, is_cluster=True), 1)
         self.assertEqual(calc_conc(2, is_cluster=True), 2)
         self.assertEqual(calc_conc(3, is_cluster=True), 3)
-        self.assertEqual(calc_conc(4, is_cluster=True), 4)
-        self.assertEqual(calc_conc(10, is_cluster=True), 4)
+        self.assertEqual(calc_conc(5, is_cluster=True), 5)
+        self.assertEqual(calc_conc(8, is_cluster=True), 8)
+        self.assertEqual(calc_conc(10, is_cluster=True), 8)
 
         # Local mode (single PC GPU safety)
-        self.assertEqual(calc_conc(3, is_cluster=False), 1)
+        self.assertEqual(calc_conc(5, is_cluster=False), 1)
         self.assertEqual(calc_conc(2, is_cluster=False), 1)
+
+    def test_reconstruction_cmd_independent_workers_flag(self) -> None:
+        """Verify _build_reconstruction_cmd includes --network-independent-workers when checked."""
+        from autometashape_gui import AutoMetashapeStudio
+
+        gui_mock = MagicMock()
+        gui_mock.metashape_exe = "metashape.exe"
+        gui_mock.recon_script = "scripts/metashape_reconstruction.py"
+        gui_mock.selected_preset_key = "pro"
+        gui_mock.var_presel_mode.get.return_value = "estimated"
+        gui_mock.var_pipelined_export.get.return_value = False
+        gui_mock.batch_running = False
+
+        gui_mock.var_export_glb.get.return_value = False
+        gui_mock.var_export_obj.get.return_value = True
+        gui_mock.var_export_fbx.get.return_value = False
+        gui_mock.var_export_ply.get.return_value = False
+        gui_mock.var_export_dxf.get.return_value = False
+        gui_mock.var_export_tie_points.get.return_value = False
+        gui_mock.var_build_ortho.get.return_value = True
+        gui_mock.var_export_ortho.get.return_value = True
+        gui_mock.var_build_dem.get.return_value = True
+        gui_mock.var_export_dem.get.return_value = False
+        gui_mock.var_build_point_cloud.get.return_value = False
+        gui_mock.var_export_point_cloud.get.return_value = False
+        gui_mock.var_build_contours.get.return_value = False
+        gui_mock.var_export_contours.get.return_value = False
+        gui_mock.var_build_tiled_model.get.return_value = False
+        gui_mock.var_export_tiles.get.return_value = False
+        gui_mock.var_export_report.get.return_value = False
+        gui_mock.var_pc_format.get.return_value = "laz"
+        gui_mock.var_classify_ground.get.return_value = False
+        gui_mock.var_classify_points.get.return_value = False
+        gui_mock.var_pause_crop.get.return_value = False
+        gui_mock.var_rebake.get.return_value = False
+        gui_mock.var_resume.get.return_value = False
+        gui_mock.var_multi_chunk.get.return_value = "disable"
+        gui_mock.var_chunk_align_method.get.return_value = "camera"
+
+        gui_mock.var_network_enable.get.return_value = True
+        gui_mock.var_network_host.get.return_value = "10.5.10.202"
+        gui_mock.var_network_port.get.return_value = "5840"
+        gui_mock.var_network_path.get.return_value = r"\\SERVER\Scan"
+        gui_mock.var_network_independent_workers.get.return_value = True
+
+        cmd = AutoMetashapeStudio._build_reconstruction_cmd(gui_mock, r"C:\Images", r"C:\Output", "ProjectA")
+        self.assertIn("--network-enable", cmd)
+        self.assertIn("--network-independent-workers", cmd)
 
     def test_cluster_concurrency_variable_default(self) -> None:
         """Verify AutoMetashapeStudio defines cluster concurrency with a default of 3."""
