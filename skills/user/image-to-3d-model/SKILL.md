@@ -1,6 +1,6 @@
 ---
 name: image-to-3d-model
-description: "Reconstructs high-precision 3D models (OBJ, GLB, FBX, PLY), dense point clouds (LAZ, LAS, PLY, E57), hierarchical 3D tiles (Cesium, TLS, SLPK), elevation models (DEM), topographic contours (SHP, DXF), orthomosaics, and calibration reports. Supports all Agisoft Metashape functions: target marker detection, GCP reference, radiometric color calibration, MVS depth maps, ground/semantic classification, mesh smoothing, and texture delighting. Use when generating 3D models, point clouds, tiled models, elevation models, contours, or reports from drone or camera captures."
+description: "Reconstructs high-precision 3D models (OBJ, GLB, FBX, PLY), dense point clouds (LAZ, LAS, PLY, E57), hierarchical 3D tiles (Cesium, TLS, SLPK), elevation models (DEM), topographic contours (SHP, DXF), orthomosaics, and calibration reports. Supports distributed network cluster processing, pipelined compute-export overlap, target marker detection, GCP reference, radiometric color calibration, MVS depth maps, ground classification, and texture delighting. Use when generating 3D models, point clouds, tiled models, elevation models, contours, or reports from drone or camera captures."
 audience: user
 status: stable
 owners:
@@ -169,7 +169,55 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
 4. **Progressive Advancement**: Advance to Project $N+1$ only after Project $N$ passes verification.
 5. **Batch Summary**: Present a consolidated Markdown table reporting photo counts, aligned cameras, face counts, and deliverable paths.
 
-### 4. CLI Recipes & Usage
+### 4. Pipelined Compute-Export Overlap Engine
+
+In high-throughput multi-project workflows, exporting assets (glTF baking, OBJ formatting, multi-page 8K TIFF compression, GeoTIFF DEM generation) takes 25% to 40% of total turnaround time. Because asset export is 99% CPU and disk I/O, running exports sequentially on the cluster forces multi-GPU worker nodes to sit completely idle.
+
+The **Pipelined Compute-Export Overlap Engine** decouples reconstruction from asset exporting:
+1. **Reconstruction Export Flag Suppression**:
+   - When batch mode runs with pipelined overlap enabled, the GUI passes `--no-export-glb --no-export-obj --no-export-dem --no-export-ortho` to the reconstruction command.
+   - As soon as 3D meshing and texturing are saved in `Project_N.psx`, the cluster releases all GPU worker nodes immediately.
+2. **Immediate Cluster Advancement**:
+   - The coordinator instantly dispatches `Project_N+1` to the GPU cluster workers.
+3. **Concurrent Background Host CPU Export**:
+   - The host machine asynchronously launches `scripts/metashape_export.py` in the background for `Project_N`.
+   - **Process Concurrency Throttle (1 to 4, Default: 2)**: Bounds the number of concurrent export jobs to prevent host RAM exhaustion (each 8K atlas bake requires 8–16 GB RAM) and NVMe write-queue saturation.
+   - If maximum concurrent export slots are full when `Project_N+1` finishes, the subsequent project waits in a background thread while the cluster continues crunching `Project_N+2`.
+
+```
+GPU Cluster: [Reconstruct Project 1 (GPU)] ──> [Reconstruct Project 2 (GPU)] ──> [Reconstruct Project 3 (GPU)]
+Host CPU:                                     [Export Project 1 (CPU)]      ──> [Export Project 2 (CPU)]
+```
+
+### 5. Distributed LAN Cluster Processing Protocol
+
+For multi-PC local area networks (LAN), Metashape Network Processing divides large computational stages (matching, depth maps, dense cloud) into parallel chunks across multiple worker machines.
+
+1. **Network CLI Parameters**:
+   - `--network-enable`: Arms distributed network processing.
+   - `--network-host <IP>`: Cluster coordinator host IP (auto-detected primary adapter IPv4, e.g. `10.2.8.43` or `192.168.1.100`, avoiding hardcoded `127.0.0.1`).
+   - `--network-port <PORT>`: Metashape server control port (default: `5840`).
+   - `--network-path <UNC_PATH>`: Shared network storage root accessible identically by all machines (e.g. `//HOST_PC/SharedMetashape` or mapped `Z:/`).
+2. **Self-Contained Worker Launch Script (`launch_worker.bat`)**:
+   - Generated directly from GUI via **Export launch_worker.bat**.
+   - Auto-detects local Metashape installation on worker PCs.
+   - Zero hardcoded placeholder paths: if the shared storage path was not configured upfront, the script prompts the operator interactively on the worker machine:
+     ```cmd
+     Enter Shared Network Storage path (e.g. //HOST_PC/SharedMetashape or Z:/):
+     ```
+3. **Dynamic Work-Stealing & Heterogeneous Hardware**:
+   - Metashape utilizes dynamic pull queues: fast GPUs (e.g. RTX 4090) pull and complete 4x more subtasks than medium GPUs (e.g. RTX 3060), automatically self-balancing.
+   - Weak machines with CPU-only or integrated Intel graphics should be excluded from depth map processing to prevent the tail-end barrier straggler trap.
+
+### 6. Web Studio Dynamic Telemetry Dashboard
+
+The integrated Web Studio (`web/projects_dashboard.html`) provides real-time survey asset intelligence, optics audits, and KPI tracking without mock data or static placeholders:
+1. **Live Telemetry Generation**: The GUI automatically profiles active queue projects and completed output directories using `analyze_survey_physics()`, writing structured telemetry into `web/projects_data.js`.
+2. **KPI Metrics**: Real-time aggregation of total survey photos, alignment percentage, active/completed project counts, total 3D mesh faces, and 8K texture atlas pages.
+3. **Dynamic GSD Distribution**: Inline SVG bar chart visually rendering Ground Sampling Distance (GSD) compliance ($< 1.5\text{ cm/px}$) across all ingested flight missions.
+4. **Zero-State Handling**: Standalone browser opens display an empty state banner with instructions instead of hardcoded mock records.
+
+### 7. CLI Recipes & Usage
 
 ```powershell
 # Pro Photogrammetry & Geomatics Engine (Default):
@@ -196,6 +244,18 @@ When a parent directory contains multiple independent survey projects (e.g. `Sur
 
 # Standalone Optics & Telemetry Profiling (Inspect Only):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --profile
+
+# Distributed LAN Network Cluster Reconstruction:
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
+    --images "//HOST_PC/SharedMetashape/Site_A" \
+    --preset pro \
+    --network-enable --network-host 10.2.8.43 --network-port 5840 --network-path "//HOST_PC/SharedMetashape"
+
+# Decoupled Pipelined Reconstruction (Export Suppressed for Host Background Overlap):
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
+    --images "D:/Surveys/Site_A" \
+    --preset pro \
+    --no-export-glb --no-export-obj --no-export-dem --no-export-ortho
 
 # Checkpoint Resume:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --resume

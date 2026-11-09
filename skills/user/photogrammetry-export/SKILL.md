@@ -17,6 +17,7 @@ Lightweight export and packaging workflow converting existing or GUI-modified Ag
 
 Use this skill when:
 - Re-exporting deliverables after opening `building_reconstruction.psx` in Metashape GUI to manually sculpt, clean stray geometry, crop, or tweak UV textures.
+- Executing decoupled pipelined asset exports on the Host CPU while GPU cluster workers crunch the next project in the batch queue.
 - Converting an existing Metashape project directly into standalone binary glTF (`.glb`), Wavefront OBJ (`.obj`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), or AutoCAD DXF (`.dxf`).
 - Packaging hierarchical 3D Tiled Models (Cesium 3D Tiles `tileset.json` + `b3dm`, Agisoft `.tls`, Esri `.slpk`, `.osgb`) for streaming web GIS and Unreal Engine.
 - Exporting dense 3D point clouds (`.laz`, `.las`, `.ply`, `.e57`, `.xyz`) or sparse tie points directly from existing project chunks.
@@ -81,7 +82,20 @@ To re-bake UV mapping, a 16-page 8K texture atlas, and apply delighting (shadow 
     --remove-lighting
 ```
 
-### 4. Format Specifications
+### 4. Decoupled Pipelined Overlap Export
+In the AutoMetashape Studio architecture, `scripts/metashape_export.py` functions as the decoupled background exporter:
+- As soon as the GPU reconstruction cluster finishes meshing a project, it triggers this script in the background on the Host CPU.
+- Operates concurrently with bounded concurrency limits (1 to 4, default 2), isolating project folders and `.psx` document locks.
+- Command recipe generated automatically by the coordinator:
+```powershell
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
+    --project "D:/Exports/Project_A/Project_A.psx" \
+    --output "D:/Exports/Project_A" \
+    --export-glb --export-obj --texture-format tiff \
+    --export-dem --export-orthomosaic
+```
+
+### 5. Format Specifications
 - **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` / `.tif`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
 - **Dense Point Cloud (`.laz`, `.las`, `.ply`, `.e57`)**: `chunk.exportPointCloud()`, preserving coordinates, colors, normals, confidence, and classifications.
 - **Hierarchical 3D Tiled Model**: Cesium 3D Tiles (`tiled_model/tileset.json` + `.b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), OpenSceneGraph (`.osgb`).
