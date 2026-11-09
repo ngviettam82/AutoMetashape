@@ -760,6 +760,55 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertEqual(dispatched[0], 0)
         self.assertEqual(len(mock_studio.active_cluster_jobs), 1)
 
+    def test_preflight_server_unreachable_stops_batch_with_error(self) -> None:
+        """Verify _start_reconstruction triggers explicit error notification and aborts if cluster server unreachable."""
+        from unittest.mock import patch
+        from autometashape_gui import AutoMetashapeStudio
+
+        mock_studio = MagicMock()
+        mock_studio.var_export_root.get.return_value = "C:/Export"
+        mock_studio._get_active_projects.return_value = [{"name": "SiteA", "path": "C:/Images/SiteA"}]
+        mock_studio.var_network_enable.get.return_value = True
+        mock_studio.var_network_host.get.return_value = "192.168.1.99"
+        mock_studio.var_network_port.get.return_value = "5840"
+        mock_studio.server_proc = None
+        mock_studio.batch_running = False
+
+        with patch("os.path.isdir", return_value=False),              patch("socket.socket") as mock_sock_cls,              patch("tkinter.messagebox.showerror") as mock_showerror:
+
+            # Simulate unreachable socket connection (e.g. error code 10061)
+            mock_sock = MagicMock()
+            mock_sock.connect_ex.return_value = 10061
+            mock_sock_cls.return_value = mock_sock
+
+            AutoMetashapeStudio._start_reconstruction(mock_studio)
+
+            mock_showerror.assert_called_once()
+            self.assertIn("Server Unreachable", mock_showerror.call_args[0][0])
+            self.assertFalse(mock_studio.batch_running)
+
+    def test_stepper_set_done_and_set_error(self) -> None:
+        """Verify StudioPipelineStepper set_done and set_error update stage indicators and styles."""
+        import tkinter as tk
+        from autometashape_gui import StudioPipelineStepper, UITheme
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            stepper = StudioPipelineStepper(root, [("1", "Stage1", "Sub1"), ("2", "Stage2", "Sub2")])
+            # Test set_done
+            stepper.set_done(0, "Saved")
+            self.assertEqual(stepper.stage_indicators[0].cget("text"), "✓")
+            self.assertIn("Completed: Stage1", stepper.lbl_pipeline_status.cget("text"))
+
+            # Test set_error
+            stepper.set_error(1, "Connection Refused")
+            self.assertEqual(stepper.stage_indicators[1].cget("text"), "✗ 2")
+            self.assertIn("Error at Stage2", stepper.lbl_pipeline_status.cget("text"))
+            self.assertEqual(stepper.lbl_pipeline_status.cget("fg"), UITheme.STATUS_ERROR)
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
