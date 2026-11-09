@@ -1125,10 +1125,10 @@ class AutoMetashapeStudio:
         self.var_resume = tk.BooleanVar(value=False)
         # Export Deliverables Checklist (Default: False · Only make project Metashape)
         self.var_export_glb = tk.BooleanVar(value=False)
-        self.var_export_obj = tk.BooleanVar(value=False)
+        self.var_export_obj = tk.BooleanVar(value=True)  # Default: Production Standard OBJ
         self.var_build_ortho = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_ortho = self.var_build_ortho  # Backward-compatible alias
-        self.var_export_ortho = tk.BooleanVar(value=False)
+        self.var_export_ortho = tk.BooleanVar(value=True)  # Default: Production Standard Ortho
         self.var_build_point_cloud = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
         self.var_export_point_cloud = tk.BooleanVar(value=False)
         self.var_pc_format = tk.StringVar(value="laz")
@@ -3893,6 +3893,16 @@ class AutoMetashapeStudio:
                 self.var_stage_mesh.set(True)
             if hasattr(self, "var_stage_texture"):
                 self.var_stage_texture.set(True)
+            if hasattr(self, "var_export_obj"):
+                self.var_export_obj.set(True)
+            if hasattr(self, "var_export_ortho"):
+                self.var_export_ortho.set(True)
+            if hasattr(self, "var_export_dem"):
+                self.var_export_dem.set(False)
+            if hasattr(self, "var_export_point_cloud"):
+                self.var_export_point_cloud.set(False)
+            if hasattr(self, "var_export_glb"):
+                self.var_export_glb.set(False)
             self._sync_dynamic_stepper()
             self._sync_stepper_view()
             # Default to not exporting anything; export checklist owns deliverable decisions
@@ -5189,10 +5199,10 @@ class AutoMetashapeStudio:
         else:
             cmd.append("--no-export-obj")
 
-        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+        if hasattr(self, "var_export_dem") and self.var_export_dem.get():
             cmd.append("--export-dem")
 
-        if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
+        if hasattr(self, "var_export_ortho") and self.var_export_ortho.get():
             cmd.append("--export-orthomosaic")
 
         if hasattr(self, "var_export_report") and self.var_export_report.get():

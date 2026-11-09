@@ -273,6 +273,37 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertIn("--texture-format", cmd)
         self.assertIn("png", cmd)
 
+    def test_pipelined_export_command_skips_dem_when_not_checked(self) -> None:
+        """Verify building DEM internally for ortho does not force DEM export unless explicitly checked."""
+        psx = r"C:\Output\Scan2\Scan2.psx"
+        out_dir = r"C:\Output\Scan2"
+        proj_name = "Scan2"
+
+        gui_mock = MagicMock()
+        gui_mock.metashape_exe = "metashape.exe"
+        gui_mock.export_script = "scripts/metashape_export.py"
+        gui_mock.var_exp_format.get.return_value = "png"
+        gui_mock.var_export_glb.get.return_value = False
+        gui_mock.var_export_obj.get.return_value = True
+        gui_mock.var_build_dem.get.return_value = True
+        gui_mock.var_export_dem.get.return_value = False
+        gui_mock.var_build_ortho.get.return_value = True
+        gui_mock.var_export_ortho.get.return_value = True
+        gui_mock.var_export_report.get.return_value = False
+        gui_mock.var_build_tiled_model.get.return_value = False
+        gui_mock.var_build_contours.get.return_value = False
+        gui_mock.var_build_point_cloud.get.return_value = False
+        gui_mock.var_export_fbx.get.return_value = False
+        gui_mock.var_export_ply.get.return_value = False
+        gui_mock.var_export_dxf.get.return_value = False
+
+        from autometashape_gui import AutoMetashapeStudio
+        cmd = AutoMetashapeStudio._build_export_cmd_from_recon_settings(gui_mock, psx, out_dir, proj_name)
+        self.assertIn("--export-obj", cmd)
+        self.assertNotIn("--no-export-obj", cmd)
+        self.assertIn("--export-orthomosaic", cmd)
+        self.assertNotIn("--export-dem", cmd)
+
     def test_pick_multiple_folders_fallback(self) -> None:
         """Verify pick_multiple_folders falls back to filedialog when COM is mocked/fails."""
         from unittest.mock import patch
