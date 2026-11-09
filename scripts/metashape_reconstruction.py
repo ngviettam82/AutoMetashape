@@ -2718,6 +2718,19 @@ def run_reconstruction(
 
         # RAM Guard: Adjust to 8 pages if < 32GB RAM, and to 4 pages if < 16GB RAM
         ram_gb = get_system_ram_gb()
+        if cluster_enabled and net_client:
+            try:
+                w_data = net_client.workerList()
+                workers = w_data.get("workers", []) if isinstance(w_data, dict) else []
+                w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
+                if w_rams:
+                    min_w_ram = min(w_rams)
+                    if min_w_ram < ram_gb:
+                        print(f"  [RAM Guard] Cluster worker node with lower physical RAM detected: {min_w_ram:.1f} GB. Adjusting RAM guard threshold for cluster dispatch.", flush=True)
+                        ram_gb = min_w_ram
+            except Exception as e_w_ram:
+                print(f"  [RAM Guard] Note: could not query cluster worker RAM: {e_w_ram}", flush=True)
+
         if ram_gb < 16.0:
             if eff_pages > 4:
                 print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (<16GB). Adjusting texture atlas from {eff_pages} to 4 pages to prevent bad allocation.", flush=True)
@@ -3031,7 +3044,7 @@ def run_reconstruction(
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
     cluster_exported = False
-    if cluster_enabled and chunk.model:
+    if cluster_enabled:
         try:
             export_tasks = []
             tex_fmt = texture_format if texture_format else "png"
@@ -3083,25 +3096,25 @@ def run_reconstruction(
                 t_dxf.path = get_cluster_rel_path(dxf_out)
                 export_tasks.append(t_dxf)
 
-            if export_dem:
+            if export_dem and (getattr(chunk, "elevation", None) is not None or build_dem):
                 dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
                 t_dem = Metashape.Tasks.ExportRaster()
                 t_dem.source_data = Metashape.DataSource.ElevationData
-                t_dem.format = Metashape.RasterFormat.RasterFormatTiles
+                t_dem.format = Metashape.RasterFormat.RasterFormatNone
                 t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
                 t_dem.path = get_cluster_rel_path(dem_out)
                 export_tasks.append(t_dem)
 
-            if export_ortho:
+            if export_ortho and (chunk.orthomosaic is not None or build_orthomosaic):
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
                 t_ortho = Metashape.Tasks.ExportRaster()
                 t_ortho.source_data = Metashape.DataSource.OrthomosaicData
-                t_ortho.format = Metashape.RasterFormat.RasterFormatTiles
+                t_ortho.format = Metashape.RasterFormat.RasterFormatNone
                 t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
                 t_ortho.path = get_cluster_rel_path(ortho_out)
                 export_tasks.append(t_ortho)
 
-            if export_point_cloud:
+            if export_point_cloud and (chunk.point_cloud is not None or build_point_cloud):
                 pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
                 pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
                 pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")

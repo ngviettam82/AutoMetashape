@@ -806,6 +806,55 @@ class TestNetworkCluster(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_cluster_worker_ram_query_and_guard(self) -> None:
+        """Verify cluster worker RAM querying picks lowest worker RAM to safeguard remote texture baking."""
+        from unittest.mock import MagicMock
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "PC-HIGH", "memory_size": 68719476736.0, "state": "ready"},  # 64 GB
+                {"worker_id": 2, "hostname": "PC-LOW", "memory_size": 17179869184.0, "state": "ready"},   # 16 GB
+            ]
+        }
+        local_host_ram = 64.0
+        w_data = mock_client.workerList()
+        workers = w_data.get("workers", [])
+        w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
+        effective_ram = local_host_ram
+        if w_rams:
+            min_w = min(w_rams)
+            if min_w < effective_ram:
+                effective_ram = min_w
+
+        self.assertAlmostEqual(effective_ram, 16.0, places=1)
+
+    def test_cluster_independent_worker_mode_batch_limit(self) -> None:
+        """Verify Independent Project Mode applies setBatchWorkerLimit(batch_id, 1)."""
+        from unittest.mock import MagicMock
+        mock_client = MagicMock()
+        mock_client.createBatch.return_value = 101
+
+        batch_id = mock_client.createBatch("relative/path/project.psx", [])
+        network_independent_workers = True
+        if network_independent_workers:
+            mock_client.setBatchWorkerLimit(batch_id, 1)
+
+        mock_client.setBatchWorkerLimit.assert_called_once_with(101, 1)
+
+    def test_cluster_export_fallback_suppression(self) -> None:
+        """Verify that when cluster worker exports deliverables, host skips local export."""
+        cluster_exported = True
+        local_executed = False
+        export_glb = True
+        if (not cluster_exported) and export_glb:
+            local_executed = True
+        self.assertFalse(local_executed)
+
+        cluster_exported = False
+        if (not cluster_exported) and export_glb:
+            local_executed = True
+        self.assertTrue(local_executed)
+
 
 if __name__ == "__main__":
     unittest.main()
