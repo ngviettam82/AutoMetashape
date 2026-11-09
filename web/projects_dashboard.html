@@ -46,6 +46,80 @@
       --mono: "Geist Mono", monospace;
     }
 
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --ground: #0c0c0e;
+        --surface: #151518;
+        --raised: #1c1c20;
+        --active: #222226;
+        --border: #27272a;
+        --rule: #1e1e22;
+        --control: #36363a;
+        --text: #ffffff;
+        --muted: #a1a1aa;
+        --faint: #71717a;
+        --accent: #ffffff;
+        --chart-3: #38bdf8;
+        --pill-positive-bg: #102318;
+        --pill-positive-ink: #3fc07a;
+        --pill-warning-bg: #261706;
+        --pill-warning-ink: #f59e0b;
+        --pill-neutral-bg: #27272a;
+        --pill-neutral-ink: #d4d4d8;
+      }
+      .brand-mark {
+        background: #ffffff;
+        color: #0c0c0e;
+      }
+      .btn {
+        background: var(--surface);
+        border-color: var(--border);
+        color: var(--text);
+      }
+      .btn:hover {
+        background: var(--raised);
+      }
+      .btn-primary {
+        background: #ffffff;
+        color: #0c0c0e;
+        border-color: #ffffff;
+      }
+      .btn-primary:hover {
+        background: #e4e4e7;
+      }
+      .tab-btn.active {
+        background: var(--raised);
+        color: var(--text);
+      }
+      .search-input {
+        background: var(--surface);
+        border-color: var(--border);
+        color: var(--text);
+      }
+      tr.selected { background: #1c1c20; }
+      tr:hover:not(.selected) { background: #18181c; }
+      .data-bar-wrap { background: #27272a; }
+      .batch-bar {
+        background: #1c1c20;
+        border: 1px solid var(--border);
+        color: #ffffff;
+      }
+      .btn-batch-primary {
+        background: #ffffff;
+        color: #0c0c0e;
+      }
+      .btn-batch-primary:hover {
+        background: #e4e4e7;
+      }
+      .btn-batch-secondary {
+        border-color: #3f3f46;
+        color: #ffffff;
+      }
+      .btn-batch-secondary:hover {
+        background: rgba(255, 255, 255, 0.08);
+      }
+    }
+
     *, *::before, *::after { box-sizing: border-box; }
     body {
       margin: 0;
@@ -636,7 +710,7 @@
         <div class="kpi-cell">
           <div class="kpi-label">Total Survey Photos</div>
           <div class="kpi-value" id="kpi-photos">0</div>
-          <div class="kpi-meta" id="kpi-photos-meta"><span class="kpi-highlight" id="kpi-registered">--</span> registered cameras</div>
+          <div class="kpi-meta" id="kpi-photos-meta"><span class="kpi-highlight" id="kpi-registered">0.0%</span> registered cameras</div>
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">Active Projects</div>
@@ -645,12 +719,12 @@
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">Total 3D Mesh Faces</div>
-          <div class="kpi-value" id="kpi-faces">--</div>
+          <div class="kpi-value" id="kpi-faces">0</div>
           <div class="kpi-meta" id="kpi-faces-meta">Across 0 deliverables</div>
         </div>
         <div class="kpi-cell">
           <div class="kpi-label">8K Texture Atlases</div>
-          <div class="kpi-value" id="kpi-textures">-- <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span></div>
+          <div class="kpi-value" id="kpi-textures">0 <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span></div>
           <div class="kpi-meta">1:1 ground texel parity</div>
         </div>
       </section>
@@ -812,7 +886,7 @@
     function updateKpiStrip() {
       const totalPhotos = projects.reduce((acc, p) => acc + (parseInt(p.photos) || 0), 0);
       const totalAligned = projects.reduce((acc, p) => acc + (parseInt(p.aligned) || 0), 0);
-      const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "--";
+      const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "0.0%";
       const completedCount = projects.filter(p => p.status === 'completed').length;
       const queuedCount = projects.filter(p => p.status === 'queued').length;
       const activeCount = projects.filter(p => p.status === 'processing').length;
@@ -874,7 +948,7 @@
             ? (totalFacesNum / 1000000).toFixed(1) + "M"
             : totalFacesNum.toLocaleString();
         } else {
-          elFaces.textContent = projects.length > 0 ? "Pending" : "--";
+          elFaces.textContent = projects.length > 0 ? "Pending" : "0";
         }
       }
       const elFacesMeta = document.getElementById("kpi-faces-meta");
@@ -891,7 +965,7 @@
       });
       const elTextures = document.getElementById("kpi-textures");
       if (elTextures) {
-        elTextures.innerHTML = `${totalAtlasPages > 0 ? totalAtlasPages : '--'} <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span>`;
+        elTextures.innerHTML = `${totalAtlasPages > 0 ? totalAtlasPages : '0'} <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span>`;
       }
 
       const svg = document.getElementById("gsd-svg-bars");

@@ -1735,7 +1735,7 @@ class AutoMetashapeStudio:
 
         lbl_q_hint = tk.Label(
             self.frame_queue_container,
-            text="ℹ Overlap active: Host CPU exports deliverables in background while worker GPUs immediately start the next flight.",
+            text="Overlap active: Host CPU exports deliverables in background while worker GPUs immediately start the next flight.",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_DIM,
@@ -1792,7 +1792,7 @@ class AutoMetashapeStudio:
 
         lbl_export_info = tk.Label(
             self.card_folder.body,
-            text="ℹ Each project creates and exports to: <Export Folder>/<project_name>/<project_name>.psx",
+            text="Each project creates and exports to: <Export Folder>/<project_name>/<project_name>.psx",
             font=("Segoe UI", 7),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_DIM,
@@ -2036,7 +2036,7 @@ class AutoMetashapeStudio:
         # Footnote
         lbl_info = tk.Label(
             self.card_recon_export.body,
-            text="ℹ Metashape native project (.psx) is always saved. If all options remain unchecked, the project is fully saved without writing extra files to disk.",
+            text="Metashape native project (.psx) is always saved. If all options remain unchecked, the project is fully saved without writing extra files to disk.",
             font=("Segoe UI", 7),
             bg=UITheme.BG_SURFACE,
             fg=UITheme.TEXT_DIM,
@@ -2222,7 +2222,7 @@ class AutoMetashapeStudio:
 
         lbl_path_hint = tk.Label(
             self.frame_net_body,
-            text="ℹ All nodes and server must read/write this shared path (e.g. \\\\HOST_PC\\SharedMetashape or Z:\\)",
+            text="All nodes and server must read/write this shared path (e.g. \\\\HOST_PC\\SharedMetashape or Z:\\)",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
@@ -2259,7 +2259,7 @@ class AutoMetashapeStudio:
 
         lbl_queue_hint = tk.Label(
             row_queue_conc,
-            text="ℹ Interleaves 3 projects so worker nodes stay 100% busy across parallel cluster stages",
+            text="Interleaves up to 4 projects so worker nodes stay 100% busy across parallel cluster stages",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_MUTED,
