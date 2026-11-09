@@ -1861,29 +1861,59 @@ def run_reconstruction(
 
             if hasattr(Metashape, "NetworkClient"):
                 client = Metashape.NetworkClient()
-                if client.connect(f"{network_host}:{network_port}"):
-                    workers = client.workerList()
+                try:
+                    client.connect(f"{network_host}:{network_port}")
+                    raw_workers = client.workerList()
+                    if isinstance(raw_workers, dict):
+                        workers = raw_workers.get("workers", [])
+                    elif isinstance(raw_workers, (list, tuple)):
+                        workers = list(raw_workers)
+                    else:
+                        workers = []
+
                     for w in workers:
-                        if getattr(w, "paused", False) and hasattr(w, "id"):
+                        w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
+                        w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
+                        if w_paused and w_id is not None:
                             try:
-                                client.setWorkerPaused(w.id, False)
+                                client.setWorkerPaused(w_id, False)
                             except Exception:
                                 pass
-                    workers = client.workerList()
-                    active_cluster_workers = [w for w in workers if not getattr(w, "paused", False)]
+
+                    raw_workers = client.workerList()
+                    if isinstance(raw_workers, dict):
+                        workers = raw_workers.get("workers", [])
+                    elif isinstance(raw_workers, (list, tuple)):
+                        workers = list(raw_workers)
+                    else:
+                        workers = []
+
+                    active_cluster_workers = [
+                        w for w in workers
+                        if not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                    ]
                     print(f"  [Network Cluster] Connected to server successfully!", flush=True)
                     print(f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_cluster_workers)} active workers)", flush=True)
                     for idx, w in enumerate(workers, 1):
-                        host_label = getattr(w, "host", "Node")
-                        print(f"    • Node {idx}: {host_label} (GPU: {getattr(w, 'gpu_mask', 1)}, Priority: {getattr(w, 'priority', 0)})", flush=True)
+                        if isinstance(w, dict):
+                            host_label = w.get("hostname", "Node")
+                            g_mask = w.get("gpu_mask", 1)
+                            prio = w.get("priority", 0)
+                            cpu_en = w.get("cpu_enabled", False)
+                        else:
+                            host_label = getattr(w, "host", getattr(w, "hostname", "Node"))
+                            g_mask = getattr(w, "gpu_mask", 1)
+                            prio = getattr(w, "priority", 0)
+                            cpu_en = getattr(w, "cpu_enabled", False)
+                        print(f"    • Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})", flush=True)
 
                     if len(active_cluster_workers) > 0:
                         net_client = client
                         cluster_enabled = True
                     else:
                         print(f"  [Network Cluster] [NOTICE] 0 active worker nodes connected to server. Will execute tasks locally.", flush=True)
-                else:
-                    print(f"  [Network Cluster] [NOTICE] Server unreachable at {network_host}:{network_port}. Processing locally.", flush=True)
+                except Exception as e_net_conn:
+                    print(f"  [Network Cluster] [NOTICE] Server connection failed at {network_host}:{network_port} ({e_net_conn}). Processing locally.", flush=True)
         except Exception as e_net_init:
             print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}. Processing locally.", flush=True)
     elif Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
@@ -1920,14 +1950,42 @@ def run_reconstruction(
             doc.chunk = doc.chunks[0]
 
     def get_cluster_rel_path() -> str:
-        if network_path and os.path.exists(network_path):
+        if network_path:
+            norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
+            norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
+
+            # 1. Try standard commonpath if on same drive or both UNC
             try:
                 abs_psx = os.path.abspath(psx_out)
                 abs_net = os.path.abspath(network_path)
-                if os.path.commonpath([abs_psx, abs_net]) == abs_net:
+                if os.path.commonpath([abs_psx, abs_net]).lower() == abs_net.lower():
                     return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
             except Exception:
                 pass
+
+            # 2. Match share name from UNC path (e.g. \\ctuav\\catp -> 'catp') against psx path components
+            net_parts = [p for p in norm_net.split("/") if p]
+            if net_parts:
+                share_name = net_parts[-1].lower()
+                psx_parts = [p for p in norm_psx.split("/") if p]
+                psx_lower = [p.lower() for p in psx_parts]
+                if share_name in psx_lower:
+                    idx = psx_lower.index(share_name)
+                    rel = "/".join(psx_parts[idx + 1:])
+                    if rel:
+                        return rel
+
+            # 3. Fallback: match any common subfolder in net_path
+            for i in range(len(net_parts) - 1, -1, -1):
+                sub = net_parts[i].lower()
+                psx_parts = [p for p in norm_psx.split("/") if p]
+                psx_lower = [p.lower() for p in psx_parts]
+                if sub in psx_lower:
+                    idx = psx_lower.index(sub)
+                    rel = "/".join(psx_parts[idx + 1:])
+                    if rel:
+                        return rel
+
         return os.path.basename(psx_out)
 
     def dispatch_cluster_task(tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = "") -> bool:
@@ -1943,7 +2001,11 @@ def run_reconstruction(
 
             doc.save(psx_out)
             task_list = tasks if isinstance(tasks, (list, tuple)) else [tasks]
-            net_tasks = [t.toNetworkTask(doc.chunk) for t in task_list]
+            chunk_target = doc.chunk or (doc.chunks[0] if doc.chunks else None)
+            if chunk_target is None:
+                print(f"  [Cluster] [ERROR] Document has no active chunk for '{task_desc}'", flush=True)
+                return False
+            net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
             batch_id = net_client.createBatch(rel_psx, net_tasks)
             net_client.setBatchPaused(batch_id, False)
 

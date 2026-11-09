@@ -36,6 +36,7 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertIn("5840", content)
         self.assertIn(r"\\HOST_PC\SharedMetashape", content)
         self.assertIn("--worker", content)
+        self.assertIn("--cpu-enable 1", content)
 
     def test_generate_worker_bat_content_interactive_root(self) -> None:
         """Verify worker launcher batch file prompts interactively if root is blank."""
@@ -115,16 +116,39 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertTrue(server.lower().endswith("metashape-server.exe") or server.endswith("metashape-server"))
 
     def test_cluster_relative_path_resolution(self) -> None:
-        """Verify project path conversion to shared storage relative path."""
+        """Verify project path conversion to shared storage relative path across local and UNC paths."""
         def calc_rel(psx_out: str, network_path: str) -> str:
-            if network_path and os.path.exists(network_path):
+            if network_path:
+                norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
+                norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
                 try:
                     abs_psx = os.path.abspath(psx_out)
                     abs_net = os.path.abspath(network_path)
-                    if os.path.commonpath([abs_psx, abs_net]) == abs_net:
+                    if os.path.commonpath([abs_psx, abs_net]).lower() == abs_net.lower():
                         return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
                 except Exception:
                     pass
+
+                net_parts = [p for p in norm_net.split("/") if p]
+                if net_parts:
+                    share_name = net_parts[-1].lower()
+                    psx_parts = [p for p in norm_psx.split("/") if p]
+                    psx_lower = [p.lower() for p in psx_parts]
+                    if share_name in psx_lower:
+                        idx = psx_lower.index(share_name)
+                        rel = "/".join(psx_parts[idx + 1:])
+                        if rel:
+                            return rel
+
+                for i in range(len(net_parts) - 1, -1, -1):
+                    sub = net_parts[i].lower()
+                    psx_parts = [p for p in norm_psx.split("/") if p]
+                    psx_lower = [p.lower() for p in psx_parts]
+                    if sub in psx_lower:
+                        idx = psx_lower.index(sub)
+                        rel = "/".join(psx_parts[idx + 1:])
+                        if rel:
+                            return rel
             return os.path.basename(psx_out)
 
         # Case 1: When network_path is empty, returns file basename
@@ -136,22 +160,29 @@ class TestNetworkCluster(unittest.TestCase):
         rel = calc_rel(sub_psx, test_dir)
         self.assertEqual(rel, "sub/project.psx")
 
+        # Case 3: UNC network path matching local drive psx file
+        unc_rel = calc_rel(r"C:\Users\ngvie\Desktop\CATP\061126\218\metashape\218.psx", r"\\ctuav\catp")
+        self.assertEqual(unc_rel, "061126/218/metashape/218.psx")
+
     def test_network_client_worker_auto_unpause(self) -> None:
-        """Verify newly connected worker nodes have pause cleared automatically."""
+        """Verify newly connected worker nodes have pause cleared automatically for both dict and obj."""
         client = MagicMock()
-        worker1 = MagicMock()
-        worker1.id = 1
-        worker1.paused = True
-        worker2 = MagicMock()
-        worker2.id = 2
-        worker2.paused = False
+        dict_response = {
+            "next_revision": 0,
+            "workers": [
+                {"worker_id": 1, "hostname": "Node1", "paused": True, "cpu_enabled": True},
+                {"worker_id": 2, "hostname": "Node2", "paused": False, "cpu_enabled": True},
+            ],
+        }
+        client.workerList.return_value = dict_response
 
-        client.workerList.side_effect = [[worker1, worker2], [worker1, worker2]]
-
-        workers = client.workerList()
+        raw_workers = client.workerList()
+        workers = raw_workers.get("workers", []) if isinstance(raw_workers, dict) else raw_workers
         for w in workers:
-            if getattr(w, "paused", False) and hasattr(w, "id"):
-                client.setWorkerPaused(w.id, False)
+            w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
+            w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
+            if w_paused and w_id is not None:
+                client.setWorkerPaused(w_id, False)
 
         client.setWorkerPaused.assert_called_once_with(1, False)
 

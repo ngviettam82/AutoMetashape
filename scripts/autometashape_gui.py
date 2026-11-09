@@ -296,7 +296,7 @@ echo [READY] Worker is online and waiting for jobs from the server.
 echo Press Ctrl+C in this window at any time to disconnect this worker node.
 echo.
 
-"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%"
+"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable 1
 
 if !errorlevel! neq 0 (
     echo.
@@ -444,7 +444,7 @@ EXPORT_TAG_MAP = {
     "texture": ("texture", "Re-baking Texture Atlas"),
     "delighting": ("texture", "Delighting & Shadow Removal"),
     "1/2": ("models", "Exporting Binary GLB"),
-    "2/2": ("models", "Exporting Wavefront OBJ & TIFF"),
+    "2/2": ("models", "Exporting Wavefront OBJ & PNG"),
     "fbx": ("models", "Exporting Autodesk FBX"),
     "ply": ("models", "Exporting Stanford PLY"),
     "dxf": ("models", "Exporting AutoCAD DXF"),
@@ -1920,7 +1920,7 @@ class AutoMetashapeStudio:
         # Col 1: 3D Surface Models
         tk.Label(col1, text="3D SURFACE MODELS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
         _c(col1, "Binary glTF (.glb)", self.var_export_glb)
-        _c(col1, "Wavefront OBJ (.obj + TIFF)", self.var_export_obj)
+        _c(col1, "Wavefront OBJ (.obj + PNG)", self.var_export_obj)
         _c(col1, "Autodesk FBX (.fbx)", self.var_export_fbx)
         _c(col1, "Stanford PLY (.ply)", self.var_export_ply)
         _c(col1, "AutoCAD DXF (.dxf)", self.var_export_dxf)
@@ -2457,7 +2457,7 @@ class AutoMetashapeStudio:
             if not root_path:
                 return
 
-        cmd = [self.metashape_exe, "--worker", "--host", f"{host}:{port}", "--root", root_path]
+        cmd = [self.metashape_exe, "--worker", "--host", f"{host}:{port}", "--root", root_path, "--cpu-enable", "1"]
         creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
             self.worker_proc = subprocess.Popen(
@@ -2613,12 +2613,23 @@ class AutoMetashapeStudio:
             try:
                 import Metashape
                 client = Metashape.NetworkClient()
-                if client.connect(f"{host}:{port}"):
-                    workers = client.workerList()
-                    active_w = [w for w in workers if not getattr(w, "paused", False)]
-                    msg = f"● Online: {len(workers)} Nodes connected ({len(active_w)} active) at {host}:{port}"
-                    self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)))
-                    return
+                client.connect(f"{host}:{port}")
+                raw_workers = client.workerList()
+                if isinstance(raw_workers, dict):
+                    workers = raw_workers.get("workers", [])
+                elif isinstance(raw_workers, (list, tuple)):
+                    workers = list(raw_workers)
+                else:
+                    workers = []
+
+                active_w = [
+                    w for w in workers
+                    if not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                ]
+                msg = f"● Online: {len(workers)} Nodes connected ({len(active_w)} active) at {host}:{port}"
+                self.root.after(0, lambda: (self.lbl_network_status.set(msg), self.lbl_net_telemetry.config(fg=UITheme.ACCENT_GREEN)))
+                client.disconnect()
+                return
             except Exception:
                 pass
 
