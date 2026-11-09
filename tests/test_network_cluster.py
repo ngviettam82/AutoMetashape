@@ -169,6 +169,55 @@ class TestNetworkCluster(unittest.TestCase):
         unc_rel = calc_rel(r"C:\Projects\SharedSurveys\061126\218\metashape\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys")
         self.assertEqual(unc_rel, "061126/218/metashape/218.psx")
 
+    def test_cluster_export_path_resolution(self) -> None:
+        """Verify export task path resolution generates valid absolute UNC or local paths."""
+        def calc_rel(tgt: str, network_path: str) -> str:
+            norm_tgt = os.path.abspath(tgt).replace(r"\\", "/").replace("\\", "/")
+            norm_net = network_path.strip().replace(r"\\", "/").replace("\\", "/").rstrip("/")
+            try:
+                abs_tgt = os.path.abspath(tgt)
+                abs_net = os.path.abspath(network_path)
+                if os.path.commonpath([abs_tgt, abs_net]).lower() == abs_net.lower():
+                    return os.path.relpath(abs_tgt, abs_net).replace("\\", "/")
+            except Exception:
+                pass
+            net_parts = [p for p in norm_net.split("/") if p]
+            if net_parts:
+                share_name = net_parts[-1].lower()
+                tgt_parts = [p for p in norm_tgt.split("/") if p]
+                tgt_lower = [p.lower() for p in tgt_parts]
+                if share_name in tgt_lower:
+                    idx = tgt_lower.index(share_name)
+                    rel = "/".join(tgt_parts[idx + 1:])
+                    if rel:
+                        return rel
+            return os.path.basename(tgt)
+
+        def calc_exp(target_file: str, network_path: str) -> str:
+            norm_tgt = os.path.abspath(target_file).replace("\\", "/")
+            if network_path:
+                is_unc = network_path.startswith(r"\\") or network_path.startswith("//")
+                clean_net = network_path.strip().replace("\\", "/").rstrip("/")
+                if is_unc:
+                    clean_net = "//" + clean_net.lstrip("/")
+                rel = calc_rel(target_file, network_path)
+                if rel and rel != norm_tgt and not rel.startswith(clean_net):
+                    return f"{clean_net}/{rel}"
+            return norm_tgt
+
+        # Case 1: Empty network path returns local absolute path
+        p1 = calc_exp("output.obj", "")
+        self.assertTrue(os.path.isabs(p1))
+        self.assertTrue(p1.endswith("/output.obj"))
+
+        # Case 2: UNC network path with local drive target resolves to full UNC path
+        p2 = calc_exp(r"C:\Projects\SharedSurveys\061126\218\metashape\218.obj", r"\\CLUSTER_STORAGE\SharedSurveys")
+        self.assertEqual(p2, "//CLUSTER_STORAGE/SharedSurveys/061126/218/metashape/218.obj")
+
+        # Case 3: Local storage path preserved as valid absolute path
+        p3 = calc_exp(r"C:\ClusterData\Scan1\model.obj", r"C:\ClusterData")
+        self.assertEqual(p3, "C:/ClusterData/Scan1/model.obj")
+
     def test_network_client_worker_auto_unpause(self) -> None:
         """Verify newly connected worker nodes have pause cleared automatically for both dict and obj."""
         client = MagicMock()

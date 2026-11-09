@@ -2137,6 +2137,19 @@ def run_reconstruction(
 
         return os.path.basename(tgt)
 
+    def get_cluster_export_path(target_file: str) -> str:
+        """Returns an absolute network-accessible path (UNC or local absolute) for cluster export tasks."""
+        norm_tgt = os.path.abspath(target_file).replace("\\", "/")
+        if network_path:
+            is_unc = network_path.startswith(r"\\") or network_path.startswith("//")
+            clean_net = network_path.strip().replace("\\", "/").rstrip("/")
+            if is_unc:
+                clean_net = "//" + clean_net.lstrip("/")
+            rel = get_cluster_rel_path(target_file)
+            if rel and rel != norm_tgt and not rel.startswith(clean_net):
+                return f"{clean_net}/{rel}"
+        return norm_tgt
+
     def dispatch_cluster_task(tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = "") -> bool:
         """Dispatch photogrammetry task(s) to the network cluster with real-time progress monitoring."""
         if not cluster_enabled or net_client is None:
@@ -3206,7 +3219,7 @@ def run_reconstruction(
                 t_obj.save_texture = True
                 t_obj.save_normals = True
                 t_obj.save_colors = True
-                t_obj.path = get_cluster_rel_path(obj_out)
+                t_obj.path = get_cluster_export_path(obj_out)
                 export_tasks.append(t_obj)
 
             if export_glb and chunk.model:
@@ -3215,7 +3228,7 @@ def run_reconstruction(
                 t_glb.embed_texture = True
                 t_glb.save_normals = True
                 t_glb.save_colors = True
-                t_glb.path = get_cluster_rel_path(glb_out)
+                t_glb.path = get_cluster_export_path(glb_out)
                 export_tasks.append(t_glb)
 
             if export_fbx and chunk.model:
@@ -3225,7 +3238,7 @@ def run_reconstruction(
                 t_fbx.save_texture = True
                 t_fbx.save_normals = True
                 t_fbx.save_colors = True
-                t_fbx.path = get_cluster_rel_path(fbx_out)
+                t_fbx.path = get_cluster_export_path(fbx_out)
                 export_tasks.append(t_fbx)
 
             if export_ply and chunk.model:
@@ -3234,7 +3247,7 @@ def run_reconstruction(
                 t_ply.format = Metashape.ModelFormat.ModelFormatPLY
                 t_ply.save_normals = True
                 t_ply.save_colors = True
-                t_ply.path = get_cluster_rel_path(ply_out)
+                t_ply.path = get_cluster_export_path(ply_out)
                 export_tasks.append(t_ply)
 
             if export_dxf and chunk.model:
@@ -3242,7 +3255,7 @@ def run_reconstruction(
                 t_dxf = Metashape.Tasks.ExportModel()
                 t_dxf.format = Metashape.ModelFormat.ModelFormatDXF
                 t_dxf.save_normals = True
-                t_dxf.path = get_cluster_rel_path(dxf_out)
+                t_dxf.path = get_cluster_export_path(dxf_out)
                 export_tasks.append(t_dxf)
 
             if export_dem and (getattr(chunk, "elevation", None) is not None or build_dem):
@@ -3251,7 +3264,7 @@ def run_reconstruction(
                 t_dem.source_data = Metashape.DataSource.ElevationData
                 t_dem.format = Metashape.RasterFormat.RasterFormatNone
                 t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
-                t_dem.path = get_cluster_rel_path(dem_out)
+                t_dem.path = get_cluster_export_path(dem_out)
                 export_tasks.append(t_dem)
 
             if export_ortho and (chunk.orthomosaic is not None or build_orthomosaic):
@@ -3260,7 +3273,7 @@ def run_reconstruction(
                 t_ortho.source_data = Metashape.DataSource.OrthomosaicData
                 t_ortho.format = Metashape.RasterFormat.RasterFormatNone
                 t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
-                t_ortho.path = get_cluster_rel_path(ortho_out)
+                t_ortho.path = get_cluster_export_path(ortho_out)
                 export_tasks.append(t_ortho)
 
             if export_point_cloud and (chunk.point_cloud is not None or build_point_cloud):
@@ -3274,14 +3287,14 @@ def run_reconstruction(
                 t_pc.save_point_normal = True
                 t_pc.save_point_confidence = True
                 t_pc.save_point_classification = True
-                t_pc.path = get_cluster_rel_path(pc_out)
+                t_pc.path = get_cluster_export_path(pc_out)
                 export_tasks.append(t_pc)
 
             if export_report:
                 report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
                 t_rep = Metashape.Tasks.ExportReport()
                 t_rep.title = report_title or "AutoMetashape Processing & Calibration Report"
-                t_rep.path = get_cluster_rel_path(report_out)
+                t_rep.path = get_cluster_export_path(report_out)
                 export_tasks.append(t_rep)
 
             if export_tasks:
