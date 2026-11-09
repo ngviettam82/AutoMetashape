@@ -1217,6 +1217,10 @@ class AutoMetashapeStudio:
         self.var_max_concurrent_exports = tk.IntVar(value=2)
         self.active_background_exports: list[dict] = []
         self.bg_export_lock = threading.Lock()
+        self.var_cluster_concurrent_projects = tk.IntVar(value=2)
+        self.active_cluster_jobs: list[dict] = []
+        self.cluster_job_lock = threading.Lock()
+        self.batch_submitted_idx: int = 0
         self._physics_cache: dict[str, dict] = {}
 
         # Synchronize dynamic pipeline milestones whenever options toggle
@@ -2224,7 +2228,44 @@ class AutoMetashapeStudio:
             fg=UITheme.TEXT_MUTED,
             anchor=tk.W,
         )
-        lbl_path_hint.pack(fill=tk.X, pady=(0, 6))
+        lbl_path_hint.pack(fill=tk.X, pady=(0, 4))
+
+        # Row B2: Interleaved Multi-Project Cluster Queue
+        row_queue_conc = tk.Frame(self.frame_net_body, bg=UITheme.BG_ROOT)
+        row_queue_conc.pack(fill=tk.X, pady=(0, 6))
+
+        tk.Label(
+            row_queue_conc,
+            text="Concurrent Projects in Cluster Queue:",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_SECONDARY,
+        ).pack(side=tk.LEFT, padx=(0, 6))
+
+        spn_conc = tk.Spinbox(
+            row_queue_conc,
+            from_=1,
+            to=3,
+            textvariable=self.var_cluster_concurrent_projects,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            insertbackground="white",
+            bd=1,
+            relief=tk.SOLID,
+            width=3,
+        )
+        spn_conc.pack(side=tk.LEFT, padx=(0, 8))
+
+        lbl_queue_hint = tk.Label(
+            row_queue_conc,
+            text="ℹ Interleaves 2 projects so worker nodes stay 100% busy during single-node stages (e.g. UV mapping)",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            anchor=tk.W,
+        )
+        lbl_queue_hint.pack(side=tk.LEFT)
 
         # Row C: Direct In-GUI Cluster Daemons Manager (Server & Local Worker)
         frame_daemons = tk.Frame(
@@ -5019,34 +5060,49 @@ class AutoMetashapeStudio:
         self.batch_running = True
         self.batch_queue = active_projects
         self.batch_current_idx = 0
+        self.batch_submitted_idx = 0
+        with self.cluster_job_lock:
+            self.active_cluster_jobs = []
         stages_multi = [(str(i + 1), p["name"], f"{p.get('count', 0)} photos") for i, p in enumerate(self.batch_queue)]
         self.stepper_multi.build_stages(stages_multi)
-        self._run_next_batch_item()
+        self._pump_batch_queue()
 
-    def _run_next_batch_item(self) -> None:
-        if not self.batch_running or self.batch_current_idx >= len(self.batch_queue):
-            if hasattr(self, "active_background_exports"):
-                with self.bg_export_lock:
-                    remaining = len(self.active_background_exports)
-                if remaining > 0:
-                    names = [x["name"] for x in self.active_background_exports]
-                    self.lbl_status.config(
-                        text=f"● Cluster done. Background exporting {remaining} project(s): {', '.join(names)}",
-                        fg=UITheme.ACCENT_CYAN,
-                    )
-                    return
-            self.batch_running = False
-            if hasattr(self, "stepper_multi"):
-                self.stepper_multi.set_all_done()
-            self._log("\n" + "=" * 70, "success")
-            n_proj = len(self.batch_queue)
-            self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} processed successfully!", "success")
-            self._log("=" * 70 + "\n", "success")
-            messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been processed successfully!")
-            self._on_finished(success=True)
+    def _pump_batch_queue(self) -> None:
+        """Dispatches projects to the cluster queue up to concurrent limit."""
+        if not getattr(self, "batch_running", False):
             return
 
-        item = self.batch_queue[self.batch_current_idx]
+        is_cluster = hasattr(self, "var_network_enable") and self.var_network_enable.get()
+        max_cluster_conc = 1
+        if is_cluster:
+            try:
+                max_cluster_conc = max(1, min(int(self.var_cluster_concurrent_projects.get()), 3))
+            except Exception:
+                max_cluster_conc = 2
+
+        with self.cluster_job_lock:
+            active_count = len(self.active_cluster_jobs)
+
+        while active_count < max_cluster_conc and self.batch_submitted_idx < len(self.batch_queue):
+            idx = self.batch_submitted_idx
+            self.batch_submitted_idx += 1
+            self.batch_current_idx = idx
+            item = self.batch_queue[idx]
+            self._launch_cluster_recon_job(item, idx)
+            with self.cluster_job_lock:
+                active_count = len(self.active_cluster_jobs)
+
+        with self.cluster_job_lock:
+            active_count = len(self.active_cluster_jobs)
+        if active_count == 0 and self.batch_submitted_idx >= len(self.batch_queue):
+            self._check_batch_fully_finished()
+
+    def _run_next_batch_item(self) -> None:
+        """Backwards-compatible launcher alias mapping to _pump_batch_queue."""
+        self._pump_batch_queue()
+
+    def _launch_cluster_recon_job(self, item: dict, idx: int) -> None:
+        """Launches a project reconstruction subprocess into the cluster queue."""
         img_dir = item["path"]
         proj_name = item["name"]
         export_root = self.var_export_root.get().strip()
@@ -5054,15 +5110,59 @@ class AutoMetashapeStudio:
         os.makedirs(out_dir, exist_ok=True)
 
         total_items = len(self.batch_queue)
-        current_num = self.batch_current_idx + 1
+        current_num = idx + 1
 
-        self._log(f"\n[{current_num}/{total_items}] Starting Batch Project: {proj_name} ({img_dir})", "stage")
-        self.stepper_multi.set_active(self.batch_current_idx, f"Processing {proj_name} ({current_num}/{total_items})")
-        self._reset_stepper_mode("recon")
+        self._log(f"\n[{current_num}/{total_items}] Dispatching Project to Cluster: {proj_name} ({img_dir})", "stage")
+        if hasattr(self, "stepper_multi"):
+            self.stepper_multi.set_active(idx, f"Cluster Compute: {proj_name}")
 
         cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
-        self.frame_crop_banner.pack_forget()
-        self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
+        if hasattr(self, "frame_crop_banner"):
+            self.frame_crop_banner.pack_forget()
+
+        def _cluster_recon_worker():
+            creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            t_start = time.time()
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=creation_flags,
+                )
+                with self.cluster_job_lock:
+                    self.active_cluster_jobs.append({"name": proj_name, "idx": idx, "proc": proc})
+
+                if proc.stdout:
+                    for line in iter(proc.stdout.readline, ""):
+                        if line:
+                            clean = line.rstrip()
+                            self.log_queue.put(f"[{proj_name}] {clean}")
+                            self._parse_stepper(clean)
+                    proc.stdout.close()
+
+                code = proc.wait()
+                psx_path = os.path.join(out_dir, f"{proj_name}.psx")
+                elapsed = (time.time() - t_start) / 60.0
+                if code == 0:
+                    self.log_queue.put(f"[CLUSTER COMPUTE COMPLETE] ✓ '{proj_name}' finished cluster stages in {elapsed:.2f} min!")
+                    if getattr(self, "var_pipelined_export", None) and self.var_pipelined_export.get():
+                        self._launch_background_export(psx_path, out_dir, proj_name)
+                    else:
+                        if hasattr(self, "stepper_multi"):
+                            self.stepper_multi.set_done(idx)
+                else:
+                    self.log_queue.put(f"[CLUSTER COMPUTE WARNING] Project '{proj_name}' exited with code {code}.")
+            except Exception as e_recon:
+                self.log_queue.put(f"[CLUSTER COMPUTE EXCEPTION] '{proj_name}' failed: {e_recon}")
+            finally:
+                with self.cluster_job_lock:
+                    self.active_cluster_jobs = [x for x in self.active_cluster_jobs if x["name"] != proj_name]
+                self.root.after(100, self._pump_batch_queue)
+
+        threading.Thread(target=_cluster_recon_worker, daemon=True).start()
 
     def _build_export_cmd_from_recon_settings(self, psx: str, out_dir: str, proj_name: str) -> list[str]:
         tex_fmt = getattr(self, "var_exp_format", None).get() if hasattr(self, "var_exp_format") else "png"
@@ -5185,10 +5285,14 @@ class AutoMetashapeStudio:
         """Called whenever a background export or cluster batch queue item finishes."""
         if not getattr(self, "batch_running", False):
             return
-        if self.batch_current_idx >= len(self.batch_queue):
-            with self.bg_export_lock:
-                remaining = len(self.active_background_exports)
-            if remaining == 0:
+        with getattr(self, "cluster_job_lock", threading.Lock()):
+            active_cluster = len(getattr(self, "active_cluster_jobs", []))
+        with self.bg_export_lock:
+            remaining_exports = len(self.active_background_exports)
+
+        sub_idx = getattr(self, "batch_submitted_idx", getattr(self, "batch_current_idx", 0))
+        if sub_idx >= len(self.batch_queue) and active_cluster == 0:
+            if remaining_exports == 0:
                 self.batch_running = False
                 if hasattr(self, "stepper_multi"):
                     self.stepper_multi.set_all_done()
@@ -5206,7 +5310,7 @@ class AutoMetashapeStudio:
             else:
                 names = [x["name"] for x in self.active_background_exports]
                 self.lbl_status.config(
-                    text=f"● Cluster done. Waiting for {remaining} export(s): {', '.join(names)}",
+                    text=f"● Cluster compute complete. Waiting for {remaining_exports} background export(s): {', '.join(names)}",
                     fg=UITheme.ACCENT_CYAN,
                 )
     def _start_export(self) -> None:
@@ -5584,6 +5688,21 @@ class AutoMetashapeStudio:
                         self.current_process.kill()
                 except Exception as e:
                     self._log(f"[USER] Error terminating process: {e}", "error")
+
+                # Terminate any running cluster reconstruction jobs as well
+                if hasattr(self, "cluster_job_lock"):
+                    with self.cluster_job_lock:
+                        for item in getattr(self, "active_cluster_jobs", []):
+                            p = item.get("proc")
+                            if p and p.poll() is None:
+                                try:
+                                    p.terminate()
+                                    time.sleep(0.1)
+                                    if p.poll() is None:
+                                        p.kill()
+                                except Exception:
+                                    pass
+                        self.active_cluster_jobs = []
 
                 # Terminate any running background exports as well
                 if hasattr(self, "bg_export_lock"):

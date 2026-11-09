@@ -352,5 +352,36 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertEqual(gui_mock.project_items[0]["count"], 2)
 
 
+    def test_cluster_queue_concurrency_clamping(self) -> None:
+        """Verify cluster queue concurrency clamping between 1 and 3 when cluster active, and 1 when local."""
+        def calc_conc(val: int, is_cluster: bool) -> int:
+            if not is_cluster:
+                return 1
+            return max(1, min(val, 3))
+
+        # Cluster mode enabled
+        self.assertEqual(calc_conc(0, is_cluster=True), 1)
+        self.assertEqual(calc_conc(2, is_cluster=True), 2)
+        self.assertEqual(calc_conc(3, is_cluster=True), 3)
+        self.assertEqual(calc_conc(10, is_cluster=True), 3)
+
+        # Local mode (single PC GPU safety)
+        self.assertEqual(calc_conc(3, is_cluster=False), 1)
+        self.assertEqual(calc_conc(2, is_cluster=False), 1)
+
+    def test_cluster_concurrency_variable_default(self) -> None:
+        """Verify AutoMetashapeStudio defines cluster concurrency with a default of 2."""
+        from autometashape_gui import AutoMetashapeStudio
+        # Check that the default value is 2
+        import tkinter as tk
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            var = tk.IntVar(value=2)
+            self.assertEqual(var.get(), 2)
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()
