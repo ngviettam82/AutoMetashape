@@ -1348,6 +1348,127 @@ def filter_tie_points(
     )
 
 
+def build_cluster_gradual_selection_tasks(
+    max_reproj_error: float = 0.50,
+    max_uncertainty: float = 15.0,
+    pa_thresh: float = 3.0,
+    min_rays: int = 2,
+) -> list:
+    """Builds a sequence of native CleanTiePoints and OptimizeCameras tasks for cluster workers."""
+    if Metashape is None:
+        return []
+    tasks = []
+    # Pass 1: Reconstruction Uncertainty
+    t1 = Metashape.Tasks.CleanTiePoints()
+    t1.criterion = Metashape.TiePoints.Criterion.ReconstructionUncertainty
+    t1.threshold = max_uncertainty
+    o1 = Metashape.Tasks.OptimizeCameras()
+    o1.fit_f = o1.fit_cx = o1.fit_cy = True
+    o1.fit_b1 = o1.fit_b2 = False
+    o1.fit_k1 = o1.fit_k2 = o1.fit_k3 = True
+    o1.fit_k4 = o1.fit_p1 = o1.fit_p2 = False
+    o1.adaptive_fitting = False
+    tasks.extend([t1, o1])
+
+    # Pass 2: Projection Accuracy
+    t2 = Metashape.Tasks.CleanTiePoints()
+    t2.criterion = Metashape.TiePoints.Criterion.ProjectionAccuracy
+    t2.threshold = pa_thresh
+    o2 = Metashape.Tasks.OptimizeCameras()
+    o2.fit_f = o2.fit_cx = o2.fit_cy = True
+    o2.fit_b1 = o2.fit_b2 = False
+    o2.fit_k1 = o2.fit_k2 = o2.fit_k3 = True
+    o2.fit_k4 = o2.fit_p1 = o2.fit_p2 = False
+    o2.adaptive_fitting = False
+    tasks.extend([t2, o2])
+
+    # Pass 3: Reprojection Error
+    t3 = Metashape.Tasks.CleanTiePoints()
+    t3.criterion = Metashape.TiePoints.Criterion.ReprojectionError
+    t3.threshold = max_reproj_error
+    o3 = Metashape.Tasks.OptimizeCameras()
+    o3.fit_f = o3.fit_cx = o3.fit_cy = o3.fit_b1 = o3.fit_b2 = True
+    o3.fit_k1 = o3.fit_k2 = o3.fit_k3 = o3.fit_k4 = True
+    o3.fit_p1 = o3.fit_p2 = True
+    o3.adaptive_fitting = True
+    o3.tiepoint_covariance = True
+    tasks.extend([t3, o3])
+
+    # Pass 4: Multi-ray Multiplicity
+    t4 = Metashape.Tasks.CleanTiePoints()
+    t4.criterion = Metashape.TiePoints.Criterion.ImageCount
+    t4.threshold = max(2, min_rays)
+    o4 = Metashape.Tasks.OptimizeCameras()
+    o4.fit_f = o4.fit_cx = o4.fit_cy = o4.fit_b1 = o4.fit_b2 = True
+    o4.fit_k1 = o4.fit_k2 = o4.fit_k3 = o4.fit_k4 = True
+    o4.fit_p1 = o4.fit_p2 = True
+    o4.adaptive_fitting = True
+    o4.tiepoint_covariance = True
+    tasks.extend([t4, o4])
+
+    return tasks
+
+
+def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.05):
+    """Builds a RunScript task that executes horizontal enclosing square or structure crop on the worker."""
+    if Metashape is None:
+        return None
+    pad_str = f"{padding:.4f}"
+    if crop_method == "gps-square":
+        code = (
+            "import Metashape, math\n"
+            "chunk = Metashape.app.document.chunk\n"
+            "cams = [c for c in chunk.cameras if c.transform and c.enabled]\n"
+            "if len(cams) >= 2:\n"
+            "    rot = chunk.region.rot\n"
+            "    rot_t = rot.t()\n"
+            "    valid = [c for c in cams if (not c.reference or not c.reference.location or abs(c.reference.location.x) > 1e-4 or abs(c.reference.location.y) > 1e-4)]\n"
+            "    if not valid: valid = cams\n"
+            "    locs = [rot_t * c.center for c in valid]\n"
+            "    xs, ys, zs = [p.x for p in locs], [p.y for p in locs], [p.z for p in locs]\n"
+            "    min_x, max_x = min(xs), max(xs)\n"
+            "    min_y, max_y = min(ys), max(ys)\n"
+            "    min_z, max_z = min(zs), max(zs)\n"
+            f"    padding = {pad_str}\n"
+            "    span = max(max_x - min_x, max_y - min_y) * (1.0 + padding)\n"
+            "    cx, cy = (min_x + max_x) / 2.0, (min_y + max_y) / 2.0\n"
+            "    chunk.region.center = rot * Metashape.Vector([cx, cy, (min_z + max_z) / 2.0])\n"
+            "    chunk.region.size = Metashape.Vector([span, span, max(max_z - min_z, span * 0.5) * (1.0 + padding * 2.0)])\n"
+            "    print(f'  [Worker] Auto-Crop (GPS Square applied): Center=({cx:.1f}, {cy:.1f}), Span={span:.1f}m')\n"
+        )
+    elif crop_method == "structure":
+        code = (
+            "import Metashape, math\n"
+            "chunk = Metashape.app.document.chunk\n"
+            "pts = [p.coord for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []\n"
+            "if len(pts) >= 10:\n"
+            "    rot = chunk.region.rot\n"
+            "    rot_t = rot.t()\n"
+            "    locs = [rot_t * p for p in pts]\n"
+            "    xs = sorted([p.x for p in locs])\n"
+            "    ys = sorted([p.y for p in locs])\n"
+            "    zs = sorted([p.z for p in locs])\n"
+            "    n = len(locs)\n"
+            "    i0, i1 = int(n * 0.05), int(n * 0.95)\n"
+            "    min_x, max_x = xs[i0], xs[i1]\n"
+            "    min_y, max_y = ys[i0], ys[i1]\n"
+            "    min_z, max_z = zs[i0], zs[i1]\n"
+            f"    padding = {pad_str}\n"
+            "    dx = (max_x - min_x) * (1.0 + padding)\n"
+            "    dy = (max_y - min_y) * (1.0 + padding)\n"
+            "    dz = (max_z - min_z) * (1.0 + padding * 2.0)\n"
+            "    chunk.region.center = rot * Metashape.Vector([(min_x + max_x)/2.0, (min_y + max_y)/2.0, (min_z + max_z)/2.0])\n"
+            "    chunk.region.size = Metashape.Vector([dx, dy, dz])\n"
+            "    print(f'  [Worker] Auto-Crop (Structure applied): Size=({dx:.1f}m, {dy:.1f}m, {dz:.1f}m)')\n"
+        )
+    else:
+        return None
+
+    t_crop = Metashape.Tasks.RunScript()
+    t_crop.code = code
+    return t_crop
+
+
 def get_system_ram_gb() -> float:
     """Detect total physical RAM in GB using Windows API across embedded/standalone Python."""
     try:
@@ -2432,7 +2553,23 @@ def run_reconstruction(
                     print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
 
                 if filter_tiepoints:
-                    usgs_stats = filter_tie_points(chunk)
+                    cleaned_on_cluster = False
+                    if cluster_enabled:
+                        try:
+                            clean_tasks = build_cluster_gradual_selection_tasks()
+                            cleaned_on_cluster = dispatch_cluster_task(
+                                clean_tasks,
+                                "Gradual Selection Tie-Point Filtering & Camera Optimization (4 passes)",
+                                "align",
+                            )
+                            if cleaned_on_cluster:
+                                chunk = doc.chunk
+                        except Exception as e_cl_clean:
+                            print(f"  [Cluster] Tie-point clean dispatch exception: {e_cl_clean}. Running locally...", flush=True)
+                            cleaned_on_cluster = False
+
+                    if not cleaned_on_cluster:
+                        usgs_stats = filter_tie_points(chunk)
                 else:
                     print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
 
@@ -2443,22 +2580,34 @@ def run_reconstruction(
             wait_for_user_resume(output_dir, psx_out)
             _safe_reopen()
             chunk = doc.chunk
-        elif crop_method == "gps-square":
-            auto_crop_camera_gps_square(chunk, padding=crop_padding)
-            chunk = save_checkpoint(doc, psx_out)
-            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
-            if pause_after_crop:
-                wait_for_user_resume(output_dir, psx_out)
-                _safe_reopen()
-                chunk = doc.chunk
-        elif crop_method == "structure":
-            auto_crop_to_main_structure(chunk, padding=crop_padding)
-            chunk = save_checkpoint(doc, psx_out)
-            print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
-            if pause_after_crop:
-                wait_for_user_resume(output_dir, psx_out)
-                _safe_reopen()
-                chunk = doc.chunk
+        elif crop_method in ("gps-square", "structure"):
+            cropped_on_cluster = False
+            if cluster_enabled and not pause_after_crop:
+                try:
+                    t_crop = build_cluster_crop_task(crop_method, padding=crop_padding)
+                    if t_crop:
+                        cropped_on_cluster = dispatch_cluster_task(
+                            t_crop,
+                            f"Worker Auto-Crop Bounding Box ({crop_method})",
+                            "align",
+                        )
+                        if cropped_on_cluster:
+                            chunk = doc.chunk
+                except Exception as e_cl_cr:
+                    print(f"  [Cluster] Crop dispatch exception: {e_cl_cr}. Running locally...", flush=True)
+                    cropped_on_cluster = False
+
+            if not cropped_on_cluster:
+                if crop_method == "gps-square":
+                    auto_crop_camera_gps_square(chunk, padding=crop_padding)
+                else:
+                    auto_crop_to_main_structure(chunk, padding=crop_padding)
+                chunk = save_checkpoint(doc, psx_out)
+                print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
+                if pause_after_crop:
+                    wait_for_user_resume(output_dir, psx_out)
+                    _safe_reopen()
+                    chunk = doc.chunk
         else:
             print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
             chunk = save_checkpoint(doc, psx_out)

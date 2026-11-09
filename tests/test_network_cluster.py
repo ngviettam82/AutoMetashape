@@ -855,6 +855,44 @@ class TestNetworkCluster(unittest.TestCase):
             local_executed = True
         self.assertTrue(local_executed)
 
+    def test_build_cluster_gradual_selection_tasks(self) -> None:
+        """Verify build_cluster_gradual_selection_tasks returns 8 CleanTiePoints and OptimizeCameras tasks."""
+        from unittest.mock import MagicMock, patch
+        import metashape_reconstruction as mr
+
+        mock_meta = MagicMock()
+        mock_meta.Tasks.CleanTiePoints = lambda: MagicMock(name="CleanTiePoints")
+        mock_meta.Tasks.OptimizeCameras = lambda: MagicMock(name="OptimizeCameras")
+        mock_meta.TiePoints.Criterion.ReconstructionUncertainty = 1
+        mock_meta.TiePoints.Criterion.ProjectionAccuracy = 2
+        mock_meta.TiePoints.Criterion.ReprojectionError = 3
+        mock_meta.TiePoints.Criterion.ImageCount = 4
+
+        with patch.object(mr, "Metashape", mock_meta):
+            tasks = mr.build_cluster_gradual_selection_tasks()
+            self.assertEqual(len(tasks), 8)
+
+    def test_build_cluster_crop_task(self) -> None:
+        """Verify build_cluster_crop_task creates valid RunScript network tasks for worker bounding box auto-crop."""
+        from unittest.mock import MagicMock, patch
+        import metashape_reconstruction as mr
+
+        mock_meta = MagicMock()
+        mock_meta.Tasks.RunScript = lambda: MagicMock(name="RunScript", code="")
+
+        with patch.object(mr, "Metashape", mock_meta):
+            t_gps = mr.build_cluster_crop_task("gps-square", padding=0.05)
+            self.assertIsNotNone(t_gps)
+            self.assertIn("chunk.region.center", t_gps.code)
+            self.assertIn("chunk.region.size", t_gps.code)
+
+            t_struct = mr.build_cluster_crop_task("structure", padding=0.10)
+            self.assertIsNotNone(t_struct)
+            self.assertIn("chunk.region.center", t_struct.code)
+
+            t_none = mr.build_cluster_crop_task("manual")
+            self.assertIsNone(t_none)
+
 
 if __name__ == "__main__":
     unittest.main()
