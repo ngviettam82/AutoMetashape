@@ -841,6 +841,19 @@ class TestNetworkCluster(unittest.TestCase):
 
         mock_client.setBatchWorkerLimit.assert_called_once_with(101, 1)
 
+    def test_cluster_concurrent_projects_default_8(self) -> None:
+        """Verify that cluster concurrent projects defaults to 8 to keep cluster nodes 100% utilized."""
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            studio = AutoMetashapeStudio(root)
+            self.assertEqual(studio.var_cluster_concurrent_projects.get(), 8)
+        finally:
+            root.destroy()
+
     def test_cluster_export_fallback_suppression(self) -> None:
         """Verify that when cluster worker exports deliverables, host skips local export."""
         cluster_exported = True
