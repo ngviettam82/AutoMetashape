@@ -899,6 +899,23 @@ class StudioPipelineStepper(tk.Frame):
             fg=UITheme.ACCENT_GREEN_TXT,
         )
 
+    def set_done(self, idx: int, message: str = "") -> None:
+        if not (0 <= idx < len(self.stage_frames)):
+            return
+        num = self.stages[idx][0]
+        name = self.stages[idx][1]
+        self._apply_style(
+            idx,
+            outer_bg=UITheme.BORDER,
+            inner_bg=UITheme.ACCENT_GREEN_BG,
+            ind_text="✓",
+            ind_color=UITheme.ACCENT_GREEN_TXT,
+            title_color=UITheme.TEXT_PRIMARY,
+            sub_color=UITheme.ACCENT_GREEN_TXT,
+        )
+        status_msg = f"Completed: {name}" + (f" - {message}" if message else "")
+        self.lbl_pipeline_status.config(text=status_msg, fg=UITheme.ACCENT_GREEN_TXT)
+
     def _apply_style(
         self,
         idx: int,
@@ -4911,8 +4928,10 @@ class AutoMetashapeStudio:
             if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
                 cmd.append("--remove-lighting")
 
+        is_cluster = hasattr(self, "var_network_enable") and self.var_network_enable.get()
         is_pipelined = (
-            hasattr(self, "var_pipelined_export")
+            not is_cluster
+            and hasattr(self, "var_pipelined_export")
             and self.var_pipelined_export.get()
             and getattr(self, "batch_running", False)
         )
@@ -5198,7 +5217,8 @@ class AutoMetashapeStudio:
                 elapsed = (time.time() - t_start) / 60.0
                 if code == 0:
                     self.log_queue.put(f"[CLUSTER COMPUTE COMPLETE] ✓ '{proj_name}' finished cluster stages in {elapsed:.2f} min!")
-                    if getattr(self, "var_pipelined_export", None) and self.var_pipelined_export.get():
+                    is_cluster_mode = hasattr(self, "var_network_enable") and self.var_network_enable.get()
+                    if not is_cluster_mode and getattr(self, "var_pipelined_export", None) and self.var_pipelined_export.get():
                         self._launch_background_export(psx_path, out_dir, proj_name, idx)
                     else:
                         if hasattr(self, "stepper_multi"):

@@ -1348,6 +1348,32 @@ def filter_tie_points(
     )
 
 
+def get_system_ram_gb() -> float:
+    """Detect total physical RAM in GB using Windows API across embedded/standalone Python."""
+    try:
+        import ctypes
+
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+
+        stat = MEMORYSTATUSEX()
+        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+        return stat.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        return 32.0
+
+
 def calculate_optimal_texel_budget(chunk, gsd_cm: float, page_res: int = 8192, margin: float = 1.25) -> int:
     """Calculates the exact 1:1 ground texel parity texture page budget based on 3D mesh surface area."""
     if not chunk.model or gsd_cm is None or gsd_cm <= 0.0:
@@ -1950,44 +1976,45 @@ def run_reconstruction(
         if doc.chunk is None and len(doc.chunks) > 0:
             doc.chunk = doc.chunks[0]
 
-    def get_cluster_rel_path() -> str:
+    def get_cluster_rel_path(target_file: str = "") -> str:
+        tgt = target_file or psx_out
         if network_path:
-            norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
+            norm_tgt = os.path.abspath(tgt).replace("\\\\", "/").replace("\\", "/")
             norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
 
             # 1. Try standard commonpath if on same drive or both UNC
             try:
-                abs_psx = os.path.abspath(psx_out)
+                abs_tgt = os.path.abspath(tgt)
                 abs_net = os.path.abspath(network_path)
-                if os.path.commonpath([abs_psx, abs_net]).lower() == abs_net.lower():
-                    return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
+                if os.path.commonpath([abs_tgt, abs_net]).lower() == abs_net.lower():
+                    return os.path.relpath(abs_tgt, abs_net).replace("\\", "/")
             except Exception:
                 pass
 
-            # 2. Match share name from UNC path (e.g. \\HOST_PC\\SharedData -> 'SharedData') against psx path components
+            # 2. Match share name from UNC path against target path components
             net_parts = [p for p in norm_net.split("/") if p]
             if net_parts:
                 share_name = net_parts[-1].lower()
-                psx_parts = [p for p in norm_psx.split("/") if p]
-                psx_lower = [p.lower() for p in psx_parts]
-                if share_name in psx_lower:
-                    idx = psx_lower.index(share_name)
-                    rel = "/".join(psx_parts[idx + 1:])
+                tgt_parts = [p for p in norm_tgt.split("/") if p]
+                tgt_lower = [p.lower() for p in tgt_parts]
+                if share_name in tgt_lower:
+                    idx = tgt_lower.index(share_name)
+                    rel = "/".join(tgt_parts[idx + 1:])
                     if rel:
                         return rel
 
             # 3. Fallback: match any common subfolder in net_path
             for i in range(len(net_parts) - 1, -1, -1):
                 sub = net_parts[i].lower()
-                psx_parts = [p for p in norm_psx.split("/") if p]
-                psx_lower = [p.lower() for p in psx_parts]
-                if sub in psx_lower:
-                    idx = psx_lower.index(sub)
-                    rel = "/".join(psx_parts[idx + 1:])
+                tgt_parts = [p for p in norm_tgt.split("/") if p]
+                tgt_lower = [p.lower() for p in tgt_parts]
+                if sub in tgt_lower:
+                    idx = tgt_lower.index(sub)
+                    rel = "/".join(tgt_parts[idx + 1:])
                     if rel:
                         return rel
 
-        return os.path.basename(psx_out)
+        return os.path.basename(tgt)
 
     def dispatch_cluster_task(tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = "") -> bool:
         """Dispatch photogrammetry task(s) to the network cluster with real-time progress monitoring."""
@@ -2689,6 +2716,19 @@ def run_reconstruction(
             if optimal_budget:
                 eff_pages = optimal_budget
 
+        # RAM Guard: Adjust to 8 pages if < 32GB RAM, and to 4 pages if < 16GB RAM
+        ram_gb = get_system_ram_gb()
+        if ram_gb < 16.0:
+            if eff_pages > 4:
+                print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (<16GB). Adjusting texture atlas from {eff_pages} to 4 pages to prevent bad allocation.", flush=True)
+                eff_pages = 4
+        elif ram_gb < 32.0:
+            if eff_pages > 8:
+                print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (<32GB). Adjusting texture atlas from {eff_pages} to 8 pages to prevent bad allocation.", flush=True)
+                eff_pages = 8
+        else:
+            print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (>=32GB). Retaining full {eff_pages}-page texture atlas budget.", flush=True)
+
         t_tex = time.time()
         tex_computed = False
         if cluster_enabled:
@@ -2712,17 +2752,38 @@ def run_reconstruction(
                 tex_computed = False
 
         if not tex_computed:
-            chunk.buildUV(
-                mapping_mode=Metashape.MappingMode.GenericMapping,
-                page_count=eff_pages or 4,
-                texture_size=8192,
-            )
-            chunk.buildTexture(
-                blending_mode=Metashape.BlendingMode.MosaicBlending,
-                texture_size=8192,
-                fill_holes=fill_holes,
-                ghosting_filter=ghosting_filter,
-            )
+            try:
+                chunk.buildUV(
+                    mapping_mode=Metashape.MappingMode.GenericMapping,
+                    page_count=eff_pages or 4,
+                    texture_size=8192,
+                )
+                chunk.buildTexture(
+                    blending_mode=Metashape.BlendingMode.MosaicBlending,
+                    texture_size=8192,
+                    fill_holes=fill_holes,
+                    ghosting_filter=ghosting_filter,
+                )
+            except Exception as e_tex_bake:
+                is_oom = "bad allocation" in str(e_tex_bake).lower() or isinstance(e_tex_bake, MemoryError)
+                if is_oom:
+                    fallback_pages = 4 if ram_gb < 16.0 else 8
+                    print(f"\n  [RAM Guard] [bad allocation] Texture baking failed due to memory exhaustion ({e_tex_bake})!", flush=True)
+                    print(f"  [RAM Guard] Auto-recovering: Re-baking texture atlas adjusted to {fallback_pages} pages...", flush=True)
+                    chunk.buildUV(
+                        mapping_mode=Metashape.MappingMode.GenericMapping,
+                        page_count=fallback_pages,
+                        texture_size=8192,
+                    )
+                    chunk.buildTexture(
+                        blending_mode=Metashape.BlendingMode.MosaicBlending,
+                        texture_size=8192,
+                        fill_holes=fill_holes,
+                        ghosting_filter=ghosting_filter,
+                    )
+                    print(f"  [RAM Guard] ✓ Auto-recovery successful: {fallback_pages}-page texture atlas baked cleanly!", flush=True)
+                else:
+                    raise e_tex_bake
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
 
         if remove_lighting and chunk.model:
@@ -2836,7 +2897,7 @@ def run_reconstruction(
                 emit_ipc_stage("dem", "Reusing existing Digital Elevation Model from checkpoint")
                 print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
 
-            if export_dem:
+            if (not cluster_enabled) and export_dem:
                 dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
                 print(f"\n[7b/7] [EXPORT] Exporting GeoTIFF DEM to: {dem_out}...", flush=True)
                 comp = Metashape.ImageCompression()
@@ -2941,7 +3002,7 @@ def run_reconstruction(
                 emit_ipc_stage("ortho", f"Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px)")
                 print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
 
-            if export_ortho:
+            if (not cluster_enabled) and export_ortho:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
                 print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
                 comp = Metashape.ImageCompression()
@@ -2969,7 +3030,107 @@ def run_reconstruction(
     glb_out = os.path.join(output_dir, f"{project_name}.glb")
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
 
-    if export_glb and chunk.model:
+    cluster_exported = False
+    if cluster_enabled and chunk.model:
+        try:
+            export_tasks = []
+            tex_fmt = texture_format if texture_format else "png"
+            tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF if tex_fmt == "tiff" else Metashape.ImageFormat.ImageFormatPNG
+
+            if export_obj and chunk.model:
+                t_obj = Metashape.Tasks.ExportModel()
+                t_obj.format = Metashape.ModelFormat.ModelFormatOBJ
+                t_obj.texture_format = tex_image_fmt
+                t_obj.save_texture = True
+                t_obj.save_normals = True
+                t_obj.save_colors = True
+                t_obj.path = get_cluster_rel_path(obj_out)
+                export_tasks.append(t_obj)
+
+            if export_glb and chunk.model:
+                t_glb = Metashape.Tasks.ExportModel()
+                t_glb.format = Metashape.ModelFormat.ModelFormatGLTF
+                t_glb.embed_texture = True
+                t_glb.save_normals = True
+                t_glb.save_colors = True
+                t_glb.path = get_cluster_rel_path(glb_out)
+                export_tasks.append(t_glb)
+
+            if export_fbx and chunk.model:
+                fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
+                t_fbx = Metashape.Tasks.ExportModel()
+                t_fbx.format = Metashape.ModelFormat.ModelFormatFBX
+                t_fbx.save_texture = True
+                t_fbx.save_normals = True
+                t_fbx.save_colors = True
+                t_fbx.path = get_cluster_rel_path(fbx_out)
+                export_tasks.append(t_fbx)
+
+            if export_ply and chunk.model:
+                ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
+                t_ply = Metashape.Tasks.ExportModel()
+                t_ply.format = Metashape.ModelFormat.ModelFormatPLY
+                t_ply.save_normals = True
+                t_ply.save_colors = True
+                t_ply.path = get_cluster_rel_path(ply_out)
+                export_tasks.append(t_ply)
+
+            if export_dxf and chunk.model:
+                dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
+                t_dxf = Metashape.Tasks.ExportModel()
+                t_dxf.format = Metashape.ModelFormat.ModelFormatDXF
+                t_dxf.save_normals = True
+                t_dxf.path = get_cluster_rel_path(dxf_out)
+                export_tasks.append(t_dxf)
+
+            if export_dem:
+                dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
+                t_dem = Metashape.Tasks.ExportRaster()
+                t_dem.source_data = Metashape.DataSource.ElevationData
+                t_dem.format = Metashape.RasterFormat.RasterFormatTiles
+                t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
+                t_dem.path = get_cluster_rel_path(dem_out)
+                export_tasks.append(t_dem)
+
+            if export_ortho:
+                ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
+                t_ortho = Metashape.Tasks.ExportRaster()
+                t_ortho.source_data = Metashape.DataSource.OrthomosaicData
+                t_ortho.format = Metashape.RasterFormat.RasterFormatTiles
+                t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
+                t_ortho.path = get_cluster_rel_path(ortho_out)
+                export_tasks.append(t_ortho)
+
+            if export_point_cloud:
+                pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
+                pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+                pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
+                t_pc = Metashape.Tasks.ExportPointCloud()
+                t_pc.format = pc_fmt
+                t_pc.source_data = Metashape.DataSource.PointCloudData
+                t_pc.save_point_color = True
+                t_pc.save_point_normal = True
+                t_pc.save_point_confidence = True
+                t_pc.save_point_classification = True
+                t_pc.path = get_cluster_rel_path(pc_out)
+                export_tasks.append(t_pc)
+
+            if export_report:
+                report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
+                t_rep = Metashape.Tasks.ExportReport()
+                t_rep.title = report_title or "AutoMetashape Processing & Calibration Report"
+                t_rep.path = get_cluster_rel_path(report_out)
+                export_tasks.append(t_rep)
+
+            if export_tasks:
+                cluster_exported = dispatch_cluster_task(export_tasks, f"Cluster Exporting Deliverables ({len(export_tasks)} formats)", "export")
+                if cluster_exported:
+                    print(f"  [Cluster] ✓ All {len(export_tasks)} production deliverables exported directly by cluster worker!", flush=True)
+        except Exception as e_cl_exp:
+            print(f"  [Cluster] Note: cluster export delegation exception: {e_cl_exp}. Falling back to local export.", flush=True)
+            cluster_exported = False
+
+    if (not cluster_exported) and export_glb and chunk.model:
         try:
             chunk.exportModel(
                 glb_out,
@@ -2982,7 +3143,7 @@ def run_reconstruction(
         except Exception as e_glb:
             print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
 
-    if export_obj and chunk.model:
+    if (not cluster_exported) and export_obj and chunk.model:
         try:
             chunk.exportModel(
                 obj_out,
@@ -2996,6 +3157,41 @@ def run_reconstruction(
         except Exception as e_obj:
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 
+    if (not cluster_exported) and export_dem and getattr(chunk, "elevation", None) is not None:
+        try:
+            dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=dem_out,
+                source_data=Metashape.DataSource.ElevationData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_dem:
+            print(f"  [7/7] [WARNING] DEM fallback export issue: {e_dem}", flush=True)
+
+    if (not cluster_exported) and export_ortho and chunk.orthomosaic is not None:
+        try:
+            ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
+            comp = Metashape.ImageCompression()
+            comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+            comp.tiff_big = True
+            chunk.exportRaster(
+                path=ortho_out,
+                source_data=Metashape.DataSource.OrthomosaicData,
+                image_format=Metashape.ImageFormat.ImageFormatTIFF,
+                image_compression=comp,
+                save_world=True,
+                save_alpha=True,
+            )
+            print(f"  [7/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+        except Exception as e_ortho:
+            print(f"  [7/7] [WARNING] Orthomosaic fallback export issue: {e_ortho}", flush=True)
+
     has_any_export = any([
         export_glb, export_obj, export_fbx, export_ply, export_dxf,
         export_tie_points, export_dem, export_ortho,
@@ -3004,7 +3200,7 @@ def run_reconstruction(
     if not has_any_export:
         print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
 
-    if export_fbx and chunk.model:
+    if (not cluster_exported) and export_fbx and chunk.model:
         fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
         print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
         try:
@@ -3013,7 +3209,7 @@ def run_reconstruction(
         except Exception as e_fbx:
             print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
 
-    if export_ply and chunk.model:
+    if (not cluster_exported) and export_ply and chunk.model:
         ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
         print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
@@ -3022,7 +3218,7 @@ def run_reconstruction(
         except Exception as e_ply:
             print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
 
-    if export_dxf and chunk.model:
+    if (not cluster_exported) and export_dxf and chunk.model:
         dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
         print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
         try:
@@ -3031,7 +3227,7 @@ def run_reconstruction(
         except Exception as e_dxf:
             print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
 
-    if export_tie_points and chunk.tie_points:
+    if (not cluster_exported) and export_tie_points and chunk.tie_points:
         tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
@@ -3041,7 +3237,7 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
     # Step 7d: Dense Point Cloud Export
-    if export_point_cloud:
+    if (not cluster_exported) and export_point_cloud:
         if chunk.point_cloud and chunk.point_cloud.point_count > 0:
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
@@ -3057,11 +3253,11 @@ def run_reconstruction(
                 save_point_classification=True,
             )
             print(f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} ({os.path.getsize(pc_out)/(1024*1024):.2f} MB)", flush=True)
-    elif build_point_cloud:
+    elif build_point_cloud and (not cluster_exported):
         print(f"  [7d/7] [INFO] Dense point cloud preserved in project checkpoint. {point_cloud_format.upper() if point_cloud_format else 'LAZ'} file export skipped as requested.", flush=True)
 
     # Step 7e: Executive PDF Quality & Calibration Report
-    if export_report:
+    if (not cluster_exported) and export_report:
         try:
             report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
             print(f"\n[7e/7] [EXPORT] Exporting Official Calibration & Quality PDF Report to: {report_out}...", flush=True)

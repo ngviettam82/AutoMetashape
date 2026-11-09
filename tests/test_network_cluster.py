@@ -760,6 +760,52 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertEqual(dispatched[0], 0)
         self.assertEqual(len(mock_studio.active_cluster_jobs), 1)
 
+    def test_get_system_ram_gb(self) -> None:
+        """Verify get_system_ram_gb returns a positive float representing physical RAM."""
+        from metashape_reconstruction import get_system_ram_gb
+        ram = get_system_ram_gb()
+        self.assertIsInstance(ram, float)
+        self.assertGreater(ram, 0.0)
+
+    def test_ram_guard_texture_page_budget_scaling(self) -> None:
+        """Verify texture atlas page scaling rule: 4 pages if <16GB, 8 pages if <32GB, full if >=32GB."""
+        def scale_pages(req_pages: int, ram_gb: float) -> int:
+            eff = req_pages
+            if ram_gb < 16.0:
+                if eff > 4:
+                    eff = 4
+            elif ram_gb < 32.0:
+                if eff > 8:
+                    eff = 8
+            return eff
+
+        # 16 GB worker machine (e.g. 15.8 GB detected)
+        self.assertEqual(scale_pages(22, 15.8), 4)
+        self.assertEqual(scale_pages(2, 15.8), 2)  # smaller budgets not artificially inflated
+
+        # 32 GB worker machine (e.g. 31.7 GB detected)
+        self.assertEqual(scale_pages(22, 31.7), 8)
+        self.assertEqual(scale_pages(4, 31.7), 4)
+
+        # 64 GB workstation
+        self.assertEqual(scale_pages(22, 63.8), 22)
+        self.assertEqual(scale_pages(30, 63.8), 30)
+
+    def test_stepper_multi_set_done(self) -> None:
+        """Verify StudioPipelineStepper.set_done marks specific stage completed with checkmark."""
+        import tkinter as tk
+        from autometashape_gui import StudioPipelineStepper
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            stepper = StudioPipelineStepper(root, [("1", "SiteA", "100 photos"), ("2", "SiteB", "200 photos")])
+            stepper.set_done(0, "Exported")
+            self.assertEqual(stepper.stage_indicators[0].cget("text"), "✓")
+            self.assertIn("Completed: SiteA", stepper.lbl_pipeline_status.cget("text"))
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()
