@@ -683,6 +683,83 @@ class TestNetworkCluster(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_pump_batch_queue_concurrent_dispatch_bounds(self) -> None:
+        """Verify _pump_batch_queue respects cluster concurrency limit and prevents over-dispatch."""
+        import threading
+        from autometashape_gui import AutoMetashapeStudio
+
+        mock_studio = MagicMock()
+        mock_studio.batch_running = True
+        mock_studio.var_network_enable.get.return_value = True
+        mock_studio.var_cluster_concurrent_projects.get.return_value = 3
+        mock_studio.cluster_job_lock = threading.Lock()
+        mock_studio.active_cluster_jobs = []
+        mock_studio.batch_submitted_idx = 0
+        mock_studio.batch_current_idx = 0
+        mock_studio.batch_queue = [
+            {"path": f"C:/Scan_{i}", "name": f"Scan_{i}"} for i in range(5)
+        ]
+
+        dispatched_items = []
+
+        def fake_launch(item: dict, idx: int) -> None:
+            dispatched_items.append((item, idx))
+            with mock_studio.cluster_job_lock:
+                mock_studio.active_cluster_jobs.append({"name": item["name"], "idx": idx, "proc": None})
+
+        mock_studio._launch_cluster_recon_job = fake_launch
+
+        # First pump: should dispatch exactly 3 jobs (indexes 0, 1, 2)
+        AutoMetashapeStudio._pump_batch_queue(mock_studio)
+        self.assertEqual(len(dispatched_items), 3)
+        self.assertEqual(mock_studio.batch_submitted_idx, 3)
+        self.assertEqual(len(mock_studio.active_cluster_jobs), 3)
+
+        # Second pump without any jobs finishing: should not dispatch anything more
+        AutoMetashapeStudio._pump_batch_queue(mock_studio)
+        self.assertEqual(len(dispatched_items), 3)
+
+        # Complete one job (Scan_0)
+        with mock_studio.cluster_job_lock:
+            mock_studio.active_cluster_jobs = [x for x in mock_studio.active_cluster_jobs if x["name"] != "Scan_0"]
+
+        # Third pump: should dispatch index 3 (Scan_3)
+        AutoMetashapeStudio._pump_batch_queue(mock_studio)
+        self.assertEqual(len(dispatched_items), 4)
+        self.assertEqual(mock_studio.batch_submitted_idx, 4)
+        self.assertEqual(len(mock_studio.active_cluster_jobs), 3)
+
+    def test_pump_batch_queue_local_mode_serial_dispatch(self) -> None:
+        """Verify _pump_batch_queue enforces strict serial (max 1) dispatch when cluster is disabled."""
+        import threading
+        from autometashape_gui import AutoMetashapeStudio
+
+        mock_studio = MagicMock()
+        mock_studio.batch_running = True
+        mock_studio.var_network_enable.get.return_value = False
+        mock_studio.var_cluster_concurrent_projects.get.return_value = 4
+        mock_studio.cluster_job_lock = threading.Lock()
+        mock_studio.active_cluster_jobs = []
+        mock_studio.batch_submitted_idx = 0
+        mock_studio.batch_queue = [
+            {"path": f"C:/Scan_{i}", "name": f"Scan_{i}"} for i in range(3)
+        ]
+
+        dispatched = []
+
+        def fake_launch(item: dict, idx: int) -> None:
+            dispatched.append(idx)
+            with mock_studio.cluster_job_lock:
+                mock_studio.active_cluster_jobs.append({"name": item["name"], "idx": idx, "proc": None})
+
+        mock_studio._launch_cluster_recon_job = fake_launch
+
+        # Pumping in local mode should dispatch only 1 project at a time
+        AutoMetashapeStudio._pump_batch_queue(mock_studio)
+        self.assertEqual(len(dispatched), 1)
+        self.assertEqual(dispatched[0], 0)
+        self.assertEqual(len(mock_studio.active_cluster_jobs), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

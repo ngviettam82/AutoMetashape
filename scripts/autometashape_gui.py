@@ -5166,6 +5166,10 @@ class AutoMetashapeStudio:
         if hasattr(self, "frame_crop_banner"):
             self.frame_crop_banner.pack_forget()
 
+        job_record = {"name": proj_name, "idx": idx, "proc": None}
+        with self.cluster_job_lock:
+            self.active_cluster_jobs.append(job_record)
+
         def _cluster_recon_worker():
             creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
             t_start = time.time()
@@ -5179,7 +5183,7 @@ class AutoMetashapeStudio:
                     creationflags=creation_flags,
                 )
                 with self.cluster_job_lock:
-                    self.active_cluster_jobs.append({"name": proj_name, "idx": idx, "proc": proc})
+                    job_record["proc"] = proc
 
                 if proc.stdout:
                     for line in iter(proc.stdout.readline, ""):
@@ -5195,7 +5199,7 @@ class AutoMetashapeStudio:
                 if code == 0:
                     self.log_queue.put(f"[CLUSTER COMPUTE COMPLETE] ✓ '{proj_name}' finished cluster stages in {elapsed:.2f} min!")
                     if getattr(self, "var_pipelined_export", None) and self.var_pipelined_export.get():
-                        self._launch_background_export(psx_path, out_dir, proj_name)
+                        self._launch_background_export(psx_path, out_dir, proj_name, idx)
                     else:
                         if hasattr(self, "stepper_multi"):
                             self.stepper_multi.set_done(idx)
@@ -5283,8 +5287,11 @@ class AutoMetashapeStudio:
 
         return cmd
 
-    def _launch_background_export(self, psx: str, out_dir: str, proj_name: str) -> None:
+    def _launch_background_export(self, psx: str, out_dir: str, proj_name: str, idx: int = -1) -> None:
         """Launches project export asynchronously in background queue so cluster proceeds immediately."""
+        if idx >= 0 and hasattr(self, "stepper_multi"):
+            self.stepper_multi.set_active(idx, f"Exporting: {proj_name}")
+
         def _bg_worker():
             max_conc = 2
             try:
@@ -5329,6 +5336,8 @@ class AutoMetashapeStudio:
                 elapsed = (time.time() - t_start) / 60.0
                 if code == 0:
                     self.log_queue.put(f"[BACKGROUND EXPORT COMPLETE] ✓ '{proj_name}' deliverables saved in {elapsed:.2f} min!")
+                    if idx >= 0 and hasattr(self, "stepper_multi"):
+                        self.stepper_multi.set_done(idx)
                 else:
                     self.log_queue.put(f"[BACKGROUND EXPORT WARNING] '{proj_name}' export exited with code {code}.")
             except Exception as e_exp:
