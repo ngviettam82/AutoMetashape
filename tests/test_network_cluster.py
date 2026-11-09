@@ -304,6 +304,181 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertIn("--export-orthomosaic", cmd)
         self.assertNotIn("--export-dem", cmd)
 
+    def test_pipelined_export_strictly_respects_all_export_table_deliverables(self) -> None:
+        """Defend that export command strictly and exclusively uses Export Table variables, not internal build flags."""
+        psx = r"C:\Output\Project1\Project1.psx"
+        out_dir = r"C:\Output\Project1"
+        proj_name = "Project1"
+
+        gui_mock = MagicMock()
+        gui_mock.metashape_exe = "metashape.exe"
+        gui_mock.export_script = "scripts/metashape_export.py"
+        gui_mock.var_exp_format.get.return_value = "png"
+
+        # User checked: FBX, PLY, DXF, Contours, Point Cloud, Tie Points, Tiles, and Report
+        # User un-checked: GLB, OBJ, Ortho, DEM
+        gui_mock.var_export_glb.get.return_value = False
+        gui_mock.var_export_obj.get.return_value = False
+        gui_mock.var_export_fbx.get.return_value = True
+        gui_mock.var_export_ply.get.return_value = True
+        gui_mock.var_export_dxf.get.return_value = True
+        gui_mock.var_export_ortho.get.return_value = False
+        gui_mock.var_export_dem.get.return_value = False
+        gui_mock.var_export_contours.get.return_value = True
+        gui_mock.var_contour_interval.get.return_value = 2.5
+        gui_mock.var_contours_format.get.return_value = "dxf"
+        gui_mock.var_export_point_cloud.get.return_value = True
+        gui_mock.var_pc_format.get.return_value = "las"
+        gui_mock.var_export_tie_points.get.return_value = True
+        gui_mock.var_export_tiles.get.return_value = True
+        gui_mock.var_tiled_model_format.get.return_value = "cesium"
+        gui_mock.var_tile_size.get.return_value = 512
+        gui_mock.var_export_report.get.return_value = True
+
+        from autometashape_gui import AutoMetashapeStudio
+        cmd = AutoMetashapeStudio._build_export_cmd_from_recon_settings(gui_mock, psx, out_dir, proj_name)
+
+        self.assertIn("--no-export-glb", cmd)
+        self.assertIn("--no-export-obj", cmd)
+        self.assertNotIn("--export-glb", cmd)
+        self.assertNotIn("--export-obj", cmd)
+        self.assertNotIn("--export-orthomosaic", cmd)
+        self.assertNotIn("--export-dem", cmd)
+
+        self.assertIn("--export-fbx", cmd)
+        self.assertIn("--export-ply", cmd)
+        self.assertIn("--export-dxf", cmd)
+        self.assertIn("--export-contours", cmd)
+        self.assertIn("--contour-interval", cmd)
+        self.assertIn("2.5", cmd)
+        self.assertIn("--contours-format", cmd)
+        self.assertIn("dxf", cmd)
+        self.assertIn("--export-point-cloud", cmd)
+        self.assertIn("--point-cloud-format", cmd)
+        self.assertIn("las", cmd)
+        self.assertIn("--export-tie-points", cmd)
+        self.assertIn("--export-tiled-model", cmd)
+        self.assertIn("--tiled-model-format", cmd)
+        self.assertIn("cesium", cmd)
+        self.assertIn("--tile-size", cmd)
+        self.assertIn("512", cmd)
+        self.assertIn("--export-report", cmd)
+
+    def test_reconstruction_cmd_pipelined_suppresses_all_deliverable_exports(self) -> None:
+        """Defend that pipelined reconstruction suppresses all deliverable exports to background thread."""
+        gui_mock = MagicMock()
+        gui_mock.metashape_exe = "metashape.exe"
+        gui_mock.recon_script = "scripts/metashape_reconstruction.py"
+        gui_mock.selected_preset_key = "pro"
+        gui_mock.var_presel_mode.get.return_value = "estimated"
+        gui_mock.var_pipelined_export.get.return_value = True
+        gui_mock.batch_running = True
+
+        # Even if export options are checked in table, pipelined reconstruction must suppress them
+        gui_mock.var_export_glb.get.return_value = True
+        gui_mock.var_export_obj.get.return_value = True
+        gui_mock.var_export_dem.get.return_value = True
+        gui_mock.var_export_ortho.get.return_value = True
+        gui_mock.var_export_point_cloud.get.return_value = True
+        gui_mock.var_export_report.get.return_value = True
+        gui_mock.var_build_ortho.get.return_value = True
+        gui_mock.var_build_dem.get.return_value = True
+        gui_mock.var_build_point_cloud.get.return_value = True
+        gui_mock.var_build_contours.get.return_value = False
+        gui_mock.var_export_contours.get.return_value = False
+        gui_mock.var_build_tiled_model.get.return_value = False
+        gui_mock.var_export_tiles.get.return_value = False
+        gui_mock.var_pc_format.get.return_value = "laz"
+        gui_mock.var_classify_ground.get.return_value = False
+        gui_mock.var_classify_points.get.return_value = False
+        gui_mock.var_pause_crop.get.return_value = False
+        gui_mock.var_rebake.get.return_value = False
+        gui_mock.var_resume.get.return_value = False
+        gui_mock.var_multi_chunk.get.return_value = "disable"
+        gui_mock.var_chunk_align_method.get.return_value = "camera"
+        gui_mock.var_network_enable.get.return_value = False
+
+        from autometashape_gui import AutoMetashapeStudio
+        cmd = AutoMetashapeStudio._build_reconstruction_cmd(gui_mock, r"C:\Images", r"C:\Output", "ProjectA")
+
+        self.assertIn("--no-export-glb", cmd)
+        self.assertIn("--no-export-obj", cmd)
+        self.assertIn("--no-export-dem", cmd)
+        self.assertIn("--no-export-ortho", cmd)
+        self.assertIn("--no-export-point-cloud", cmd)
+        self.assertIn("--no-report", cmd)
+        self.assertNotIn("--export-glb", cmd)
+        self.assertNotIn("--export-obj", cmd)
+        self.assertNotIn("--export-dem", cmd)
+        self.assertNotIn("--export-ortho", cmd)
+        self.assertNotIn("--export-point-cloud", cmd)
+        self.assertNotIn("--export-report", cmd)
+
+    def test_preset_selection_does_not_clobber_user_export_table_choices(self) -> None:
+        """Defend that selecting Pro preset does not overwrite the user's Export Table checklist."""
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            gui_mock = MagicMock()
+            gui_mock.selected_preset_key = "custom"
+            gui_mock.card_adv = MagicMock()
+            gui_mock.preset_cards = {}
+
+            # Simulate user customizing their Export Table
+            var_glb = tk.BooleanVar(value=True)
+            var_obj = tk.BooleanVar(value=False)
+            var_dem = tk.BooleanVar(value=True)
+            var_ortho = tk.BooleanVar(value=False)
+            var_pc = tk.BooleanVar(value=True)
+
+            gui_mock.var_export_glb = var_glb
+            gui_mock.var_export_obj = var_obj
+            gui_mock.var_export_dem = var_dem
+            gui_mock.var_export_ortho = var_ortho
+            gui_mock.var_export_point_cloud = var_pc
+
+            gui_mock.var_align_quality = tk.StringVar(value="medium")
+            gui_mock.var_keypoint_limit = tk.StringVar(value="40000")
+            gui_mock.var_tiepoint_limit = tk.StringVar(value="4000")
+            gui_mock.var_faces = tk.StringVar(value="500000")
+            gui_mock.var_tex_pages = tk.StringVar(value="4")
+            gui_mock.var_crop = tk.StringVar(value="none")
+            gui_mock.var_depth_quality = tk.StringVar(value="low")
+            gui_mock.var_depth_filtering = tk.StringVar(value="mild")
+            gui_mock.var_guided = tk.BooleanVar(value=False)
+            gui_mock.var_rolling = tk.BooleanVar(value=False)
+            gui_mock.var_stationary = tk.BooleanVar(value=False)
+            gui_mock.var_adaptive_fitting = tk.BooleanVar(value=False)
+            gui_mock.var_close_holes = tk.BooleanVar(value=True)
+            gui_mock.var_fill_holes = tk.BooleanVar(value=False)
+            gui_mock.var_ghosting = tk.BooleanVar(value=False)
+            gui_mock.var_build_point_cloud = tk.BooleanVar(value=False)
+            gui_mock.var_build_dem = tk.BooleanVar(value=False)
+            gui_mock.var_build_ortho = tk.BooleanVar(value=False)
+            gui_mock.var_classify_ground = tk.BooleanVar(value=True)
+
+            # User selects Pro preset
+            AutoMetashapeStudio._select_preset(gui_mock, "pro")
+
+            # Workflow parameters are updated to Pro standards
+            self.assertEqual(gui_mock.var_align_quality.get(), "high")
+            self.assertEqual(gui_mock.var_faces.get(), "2000000")
+            self.assertEqual(gui_mock.var_tex_pages.get(), "22")
+            self.assertTrue(gui_mock.var_build_ortho.get())
+            self.assertTrue(gui_mock.var_build_dem.get())
+
+            # BUT user's Export Table checklist is strictly preserved and not overwritten!
+            self.assertTrue(gui_mock.var_export_glb.get())
+            self.assertFalse(gui_mock.var_export_obj.get())
+            self.assertTrue(gui_mock.var_export_dem.get())
+            self.assertFalse(gui_mock.var_export_ortho.get())
+            self.assertTrue(gui_mock.var_export_point_cloud.get())
+        finally:
+            root.destroy()
+
     def test_pick_multiple_folders_fallback(self) -> None:
         """Verify pick_multiple_folders falls back to filedialog when COM is mocked/fails."""
         from unittest.mock import patch

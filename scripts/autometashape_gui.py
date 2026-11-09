@@ -2934,12 +2934,12 @@ class AutoMetashapeStudio:
             getattr(self, "var_export_fbx", None),
             getattr(self, "var_export_ply", None),
             getattr(self, "var_export_dxf", None),
-            getattr(self, "var_ortho", None),
+            getattr(self, "var_export_ortho", None),
             getattr(self, "var_export_dem", None),
-            getattr(self, "var_build_contours", None),
+            getattr(self, "var_export_contours", None),
             getattr(self, "var_export_point_cloud", None),
             getattr(self, "var_export_tie_points", None),
-            getattr(self, "var_build_tiled_model", None),
+            getattr(self, "var_export_tiles", None),
             getattr(self, "var_export_report", None),
         ]
         count = sum(1 for v in exp_vars if v and v.get())
@@ -3893,16 +3893,6 @@ class AutoMetashapeStudio:
                 self.var_stage_mesh.set(True)
             if hasattr(self, "var_stage_texture"):
                 self.var_stage_texture.set(True)
-            if hasattr(self, "var_export_obj"):
-                self.var_export_obj.set(True)
-            if hasattr(self, "var_export_ortho"):
-                self.var_export_ortho.set(True)
-            if hasattr(self, "var_export_dem"):
-                self.var_export_dem.set(False)
-            if hasattr(self, "var_export_point_cloud"):
-                self.var_export_point_cloud.set(False)
-            if hasattr(self, "var_export_glb"):
-                self.var_export_glb.set(False)
             self._sync_dynamic_stepper()
             self._sync_stepper_view()
             # Default to not exporting anything; export checklist owns deliverable decisions
@@ -3966,7 +3956,6 @@ class AutoMetashapeStudio:
                     self.var_surface_type.set(plan["surface_type"])
                     self.var_remove_lighting.set(plan["remove_lighting"])
                     self.var_build_ortho.set(plan["build_orthomosaic"])
-                    self.var_export_ortho.set(plan["build_orthomosaic"])
                     self.var_build_dem.set(plan["build_dem"])
                     self.var_build_point_cloud.set(plan["build_point_cloud"])
                     self.var_classify_ground.set(plan["classify_ground"])
@@ -4026,12 +4015,13 @@ class AutoMetashapeStudio:
             getattr(self, "var_export_fbx", tk.BooleanVar()).get(),
             getattr(self, "var_export_ply", tk.BooleanVar()).get(),
             getattr(self, "var_export_dxf", tk.BooleanVar()).get(),
-            getattr(self, "var_export_dem", tk.BooleanVar()).get(),
             getattr(self, "var_export_ortho", tk.BooleanVar()).get(),
+            getattr(self, "var_export_dem", tk.BooleanVar()).get(),
+            getattr(self, "var_export_contours", tk.BooleanVar()).get(),
             getattr(self, "var_export_point_cloud", tk.BooleanVar()).get(),
+            getattr(self, "var_export_tie_points", tk.BooleanVar()).get(),
             getattr(self, "var_export_tiles", tk.BooleanVar()).get(),
             getattr(self, "var_export_report", tk.BooleanVar()).get(),
-            getattr(self, "var_build_contours", tk.BooleanVar()).get(),
         ])
 
         if not is_custom:
@@ -4902,6 +4892,7 @@ class AutoMetashapeStudio:
                 "--no-export-obj",
                 "--no-export-dem",
                 "--no-export-ortho",
+                "--no-export-point-cloud",
                 "--no-report",
             ])
             if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
@@ -4913,6 +4904,11 @@ class AutoMetashapeStudio:
                 cmd.append("--build-dem")
             else:
                 cmd.append("--no-dem")
+
+            if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) or (hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get()):
+                cmd.append("--build-point-cloud")
+            else:
+                cmd.append("--no-point-cloud")
         else:
             if hasattr(self, "var_export_glb") and self.var_export_glb.get():
                 cmd.append("--export-glb")
@@ -4951,34 +4947,41 @@ class AutoMetashapeStudio:
             else:
                 cmd.append("--no-dem")
 
-        if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
-            cmd.append("--build-contours")
-            cmd.extend(["--contour-interval", self.var_contour_interval.get()])
-            cmd.extend(["--contours-format", self.var_contours_format.get()])
+            if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) or (hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get()):
+                cmd.append("--build-point-cloud")
+                if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
+                    cmd.append("--export-point-cloud")
+                else:
+                    cmd.append("--no-export-point-cloud")
+            else:
+                cmd.append("--no-point-cloud")
+                cmd.append("--no-export-point-cloud")
 
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-            cmd.append("--build-tiled-model")
-            cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
-            cmd.extend(["--tile-size", self.var_tile_size.get()])
+            if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
+                cmd.append("--build-contours")
+                if hasattr(self, "var_contour_interval"):
+                    cmd.extend(["--contour-interval", str(self.var_contour_interval.get())])
+                if hasattr(self, "var_contours_format"):
+                    cmd.extend(["--contours-format", self.var_contours_format.get()])
 
-        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get():
-            cmd.append("--build-point-cloud")
-        else:
-            cmd.append("--no-point-cloud")
-        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
-            cmd.append("--export-point-cloud")
-        else:
-            cmd.append("--no-export-point-cloud")
+            if (hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get()) or (hasattr(self, "var_export_tiles") and self.var_export_tiles.get()):
+                cmd.append("--build-tiled-model")
+                if hasattr(self, "var_tiled_model_format"):
+                    cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+                if hasattr(self, "var_tile_size"):
+                    cmd.extend(["--tile-size", str(self.var_tile_size.get())])
+
+            if hasattr(self, "var_export_report") and self.var_export_report.get():
+                cmd.append("--export-report")
+            else:
+                cmd.append("--no-report")
+
         if hasattr(self, "var_pc_format") and self.var_pc_format.get() != "laz":
             cmd.extend(["--point-cloud-format", self.var_pc_format.get()])
         if hasattr(self, "var_classify_ground") and self.var_classify_ground.get():
             cmd.append("--classify-ground")
         if hasattr(self, "var_classify_points") and self.var_classify_points.get():
             cmd.append("--classify-points")
-        if hasattr(self, "var_export_report") and self.var_export_report.get():
-            cmd.append("--export-report")
-        else:
-            cmd.append("--no-report")
         if self.var_pause_crop.get():
             cmd.append("--pause-after-crop")
         if self.var_rebake.get():
@@ -5208,29 +5211,34 @@ class AutoMetashapeStudio:
         if hasattr(self, "var_export_report") and self.var_export_report.get():
             cmd.append("--export-report")
 
-        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
-            cmd.append("--export-tiled-model")
-            if hasattr(self, "var_tiled_model_format"):
-                cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
-
-        if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
-            cmd.append("--export-contours")
-            if hasattr(self, "var_contour_interval"):
-                cmd.extend(["--contour-interval", str(self.var_contour_interval.get())])
-            if hasattr(self, "var_contours_format"):
-                cmd.extend(["--contours-format", self.var_contours_format.get()])
-
-        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get() and hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
-            cmd.append("--export-point-cloud")
-            if hasattr(self, "var_point_cloud_format"):
-                cmd.extend(["--point-cloud-format", self.var_point_cloud_format.get()])
-
         if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
             cmd.append("--export-fbx")
         if hasattr(self, "var_export_ply") and self.var_export_ply.get():
             cmd.append("--export-ply")
         if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
             cmd.append("--export-dxf")
+
+        if hasattr(self, "var_export_contours") and self.var_export_contours.get():
+            cmd.append("--export-contours")
+            if hasattr(self, "var_contour_interval"):
+                cmd.extend(["--contour-interval", str(self.var_contour_interval.get())])
+            if hasattr(self, "var_contours_format"):
+                cmd.extend(["--contours-format", self.var_contours_format.get()])
+
+        if hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
+            cmd.append("--export-point-cloud")
+            if hasattr(self, "var_pc_format"):
+                cmd.extend(["--point-cloud-format", self.var_pc_format.get()])
+
+        if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
+            cmd.append("--export-tie-points")
+
+        if hasattr(self, "var_export_tiles") and self.var_export_tiles.get():
+            cmd.append("--export-tiled-model")
+            if hasattr(self, "var_tiled_model_format"):
+                cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+            if hasattr(self, "var_tile_size"):
+                cmd.extend(["--tile-size", str(self.var_tile_size.get())])
 
         return cmd
 
