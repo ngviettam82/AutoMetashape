@@ -15,11 +15,27 @@ from unittest.mock import MagicMock
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-from autometashape_gui import find_metashape_server_path
+from autometashape_gui import find_metashape_server_path, generate_worker_bat_content, get_primary_lan_ip
 
 
 class TestNetworkCluster(unittest.TestCase):
     """Test suite for Metashape distributed cluster integration."""
+
+    def test_get_primary_lan_ip_format(self) -> None:
+        """Verify LAN IP detection returns a valid IPv4 string."""
+        ip = get_primary_lan_ip()
+        parts = ip.split(".")
+        self.assertEqual(len(parts), 4)
+        for p in parts:
+            self.assertTrue(p.isdigit())
+            self.assertTrue(0 <= int(p) <= 255)
+
+    def test_generate_worker_bat_content_with_auto_ip(self) -> None:
+        """Verify worker launcher batch content embeds detected IP and port."""
+        content = generate_worker_bat_content(None, "5840", r"\\SERVER\Scan")
+        self.assertIn("5840", content)
+        self.assertIn(r"\\SERVER\Scan", content)
+        self.assertIn("--worker", content)
 
     def test_find_metashape_server_path_discovery(self) -> None:
         """Verify server discovery logic locates binary or safely returns None."""

@@ -226,9 +226,23 @@ def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
     return None
 
 
-def generate_worker_bat_content(host: str = "127.0.0.1", port: str = "5840", root_path: str = "") -> str:
+def get_primary_lan_ip() -> str:
+    """Detect the host machine's primary LAN IPv4 address (e.g. 192.168.x.x or 10.x.x.x)."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def generate_worker_bat_content(host: str | None = None, port: str = "5840", root_path: str = "") -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
-    target_host = host.strip() or "127.0.0.1"
+    target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
     target_port = port.strip() or "5840"
     target_root = root_path.strip() or r"\\SERVER\RealityScan"
 
@@ -1072,7 +1086,7 @@ class AutoMetashapeStudio:
 
         # Distributed Network Processing Cluster Variables & Managed Daemons
         self.var_network_enable = tk.BooleanVar(value=False)
-        self.var_network_host = tk.StringVar(value="127.0.0.1")
+        self.var_network_host = tk.StringVar(value=get_primary_lan_ip())
         self.var_network_port = tk.StringVar(value="5840")
         self.var_network_path = tk.StringVar(value="")
         self.lbl_network_status = tk.StringVar(value="● Standby: Cluster disabled (processing locally)")
@@ -4557,11 +4571,12 @@ class AutoMetashapeStudio:
         # 4. Check if network processing is armed and ensure local server availability
         if hasattr(self, "var_network_enable") and self.var_network_enable.get():
             host = self.var_network_host.get().strip() or "127.0.0.1"
-            if host in ("127.0.0.1", "localhost", "0.0.0.0"):
+            primary_lan = get_primary_lan_ip()
+            if host in ("127.0.0.1", "localhost", "0.0.0.0", primary_lan):
                 if self.server_proc is None or self.server_proc.poll() is not None:
                     if messagebox.askyesno(
                         "Start Local Metashape Server?",
-                        "Network cluster processing is armed for localhost, but the local Metashape Server daemon is not running.\n\n"
+                        f"Network cluster processing is armed for this host ({host}), but the local Metashape Server daemon is not running.\n\n"
                         "Would you like AutoMetashape to start the local server daemon now?",
                     ):
                         self._toggle_local_server()
