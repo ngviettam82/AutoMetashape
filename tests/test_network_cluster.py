@@ -166,7 +166,7 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertEqual(rel, "sub/project.psx")
 
         # Case 3: UNC network path matching local drive psx file
-        unc_rel = calc_rel(r"C:\Users\ngvie\Desktop\CATP\061126\218\metashape\218.psx", r"\\ctuav\catp")
+        unc_rel = calc_rel(r"C:\Projects\SharedSurveys\061126\218\metashape\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys")
         self.assertEqual(unc_rel, "061126/218/metashape/218.psx")
 
     def test_network_client_worker_auto_unpause(self) -> None:

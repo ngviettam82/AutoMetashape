@@ -1963,7 +1963,7 @@ def run_reconstruction(
             except Exception:
                 pass
 
-            # 2. Match share name from UNC path (e.g. \\ctuav\\catp -> 'catp') against psx path components
+            # 2. Match share name from UNC path (e.g. \\HOST_PC\\SharedData -> 'SharedData') against psx path components
             net_parts = [p for p in norm_net.split("/") if p]
             if net_parts:
                 share_name = net_parts[-1].lower()
