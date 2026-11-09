@@ -1095,7 +1095,7 @@ class AutoMetashapeStudio:
 
         self.var_psx_path = tk.StringVar()
         self.var_export_out = tk.StringVar()
-        self.var_exp_format = tk.StringVar(value="tiff")
+        self.var_exp_format = tk.StringVar(value="png")
         self.var_exp_pages = tk.StringVar(value="16")
         self.var_exp_rebake = tk.BooleanVar(value=True)
 
@@ -4938,7 +4938,7 @@ class AutoMetashapeStudio:
         self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
 
     def _build_export_cmd_from_recon_settings(self, psx: str, out_dir: str, proj_name: str) -> list[str]:
-        tex_fmt = getattr(self, "var_exp_format", None).get() if hasattr(self, "var_exp_format") else "tiff"
+        tex_fmt = getattr(self, "var_exp_format", None).get() if hasattr(self, "var_exp_format") else "png"
         cmd = [
             self.metashape_exe,
             "-r",

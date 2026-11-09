@@ -2918,12 +2918,12 @@ def run_reconstruction(
             chunk.exportModel(
                 obj_out,
                 format=Metashape.ModelFormat.ModelFormatOBJ,
-                texture_format=Metashape.ImageFormat.ImageFormatTIFF,
+                texture_format=Metashape.ImageFormat.ImageFormatPNG,
                 save_texture=True,
                 save_normals=True,
                 save_colors=True,
             )
-            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + TIFF: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + PNG: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
         except Exception as e_obj:
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 

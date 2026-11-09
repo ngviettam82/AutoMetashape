@@ -124,7 +124,7 @@ def infer_project_name(
 def export_project_assets(
     project_path: str,
     output_dir: str = None,
-    texture_format: str = "tiff",
+    texture_format: str = "png",
     rebake_texture: bool = False,
     texture_pages: int = 16,
     fill_holes: bool = True,
@@ -556,7 +556,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", required=True, help="Path to existing Metashape project file (.psx)")
     parser.add_argument("--output", default=None, help="Output directory for exported 3D assets (default: same folder as .psx)")
     parser.add_argument("--project-name", default=None, help="Base name for exported 3D model, textures, point cloud, and reports (default: folder project name)")
-    parser.add_argument("--texture-format", choices=["png", "tiff", "jpeg"], default="tiff", help="Texture atlas format (default: tiff)")
+    parser.add_argument("--texture-format", choices=["png", "tiff", "jpeg"], default="png", help="Texture atlas format (default: png)")
     parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=True, help="Export binary glTF (.glb) model (default: True)")
     parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary glTF (.glb) export")
     parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=True, help="Export Wavefront OBJ (.obj) model (default: True)")
