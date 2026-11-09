@@ -2284,6 +2284,7 @@ class AutoMetashapeStudio:
             activeforeground=UITheme.TEXT_PRIMARY,
             bd=0,
             anchor=tk.W,
+            cursor="hand2",
         )
         cb_indep.pack(fill=tk.X)
 
@@ -2295,7 +2296,7 @@ class AutoMetashapeStudio:
             fg=UITheme.TEXT_MUTED,
             justify=tk.LEFT,
             anchor=tk.W,
-        ).pack(fill=tk.X, pady=(1, 0))
+        ).pack(fill=tk.X, padx=(20, 0), pady=(1, 0))
 
         # Row C: Direct In-GUI Cluster Daemons Manager (Server & Local Worker)
         frame_daemons = tk.Frame(
