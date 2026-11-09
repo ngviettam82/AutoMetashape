@@ -100,8 +100,6 @@ class UITheme:
     ACCENT_AMBER_TXT = "#f59e0b"    # Accessible amber text
     ACCENT_RED = "#dc2626"          # Semantic error / stop
     ACCENT_RED_HOVER = "#b91c1c"
-    STATUS_ERROR = "#dc2626"
-    STATUS_WARNING = "#d97706"
 
 
 # ---------------------------------------------------------------------------
@@ -900,42 +898,6 @@ class StudioPipelineStepper(tk.Frame):
             text=f"Complete: All {len(self.stages)} stages finished successfully. Deliverables ready on disk.",
             fg=UITheme.ACCENT_GREEN_TXT,
         )
-
-    def set_done(self, idx: int, message: str = "") -> None:
-        if not (0 <= idx < len(self.stage_frames)):
-            return
-        num = self.stages[idx][0]
-        name = self.stages[idx][1]
-        self._apply_style(
-            idx,
-            outer_bg=UITheme.BORDER,
-            inner_bg=UITheme.ACCENT_GREEN_BG,
-            ind_text="✓",
-            ind_color=UITheme.ACCENT_GREEN_TXT,
-            title_color=UITheme.TEXT_PRIMARY,
-            sub_color=UITheme.ACCENT_GREEN_TXT,
-        )
-        status_msg = f"Completed: {name}" + (f" - {message}" if message else "")
-        self.lbl_pipeline_status.config(text=status_msg, fg=UITheme.ACCENT_GREEN_TXT)
-
-    def set_error(self, idx: int, message: str = "") -> None:
-        if not (0 <= idx < len(self.stage_frames)):
-            return
-        self.is_done = False
-        self.is_paused = False
-        num = self.stages[idx][0]
-        name = self.stages[idx][1]
-        self._apply_style(
-            idx,
-            outer_bg=UITheme.STATUS_ERROR,
-            inner_bg="#2a1414",
-            ind_text=f"✗ {num}",
-            ind_color=UITheme.STATUS_ERROR,
-            title_color=UITheme.TEXT_PRIMARY,
-            sub_color=UITheme.STATUS_ERROR,
-        )
-        status_msg = f"Error at {name}" + (f": {message}" if message else "")
-        self.lbl_pipeline_status.config(text=status_msg, fg=UITheme.STATUS_ERROR)
 
     def _apply_style(
         self,
@@ -5126,10 +5088,9 @@ class AutoMetashapeStudio:
                 self._log("[CANCEL] Reconstruction cancelled by user to preserve existing project files.", "warning")
                 return
 
-        # 4. Check if network processing is armed and ensure server is reachable
+        # 4. Check if network processing is armed and ensure local server availability
         if hasattr(self, "var_network_enable") and self.var_network_enable.get():
             host = self.var_network_host.get().strip() or "127.0.0.1"
-            port = self.var_network_port.get().strip() or "5840"
             primary_lan = get_primary_lan_ip()
             if host in ("127.0.0.1", "localhost", "0.0.0.0", primary_lan):
                 if self.server_proc is None or self.server_proc.poll() is not None:
@@ -5139,35 +5100,6 @@ class AutoMetashapeStudio:
                         "Would you like AutoMetashape to start the local server daemon now?",
                     ):
                         self._toggle_local_server()
-                        time.sleep(1.2)
-
-            # Strict server reachability check: prompt explicit error notification if unreachable
-            import socket
-            sock_ok = False
-            try:
-                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-                sock.settimeout(2.5)
-                res = sock.connect_ex((host, int(port)))
-                sock.close()
-                sock_ok = (res == 0)
-            except Exception:
-                sock_ok = False
-
-            if not sock_ok:
-                err_msg = (
-                    f"Could not connect to Metashape Server at {host}:{port}.\n\n"
-                    "Network Processing is enabled, but the cluster server daemon is unreachable.\n\n"
-                    "Please verify:\n"
-                    "1. The Metashape Server daemon is started (click 'Start Local Server' or start on host PC).\n"
-                    "2. The host IP and port are correct and not blocked by a firewall.\n\n"
-                    "Batch processing aborted. To run locally without a cluster, turn OFF 'Enable Network Processing' in Cluster Settings."
-                )
-                self.lbl_network_status.set(f"● Server unreachable at {host}:{port}")
-                self.lbl_net_telemetry.config(fg=UITheme.STATUS_ERROR)
-                self.lbl_status.config(text=f"✗ Error: Cluster Server unreachable at {host}:{port}", fg=UITheme.STATUS_ERROR)
-                self._log(f"\n[ERROR] Network Cluster Server unreachable at {host}:{port}!", "error")
-                messagebox.showerror("Network Cluster Error: Server Unreachable", err_msg)
-                return
 
         # 5. Launch unified queue reconstruction (consistent for 1 or N projects)
         self._reset_stepper_mode("recon")
@@ -5272,13 +5204,7 @@ class AutoMetashapeStudio:
                         if hasattr(self, "stepper_multi"):
                             self.stepper_multi.set_done(idx)
                 else:
-                    self.log_queue.put(f"[CLUSTER COMPUTE ERROR] Project '{proj_name}' exited with error code {code}.")
-                    if hasattr(self, "stepper_multi"):
-                        self.stepper_multi.set_error(idx, f"Exit code {code}")
-                    self.root.after(0, lambda: self.lbl_status.config(
-                        text=f"✗ Error: '{proj_name}' failed cluster execution (exit code {code})",
-                        fg=UITheme.STATUS_ERROR,
-                    ))
+                    self.log_queue.put(f"[CLUSTER COMPUTE WARNING] Project '{proj_name}' exited with code {code}.")
             except Exception as e_recon:
                 self.log_queue.put(f"[CLUSTER COMPUTE EXCEPTION] '{proj_name}' failed: {e_recon}")
             finally:

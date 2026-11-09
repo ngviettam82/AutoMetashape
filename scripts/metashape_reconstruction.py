@@ -1912,23 +1912,11 @@ def run_reconstruction(
                         net_client = client
                         cluster_enabled = True
                     else:
-                        err_no_workers = f"Metashape Server at {network_host}:{network_port} has 0 active worker nodes!"
-                        print(f"\n=========================================================================", flush=True)
-                        print(f"  [Network Cluster] [ERROR] {err_no_workers}", flush=True)
-                        print(f"  Network mode is enabled (--network-enable), but no cluster workers are connected.", flush=True)
-                        print(f"=========================================================================\n", flush=True)
-                        raise RuntimeError(err_no_workers)
+                        print(f"  [Network Cluster] [NOTICE] 0 active worker nodes connected to server. Will execute tasks locally.", flush=True)
                 except Exception as e_net_conn:
-                    err_unreach = f"Metashape Server unreachable at {network_host}:{network_port} ({e_net_conn})"
-                    print(f"\n=========================================================================", flush=True)
-                    print(f"  [Network Cluster] [ERROR] {err_unreach}", flush=True)
-                    print(f"  Network mode is enabled (--network-enable), but the server is not responding.", flush=True)
-                    print(f"=========================================================================\n", flush=True)
-                    raise ConnectionError(err_unreach)
+                    print(f"  [Network Cluster] [NOTICE] Server connection failed at {network_host}:{network_port} ({e_net_conn}). Processing locally.", flush=True)
         except Exception as e_net_init:
-            err_init = f"Error configuring network processing: {e_net_init}"
-            print(f"\n[Network Cluster] [ERROR] {err_init}", flush=True)
-            raise RuntimeError(err_init)
+            print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}. Processing locally.", flush=True)
     elif Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
         try:
             Metashape.app.settings.network_enable = False
