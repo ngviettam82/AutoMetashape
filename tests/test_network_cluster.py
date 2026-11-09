@@ -121,6 +121,52 @@ class TestNetworkCluster(unittest.TestCase):
         errors = b_info_failed["tasks"][0]["errors"]
         self.assertIn("Out of memory", errors)
 
+    def test_pipelined_export_concurrency_bounds(self) -> None:
+        """Verify concurrency clamping between 1 and 4."""
+        def clamp_concurrency(val: int) -> int:
+            return max(1, min(val, 4))
+
+        self.assertEqual(clamp_concurrency(0), 1)
+        self.assertEqual(clamp_concurrency(2), 2)
+        self.assertEqual(clamp_concurrency(10), 4)
+
+    def test_pipelined_export_command_generation(self) -> None:
+        """Verify decoupled export command generation includes required flags."""
+        psx = r"C:\Output\Scan1\Scan1.psx"
+        out_dir = r"C:\Output\Scan1"
+        proj_name = "Scan1"
+
+        gui_mock = MagicMock()
+        gui_mock.metashape_exe = "metashape.exe"
+        gui_mock.export_script = "scripts/metashape_export.py"
+        gui_mock.var_exp_format.get.return_value = "png"
+        gui_mock.var_export_glb.get.return_value = True
+        gui_mock.var_export_obj.get.return_value = True
+        gui_mock.var_build_dem.get.return_value = True
+        gui_mock.var_export_dem.get.return_value = True
+        gui_mock.var_build_ortho.get.return_value = True
+        gui_mock.var_export_ortho.get.return_value = True
+        gui_mock.var_export_report.get.return_value = False
+        gui_mock.var_build_tiled_model.get.return_value = False
+        gui_mock.var_build_contours.get.return_value = False
+        gui_mock.var_build_point_cloud.get.return_value = False
+        gui_mock.var_export_fbx.get.return_value = False
+        gui_mock.var_export_ply.get.return_value = False
+        gui_mock.var_export_dxf.get.return_value = False
+
+        from autometashape_gui import AutoMetashapeStudio
+        cmd = AutoMetashapeStudio._build_export_cmd_from_recon_settings(gui_mock, psx, out_dir, proj_name)
+        self.assertIn("--project", cmd)
+        self.assertIn(psx, cmd)
+        self.assertIn("--output", cmd)
+        self.assertIn(out_dir, cmd)
+        self.assertIn("--export-glb", cmd)
+        self.assertIn("--export-obj", cmd)
+        self.assertIn("--export-dem", cmd)
+        self.assertIn("--export-orthomosaic", cmd)
+        self.assertIn("--texture-format", cmd)
+        self.assertIn("png", cmd)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -1107,6 +1107,10 @@ class AutoMetashapeStudio:
         self.batch_queue: list[dict] = []
         self.batch_current_idx: int = -1
         self.lbl_queue_status = tk.StringVar(value="0 projects in queue")
+        self.var_pipelined_export = tk.BooleanVar(value=True)
+        self.var_max_concurrent_exports = tk.IntVar(value=2)
+        self.active_background_exports: list[dict] = []
+        self.bg_export_lock = threading.Lock()
 
         # Synchronize dynamic pipeline milestones whenever options toggle
         for _v in [
@@ -1579,15 +1583,54 @@ class AutoMetashapeStudio:
             lambda e: self.canvas_queue.configure(scrollregion=self.canvas_queue.bbox("all")),
         )
 
+        row_pipeline_opts = tk.Frame(self.frame_queue_container, bg=UITheme.BG_ROOT)
+        row_pipeline_opts.pack(fill=tk.X, pady=(4, 2))
+
+        chk_pipelined = tk.Checkbutton(
+            row_pipeline_opts,
+            text="⚡ Pipelined Compute-Export Overlap (Host exports while cluster starts next project)",
+            variable=self.var_pipelined_export,
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.ACCENT_CYAN,
+            selectcolor=UITheme.BG_SURFACE,
+            activebackground=UITheme.BG_ROOT,
+            activeforeground=UITheme.ACCENT_CYAN,
+            cursor="hand2",
+        )
+        chk_pipelined.pack(side=tk.LEFT)
+
+        spn_exports = tk.Spinbox(
+            row_pipeline_opts,
+            from_=1,
+            to=4,
+            width=3,
+            textvariable=self.var_max_concurrent_exports,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_INPUT,
+            fg=UITheme.TEXT_PRIMARY,
+            bd=1,
+            relief=tk.SOLID,
+        )
+        spn_exports.pack(side=tk.RIGHT)
+
+        tk.Label(
+            row_pipeline_opts,
+            text="Max Exports:",
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_SECONDARY,
+        ).pack(side=tk.RIGHT, padx=(0, 4))
+
         lbl_q_hint = tk.Label(
             self.frame_queue_container,
-            text="ℹ Projects in queue are reconstructed sequentially. Outputs saved to: <Export Folder>/<ProjectName>/",
+            text="ℹ Overlap active: Host CPU exports deliverables in background while worker GPUs immediately start the next flight.",
             font=("Segoe UI", 7),
             bg=UITheme.BG_ROOT,
             fg=UITheme.TEXT_DIM,
             anchor=tk.W,
         )
-        lbl_q_hint.pack(fill=tk.X, pady=(4, 0))
+        lbl_q_hint.pack(fill=tk.X, pady=(2, 0))
 
         # Render initial empty state
         self._render_queue_items()
@@ -4430,42 +4473,66 @@ class AutoMetashapeStudio:
             if hasattr(self, "var_remove_lighting") and self.var_remove_lighting.get():
                 cmd.append("--remove-lighting")
 
-        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
-            cmd.append("--export-glb")
-        else:
-            cmd.append("--no-export-glb")
+        is_pipelined = (
+            hasattr(self, "var_pipelined_export")
+            and self.var_pipelined_export.get()
+            and getattr(self, "batch_running", False)
+        )
 
-        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
-            cmd.append("--export-obj")
-        else:
-            cmd.append("--no-export-obj")
-
-        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
-            cmd.append("--export-fbx")
-        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
-            cmd.append("--export-ply")
-        if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
-            cmd.append("--export-dxf")
-        if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
-            cmd.append("--export-tie-points")
-
-        if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
-            cmd.append("--ortho")
-            if hasattr(self, "var_export_ortho") and self.var_export_ortho.get():
-                cmd.append("--export-ortho")
+        if is_pipelined:
+            cmd.extend([
+                "--no-export-glb",
+                "--no-export-obj",
+                "--no-export-dem",
+                "--no-export-ortho",
+                "--no-report",
+            ])
+            if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
+                cmd.append("--ortho")
             else:
-                cmd.append("--no-export-ortho")
-        else:
-            cmd.append("--no-ortho")
+                cmd.append("--no-ortho")
 
-        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
-            cmd.append("--build-dem")
-            if hasattr(self, "var_export_dem") and self.var_export_dem.get():
-                cmd.append("--export-dem")
+            if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+                cmd.append("--build-dem")
             else:
-                cmd.append("--no-export-dem")
+                cmd.append("--no-dem")
         else:
-            cmd.append("--no-dem")
+            if hasattr(self, "var_export_glb") and self.var_export_glb.get():
+                cmd.append("--export-glb")
+            else:
+                cmd.append("--no-export-glb")
+
+            if hasattr(self, "var_export_obj") and self.var_export_obj.get():
+                cmd.append("--export-obj")
+            else:
+                cmd.append("--no-export-obj")
+
+            if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+                cmd.append("--export-fbx")
+            if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+                cmd.append("--export-ply")
+            if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
+                cmd.append("--export-dxf")
+            if hasattr(self, "var_export_tie_points") and self.var_export_tie_points.get():
+                cmd.append("--export-tie-points")
+
+            if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
+                cmd.append("--ortho")
+                if hasattr(self, "var_export_ortho") and self.var_export_ortho.get():
+                    cmd.append("--export-ortho")
+                else:
+                    cmd.append("--no-export-ortho")
+            else:
+                cmd.append("--no-ortho")
+
+            if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+                cmd.append("--build-dem")
+                if hasattr(self, "var_export_dem") and self.var_export_dem.get():
+                    cmd.append("--export-dem")
+                else:
+                    cmd.append("--no-export-dem")
+            else:
+                cmd.append("--no-dem")
 
         if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
             cmd.append("--build-contours")
@@ -4592,6 +4659,16 @@ class AutoMetashapeStudio:
 
     def _run_next_batch_item(self) -> None:
         if not self.batch_running or self.batch_current_idx >= len(self.batch_queue):
+            if hasattr(self, "active_background_exports"):
+                with self.bg_export_lock:
+                    remaining = len(self.active_background_exports)
+                if remaining > 0:
+                    names = [x["name"] for x in self.active_background_exports]
+                    self.lbl_status.config(
+                        text=f"● Cluster done. Background exporting {remaining} project(s): {', '.join(names)}",
+                        fg=UITheme.ACCENT_CYAN,
+                    )
+                    return
             self.batch_running = False
             if hasattr(self, "stepper_multi"):
                 self.stepper_multi.set_all_done()
@@ -4620,6 +4697,152 @@ class AutoMetashapeStudio:
         cmd = self._build_reconstruction_cmd(img_dir, out_dir, proj_name)
         self.frame_crop_banner.pack_forget()
         self._spawn_worker(cmd, f"Batch [{current_num}/{total_items}]: {proj_name}")
+
+    def _build_export_cmd_from_recon_settings(self, psx: str, out_dir: str, proj_name: str) -> list[str]:
+        tex_fmt = getattr(self, "var_exp_format", None).get() if hasattr(self, "var_exp_format") else "tiff"
+        cmd = [
+            self.metashape_exe,
+            "-r",
+            self.export_script,
+            "--project",
+            psx,
+            "--output",
+            out_dir,
+            "--project-name",
+            proj_name,
+            "--texture-format",
+            tex_fmt,
+        ]
+        if hasattr(self, "var_export_glb") and self.var_export_glb.get():
+            cmd.append("--export-glb")
+        else:
+            cmd.append("--no-export-glb")
+
+        if hasattr(self, "var_export_obj") and self.var_export_obj.get():
+            cmd.append("--export-obj")
+        else:
+            cmd.append("--no-export-obj")
+
+        if (hasattr(self, "var_build_dem") and self.var_build_dem.get()) or (hasattr(self, "var_export_dem") and self.var_export_dem.get()):
+            cmd.append("--export-dem")
+
+        if (hasattr(self, "var_build_ortho") and self.var_build_ortho.get()) or (hasattr(self, "var_export_ortho") and self.var_export_ortho.get()):
+            cmd.append("--export-orthomosaic")
+
+        if hasattr(self, "var_export_report") and self.var_export_report.get():
+            cmd.append("--export-report")
+
+        if hasattr(self, "var_build_tiled_model") and self.var_build_tiled_model.get():
+            cmd.append("--export-tiled-model")
+            if hasattr(self, "var_tiled_model_format"):
+                cmd.extend(["--tiled-model-format", self.var_tiled_model_format.get()])
+
+        if (hasattr(self, "var_build_contours") and self.var_build_contours.get()) or (hasattr(self, "var_export_contours") and self.var_export_contours.get()):
+            cmd.append("--export-contours")
+            if hasattr(self, "var_contour_interval"):
+                cmd.extend(["--contour-interval", str(self.var_contour_interval.get())])
+            if hasattr(self, "var_contours_format"):
+                cmd.extend(["--contours-format", self.var_contours_format.get()])
+
+        if hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get() and hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get():
+            cmd.append("--export-point-cloud")
+            if hasattr(self, "var_point_cloud_format"):
+                cmd.extend(["--point-cloud-format", self.var_point_cloud_format.get()])
+
+        if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
+            cmd.append("--export-fbx")
+        if hasattr(self, "var_export_ply") and self.var_export_ply.get():
+            cmd.append("--export-ply")
+        if hasattr(self, "var_export_dxf") and self.var_export_dxf.get():
+            cmd.append("--export-dxf")
+
+        return cmd
+
+    def _launch_background_export(self, psx: str, out_dir: str, proj_name: str) -> None:
+        """Launches project export asynchronously in background queue so cluster proceeds immediately."""
+        def _bg_worker():
+            max_conc = 2
+            try:
+                max_conc = int(self.var_max_concurrent_exports.get())
+            except Exception:
+                max_conc = 2
+            max_conc = max(1, min(max_conc, 4))
+
+            # Wait if active exports reached concurrency limit
+            while True:
+                with self.bg_export_lock:
+                    if len(self.active_background_exports) < max_conc:
+                        break
+                time.sleep(2.0)
+                if not getattr(self, "batch_running", False) and not self.active_background_exports:
+                    break
+
+            cmd = self._build_export_cmd_from_recon_settings(psx, out_dir, proj_name)
+            self._log(f"\n[PIPELINE OVERLAP] Launching background export for '{proj_name}' on Host CPU...", "stage")
+            t_start = time.time()
+            creation_flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+            try:
+                proc = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    bufsize=1,
+                    creationflags=creation_flags,
+                )
+                with self.bg_export_lock:
+                    self.active_background_exports.append({"name": proj_name, "proc": proc})
+
+                if proc.stdout:
+                    for line in iter(proc.stdout.readline, ""):
+                        if line:
+                            clean = line.rstrip()
+                            if any(k in clean for k in ["[EXPORT]", "[SUCCESS]", "Saved:", "MB)", "[DEM]", "[Orthomosaic]"]):
+                                self.log_queue.put(f"  [Host Export - {proj_name}] {clean}")
+                    proc.stdout.close()
+                code = proc.wait()
+                elapsed = (time.time() - t_start) / 60.0
+                if code == 0:
+                    self.log_queue.put(f"[BACKGROUND EXPORT COMPLETE] ✓ '{proj_name}' deliverables saved in {elapsed:.2f} min!")
+                else:
+                    self.log_queue.put(f"[BACKGROUND EXPORT WARNING] '{proj_name}' export exited with code {code}.")
+            except Exception as e_exp:
+                self.log_queue.put(f"[BACKGROUND EXPORT ERROR] '{proj_name}' export failed: {e_exp}")
+            finally:
+                with self.bg_export_lock:
+                    self.active_background_exports = [x for x in self.active_background_exports if x["name"] != proj_name]
+                self.root.after(100, self._check_batch_fully_finished)
+
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+    def _check_batch_fully_finished(self) -> None:
+        """Called whenever a background export or cluster batch queue item finishes."""
+        if not getattr(self, "batch_running", False):
+            return
+        if self.batch_current_idx >= len(self.batch_queue):
+            with self.bg_export_lock:
+                remaining = len(self.active_background_exports)
+            if remaining == 0:
+                self.batch_running = False
+                if hasattr(self, "stepper_multi"):
+                    self.stepper_multi.set_all_done()
+                if hasattr(self, "stepper"):
+                    self.stepper.set_all_done()
+                self.lbl_status.config(text="✓ Status: Batch Complete (All Exports Saved)", fg=UITheme.ACCENT_GREEN_TXT)
+                self._log("\n" + "=" * 70, "success")
+                n_proj = len(self.batch_queue)
+                self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} reconstructed and exported successfully!", "success")
+                self._log("=" * 70 + "\n", "success")
+                messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been reconstructed and exported successfully!")
+                self.btn_start.config(state=tk.NORMAL, bg=UITheme.ACCENT_CYAN, fg="black")
+                self.btn_stop.config(state=tk.DISABLED, bg=UITheme.BG_SURFACE_RAISED, fg=UITheme.TEXT_MUTED)
+                self.progress_bar.stop()
+            else:
+                names = [x["name"] for x in self.active_background_exports]
+                self.lbl_status.config(
+                    text=f"● Cluster done. Waiting for {remaining} export(s): {', '.join(names)}",
+                    fg=UITheme.ACCENT_CYAN,
+                )
     def _start_export(self) -> None:
         self._reset_stepper_mode("export")
         psx = self.var_psx_path.get().strip()
@@ -4996,6 +5219,21 @@ class AutoMetashapeStudio:
                 except Exception as e:
                     self._log(f"[USER] Error terminating process: {e}", "error")
 
+                # Terminate any running background exports as well
+                if hasattr(self, "bg_export_lock"):
+                    with self.bg_export_lock:
+                        for item in getattr(self, "active_background_exports", []):
+                            p = item.get("proc")
+                            if p and p.poll() is None:
+                                try:
+                                    p.terminate()
+                                    time.sleep(0.1)
+                                    if p.poll() is None:
+                                        p.kill()
+                                except Exception:
+                                    pass
+                        self.active_background_exports = []
+
                 self._clean_project_locks()
                 self._log("[SAFE-EXIT] Process cancelled safely. Existing checkpoints remain intact.", "stage")
                 self._on_finished(success=False, user_cancelled=True)
@@ -5013,6 +5251,20 @@ class AutoMetashapeStudio:
             except Exception:
                 pass
             self._clean_project_locks()
+
+        if hasattr(self, "bg_export_lock"):
+            with self.bg_export_lock:
+                for item in getattr(self, "active_background_exports", []):
+                    p = item.get("proc")
+                    if p and p.poll() is None:
+                        try:
+                            p.terminate()
+                            time.sleep(0.1)
+                            if p.poll() is None:
+                                p.kill()
+                        except Exception:
+                            pass
+                self.active_background_exports = []
 
         # Safely terminate any local cluster daemons launched from the GUI
         if hasattr(self, "worker_proc") and self.worker_proc and self.worker_proc.poll() is None:
@@ -5054,23 +5306,46 @@ class AutoMetashapeStudio:
                 self.lbl_status.config(text="● Status: Batch cancelled safely", fg=UITheme.ACCENT_AMBER_TXT)
                 self._clean_project_locks()
             elif success:
-                self._log(f"[BATCH ITEM SUCCESS] Project {self.batch_queue[self.batch_current_idx]['name']} complete.", "success")
-                self.batch_current_idx += 1
-                if self.batch_current_idx < len(self.batch_queue):
-                    self.root.after(1000, self._run_next_batch_item)
-                    return
-                else:
-                    self.batch_running = False
+                item = self.batch_queue[self.batch_current_idx]
+                proj_name = item["name"]
+                export_root = self.var_export_root.get().strip()
+                out_dir = os.path.join(export_root, proj_name)
+                psx_path = os.path.join(out_dir, f"{proj_name}.psx")
+
+                if getattr(self, "var_pipelined_export", None) and self.var_pipelined_export.get():
+                    self._log(f"[BATCH ITEM GPU COMPLETE] Project '{proj_name}' finished cluster compute.", "success")
+                    self._launch_background_export(psx_path, out_dir, proj_name)
+
                     if hasattr(self, "stepper_multi"):
-                        self.stepper_multi.set_all_done()
-                    if hasattr(self, "stepper"):
-                        self.stepper.set_all_done()
-                    self.lbl_status.config(text="✓ Status: Batch Complete", fg=UITheme.ACCENT_GREEN_TXT)
-                    self._log("\n" + "=" * 70, "success")
-                    n_proj = len(self.batch_queue)
-                    self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} processed successfully!", "success")
-                    self._log("=" * 70 + "\n", "success")
-                    messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been processed successfully!")
+                        self.stepper_multi.set_active(self.batch_current_idx, f"{proj_name} (Exporting deliverables...)")
+
+                    self.batch_current_idx += 1
+                    if self.batch_current_idx < len(self.batch_queue):
+                        self._log(f"\n[PIPELINE OVERLAP] Advancing to next project on cluster immediately...", "stage")
+                        self.root.after(500, self._run_next_batch_item)
+                        return
+                    else:
+                        self._log(f"\n[PIPELINE] All {len(self.batch_queue)} projects submitted to cluster. Waiting for background exports to complete...", "stage")
+                        self._check_batch_fully_finished()
+                        return
+                else:
+                    self._log(f"[BATCH ITEM SUCCESS] Project {proj_name} complete.", "success")
+                    self.batch_current_idx += 1
+                    if self.batch_current_idx < len(self.batch_queue):
+                        self.root.after(1000, self._run_next_batch_item)
+                        return
+                    else:
+                        self.batch_running = False
+                        if hasattr(self, "stepper_multi"):
+                            self.stepper_multi.set_all_done()
+                        if hasattr(self, "stepper"):
+                            self.stepper.set_all_done()
+                        self.lbl_status.config(text="✓ Status: Batch Complete", fg=UITheme.ACCENT_GREEN_TXT)
+                        self._log("\n" + "=" * 70, "success")
+                        n_proj = len(self.batch_queue)
+                        self._log(f"[COMPLETE] All {n_proj} survey project{'s' if n_proj > 1 else ''} processed successfully!", "success")
+                        self._log("=" * 70 + "\n", "success")
+                        messagebox.showinfo("Processing Complete", f"All {n_proj} survey project{'s' if n_proj > 1 else ''} have been processed successfully!")
             else:
                 self.batch_running = False
                 self.lbl_status.config(text="▲ Status: Batch Process Failed", fg="#f87171")
