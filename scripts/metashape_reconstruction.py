@@ -1841,6 +1841,9 @@ def run_reconstruction(
         print("[Hardware] Running on CPU.", flush=True)
 
     # Distributed Network Cluster Processing
+    net_client = None
+    cluster_enabled = False
+    active_cluster_workers = []
     if network_enable and Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
         try:
             print("\n=========================================================================")
@@ -1856,23 +1859,33 @@ def run_reconstruction(
             if network_path:
                 Metashape.app.settings.network_path = str(network_path).strip()
 
-            try:
-                if hasattr(Metashape, "NetworkClient"):
-                    net_client = Metashape.NetworkClient()
-                    if net_client.connect(f"{network_host}:{network_port}"):
-                        workers = net_client.workerList()
-                        active_w = [w for w in workers if not getattr(w, "paused", False)]
-                        print(f"  [Network Cluster] Connected to server successfully!", flush=True)
-                        print(f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_w)} active workers)", flush=True)
-                        for idx, w in enumerate(workers, 1):
-                            host_label = getattr(w, "host", "Node")
-                            print(f"    • Node {idx}: {host_label} (GPU: {getattr(w, 'gpu_mask', 1)}, Priority: {getattr(w, 'priority', 0)})", flush=True)
+            if hasattr(Metashape, "NetworkClient"):
+                client = Metashape.NetworkClient()
+                if client.connect(f"{network_host}:{network_port}"):
+                    workers = client.workerList()
+                    for w in workers:
+                        if getattr(w, "paused", False) and hasattr(w, "id"):
+                            try:
+                                client.setWorkerPaused(w.id, False)
+                            except Exception:
+                                pass
+                    workers = client.workerList()
+                    active_cluster_workers = [w for w in workers if not getattr(w, "paused", False)]
+                    print(f"  [Network Cluster] Connected to server successfully!", flush=True)
+                    print(f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_cluster_workers)} active workers)", flush=True)
+                    for idx, w in enumerate(workers, 1):
+                        host_label = getattr(w, "host", "Node")
+                        print(f"    • Node {idx}: {host_label} (GPU: {getattr(w, 'gpu_mask', 1)}, Priority: {getattr(w, 'priority', 0)})", flush=True)
+
+                    if len(active_cluster_workers) > 0:
+                        net_client = client
+                        cluster_enabled = True
                     else:
-                        print(f"  [Network Cluster] [NOTICE] Server connection pending at {network_host}:{network_port}. Metashape will connect during task execution.", flush=True)
-            except Exception as e_net_chk:
-                print(f"  [Network Cluster] [NOTICE] Network server check: {e_net_chk}. Configuration applied.", flush=True)
+                        print(f"  [Network Cluster] [NOTICE] 0 active worker nodes connected to server. Will execute tasks locally.", flush=True)
+                else:
+                    print(f"  [Network Cluster] [NOTICE] Server unreachable at {network_host}:{network_port}. Processing locally.", flush=True)
         except Exception as e_net_init:
-            print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}", flush=True)
+            print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}. Processing locally.", flush=True)
     elif Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
         try:
             Metashape.app.settings.network_enable = False
@@ -1882,6 +1895,102 @@ def run_reconstruction(
     doc = Metashape.Document()
     resumed = False
     target_psx = psx_out if os.path.exists(psx_out) else (legacy_psx if os.path.exists(legacy_psx) else None)
+
+    def _safe_reopen():
+        load_path = psx_out if os.path.exists(psx_out) else (target_psx if target_psx and os.path.exists(target_psx) else psx_out)
+        files_dir = load_path.replace(".psx", ".files")
+        lock_file = os.path.join(files_dir, "lock")
+        if os.path.isfile(lock_file):
+            try:
+                os.remove(lock_file)
+            except Exception:
+                pass
+        try:
+            doc.open(load_path, read_only=False, ignore_lock=True)
+        except Exception:
+            try:
+                doc.open(load_path, ignore_lock=True)
+            except Exception:
+                doc.open(load_path)
+        try:
+            doc.read_only = False
+        except Exception:
+            pass
+        if doc.chunk is None and len(doc.chunks) > 0:
+            doc.chunk = doc.chunks[0]
+
+    def get_cluster_rel_path() -> str:
+        if network_path and os.path.exists(network_path):
+            try:
+                abs_psx = os.path.abspath(psx_out)
+                abs_net = os.path.abspath(network_path)
+                if os.path.commonpath([abs_psx, abs_net]) == abs_net:
+                    return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
+            except Exception:
+                pass
+        return os.path.basename(psx_out)
+
+    def dispatch_cluster_task(tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = "") -> bool:
+        """Dispatch photogrammetry task(s) to the network cluster with real-time progress monitoring."""
+        if not cluster_enabled or net_client is None:
+            return False
+
+        try:
+            rel_psx = get_cluster_rel_path()
+            if stage_key:
+                emit_ipc_stage(stage_key, task_desc)
+            print(f"\n[Network Cluster] Dispatching '{task_desc}' to cluster ({network_host}:{network_port})...", flush=True)
+
+            doc.save(psx_out)
+            task_list = tasks if isinstance(tasks, (list, tuple)) else [tasks]
+            net_tasks = [t.toNetworkTask(doc.chunk) for t in task_list]
+            batch_id = net_client.createBatch(rel_psx, net_tasks)
+            net_client.setBatchPaused(batch_id, False)
+
+            t_task_start = time.time()
+            last_progress = -1.0
+            last_log_time = 0.0
+            while True:
+                time.sleep(1.0)
+                b_info = net_client.batchInfo(batch_id)
+                state = b_info.get("state")
+                tasks_info = b_info.get("tasks", [])
+                if tasks_info:
+                    total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
+                    active_task = next((t for t in tasks_info if t.get("state") in ("running", "submitted")), tasks_info[-1])
+                    t_sub_name = active_task.get("name", task_desc)
+                    sub_prog = active_task.get("progress", 0.0)
+                    now_t = time.time()
+                    if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
+                        elapsed_min = (now_t - t_task_start) / 60.0
+                        if len(tasks_info) > 1:
+                            print(f"  [Cluster Progress] {task_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                        else:
+                            print(f"  [Cluster Progress] {task_desc}: {total_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)", flush=True)
+                        last_progress = total_prog
+                        last_log_time = now_t
+
+                if state == "completed":
+                    elapsed_min = (time.time() - t_task_start) / 60.0
+                    print(f"  [Cluster] ✓ Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True)
+                    break
+                elif state in ("failed", "aborted"):
+                    err_msgs = []
+                    for t in tasks_info:
+                        for err in t.get("errors", []):
+                            err_msgs.append(str(err))
+                    err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
+                    print(f"  [Cluster] [ERROR] Task '{task_desc}' {state}: {err_str}", flush=True)
+                    print(f"  [Cluster] Falling back to local execution for '{task_desc}'...", flush=True)
+                    return False
+
+            _safe_reopen()
+            return True
+
+        except Exception as e_dispatch:
+            print(f"  [Cluster] [WARNING] Cluster dispatch exception: {e_dispatch}. Falling back to local execution...", flush=True)
+            return False
+
     if resume and target_psx:
         print(f"\n[Checkpoint] Found existing project (--resume specified): {target_psx}", flush=True)
         try:
@@ -2163,24 +2272,60 @@ def run_reconstruction(
                 emit_ipc_stage("match", "Executing GPU Feature Matching")
                 print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
                 t_match = time.time()
-                chunk.matchPhotos(
-                    downscale=align_downscale,
-                    generic_preselection=True,
-                    reference_preselection=True,
-                    reference_preselection_mode=presel_mode_enum,
-                    keypoint_limit=keypoint_limit,
-                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                    tiepoint_limit=tiepoint_limit,
-                    mask_tiepoints=False,
-                    filter_stationary_points=filter_stationary_points,
-                    guided_matching=guided_matching,
-                )
+                matched = False
+                if cluster_enabled:
+                    try:
+                        t_m = Metashape.Tasks.MatchPhotos()
+                        t_m.downscale = align_downscale
+                        t_m.generic_preselection = True
+                        t_m.reference_preselection = True
+                        t_m.reference_preselection_mode = presel_mode_enum
+                        t_m.keypoint_limit = keypoint_limit
+                        t_m.keypoint_limit_per_mpx = keypoint_limit_per_mpx
+                        t_m.tiepoint_limit = tiepoint_limit
+                        t_m.mask_tiepoints = False
+                        t_m.filter_stationary_points = filter_stationary_points
+                        t_m.guided_matching = guided_matching
+                        matched = dispatch_cluster_task(t_m, "GPU Feature Matching", "match")
+                        if matched:
+                            chunk = doc.chunk
+                    except Exception as e_m_dispatch:
+                        print(f"  [Cluster] MatchPhotos dispatch exception: {e_m_dispatch}. Running locally...", flush=True)
+                        matched = False
+
+                if not matched:
+                    chunk.matchPhotos(
+                        downscale=align_downscale,
+                        generic_preselection=True,
+                        reference_preselection=True,
+                        reference_preselection_mode=presel_mode_enum,
+                        keypoint_limit=keypoint_limit,
+                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                        tiepoint_limit=tiepoint_limit,
+                        mask_tiepoints=False,
+                        filter_stationary_points=filter_stationary_points,
+                        guided_matching=guided_matching,
+                    )
                 print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
 
                 emit_ipc_stage("align", "Camera Alignment & Bundle Adjustment")
                 print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
                 t_align = time.time()
-                chunk.alignCameras(adaptive_fitting=adaptive_fitting)
+                aligned = False
+                if cluster_enabled:
+                    try:
+                        t_a = Metashape.Tasks.AlignCameras()
+                        t_a.adaptive_fitting = adaptive_fitting
+                        aligned = dispatch_cluster_task(t_a, "Camera Alignment & Bundle Adjustment", "align")
+                        if aligned:
+                            chunk = doc.chunk
+                    except Exception as e_a_dispatch:
+                        print(f"  [Cluster] AlignCameras dispatch exception: {e_a_dispatch}. Running locally...", flush=True)
+                        aligned = False
+
+                if not aligned:
+                    chunk.alignCameras(adaptive_fitting=adaptive_fitting)
+
                 aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
                 enabled_count = sum(1 for c in chunk.cameras if c.enabled)
                 print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
@@ -2194,26 +2339,6 @@ def run_reconstruction(
                     usgs_stats = filter_tie_points(chunk)
                 else:
                     print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
-
-        def _safe_reopen():
-            files_dir = psx_out.replace(".psx", ".files")
-            lock_file = os.path.join(files_dir, "lock")
-            if os.path.isfile(lock_file):
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
-            try:
-                doc.open(target_psx, read_only=False, ignore_lock=True)
-            except Exception:
-                try:
-                    doc.open(target_psx, ignore_lock=True)
-                except Exception:
-                    doc.open(target_psx)
-            try:
-                doc.read_only = False
-            except Exception:
-                pass
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
@@ -2273,11 +2398,26 @@ def run_reconstruction(
             emit_ipc_stage("depth", f"Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()})")
             print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
             t_depth = time.time()
-            chunk.buildDepthMaps(
-                downscale=depth_downscale,
-                filter_mode=filter_mode_arg,
-                reuse_depth=False,
-            )
+            depth_computed = False
+            if cluster_enabled:
+                try:
+                    t_d = Metashape.Tasks.BuildDepthMaps()
+                    t_d.downscale = depth_downscale
+                    t_d.filter_mode = filter_mode_arg
+                    t_d.reuse_depth = False
+                    depth_computed = dispatch_cluster_task(t_d, f"Computing GPU MVS Depth Maps ({depth_quality.capitalize()})", "depth")
+                    if depth_computed:
+                        chunk = doc.chunk
+                except Exception as e_d_dispatch:
+                    print(f"  [Cluster] BuildDepthMaps dispatch exception: {e_d_dispatch}. Running locally...", flush=True)
+                    depth_computed = False
+
+            if not depth_computed:
+                chunk.buildDepthMaps(
+                    downscale=depth_downscale,
+                    filter_mode=filter_mode_arg,
+                    reuse_depth=False,
+                )
             print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
             chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
@@ -2292,14 +2432,32 @@ def run_reconstruction(
             emit_ipc_stage("point_cloud", "Generating Dense Point Cloud from Depth Maps")
             print(f"\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
             t_pc = time.time()
-            chunk.buildPointCloud(
-                source_data=Metashape.DataSource.DepthMapsData,
-                point_colors=True,
-                point_confidence=True,
-                uniform_sampling=True,
-                points_spacing=points_spacing,
-                keep_depth=True,
-            )
+            pc_computed = False
+            if cluster_enabled:
+                try:
+                    t_p = Metashape.Tasks.BuildPointCloud()
+                    t_p.source_data = Metashape.DataSource.DepthMapsData
+                    t_p.point_colors = True
+                    t_p.point_confidence = True
+                    t_p.uniform_sampling = True
+                    t_p.points_spacing = points_spacing
+                    t_p.keep_depth = True
+                    pc_computed = dispatch_cluster_task(t_p, "Generating Dense Point Cloud from Depth Maps", "point_cloud")
+                    if pc_computed:
+                        chunk = doc.chunk
+                except Exception as e_pc_disp:
+                    print(f"  [Cluster] BuildPointCloud dispatch exception: {e_pc_disp}. Running locally...", flush=True)
+                    pc_computed = False
+
+            if not pc_computed:
+                chunk.buildPointCloud(
+                    source_data=Metashape.DataSource.DepthMapsData,
+                    point_colors=True,
+                    point_confidence=True,
+                    uniform_sampling=True,
+                    points_spacing=points_spacing,
+                    keep_depth=True,
+                )
             pc_count = chunk.point_cloud.point_count if chunk.point_cloud else 0
             print(f"  Point cloud completed in {(time.time() - t_pc)/60:.2f} min! Density: {pc_count:,} 3D points.", flush=True)
 
@@ -2358,22 +2516,26 @@ def run_reconstruction(
                 print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
 
             surf_enum = SURFACE_TYPE_MAP.get(surface_type.lower(), Metashape.SurfaceType.Arbitrary)
-            try:
-                chunk.buildModel(
-                    surface_type=surf_enum,
-                    source_data=Metashape.DataSource.DepthMapsData,
-                    interpolation=Metashape.Interpolation.EnabledInterpolation,
-                    face_count=face_count_arg,
-                    face_count_custom=face_count_custom_arg,
-                    vertex_colors=True,
-                    vertex_confidence=True,
-                )
-            except Exception as e:
-                print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
-                print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
-                orig_gpu_mask = Metashape.app.gpu_mask
+            mesh_computed = False
+            if cluster_enabled:
                 try:
-                    Metashape.app.gpu_mask = 0
+                    t_m = Metashape.Tasks.BuildModel()
+                    t_m.surface_type = surf_enum
+                    t_m.source_data = Metashape.DataSource.DepthMapsData
+                    t_m.interpolation = Metashape.Interpolation.EnabledInterpolation
+                    t_m.face_count = face_count_arg
+                    t_m.face_count_custom = face_count_custom_arg
+                    t_m.vertex_colors = True
+                    t_m.vertex_confidence = True
+                    mesh_computed = dispatch_cluster_task(t_m, f"Surface Mesh ({custom_faces:,} faces)", "mesh")
+                    if mesh_computed:
+                        chunk = doc.chunk
+                except Exception as e_m_disp:
+                    print(f"  [Cluster] BuildModel dispatch exception: {e_m_disp}. Running locally...", flush=True)
+                    mesh_computed = False
+
+            if not mesh_computed:
+                try:
                     chunk.buildModel(
                         surface_type=surf_enum,
                         source_data=Metashape.DataSource.DepthMapsData,
@@ -2381,11 +2543,26 @@ def run_reconstruction(
                         face_count=face_count_arg,
                         face_count_custom=face_count_custom_arg,
                         vertex_colors=True,
+                        vertex_confidence=True,
                     )
-                    print("  [Fallback] CPU surface meshing succeeded!", flush=True)
-                finally:
-                    Metashape.app.gpu_mask = orig_gpu_mask
-                    print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
+                except Exception as e:
+                    print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
+                    print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
+                    orig_gpu_mask = Metashape.app.gpu_mask
+                    try:
+                        Metashape.app.gpu_mask = 0
+                        chunk.buildModel(
+                            surface_type=surf_enum,
+                            source_data=Metashape.DataSource.DepthMapsData,
+                            interpolation=Metashape.Interpolation.EnabledInterpolation,
+                            face_count=face_count_arg,
+                            face_count_custom=face_count_custom_arg,
+                            vertex_colors=True,
+                        )
+                        print("  [Fallback] CPU surface meshing succeeded!", flush=True)
+                    finally:
+                        Metashape.app.gpu_mask = orig_gpu_mask
+                        print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
             if close_holes and chunk.model:
                 chunk.model.closeHoles(level=30)
                 print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
@@ -2444,17 +2621,39 @@ def run_reconstruction(
                 eff_pages = optimal_budget
 
         t_tex = time.time()
-        chunk.buildUV(
-            mapping_mode=Metashape.MappingMode.GenericMapping,
-            page_count=eff_pages or 4,
-            texture_size=8192,
-        )
-        chunk.buildTexture(
-            blending_mode=Metashape.BlendingMode.MosaicBlending,
-            texture_size=8192,
-            fill_holes=fill_holes,
-            ghosting_filter=ghosting_filter,
-        )
+        tex_computed = False
+        if cluster_enabled:
+            try:
+                t_uv = Metashape.Tasks.BuildUV()
+                t_uv.mapping_mode = Metashape.MappingMode.GenericMapping
+                t_uv.page_count = eff_pages or 4
+                t_uv.texture_size = 8192
+
+                t_t = Metashape.Tasks.BuildTexture()
+                t_t.blending_mode = Metashape.BlendingMode.MosaicBlending
+                t_t.texture_size = 8192
+                t_t.fill_holes = fill_holes
+                t_t.ghosting_filter = ghosting_filter
+
+                tex_computed = dispatch_cluster_task([t_uv, t_t], f"Baking {eff_pages or 4}x 8K Texture Atlas", "texture")
+                if tex_computed:
+                    chunk = doc.chunk
+            except Exception as e_tx_disp:
+                print(f"  [Cluster] BuildUV/BuildTexture dispatch exception: {e_tx_disp}. Running locally...", flush=True)
+                tex_computed = False
+
+        if not tex_computed:
+            chunk.buildUV(
+                mapping_mode=Metashape.MappingMode.GenericMapping,
+                page_count=eff_pages or 4,
+                texture_size=8192,
+            )
+            chunk.buildTexture(
+                blending_mode=Metashape.BlendingMode.MosaicBlending,
+                texture_size=8192,
+                fill_holes=fill_holes,
+                ghosting_filter=ghosting_filter,
+            )
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
 
         if remove_lighting and chunk.model:
@@ -2475,10 +2674,24 @@ def run_reconstruction(
                 emit_ipc_stage("tiled_model", f"Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})")
                 print(f"\n[6b/7] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
                 t_tile = time.time()
-                chunk.buildTiledModel(
-                    tile_size=tile_size,
-                    source_data=Metashape.DataSource.DepthMapsData,
-                )
+                tiled_computed = False
+                if cluster_enabled:
+                    try:
+                        t_tl = Metashape.Tasks.BuildTiledModel()
+                        t_tl.tile_size = tile_size
+                        t_tl.source_data = Metashape.DataSource.DepthMapsData
+                        tiled_computed = dispatch_cluster_task(t_tl, f"Building 3D Tiled Model (Tile Size: {tile_size})", "tiled_model")
+                        if tiled_computed:
+                            chunk = doc.chunk
+                    except Exception as e_tl_disp:
+                        print(f"  [Cluster] BuildTiledModel dispatch exception: {e_tl_disp}. Running locally...", flush=True)
+                        tiled_computed = False
+
+                if not tiled_computed:
+                    chunk.buildTiledModel(
+                        tile_size=tile_size,
+                        source_data=Metashape.DataSource.DepthMapsData,
+                    )
                 print(f"  3D Tiled model completed in {(time.time() - t_tile)/60:.2f} min.", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
             else:
@@ -2526,11 +2739,27 @@ def run_reconstruction(
                 if target_crs:
                     proj.crs = target_crs
                 dem_source = Metashape.DataSource.PointCloudData if (chunk.point_cloud and chunk.point_cloud.point_count > 0) else Metashape.DataSource.DepthMapsData
-                chunk.buildDem(
-                    source_data=dem_source,
-                    interpolation=Metashape.Interpolation.EnabledInterpolation,
-                    projection=proj,
-                )
+                dem_computed = False
+                if cluster_enabled:
+                    try:
+                        t_dm = Metashape.Tasks.BuildDem()
+                        t_dm.source_data = dem_source
+                        t_dm.interpolation = Metashape.Interpolation.EnabledInterpolation
+                        if target_crs:
+                            t_dm.projection = proj
+                        dem_computed = dispatch_cluster_task(t_dm, "Building Digital Elevation Model (DEM/DSM)", "dem")
+                        if dem_computed:
+                            chunk = doc.chunk
+                    except Exception as e_dm_disp:
+                        print(f"  [Cluster] BuildDem dispatch exception: {e_dm_disp}. Running locally...", flush=True)
+                        dem_computed = False
+
+                if not dem_computed:
+                    chunk.buildDem(
+                        source_data=dem_source,
+                        interpolation=Metashape.Interpolation.EnabledInterpolation,
+                        projection=proj,
+                    )
                 print(f"  [7b/7] DEM generation completed in {(time.time() - t_dem)/60:.2f} min.", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7b/7] [CHECKPOINT] Saved DEM inside project: {psx_out}", flush=True)
@@ -2607,15 +2836,35 @@ def run_reconstruction(
                                 target_crs = chunk.crs
                 if target_crs:
                     proj.crs = target_crs
-                chunk.buildOrthomosaic(
-                    surface_data=Metashape.DataSource.ModelData,
-                    blending_mode=Metashape.BlendingMode.MosaicBlending,
-                    fill_holes=fill_holes,
-                    ghosting_filter=ghosting_filter,
-                    cull_faces=ortho_cull_faces,
-                    projection=proj,
-                    resolution=ortho_resolution if getattr(proj.crs, "projcs", None) else 0,
-                )
+                ortho_computed = False
+                if cluster_enabled:
+                    try:
+                        t_om = Metashape.Tasks.BuildOrthomosaic()
+                        t_om.surface_data = Metashape.DataSource.ModelData
+                        t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
+                        t_om.fill_holes = fill_holes
+                        t_om.ghosting_filter = ghosting_filter
+                        t_om.cull_faces = ortho_cull_faces
+                        t_om.projection = proj
+                        if getattr(proj.crs, "projcs", None) and ortho_resolution > 0:
+                            t_om.resolution = ortho_resolution
+                        ortho_computed = dispatch_cluster_task(t_om, "Generating Orthomosaic from Reconstructed Surface Mesh", "ortho")
+                        if ortho_computed:
+                            chunk = doc.chunk
+                    except Exception as e_om_disp:
+                        print(f"  [Cluster] BuildOrthomosaic dispatch exception: {e_om_disp}. Running locally...", flush=True)
+                        ortho_computed = False
+
+                if not ortho_computed:
+                    chunk.buildOrthomosaic(
+                        surface_data=Metashape.DataSource.ModelData,
+                        blending_mode=Metashape.BlendingMode.MosaicBlending,
+                        fill_holes=fill_holes,
+                        ghosting_filter=ghosting_filter,
+                        cull_faces=ortho_cull_faces,
+                        projection=proj,
+                        resolution=ortho_resolution if getattr(proj.crs, "projcs", None) else 0,
+                    )
                 print(f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7c/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)

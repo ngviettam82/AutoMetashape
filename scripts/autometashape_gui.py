@@ -2288,7 +2288,7 @@ class AutoMetashapeStudio:
 
         server_bin = find_metashape_server_path(self.metashape_exe)
         if server_bin and os.path.isfile(server_bin):
-            cmd = [server_bin, "--host", f"0.0.0.0:{port}", "--no-database"]
+            cmd = [server_bin, "--host", f"0.0.0.0:{port}", "--resume-workers", "--no-database"]
         elif self.metashape_exe and os.path.isfile(self.metashape_exe):
             dispatch_port = str(int_port + 1)
             cmd = [self.metashape_exe, "--server", "--control", f"0.0.0.0:{port}", "--dispatch", f"0.0.0.0:{dispatch_port}"]
@@ -2473,7 +2473,7 @@ class AutoMetashapeStudio:
         port = self.var_network_port.get().strip() or "5840"
         server_bin = find_metashape_server_path(self.metashape_exe)
         if server_bin:
-            cmd = f'"{server_bin}" --host 0.0.0.0:{port} --no-database'
+            cmd = f'"{server_bin}" --host 0.0.0.0:{port} --resume-workers --no-database'
         else:
             try:
                 dispatch_port = str(int(port) + 1)
