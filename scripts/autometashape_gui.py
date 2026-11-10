@@ -537,7 +537,7 @@ EXPORT_TAG_MAP = {
     "texture": ("texture", "Re-baking Texture Atlas"),
     "delighting": ("texture", "Delighting & Shadow Removal"),
     "1/2": ("models", "Exporting Binary GLB"),
-    "2/2": ("models", "Exporting Wavefront OBJ & PNG"),
+    "2/2": ("models", "Exporting Wavefront OBJ & Textures"),
     "fbx": ("models", "Exporting Autodesk FBX"),
     "ply": ("models", "Exporting Stanford PLY"),
     "dxf": ("models", "Exporting AutoCAD DXF"),
@@ -2034,7 +2034,7 @@ class AutoMetashapeStudio:
         # Col 1: 3D Surface Models
         tk.Label(col1, text="3D SURFACE MODELS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
         _c(col1, "Binary glTF (.glb)", self.var_export_glb)
-        _c(col1, "Wavefront OBJ (.obj + PNG)", self.var_export_obj)
+        _c(col1, "Wavefront OBJ (.obj + textures)", self.var_export_obj)
         _c(col1, "Autodesk FBX (.fbx)", self.var_export_fbx)
         _c(col1, "Stanford PLY (.ply)", self.var_export_ply)
         _c(col1, "AutoCAD DXF (.dxf)", self.var_export_dxf)
@@ -3293,7 +3293,10 @@ class AutoMetashapeStudio:
         grid_tex.pack(fill=tk.X, pady=(2, 2))
 
         tk.Label(grid_tex, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_tex, textvariable=self.var_tex_pages, values=["16", "22", "8", "4", "2", "32"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid_tex, textvariable=self.var_tex_pages, values=["16", "22", "8", "4", "2", "32"], state="readonly", width=8).grid(row=0, column=1, padx=(4, 14), pady=3)
+
+        tk.Label(grid_tex, text="Atlas Format:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=2, sticky=tk.W, pady=3)
+        ttk.Combobox(grid_tex, textvariable=self.var_exp_format, values=["png", "tiff", "jpeg"], state="readonly", width=8).grid(row=0, column=3, padx=(4, 14), pady=3)
 
         chk_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_tex.pack(fill=tk.X, pady=(2, 4))

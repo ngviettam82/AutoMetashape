@@ -4281,7 +4281,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # 3D Model Export Options (Default: False · Metashape project only)
     parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=False, help="Export binary glTF 3D model (.glb)")
     parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary GLB export")
-    parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=False, help="Export Wavefront OBJ model + 8K TIFF textures (.obj)")
+    parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=False, help="Export Wavefront OBJ model + texture atlas (.obj)")
     parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ export")
     parser.add_argument("--texture-format", choices=["png", "tiff", "tif", "jpg", "jpeg"], default="png", help="Format for exported texture atlas files (default: png)")
     # Point Cloud Options
