@@ -1513,6 +1513,329 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
     return t_crop
 
 
+def build_unified_cluster_pipeline_tasks(
+    chunk,
+    output_dir: str,
+    project_name: str,
+    align_photos: bool = True,
+    align_quality: str = "high",
+    reference_preselection_mode: str = "estimated",
+    keypoint_limit: int = 200000,
+    keypoint_limit_per_mpx: int = 15000,
+    tiepoint_limit: int = 25000,
+    filter_stationary_points: bool = True,
+    guided_matching: bool = True,
+    adaptive_fitting: bool = True,
+    filter_tiepoints: bool = True,
+    crop_method: str = "gps-square",
+    crop_padding: float = 0.05,
+    build_depth_maps: bool = True,
+    depth_quality: str = "high",
+    depth_filtering: str = "moderate",
+    build_point_cloud: bool = True,
+    points_spacing: float = 0.02,
+    build_mesh: bool = True,
+    surface_type: str = "arbitrary",
+    custom_faces: int = None,
+    build_texture: bool = True,
+    texture_pages: int = None,
+    fill_holes: bool = True,
+    ghosting_filter: bool = True,
+    build_dem: bool = False,
+    build_orthomosaic: bool = False,
+    ortho_resolution: float = 0.02,
+    ortho_cull_faces: bool = True,
+    build_tiled_model: bool = False,
+    tile_size: int = 256,
+    export_glb: bool = False,
+    export_obj: bool = False,
+    export_fbx: bool = False,
+    export_ply: bool = False,
+    export_dxf: bool = False,
+    export_tie_points: bool = False,
+    export_dem: bool = False,
+    export_ortho: bool = False,
+    export_point_cloud: bool = False,
+    point_cloud_format: str = "laz",
+    export_report: bool = False,
+    report_title: str = None,
+    texture_format: str = "png",
+    network_path: str = "",
+    worker_ram_gb: float = 32.0,
+    export_path_fn=None,
+) -> tuple[list, list[tuple[str, str, str]]]:
+    """Assembles the complete sequence of photogrammetry pipeline tasks into a single unified batch for independent worker execution."""
+    if Metashape is None:
+        return [], []
+
+    tasks = []
+    stage_info = []
+
+    def get_exp_path(f: str) -> str:
+        if export_path_fn:
+            return export_path_fn(f)
+        return os.path.abspath(f).replace("\\", "/")
+
+    # 1. Feature Matching & Camera Alignment
+    if align_photos:
+        align_downscale = ALIGN_DOWNSCALE_MAP.get((align_quality or "high").lower(), 2)
+        presel_mode_enum = PRESEL_MODE_MAP.get(
+            (reference_preselection_mode or "estimated").lower(),
+            Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
+        )
+
+        t_match = Metashape.Tasks.MatchPhotos()
+        t_match.downscale = align_downscale
+        t_match.generic_preselection = True
+        t_match.reference_preselection = True
+        t_match.reference_preselection_mode = presel_mode_enum
+        t_match.keypoint_limit = keypoint_limit or 200000
+        t_match.keypoint_limit_per_mpx = keypoint_limit_per_mpx or 15000
+        t_match.tiepoint_limit = tiepoint_limit or 25000
+        t_match.mask_tiepoints = False
+        t_match.filter_stationary_points = filter_stationary_points
+        t_match.guided_matching = guided_matching
+        tasks.append(t_match)
+        stage_info.append(("MatchPhotos", "match", "GPU Feature Matching"))
+
+        t_align = Metashape.Tasks.AlignCameras()
+        t_align.adaptive_fitting = adaptive_fitting
+        tasks.append(t_align)
+        stage_info.append(("AlignCameras", "align", "Camera Alignment & Bundle Adjustment"))
+
+        if filter_tiepoints:
+            clean_tasks = build_cluster_gradual_selection_tasks()
+            for ct in clean_tasks:
+                tasks.append(ct)
+                t_type = "CleanTiePoints" if hasattr(ct, "criterion") else "OptimizeCameras"
+                stage_info.append((t_type, "align", "Gradual Selection Tie-Point Cleaning & Camera Optimization"))
+
+        if crop_method in ("gps-square", "structure"):
+            t_crop = build_cluster_crop_task(crop_method, padding=crop_padding)
+            if t_crop:
+                tasks.append(t_crop)
+                stage_info.append(("RunScript", "align", f"Auto-Crop Bounding Box ({crop_method})"))
+
+    # 2. Multi-View Stereo Depth Maps
+    if build_depth_maps:
+        depth_downscale = DEPTH_DOWNSCALE_MAP.get((depth_quality or "high").lower(), 4)
+        filter_mode_arg = DEPTH_FILTER_MAP.get((depth_filtering or "moderate").lower(), Metashape.FilterMode.ModerateFiltering)
+        t_d = Metashape.Tasks.BuildDepthMaps()
+        t_d.downscale = depth_downscale
+        t_d.filter_mode = filter_mode_arg
+        t_d.reuse_depth = False
+        tasks.append(t_d)
+        stage_info.append(("BuildDepthMaps", "depth", f"GPU MVS Depth Maps ({depth_quality.capitalize()})"))
+
+    # 3. Dense Point Cloud
+    if build_point_cloud:
+        t_p = Metashape.Tasks.BuildPointCloud()
+        t_p.source_data = Metashape.DataSource.DepthMapsData
+        t_p.point_colors = True
+        t_p.point_confidence = True
+        t_p.uniform_sampling = True
+        t_p.points_spacing = points_spacing or 0.02
+        t_p.keep_depth = True
+        tasks.append(t_p)
+        stage_info.append(("BuildPointCloud", "point_cloud", "Generating Dense Point Cloud"))
+
+    # 4. Surface Mesh Model
+    if build_mesh:
+        surf_enum = SURFACE_TYPE_MAP.get((surface_type or "arbitrary").lower(), Metashape.SurfaceType.Arbitrary)
+        if custom_faces and custom_faces > 0:
+            face_count_arg = Metashape.FaceCount.CustomFaceCount
+            face_count_custom_arg = custom_faces
+        else:
+            face_count_arg = Metashape.FaceCount.MediumFaceCount
+            face_count_custom_arg = 200000
+
+        t_m = Metashape.Tasks.BuildModel()
+        t_m.surface_type = surf_enum
+        t_m.source_data = Metashape.DataSource.DepthMapsData
+        t_m.interpolation = Metashape.Interpolation.EnabledInterpolation
+        t_m.face_count = face_count_arg
+        t_m.face_count_custom = face_count_custom_arg
+        t_m.vertex_colors = True
+        t_m.vertex_confidence = True
+        tasks.append(t_m)
+        stage_info.append(("BuildModel", "mesh", f"Surface Meshing ({face_count_custom_arg:,} faces)"))
+
+    # 5. Texture Atlas Parameterization & Mosaic Blending
+    if build_texture:
+        eff_pages = texture_pages or 22
+        if worker_ram_gb < 16.0:
+            eff_pages = min(eff_pages, 4)
+        elif worker_ram_gb < 32.0:
+            eff_pages = min(eff_pages, 8)
+
+        t_uv = Metashape.Tasks.BuildUV()
+        t_uv.mapping_mode = Metashape.MappingMode.GenericMapping
+        t_uv.page_count = eff_pages
+        t_uv.texture_size = 8192
+        tasks.append(t_uv)
+        stage_info.append(("BuildUV", "texture", f"Texture UV Parameterization ({eff_pages} pages)"))
+
+        t_tex = Metashape.Tasks.BuildTexture()
+        t_tex.blending_mode = Metashape.BlendingMode.MosaicBlending
+        t_tex.texture_size = 8192
+        t_tex.fill_holes = fill_holes
+        t_tex.ghosting_filter = ghosting_filter
+        tasks.append(t_tex)
+        stage_info.append(("BuildTexture", "texture", f"Baking {eff_pages}x 8K Texture Atlas"))
+
+    # 6. LOD 3D Tiled Model
+    if build_tiled_model:
+        t_tl = Metashape.Tasks.BuildTiledModel()
+        t_tl.tile_size = tile_size or 256
+        t_tl.source_data = Metashape.DataSource.DepthMapsData
+        tasks.append(t_tl)
+        stage_info.append(("BuildTiledModel", "tiled_model", f"Building 3D Tiled Model ({tile_size}px tiles)"))
+
+    # Geodesy / Projection Setup for DEM & Ortho
+    proj = Metashape.OrthoProjection()
+    target_crs = chunk.crs if chunk else None
+    if chunk and chunk.crs and not getattr(chunk.crs, "projcs", None):
+        gps_cams = [c for c in chunk.cameras if c.reference and c.reference.location and (abs(c.reference.location.x) > 0.001 or abs(c.reference.location.y) > 0.001)]
+        if gps_cams:
+            avg_lon = sum(c.reference.location.x for c in gps_cams) / len(gps_cams)
+            avg_lat = sum(c.reference.location.y for c in gps_cams) / len(gps_cams)
+            utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
+            try:
+                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+            except Exception:
+                target_crs = chunk.crs
+    if target_crs:
+        proj.crs = target_crs
+
+    # 7. Digital Elevation Model (DEM)
+    if build_dem:
+        dem_source = Metashape.DataSource.PointCloudData if build_point_cloud else Metashape.DataSource.DepthMapsData
+        t_dm = Metashape.Tasks.BuildDem()
+        t_dm.source_data = dem_source
+        t_dm.interpolation = Metashape.Interpolation.EnabledInterpolation
+        if target_crs:
+            t_dm.projection = proj
+        tasks.append(t_dm)
+        stage_info.append(("BuildDem", "dem", "Building Digital Elevation Model (DEM/DSM)"))
+
+    # 8. True Orthomosaic
+    if build_orthomosaic:
+        t_om = Metashape.Tasks.BuildOrthomosaic()
+        t_om.surface_data = Metashape.DataSource.ModelData
+        t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
+        t_om.fill_holes = fill_holes
+        t_om.ghosting_filter = ghosting_filter
+        t_om.cull_faces = ortho_cull_faces
+        t_om.projection = proj
+        if getattr(proj.crs, "projcs", None) and ortho_resolution and ortho_resolution > 0:
+            t_om.resolution = ortho_resolution
+        tasks.append(t_om)
+        stage_info.append(("BuildOrthomosaic", "ortho", "Generating Orthomosaic"))
+
+    # 9. Deliverables Export
+    glb_out = os.path.join(output_dir, f"{project_name}.glb")
+    obj_out = os.path.join(output_dir, f"{project_name}.obj")
+    fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
+    ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
+    dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
+    dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
+    ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
+    rep_out = os.path.join(output_dir, f"{project_name}_report.pdf")
+
+    tex_fmt = texture_format if texture_format else "png"
+    tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF if tex_fmt == "tiff" else Metashape.ImageFormat.ImageFormatPNG
+
+    if export_obj and build_mesh:
+        t_obj = Metashape.Tasks.ExportModel()
+        t_obj.format = Metashape.ModelFormat.ModelFormatOBJ
+        t_obj.texture_format = tex_image_fmt
+        t_obj.save_texture = True
+        t_obj.save_normals = True
+        t_obj.save_colors = True
+        t_obj.path = get_exp_path(obj_out)
+        tasks.append(t_obj)
+        stage_info.append(("ExportModel", "export", "Exporting Wavefront OBJ + PNG Atlas"))
+
+    if export_glb and build_mesh:
+        t_glb = Metashape.Tasks.ExportModel()
+        t_glb.format = Metashape.ModelFormat.ModelFormatGLTF
+        t_glb.embed_texture = True
+        t_glb.save_normals = True
+        t_glb.save_colors = True
+        t_glb.path = get_exp_path(glb_out)
+        tasks.append(t_glb)
+        stage_info.append(("ExportModel", "export", "Exporting Binary glTF (.glb)"))
+
+    if export_fbx and build_mesh:
+        t_fbx = Metashape.Tasks.ExportModel()
+        t_fbx.format = Metashape.ModelFormat.ModelFormatFBX
+        t_fbx.save_texture = True
+        t_fbx.save_normals = True
+        t_fbx.save_colors = True
+        t_fbx.path = get_exp_path(fbx_out)
+        tasks.append(t_fbx)
+        stage_info.append(("ExportModel", "export", "Exporting Autodesk FBX"))
+
+    if export_ply and build_mesh:
+        t_ply = Metashape.Tasks.ExportModel()
+        t_ply.format = Metashape.ModelFormat.ModelFormatPLY
+        t_ply.save_normals = True
+        t_ply.save_colors = True
+        t_ply.path = get_exp_path(ply_out)
+        tasks.append(t_ply)
+        stage_info.append(("ExportModel", "export", "Exporting Stanford PLY Mesh"))
+
+    if export_dxf and build_mesh:
+        t_dxf = Metashape.Tasks.ExportModel()
+        t_dxf.format = Metashape.ModelFormat.ModelFormatDXF
+        t_dxf.save_normals = True
+        t_dxf.path = get_exp_path(dxf_out)
+        tasks.append(t_dxf)
+        stage_info.append(("ExportModel", "export", "Exporting AutoCAD DXF Mesh"))
+
+    if export_dem and build_dem:
+        t_dem = Metashape.Tasks.ExportRaster()
+        t_dem.source_data = Metashape.DataSource.ElevationData
+        t_dem.format = Metashape.RasterFormat.RasterFormatNone
+        t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
+        t_dem.path = get_exp_path(dem_out)
+        tasks.append(t_dem)
+        stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Elevation Model (DEM)"))
+
+    if export_ortho and build_orthomosaic:
+        t_ortho = Metashape.Tasks.ExportRaster()
+        t_ortho.source_data = Metashape.DataSource.OrthomosaicData
+        t_ortho.format = Metashape.RasterFormat.RasterFormatNone
+        t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
+        t_ortho.path = get_exp_path(ortho_out)
+        tasks.append(t_ortho)
+        stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Orthomosaic"))
+
+    if export_point_cloud and build_point_cloud:
+        pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
+        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+        pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
+        t_pc = Metashape.Tasks.ExportPointCloud()
+        t_pc.format = pc_fmt
+        t_pc.source_data = Metashape.DataSource.PointCloudData
+        t_pc.save_point_color = True
+        t_pc.save_point_normal = True
+        t_pc.save_point_confidence = True
+        t_pc.save_point_classification = True
+        t_pc.path = get_exp_path(pc_out)
+        tasks.append(t_pc)
+        stage_info.append(("ExportPointCloud", "export", f"Exporting Dense Point Cloud ({pc_format_ext.upper()})"))
+
+    if export_report:
+        t_rep = Metashape.Tasks.ExportReport()
+        t_rep.title = report_title or "AutoMetashape Processing & Calibration Report"
+        t_rep.path = get_exp_path(rep_out)
+        tasks.append(t_rep)
+        stage_info.append(("ExportReport", "export", "Exporting Calibration & Quality PDF Report"))
+
+    return tasks, stage_info
+
+
 def get_system_ram_gb() -> float:
     """Detect total physical RAM in GB using Windows API across embedded/standalone Python."""
     try:
@@ -2507,6 +2830,159 @@ def run_reconstruction(
                     print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
+
+            # -------------------------------------------------------------
+            # Autonomous Unified Project Batch (Independent Project Mode)
+            # -------------------------------------------------------------
+            can_use_unified_batch = (
+                cluster_enabled
+                and network_independent_workers
+                and net_client is not None
+                and (not pause_after_crop)
+                and crop_method != "manual"
+            )
+            unified_succeeded = False
+            if can_use_unified_batch:
+                try:
+                    print("\n=========================================================================", flush=True)
+                    print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
+                    print("  Full Project Pipeline Bundled into 1 Dedicated Worker Batch", flush=True)
+                    print("  Worker Node Lock: 1 node (Zero Intermediate LAN Syncs, Zero Worker Hopping)", flush=True)
+                    print("=========================================================================", flush=True)
+
+                    doc.save(psx_out)
+                    rel_psx = get_cluster_rel_path()
+
+                    eff_worker_ram = get_system_ram_gb()
+                    if net_client:
+                        try:
+                            w_data = net_client.workerList()
+                            workers = w_data.get("workers", []) if isinstance(w_data, dict) else []
+                            w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
+                            if w_rams:
+                                min_w_ram = min(w_rams)
+                                if min_w_ram < eff_worker_ram:
+                                    eff_worker_ram = min_w_ram
+                        except Exception:
+                            pass
+
+                    u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
+                        chunk=chunk,
+                        output_dir=output_dir,
+                        project_name=project_name,
+                        align_photos=align_photos,
+                        align_quality=align_quality,
+                        reference_preselection_mode=reference_preselection_mode,
+                        keypoint_limit=keypoint_limit,
+                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                        tiepoint_limit=tiepoint_limit,
+                        filter_stationary_points=filter_stationary_points,
+                        guided_matching=guided_matching,
+                        adaptive_fitting=adaptive_fitting,
+                        filter_tiepoints=filter_tiepoints,
+                        crop_method=crop_method,
+                        crop_padding=crop_padding,
+                        build_depth_maps=build_depth_maps,
+                        depth_quality=depth_quality,
+                        depth_filtering=depth_filtering,
+                        build_point_cloud=build_point_cloud,
+                        points_spacing=points_spacing,
+                        build_mesh=build_mesh,
+                        surface_type=surface_type,
+                        custom_faces=custom_faces,
+                        build_texture=build_texture,
+                        texture_pages=texture_pages,
+                        fill_holes=fill_holes,
+                        ghosting_filter=ghosting_filter,
+                        build_dem=build_dem,
+                        build_orthomosaic=build_orthomosaic,
+                        ortho_resolution=ortho_resolution,
+                        ortho_cull_faces=ortho_cull_faces,
+                        build_tiled_model=build_tiled_model,
+                        tile_size=tile_size,
+                        export_glb=export_glb,
+                        export_obj=export_obj,
+                        export_fbx=export_fbx,
+                        export_ply=export_ply,
+                        export_dxf=export_dxf,
+                        export_tie_points=export_tie_points,
+                        export_dem=export_dem,
+                        export_ortho=export_ortho,
+                        export_point_cloud=export_point_cloud,
+                        point_cloud_format=point_cloud_format,
+                        export_report=export_report,
+                        report_title=report_title,
+                        texture_format=texture_format,
+                        network_path=network_path,
+                        worker_ram_gb=eff_worker_ram,
+                        export_path_fn=get_cluster_export_path,
+                    )
+
+                    if u_tasks:
+                        net_tasks = [t.toNetworkTask(chunk) for t in u_tasks]
+                        batch_id = net_client.createBatch(rel_psx, net_tasks)
+                        net_client.setBatchWorkerLimit(batch_id, 1)
+                        net_client.setBatchPaused(batch_id, False)
+                        print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
+
+                        t_u_start = time.time()
+                        last_stage_key = None
+                        last_progress = -1.0
+                        last_log_time = 0.0
+
+                        while True:
+                            time.sleep(1.0)
+                            b_info = net_client.batchInfo(batch_id)
+                            state = b_info.get("state")
+                            tasks_info = b_info.get("tasks", [])
+                            if tasks_info:
+                                active_task = next((t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")), tasks_info[-1])
+                                t_sub_name = active_task.get("name", "Task")
+                                sub_prog = active_task.get("progress", 0.0)
+                                total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
+
+                                matching_stage = next(((k, d) for n, k, d in u_stages if n == t_sub_name), ("recon", t_sub_name))
+                                stage_k, stage_desc = matching_stage
+
+                                if stage_k != last_stage_key:
+                                    emit_ipc_stage(stage_k, stage_desc)
+                                    print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} ({t_sub_name})", flush=True)
+                                    last_stage_key = stage_k
+
+                                now_t = time.time()
+                                if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
+                                    elapsed_min = (now_t - t_u_start) / 60.0
+                                    print(f"  [Cluster Progress] {stage_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall Project: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                    last_progress = total_prog
+                                    last_log_time = now_t
+
+                            if state == "completed":
+                                elapsed_min = (time.time() - t_u_start) / 60.0
+                                print(f"\n  [Cluster] ✓ Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!", flush=True)
+                                unified_succeeded = True
+                                break
+                            elif state in ("failed", "aborted"):
+                                err_msgs = []
+                                for t in tasks_info:
+                                    for err in t.get("errors", []):
+                                        err_msgs.append(str(err))
+                                err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
+                                print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
+                                print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
+                                unified_succeeded = False
+                                break
+
+                    if unified_succeeded:
+                        _safe_reopen()
+                        total_time = (time.time() - t_start) / 60.0
+                        print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
+                        emit_ipc_event(IPC_COMPLETE)
+                        if survey_physics and pro_plan:
+                            print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
+                        return
+                except Exception as e_unified:
+                    print(f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...", flush=True)
+                    unified_succeeded = False
 
         else:
             all_imgs = []

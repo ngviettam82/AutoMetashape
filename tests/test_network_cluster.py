@@ -956,5 +956,117 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIsNone(t_none)
 
 
+    def test_build_unified_cluster_pipeline_tasks_full(self) -> None:
+        """Verify build_unified_cluster_pipeline_tasks bundles all pipeline stages into a unified batch with correct stage mapping and RAM guard."""
+        from unittest.mock import MagicMock, patch
+        import metashape_reconstruction as mr
+
+        mock_meta = MagicMock()
+        mock_meta.ReferencePreselectionMode.ReferencePreselectionEstimated = 1
+        mock_meta.FilterMode.ModerateFiltering = 2
+        mock_meta.DataSource.DepthMapsData = 1
+        mock_meta.DataSource.ElevationData = 2
+        mock_meta.DataSource.OrthomosaicData = 3
+        mock_meta.DataSource.PointCloudData = 4
+        mock_meta.SurfaceType.Arbitrary = 0
+        mock_meta.Interpolation.EnabledInterpolation = 1
+        mock_meta.FaceCount.CustomFaceCount = 1
+        mock_meta.MappingMode.GenericMapping = 0
+        mock_meta.BlendingMode.MosaicBlending = 1
+        mock_meta.ModelFormat.ModelFormatOBJ = 1
+        mock_meta.ModelFormat.ModelFormatGLTF = 2
+        mock_meta.ImageFormat.ImageFormatPNG = 1
+        mock_meta.RasterFormat.RasterFormatNone = 0
+        mock_meta.ImageFormat.ImageFormatTIFF = 2
+        mock_meta.PointCloudFormat.PointCloudFormatLAZ = 1
+
+        mock_meta.Tasks.MatchPhotos = lambda: MagicMock(name="MatchPhotos")
+        mock_meta.Tasks.AlignCameras = lambda: MagicMock(name="AlignCameras")
+        mock_meta.Tasks.CleanTiePoints = lambda: MagicMock(name="CleanTiePoints", criterion=1)
+        mock_meta.Tasks.OptimizeCameras = lambda: MagicMock(name="OptimizeCameras")
+        mock_meta.Tasks.RunScript = lambda: MagicMock(name="RunScript", code="chunk.region.size = ...")
+        mock_meta.Tasks.BuildDepthMaps = lambda: MagicMock(name="BuildDepthMaps")
+        mock_meta.Tasks.BuildPointCloud = lambda: MagicMock(name="BuildPointCloud")
+        mock_meta.Tasks.BuildModel = lambda: MagicMock(name="BuildModel")
+        mock_meta.Tasks.BuildUV = lambda: MagicMock(name="BuildUV", page_count=22)
+        mock_meta.Tasks.BuildTexture = lambda: MagicMock(name="BuildTexture")
+        mock_meta.Tasks.BuildDem = lambda: MagicMock(name="BuildDem")
+        mock_meta.Tasks.BuildOrthomosaic = lambda: MagicMock(name="BuildOrthomosaic")
+        mock_meta.Tasks.ExportModel = lambda: MagicMock(name="ExportModel")
+        mock_meta.Tasks.ExportRaster = lambda: MagicMock(name="ExportRaster")
+        mock_meta.Tasks.ExportPointCloud = lambda: MagicMock(name="ExportPointCloud")
+        mock_meta.Tasks.ExportReport = lambda: MagicMock(name="ExportReport")
+
+        mock_chunk = MagicMock()
+        mock_chunk.crs = None
+        mock_chunk.cameras = []
+
+        with patch.object(mr, "Metashape", mock_meta):
+            # Test 1: Full Pro Preset with RAM < 16GB
+            tasks_16, stages_16 = mr.build_unified_cluster_pipeline_tasks(
+                chunk=mock_chunk,
+                output_dir="C:/Out/Proj",
+                project_name="Proj",
+                align_photos=True,
+                filter_tiepoints=True,
+                crop_method="gps-square",
+                build_depth_maps=True,
+                build_point_cloud=True,
+                build_mesh=True,
+                build_texture=True,
+                texture_pages=22,
+                build_dem=True,
+                build_orthomosaic=True,
+                export_obj=True,
+                export_glb=True,
+                export_dem=True,
+                export_ortho=True,
+                export_point_cloud=True,
+                export_report=True,
+                worker_ram_gb=15.5,
+            )
+            # Find BuildUV task in tasks_16
+            uv_task_16 = next(t for t, (name, _, _) in zip(tasks_16, stages_16) if name == "BuildUV")
+            self.assertEqual(uv_task_16.page_count, 4)
+
+            # Test 2: RAM < 32GB
+            tasks_32, stages_32 = mr.build_unified_cluster_pipeline_tasks(
+                chunk=mock_chunk,
+                output_dir="C:/Out/Proj",
+                project_name="Proj",
+                build_texture=True,
+                texture_pages=22,
+                worker_ram_gb=31.8,
+            )
+            uv_task_32 = next(t for t, (name, _, _) in zip(tasks_32, stages_32) if name == "BuildUV")
+            self.assertEqual(uv_task_32.page_count, 8)
+
+            # Test 3: Stage info contains expected stepper stages
+            stage_keys = [k for _, k, _ in stages_16]
+            self.assertIn("match", stage_keys)
+            self.assertIn("align", stage_keys)
+            self.assertIn("depth", stage_keys)
+            self.assertIn("point_cloud", stage_keys)
+            self.assertIn("mesh", stage_keys)
+            self.assertIn("texture", stage_keys)
+            self.assertIn("dem", stage_keys)
+            self.assertIn("ortho", stage_keys)
+            self.assertIn("export", stage_keys)
+
+            # Test 4: When align_photos=False, MatchPhotos and AlignCameras are omitted
+            tasks_no_align, stages_no_align = mr.build_unified_cluster_pipeline_tasks(
+                chunk=mock_chunk,
+                output_dir="C:/Out/Proj",
+                project_name="Proj",
+                align_photos=False,
+                build_depth_maps=True,
+                build_mesh=True,
+            )
+            stage_keys_no_align = [k for _, k, _ in stages_no_align]
+            self.assertNotIn("match", stage_keys_no_align)
+            self.assertIn("depth", stage_keys_no_align)
+            self.assertIn("mesh", stage_keys_no_align)
+
+
 if __name__ == "__main__":
     unittest.main()
