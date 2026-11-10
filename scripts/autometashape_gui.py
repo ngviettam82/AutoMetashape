@@ -2871,6 +2871,7 @@ class AutoMetashapeStudio:
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
             elif changed_stage == "ortho" and self.var_build_ortho.get():
+                self.var_stage_mesh.set(True)
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
             elif changed_stage in ("dem", "contours") and (self.var_build_dem.get() or self.var_build_contours.get()):
@@ -2917,6 +2918,8 @@ class AutoMetashapeStudio:
 
             if not self.var_stage_mesh.get():
                 self.var_stage_texture.set(False)
+                self.var_build_ortho.set(False)
+                self.var_export_ortho.set(False)
                 self.var_export_glb.set(False)
                 self.var_export_obj.set(False)
                 self.var_export_fbx.set(False)
@@ -2925,8 +2928,6 @@ class AutoMetashapeStudio:
 
             if not self.var_build_dem.get():
                 self.var_export_dem.set(False)
-                self.var_build_ortho.set(False)
-                self.var_export_ortho.set(False)
                 self.var_build_contours.set(False)
                 self.var_export_contours.set(False)
 

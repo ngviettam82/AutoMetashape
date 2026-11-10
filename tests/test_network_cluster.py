@@ -573,6 +573,52 @@ class TestNetworkCluster(unittest.TestCase):
         finally:
             root.destroy()
 
+    def test_workflow_two_way_cascade_dependencies(self) -> None:
+        """Defend two-way workflow stage cascading dependencies:
+        1. Ticking a downstream stage automatically ticks mandatory upstream prerequisites.
+        2. Unticking an upstream prerequisite automatically unticks dependent downstream stages.
+        3. Downstream stages can be independently unticked without affecting upstream prerequisites.
+        """
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        try:
+            gui = AutoMetashapeStudio(root)
+
+            # Case 1: Independent downstream untick (Model enabled, Ortho disabled)
+            gui.var_stage_mesh.set(True)
+            gui.var_build_ortho.set(False)
+            gui._on_workflow_stage_toggled("ortho")
+            self.assertTrue(gui.var_stage_mesh.get())
+            self.assertFalse(gui.var_build_ortho.get())
+
+            # Case 2: Forward cascade (Ticking Ortho enables mandatory Mesh, Depth, Align)
+            gui.var_stage_mesh.set(False)
+            gui.var_build_ortho.set(True)
+            gui._on_workflow_stage_toggled("ortho")
+            self.assertTrue(gui.var_stage_mesh.get())
+            self.assertTrue(gui.var_stage_depth.get())
+            self.assertTrue(gui.var_stage_align.get())
+            self.assertTrue(gui.var_build_ortho.get())
+
+            # Case 3: Backward cascade (Unticking Mesh disables Texture and True Ortho)
+            gui.var_stage_texture.set(True)
+            gui.var_stage_mesh.set(False)
+            gui._on_workflow_stage_toggled("mesh")
+            self.assertFalse(gui.var_stage_mesh.get())
+            self.assertFalse(gui.var_stage_texture.get())
+            self.assertFalse(gui.var_build_ortho.get())
+
+            # Case 4: Deep backward cascade (Unticking Depth disables Mesh, Cloud, Ortho)
+            gui.var_stage_depth.set(False)
+            gui._on_workflow_stage_toggled("depth")
+            self.assertFalse(gui.var_build_point_cloud.get())
+            self.assertFalse(gui.var_stage_mesh.get())
+            self.assertFalse(gui.var_build_ortho.get())
+        finally:
+            root.destroy()
+
     def test_pick_multiple_folders_fallback(self) -> None:
         """Verify pick_multiple_folders falls back to filedialog when COM is mocked/fails."""
         from unittest.mock import patch
