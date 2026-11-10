@@ -683,7 +683,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     - Fixed 22-page 8K texture atlas (retains full architectural sharpness)
     - 2,000,000 polygon surface mesh
     - Native meshing interpolation with no aggressive hole-closing webbing (close_holes = False)
-    - True orthomosaic GeoTIFF & elevation DEM enabled
+    - True orthomosaic GeoTIFF enabled (DEM disabled by default; True Ortho uses 3D mesh)
     - CMOS rolling shutter compensation enabled strictly for rolling shutter sensors
     - Gentle tie-point filtering capping point removal at <= 10% (retains >= 90% inliers)
     """
@@ -699,7 +699,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     custom_faces = 2000000
     texture_pages = 22
     build_orthomosaic = True
-    build_dem = True
+    build_dem = False
     build_point_cloud = True
     classify_ground = False
     close_holes = False
@@ -2331,7 +2331,9 @@ def run_reconstruction(
     if build_orthomosaic is None:
         build_orthomosaic = True if is_pro_preset else False
     if build_dem is None:
-        build_dem = True if is_pro_preset else False
+        build_dem = False
+    if export_dem or build_contours:
+        build_dem = True
     if build_point_cloud is None:
         build_point_cloud = True
     if classify_ground is None:
@@ -4142,7 +4144,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")
     parser.add_argument("--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold")
     # DEM / Elevation Options
-    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM) (default: True in 'pro' preset)")
+    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM) (default: False)")
     parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
     parser.add_argument("--export-dem", dest="export_dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
     parser.add_argument("--no-export-dem", dest="export_dem", action="store_false", help="Disable GeoTIFF Digital Elevation Model export")

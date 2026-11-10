@@ -1151,7 +1151,7 @@ class AutoMetashapeStudio:
         self.var_pc_format = tk.StringVar(value="laz")
         self.var_classify_ground = tk.BooleanVar(value=False)
         self.var_classify_points = tk.BooleanVar(value=False)
-        self.var_build_dem = tk.BooleanVar(value=True)  # Enabled by default in Pro preset
+        self.var_build_dem = tk.BooleanVar(value=False)  # Disabled by default in Pro preset; True Ortho uses 3D mesh
         self.var_export_dem = tk.BooleanVar(value=False)
         self.var_export_report = tk.BooleanVar(value=False)
 
@@ -1923,8 +1923,8 @@ class AutoMetashapeStudio:
         _make_preset(
             "pro",
             "Pro Photogrammetry & Geomatics Engine (Default)",
-            "Gentle Filter (90%+ retained) · 2M Arbitrary 3D · 22-Page 8K · Ortho & DEM",
-            "Production geomatics standard: gentle tie-point filtering, 2M polygon arbitrary 3D mesh, 22-page 8K texture atlas, 2.0 cm/px true orthomosaic GeoTIFF, elevation DEM, and sensor optics compensation.",
+            "Gentle Filter (90%+ retained) · 2M Arbitrary 3D · 22-Page 8K · True Ortho",
+            "Production geomatics standard: gentle tie-point filtering, 2M polygon arbitrary 3D mesh, 22-page 8K texture atlas, 2.0 cm/px true orthomosaic GeoTIFF, and sensor optics compensation.",
         )
         _make_preset(
             "custom",
@@ -2871,7 +2871,6 @@ class AutoMetashapeStudio:
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
             elif changed_stage == "ortho" and self.var_build_ortho.get():
-                self.var_build_dem.set(True)
                 self.var_stage_depth.set(True)
                 self.var_stage_align.set(True)
             elif changed_stage in ("dem", "contours") and (self.var_build_dem.get() or self.var_build_contours.get()):
@@ -3930,7 +3929,7 @@ class AutoMetashapeStudio:
             self.var_fill_holes.set(True)
             self.var_ghosting.set(True)
             self.var_build_point_cloud.set(True)
-            self.var_build_dem.set(True)
+            self.var_build_dem.set(False)
             self.var_build_ortho.set(True)
             self.var_classify_ground.set(False)
             if hasattr(self, "var_stage_align"):
@@ -4054,7 +4053,6 @@ class AutoMetashapeStudio:
             getattr(self, "var_build_dem", tk.BooleanVar(value=False)).get()
             or getattr(self, "var_export_dem", tk.BooleanVar(value=False)).get()
             or getattr(self, "var_build_contours", tk.BooleanVar(value=False)).get()
-            or do_ortho
         )
 
         has_deliverables = any([
@@ -4996,6 +4994,7 @@ class AutoMetashapeStudio:
                     cmd.append("--no-export-dem")
             else:
                 cmd.append("--no-dem")
+                cmd.append("--no-export-dem")
 
             if (hasattr(self, "var_build_point_cloud") and self.var_build_point_cloud.get()) or (hasattr(self, "var_export_point_cloud") and self.var_export_point_cloud.get()):
                 cmd.append("--build-point-cloud")

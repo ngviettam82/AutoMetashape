@@ -562,7 +562,7 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertEqual(gui_mock.var_faces.get(), "2000000")
             self.assertEqual(gui_mock.var_tex_pages.get(), "22")
             self.assertTrue(gui_mock.var_build_ortho.get())
-            self.assertTrue(gui_mock.var_build_dem.get())
+            self.assertFalse(gui_mock.var_build_dem.get())
 
             # BUT user's Export Table checklist is strictly preserved and not overwritten!
             self.assertTrue(gui_mock.var_export_glb.get())
