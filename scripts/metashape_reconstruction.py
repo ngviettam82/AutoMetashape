@@ -24,6 +24,17 @@ import re
 import sys
 import threading
 import time
+
+# Configure Windows console streams for Vietnamese and international Unicode paths
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr", "stdin"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 try:
     import Metashape
 except ImportError:
@@ -2040,6 +2051,13 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
     return groups
 
 
+def get_psx_files_dir(psx_path: str) -> str:
+    """Returns the associated .files directory for a .psx project path without string corruption."""
+    if psx_path.lower().endswith(".psx"):
+        return psx_path[:-4] + ".files"
+    return psx_path + ".files"
+
+
 def save_checkpoint(doc, target_path=None):
     """Safely saves Metashape document ensuring read_only is overridden and chunk is re-synchronized."""
     try:
@@ -2058,7 +2076,7 @@ def save_checkpoint(doc, target_path=None):
         # Fallback: force unlock and retry
         try:
             if target_path:
-                files_dir = target_path.replace(".psx", ".files")
+                files_dir = get_psx_files_dir(target_path)
                 lock_file = os.path.join(files_dir, "lock")
                 if os.path.isfile(lock_file):
                     try:
@@ -2097,7 +2115,7 @@ def infer_project_name(
     if images_dir:
         abs_img = os.path.abspath(images_dir)
         base = os.path.basename(abs_img)
-        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input") and os.path.dirname(abs_img):
+        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input", "ảnh", "anh", "ảnh chụp", "anh chup", "dữ liệu", "du lieu") and os.path.dirname(abs_img):
             base = os.path.basename(os.path.dirname(abs_img))
         if base and base not in (".", "/", "\\"):
             return base
@@ -2518,7 +2536,7 @@ def run_reconstruction(
 
     def _safe_reopen():
         load_path = psx_out if os.path.exists(psx_out) else (target_psx if target_psx and os.path.exists(target_psx) else psx_out)
-        files_dir = load_path.replace(".psx", ".files")
+        files_dir = get_psx_files_dir(load_path)
         lock_file = os.path.join(files_dir, "lock")
         if os.path.isfile(lock_file):
             try:
@@ -2722,7 +2740,7 @@ def run_reconstruction(
     if resume and target_psx:
         print(f"\n[Checkpoint] Found existing project (--resume specified): {target_psx}", flush=True)
         try:
-            files_dir = psx_out.replace(".psx", ".files")
+            files_dir = get_psx_files_dir(psx_out)
             lock_file = os.path.join(files_dir, "lock")
             if os.path.isfile(lock_file):
                 try:
@@ -2769,7 +2787,7 @@ def run_reconstruction(
     else:
         if not resume and os.path.exists(psx_out):
             print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--resume not specified). Overwriting previous run in: {output_dir}", flush=True)
-            files_dir = psx_out.replace(".psx", ".files")
+            files_dir = get_psx_files_dir(psx_out)
             lock_file = os.path.join(files_dir, "lock")
             if os.path.isfile(lock_file):
                 try:

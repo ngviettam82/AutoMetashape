@@ -15,7 +15,19 @@ production-ready 3D assets without re-running camera matching or depth maps:
 from __future__ import annotations
 import argparse
 import os
+import sys
 import time
+
+# Configure Windows console streams for Vietnamese and international Unicode paths
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr", "stdin"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 try:
     import Metashape
 except ImportError:
@@ -105,7 +117,7 @@ def infer_project_name(
     if images_dir:
         abs_img = os.path.abspath(images_dir)
         base = os.path.basename(abs_img)
-        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input") and os.path.dirname(abs_img):
+        if base.lower() in ("images", "photos", "raw", "dji", "survey", "data", "input", "ảnh", "anh", "ảnh chụp", "anh chup", "dữ liệu", "du lieu") and os.path.dirname(abs_img):
             base = os.path.basename(os.path.dirname(abs_img))
         if base and base not in (".", "/", "\\"):
             return base
@@ -175,7 +187,7 @@ def export_project_assets(
 
     emit_ipc_stage("project", f"Loading Metashape Project: {os.path.basename(project_path)}")
     doc = Metashape.Document()
-    files_dir = project_path.replace(".psx", ".files")
+    files_dir = project_path[:-4] + ".files" if project_path.lower().endswith(".psx") else project_path + ".files"
     lock_file = os.path.join(files_dir, "lock")
     if os.path.isfile(lock_file):
         try:
