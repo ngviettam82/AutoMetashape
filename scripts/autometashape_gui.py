@@ -3292,7 +3292,7 @@ class AutoMetashapeStudio:
         grid_tex.pack(fill=tk.X, pady=(2, 2))
 
         tk.Label(grid_tex, text="Texture Pages:", font=("Segoe UI", 8), bg=UITheme.BG_SURFACE, fg=UITheme.TEXT_MUTED).grid(row=0, column=0, sticky=tk.W, pady=3)
-        ttk.Combobox(grid_tex, textvariable=self.var_tex_pages, values=["16", "8", "4", "2", "32"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
+        ttk.Combobox(grid_tex, textvariable=self.var_tex_pages, values=["16", "22", "8", "4", "2", "32"], state="readonly", width=10).grid(row=0, column=1, padx=(4, 14), pady=3)
 
         chk_tex = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_tex.pack(fill=tk.X, pady=(2, 4))

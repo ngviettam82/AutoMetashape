@@ -3449,7 +3449,7 @@ def run_reconstruction(
                 t_t.fill_holes = fill_holes
                 t_t.ghosting_filter = ghosting_filter
 
-                tex_computed = dispatch_cluster_task([t_uv, t_t], f"Baking {eff_pages or 4}x 8K Texture Atlas", "texture")
+                tex_computed = dispatch_cluster_task([t_uv, t_t], f"Baking {eff_pages or 16}x 8K Texture Atlas", "texture")
                 if tex_computed:
                     chunk = doc.chunk
             except Exception as e_tx_disp:
@@ -3460,7 +3460,7 @@ def run_reconstruction(
             try:
                 chunk.buildUV(
                     mapping_mode=Metashape.MappingMode.GenericMapping,
-                    page_count=eff_pages or 4,
+                    page_count=eff_pages or 16,
                     texture_size=8192,
                 )
                 chunk.buildTexture(
@@ -3470,25 +3470,8 @@ def run_reconstruction(
                     ghosting_filter=ghosting_filter,
                 )
             except Exception as e_tex_bake:
-                is_oom = "bad allocation" in str(e_tex_bake).lower() or isinstance(e_tex_bake, MemoryError)
-                if is_oom:
-                    fallback_pages = 4 if ram_gb < 16.0 else 8
-                    print(f"\n  [RAM Guard] [bad allocation] Texture baking failed due to memory exhaustion ({e_tex_bake})!", flush=True)
-                    print(f"  [RAM Guard] Auto-recovering: Re-baking texture atlas adjusted to {fallback_pages} pages...", flush=True)
-                    chunk.buildUV(
-                        mapping_mode=Metashape.MappingMode.GenericMapping,
-                        page_count=fallback_pages,
-                        texture_size=8192,
-                    )
-                    chunk.buildTexture(
-                        blending_mode=Metashape.BlendingMode.MosaicBlending,
-                        texture_size=8192,
-                        fill_holes=fill_holes,
-                        ghosting_filter=ghosting_filter,
-                    )
-                    print(f"  [RAM Guard] ✓ Auto-recovery successful: {fallback_pages}-page texture atlas baked cleanly!", flush=True)
-                else:
-                    raise e_tex_bake
+                print(f"  [Texture] Texture baking exception: {e_tex_bake}", flush=True)
+                raise e_tex_bake
         print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
 
         if remove_lighting and chunk.model:

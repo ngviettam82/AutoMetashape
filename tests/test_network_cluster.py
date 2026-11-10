@@ -991,7 +991,7 @@ class TestNetworkCluster(unittest.TestCase):
 
 
     def test_build_unified_cluster_pipeline_tasks_full(self) -> None:
-        """Verify build_unified_cluster_pipeline_tasks bundles all pipeline stages into a unified batch with correct stage mapping and RAM guard."""
+        """Verify build_unified_cluster_pipeline_tasks bundles all pipeline stages into a unified batch with correct stage mapping and deterministic texture pages."""
         from unittest.mock import MagicMock, patch
         import metashape_reconstruction as mr
 
