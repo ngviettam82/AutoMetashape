@@ -1862,7 +1862,6 @@ def build_unified_cluster_pipeline_tasks(
     if export_dem and build_dem:
         t_dem = Metashape.Tasks.ExportRaster()
         t_dem.source_data = Metashape.DataSource.ElevationData
-        t_dem.format = Metashape.RasterFormat.RasterFormatNone
         t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
         comp = Metashape.ImageCompression()
         comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -1876,7 +1875,6 @@ def build_unified_cluster_pipeline_tasks(
     if export_ortho and build_orthomosaic:
         t_ortho = Metashape.Tasks.ExportRaster()
         t_ortho.source_data = Metashape.DataSource.OrthomosaicData
-        t_ortho.format = Metashape.RasterFormat.RasterFormatNone
         t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
         comp = Metashape.ImageCompression()
         comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -4343,7 +4341,6 @@ def run_reconstruction(
                 dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
                 t_dem = Metashape.Tasks.ExportRaster()
                 t_dem.source_data = Metashape.DataSource.ElevationData
-                t_dem.format = Metashape.RasterFormat.RasterFormatNone
                 t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
                 comp = Metashape.ImageCompression()
                 comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -4357,7 +4354,6 @@ def run_reconstruction(
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
                 t_ortho = Metashape.Tasks.ExportRaster()
                 t_ortho.source_data = Metashape.DataSource.OrthomosaicData
-                t_ortho.format = Metashape.RasterFormat.RasterFormatNone
                 t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
                 comp = Metashape.ImageCompression()
                 comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW

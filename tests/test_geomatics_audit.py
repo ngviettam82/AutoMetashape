@@ -177,11 +177,13 @@ class TestGeomaticsAudit(unittest.TestCase):
             t_dem = next(t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportRaster" and "DEM" in desc)
             self.assertTrue(t_dem.save_world)
             self.assertIsNotNone(t_dem.image_compression)
+            self.assertNotEqual(getattr(t_dem, "format", None), self.mock_meta.RasterFormat.RasterFormatNone)
 
             t_ortho = next(t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportRaster" and "Orthomosaic" in desc)
             self.assertTrue(t_ortho.save_world)
             self.assertTrue(t_ortho.save_alpha)
             self.assertIsNotNone(t_ortho.image_compression)
+            self.assertNotEqual(getattr(t_ortho, "format", None), self.mock_meta.RasterFormat.RasterFormatNone)
 
 
 if __name__ == "__main__":
