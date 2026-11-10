@@ -749,19 +749,6 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     }
 
 
-def profile_dataset(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
-    """Profiles photogrammetry survey dataset by inspecting telemetry, GPS bounds, and sensor optics."""
-    phys = analyze_survey_physics(images_dir, sample_size=sample_size, output_dir=output_dir)
-    # Maintain legacy keys for backwards compatibility
-    phys["rolling_shutter_recommended"] = (phys.get("shutter") == "rolling")
-    return phys
-
-
-def infer_optimal_parameters(profile: dict) -> dict:
-    """Dynamically infers optimal photogrammetric pipeline parameters based on survey profiling."""
-    return derive_pro_photogrammetry_plan(profile)
-
-
 def print_pro_engineering_report(physics: dict, plan: dict, usgs_stats: dict = None) -> None:
     """Prints a professional photogrammetric & geomatics engineering summary."""
     print("\n" + "=" * 80, flush=True)
@@ -1598,7 +1585,6 @@ def build_unified_cluster_pipeline_tasks(
     report_title: str = None,
     texture_format: str = "png",
     network_path: str = "",
-    worker_ram_gb: float = 32.0,
     export_path_fn=None,
 ) -> tuple[list, list[tuple[str, str, str]]]:
     """Assembles the complete sequence of photogrammetry pipeline tasks into a single unified batch for independent worker execution."""
@@ -1867,54 +1853,6 @@ def build_unified_cluster_pipeline_tasks(
         stage_info.append(("ExportReport", "export", "Exporting Calibration & Quality PDF Report"))
 
     return tasks, stage_info
-
-
-def get_system_ram_gb() -> float:
-    """Detect total physical RAM in GB using Windows API across embedded/standalone Python."""
-    try:
-        import ctypes
-
-        class MEMORYSTATUSEX(ctypes.Structure):
-            _fields_ = [
-                ("dwLength", ctypes.c_ulong),
-                ("dwMemoryLoad", ctypes.c_ulong),
-                ("ullTotalPhys", ctypes.c_ulonglong),
-                ("ullAvailPhys", ctypes.c_ulonglong),
-                ("ullTotalPageFile", ctypes.c_ulonglong),
-                ("ullAvailPageFile", ctypes.c_ulonglong),
-                ("ullTotalVirtual", ctypes.c_ulonglong),
-                ("ullAvailVirtual", ctypes.c_ulonglong),
-                ("sullAvailExtendedVirtual", ctypes.c_ulonglong),
-            ]
-
-        stat = MEMORYSTATUSEX()
-        stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
-        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
-        return stat.ullTotalPhys / (1024 ** 3)
-    except Exception:
-        return 32.0
-
-
-def calculate_optimal_texel_budget(chunk, gsd_cm: float, page_res: int = 8192, margin: float = 1.25) -> int:
-    """Calculates the exact 1:1 ground texel parity texture page budget based on 3D mesh surface area."""
-    if not chunk.model or gsd_cm is None or gsd_cm <= 0.0:
-        return 4
-    try:
-        surf_area_m2 = chunk.model.area()
-        if surf_area_m2 <= 0.0:
-            return 4
-        texels_per_page = page_res * page_res
-        required_texels = (surf_area_m2 * 10000.0) / (gsd_cm ** 2)
-        raw_pages = math.ceil((required_texels / texels_per_page) * margin)
-        optimal_pages = max(1, min(raw_pages, 32))
-        effective_gsd_texel = math.sqrt((surf_area_m2 * 10000.0) / (optimal_pages * texels_per_page / margin))
-        print(f"\n[1:1 Texel Density Budget] Mesh Surface Area: {surf_area_m2:,.1f} m² | Camera GSD: {gsd_cm:.2f} cm/px", flush=True)
-        print(f"  Required Surface Texels: {required_texels/1e6:.1f} Megapixels", flush=True)
-        print(f"  Allocated Texture Atlas: {optimal_pages}x {page_res}x{page_res} Pages (Effective Texel Density: {effective_gsd_texel:.2f} cm/texel, 1:1 Parity).", flush=True)
-        return optimal_pages
-    except Exception as e:
-        print(f"  [1:1 Texel Budget] Area computation skipped ({e}); using baseline pages.", flush=True)
-        return 4
 
 
 def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
@@ -2888,19 +2826,6 @@ def run_reconstruction(
                     doc.save(psx_out)
                     rel_psx = get_cluster_rel_path()
 
-                    eff_worker_ram = get_system_ram_gb()
-                    if net_client:
-                        try:
-                            w_data = net_client.workerList()
-                            workers = w_data.get("workers", []) if isinstance(w_data, dict) else []
-                            w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
-                            if w_rams:
-                                min_w_ram = min(w_rams)
-                                if min_w_ram < eff_worker_ram:
-                                    eff_worker_ram = min_w_ram
-                        except Exception:
-                            pass
-
                     u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
                         chunk=chunk,
                         output_dir=output_dir,
@@ -2949,7 +2874,6 @@ def run_reconstruction(
                         report_title=report_title,
                         texture_format=texture_format,
                         network_path=network_path,
-                        worker_ram_gb=eff_worker_ram,
                         export_path_fn=get_cluster_export_path,
                     )
 
@@ -3428,10 +3352,6 @@ def run_reconstruction(
 
         # Deterministic texture atlas allocation (identical across all projects and cluster nodes)
         eff_pages = texture_pages or 16
-        if texture_pages is None and chunk.model and survey_physics and survey_physics.get("gsd_cm"):
-            optimal_budget = calculate_optimal_texel_budget(chunk, gsd_cm=survey_physics["gsd_cm"])
-            if optimal_budget:
-                eff_pages = optimal_budget
         print(f"  [Texture] Baking {eff_pages}x 8K texture atlas (deterministic parity across all nodes).", flush=True)
 
         t_tex = time.time()

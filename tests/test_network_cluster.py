@@ -855,25 +855,6 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertEqual(dispatched[0], 0)
         self.assertEqual(len(mock_studio.active_cluster_jobs), 1)
 
-    def test_get_system_ram_gb(self) -> None:
-        """Verify get_system_ram_gb returns a positive float representing physical RAM."""
-        from metashape_reconstruction import get_system_ram_gb
-        ram = get_system_ram_gb()
-        self.assertIsInstance(ram, float)
-        self.assertGreater(ram, 0.0)
-
-    def test_deterministic_texture_pages_no_ram_guard(self) -> None:
-        """Verify texture atlas page count is strictly deterministic (16 pages) across all worker machines with no RAM downscaling."""
-        def get_pages(req_pages: int, ram_gb: float) -> int:
-            return req_pages or 16
-
-        # 16 GB worker machine retains full requested budget
-        self.assertEqual(get_pages(16, 15.8), 16)
-        # 32 GB worker machine retains full requested budget
-        self.assertEqual(get_pages(16, 31.7), 16)
-        # 64 GB workstation retains full requested budget
-        self.assertEqual(get_pages(16, 63.8), 16)
-
     def test_stepper_multi_set_done(self) -> None:
         """Verify StudioPipelineStepper.set_done marks specific stage completed with checkmark."""
         import tkinter as tk
@@ -888,28 +869,6 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIn("Completed: SiteA", stepper.lbl_pipeline_status.cget("text"))
         finally:
             root.destroy()
-
-    def test_cluster_worker_ram_query_and_guard(self) -> None:
-        """Verify cluster worker RAM querying picks lowest worker RAM to safeguard remote texture baking."""
-        from unittest.mock import MagicMock
-        mock_client = MagicMock()
-        mock_client.workerList.return_value = {
-            "workers": [
-                {"worker_id": 1, "hostname": "PC-HIGH", "memory_size": 68719476736.0, "state": "ready"},  # 64 GB
-                {"worker_id": 2, "hostname": "PC-LOW", "memory_size": 17179869184.0, "state": "ready"},   # 16 GB
-            ]
-        }
-        local_host_ram = 64.0
-        w_data = mock_client.workerList()
-        workers = w_data.get("workers", [])
-        w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
-        effective_ram = local_host_ram
-        if w_rams:
-            min_w = min(w_rams)
-            if min_w < effective_ram:
-                effective_ram = min_w
-
-        self.assertAlmostEqual(effective_ram, 16.0, places=1)
 
     def test_cluster_independent_worker_mode_batch_limit(self) -> None:
         """Verify Independent Project Mode applies setBatchWorkerLimit(batch_id, 1)."""
@@ -1036,7 +995,7 @@ class TestNetworkCluster(unittest.TestCase):
         mock_chunk.cameras = []
 
         with patch.object(mr, "Metashape", mock_meta):
-            # Test 1: Full Pro Preset with RAM < 16GB (strictly preserves deterministic 16 pages, no RAM guard clamping)
+            # Test 1: Full Unified Pipeline assembly with deterministic 16 texture pages
             tasks_16, stages_16 = mr.build_unified_cluster_pipeline_tasks(
                 chunk=mock_chunk,
                 output_dir="C:/Out/Proj",
@@ -1057,25 +1016,12 @@ class TestNetworkCluster(unittest.TestCase):
                 export_ortho=True,
                 export_point_cloud=True,
                 export_report=True,
-                worker_ram_gb=15.5,
             )
             # Find BuildUV task in tasks_16
             uv_task_16 = next(t for t, (name, _, _) in zip(tasks_16, stages_16) if name == "BuildUV")
             self.assertEqual(uv_task_16.page_count, 16)
 
-            # Test 2: RAM < 32GB (strictly preserves deterministic 16 pages, no RAM guard clamping)
-            tasks_32, stages_32 = mr.build_unified_cluster_pipeline_tasks(
-                chunk=mock_chunk,
-                output_dir="C:/Out/Proj",
-                project_name="Proj",
-                build_texture=True,
-                texture_pages=16,
-                worker_ram_gb=31.8,
-            )
-            uv_task_32 = next(t for t, (name, _, _) in zip(tasks_32, stages_32) if name == "BuildUV")
-            self.assertEqual(uv_task_32.page_count, 16)
-
-            # Test 3: Stage info contains expected stepper stages
+            # Test 2: Stage info contains expected stepper stages
             stage_keys = [k for _, k, _ in stages_16]
             self.assertIn("match", stage_keys)
             self.assertIn("align", stage_keys)
