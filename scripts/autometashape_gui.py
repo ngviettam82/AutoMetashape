@@ -4966,6 +4966,9 @@ class AutoMetashapeStudio:
             else:
                 cmd.append("--no-export-obj")
 
+            if hasattr(self, "var_exp_format") and self.var_exp_format.get():
+                cmd.extend(["--texture-format", self.var_exp_format.get()])
+
             if hasattr(self, "var_export_fbx") and self.var_export_fbx.get():
                 cmd.append("--export-fbx")
             if hasattr(self, "var_export_ply") and self.var_export_ply.get():
@@ -5567,6 +5570,24 @@ class AutoMetashapeStudio:
             )
         ):
             self.log_queue.put(("__STAGE_COMPLETE__", mode))
+            return
+
+        # 2b. Cluster Memory Handoff & Bad Allocation Events
+        if stripped.startswith("@@AUTOMETASHAPE_HANDOFF:") and stripped.endswith("@@"):
+            payload = stripped[len("@@AUTOMETASHAPE_HANDOFF:") : -2].strip()
+            parts = payload.split(":")
+            proj_n = parts[0] if len(parts) > 0 else "Project"
+            t_n = parts[1] if len(parts) > 1 else "Task"
+            w_id = parts[2] if len(parts) > 2 else "Worker"
+            self.log_queue.put(f"[CLUSTER MEMORY HANDOFF] Worker {w_id} reached capacity on {t_n}. Remaining stages for '{proj_n}' transferred to another cluster node.")
+            return
+
+        if stripped.startswith("@@AUTOMETASHAPE_BAD_ALLOC:") and stripped.endswith("@@"):
+            payload = stripped[len("@@AUTOMETASHAPE_BAD_ALLOC:") : -2].strip()
+            parts = payload.split(":")
+            st_k = parts[0] if len(parts) > 0 else "Task"
+            w_id = parts[1] if len(parts) > 1 else "Worker"
+            self.log_queue.put(f"[CLUSTER MEMORY GATE] Worker {w_id} out-of-memory on {st_k}. Task routed to another machine.")
             return
 
         # 3. Monotonic stage transition event

@@ -251,6 +251,19 @@ class TestCliArgs(unittest.TestCase):
         self.assertIn("--root", bat)
         self.assertIn("@echo off", bat)
 
+    def test_recon_parser_texture_format(self) -> None:
+        """Defend --texture-format choices and default in reconstruction parser."""
+        parser = build_recon_parser()
+        default_args = parser.parse_args(["--images", "dummy_images"])
+        self.assertEqual(default_args.texture_format, "png")
+
+        for fmt in ("png", "tiff", "tif", "jpg", "jpeg"):
+            args = parser.parse_args([
+                "--images", "dummy_images",
+                "--texture-format", fmt,
+            ])
+            self.assertEqual(args.texture_format, fmt)
+
 
 if __name__ == "__main__":
     unittest.main()

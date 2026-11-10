@@ -276,6 +276,88 @@ class TestNetworkCluster(unittest.TestCase):
         errors = b_info_failed["tasks"][0]["errors"]
         self.assertIn("Out of memory", errors)
 
+    def test_cluster_bad_alloc_handoff_mechanism(self) -> None:
+        """Verify bad allocation triggers worker isolation, handoff batch creation, and worker unpause."""
+        client_mock = MagicMock()
+        client_mock.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "NodeA_16GB", "paused": False},
+                {"worker_id": 2, "hostname": "NodeB_64GB", "paused": False},
+            ]
+        }
+        client_mock.createBatch.return_value = 202
+
+        tasks_info = [
+            {"id": 1, "name": "MatchPhotos", "state": "completed", "errors": []},
+            {"id": 2, "name": "BuildDepthMaps", "state": "completed", "errors": []},
+            {"id": 3, "name": "BuildModel", "state": "completed", "errors": []},
+            {"id": 4, "name": "BuildTexture", "state": "failed", "worker_id": 1, "errors": ["std::bad_alloc: out of memory"]},
+            {"id": 5, "name": "ExportModel", "state": "unassigned", "errors": []},
+        ]
+
+        is_bad_alloc = any(
+            any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
+            for t in tasks_info
+            for e in t.get("errors", [])
+        )
+        self.assertTrue(is_bad_alloc)
+
+        # Identify failing task & worker
+        failed_idx = next(i for i, t in enumerate(tasks_info) if t.get("state") in ("failed", "aborted"))
+        failed_worker = tasks_info[failed_idx].get("worker_id")
+        self.assertEqual(failed_idx, 3)
+        self.assertEqual(failed_worker, 1)
+
+        # 1. Host isolates failing worker
+        client_mock.setWorkerPaused(failed_worker, True)
+
+        # 2. Host discovers remaining other workers
+        raw_w = client_mock.workerList()
+        other_workers = [
+            w for w in raw_w["workers"]
+            if w["worker_id"] != failed_worker and not w["paused"]
+        ]
+        self.assertEqual(len(other_workers), 1)
+        self.assertEqual(other_workers[0]["worker_id"], 2)
+
+        # 3. Host dispatches handoff continuation batch with remaining tasks
+        rem_tasks = tasks_info[failed_idx:]
+        self.assertEqual(len(rem_tasks), 2)  # BuildTexture + ExportModel
+        handoff_batch = client_mock.createBatch("project.psx", rem_tasks)
+        client_mock.setBatchWorkerLimit(handoff_batch, 1)
+
+        # 4. Host immediately unpauses failed worker so it can proceed to the next project
+        client_mock.setWorkerPaused(failed_worker, False)
+
+        # Assert correct order of operations
+        calls = client_mock.setWorkerPaused.call_args_list
+        self.assertEqual(calls[0], ((1, True),))
+        self.assertEqual(calls[1], ((1, False),))
+        client_mock.createBatch.assert_called_with("project.psx", rem_tasks)
+        client_mock.setBatchWorkerLimit.assert_called_with(202, 1)
+
+    def test_cluster_bad_alloc_sentinel_parsing(self) -> None:
+        """Verify GUI _parse_stepper logs bad allocation and handoff IPC sentinels without error."""
+        import queue
+        from autometashape_gui import AutoMetashapeStudio
+
+        studio_mock = MagicMock()
+        studio_mock.worker_mode = "recon"
+        studio_mock.active_mode = "recon"
+        studio_mock.log_queue = queue.Queue()
+
+        AutoMetashapeStudio._parse_stepper(studio_mock, "@@AUTOMETASHAPE_HANDOFF:Site_01:BuildTexture:NodeA@@")
+        msg = studio_mock.log_queue.get_nowait()
+        self.assertIn("[CLUSTER MEMORY HANDOFF]", msg)
+        self.assertIn("NodeA", msg)
+        self.assertIn("Site_01", msg)
+        self.assertIn("BuildTexture", msg)
+
+        AutoMetashapeStudio._parse_stepper(studio_mock, "@@AUTOMETASHAPE_BAD_ALLOC:texture:NodeA@@")
+        msg_gate = studio_mock.log_queue.get_nowait()
+        self.assertIn("[CLUSTER MEMORY GATE]", msg_gate)
+        self.assertIn("NodeA", msg_gate)
+
     def test_pipelined_export_concurrency_bounds(self) -> None:
         """Verify concurrency clamping between 1 and 4."""
         def clamp_concurrency(val: int) -> int:

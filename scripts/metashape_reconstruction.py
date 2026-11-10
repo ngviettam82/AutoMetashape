@@ -2182,6 +2182,7 @@ def run_reconstruction(
     export_ply: bool = False,
     export_dxf: bool = False,
     export_tie_points: bool = False,
+    texture_format: str = "png",
     network_enable: bool = False,
     network_host: str = "127.0.0.1",
     network_port: int = 5840,
@@ -2548,6 +2549,62 @@ def run_reconstruction(
                             err_msgs.append(str(err))
                     err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
                     print(f"  [Cluster] [ERROR] Task '{task_desc}' {state}: {err_str}", flush=True)
+
+                    is_bad_alloc = any(
+                        any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
+                        for t in tasks_info
+                        for e in t.get("errors", [])
+                    )
+                    if is_bad_alloc:
+                        failed_t = next(
+                            (t for t in tasks_info if any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))),
+                            tasks_info[0] if tasks_info else None,
+                        )
+                        failed_w_id = failed_t.get("worker_id") if failed_t else None
+                        print(f"\n  [Cluster Memory Gate] Worker node {failed_w_id} encountered bad allocation (out of memory) on '{task_desc}'.", flush=True)
+                        print(f"  [Cluster] Terminating task on Worker {failed_w_id} and routing to another cluster machine...", flush=True)
+                        emit_ipc_event(f"@@AUTOMETASHAPE_BAD_ALLOC:{stage_key or 'task'}:{failed_w_id}@@")
+
+                        try:
+                            if failed_w_id is not None:
+                                net_client.setWorkerPaused(failed_w_id, True)
+
+                            raw_w = net_client.workerList()
+                            w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                            other_workers = [
+                                w for w in w_list
+                                if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_w_id
+                                and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                            ]
+
+                            if other_workers:
+                                print(f"  [Cluster] Found {len(other_workers)} other active cluster node(s). Re-dispatching '{task_desc}'...", flush=True)
+                                retry_batch_id = net_client.createBatch(rel_psx, net_tasks)
+                                net_client.setBatchPaused(retry_batch_id, False)
+
+                                retry_ok = False
+                                while True:
+                                    time.sleep(1.0)
+                                    rb_info = net_client.batchInfo(retry_batch_id)
+                                    rb_state = rb_info.get("state")
+                                    if rb_state == "completed":
+                                        print(f"  [Cluster] ✓ Task '{task_desc}' successfully finished on another cluster worker!", flush=True)
+                                        retry_ok = True
+                                        break
+                                    elif rb_state in ("failed", "aborted"):
+                                        break
+
+                                if retry_ok:
+                                    break
+                        except Exception as e_handoff:
+                            print(f"  [Cluster] Note: could not hand off task to another worker: {e_handoff}", flush=True)
+                        finally:
+                            if failed_w_id is not None:
+                                try:
+                                    net_client.setWorkerPaused(failed_w_id, False)
+                                except Exception:
+                                    pass
+
                     print(f"  [Cluster] Falling back to local execution for '{task_desc}'...", flush=True)
                     return False
 
@@ -2924,6 +2981,110 @@ def run_reconstruction(
                                         err_msgs.append(str(err))
                                 err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
                                 print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
+
+                                is_bad_alloc = any(
+                                    any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
+                                    for t in tasks_info
+                                    for e in t.get("errors", [])
+                                )
+
+                                if is_bad_alloc:
+                                    failed_idx = -1
+                                    failed_worker_id = None
+                                    failed_task_name = "Task"
+                                    for i_t, t in enumerate(tasks_info):
+                                        has_err = any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))
+                                        if has_err or t.get("state") in ("failed", "aborted"):
+                                            failed_idx = i_t
+                                            failed_task_name = t.get("name", "Task")
+                                            failed_worker_id = t.get("worker_id")
+                                            break
+
+                                    if 0 <= failed_idx < len(u_tasks):
+                                        completed_count = failed_idx
+                                        remaining_u_tasks = u_tasks[failed_idx:]
+                                        remaining_u_stages = u_stages[failed_idx:]
+
+                                        print(f"\n  [Cluster Memory Alert] Dedicated worker {failed_worker_id} ran out of memory (bad allocation) during '{failed_task_name}' on project '{project_name}'!", flush=True)
+                                        print(f"  [Cluster Hand-off] Preserving completed stages ({completed_count}/{len(u_tasks)}). Transferring remaining {len(remaining_u_tasks)} task(s) to another cluster machine...", flush=True)
+                                        emit_ipc_event(f"@@AUTOMETASHAPE_HANDOFF:{project_name}:{failed_task_name}:{failed_worker_id}@@")
+
+                                        try:
+                                            if failed_worker_id is not None:
+                                                net_client.setWorkerPaused(failed_worker_id, True)
+
+                                            raw_w = net_client.workerList()
+                                            w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                                            other_workers = [
+                                                w for w in w_list
+                                                if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
+                                                and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                                            ]
+
+                                            if other_workers:
+                                                rem_net_tasks = [t.toNetworkTask(chunk) for t in remaining_u_tasks]
+                                                handoff_batch_id = net_client.createBatch(rel_psx, rem_net_tasks)
+                                                net_client.setBatchWorkerLimit(handoff_batch_id, 1)
+                                                net_client.setBatchPaused(handoff_batch_id, False)
+                                                print(f"  [Cluster] Created Handoff Continuation Batch ID={handoff_batch_id} with {len(remaining_u_tasks)} tasks for another worker.", flush=True)
+
+                                                # Immediately unpause failed worker so it is free to process the NEXT project in queue
+                                                if failed_worker_id is not None:
+                                                    net_client.setWorkerPaused(failed_worker_id, False)
+                                                    print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
+
+                                                h_start = time.time()
+                                                h_last_stage = None
+                                                h_last_prog = -1.0
+                                                h_last_log = 0.0
+
+                                                handoff_ok = False
+                                                while True:
+                                                    time.sleep(1.0)
+                                                    hb_info = net_client.batchInfo(handoff_batch_id)
+                                                    hb_state = hb_info.get("state")
+                                                    hb_tasks = hb_info.get("tasks", [])
+                                                    if hb_tasks:
+                                                        h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
+                                                        h_name = h_active.get("name", "Task")
+                                                        h_prog = h_active.get("progress", 0.0)
+                                                        h_total_prog = sum(t.get("progress", 0.0) for t in hb_tasks) / len(hb_tasks)
+
+                                                        matching_h = next(((k, d) for n, k, d in remaining_u_stages if n == h_name), ("recon", h_name))
+                                                        hk_stage, hk_desc = matching_h
+                                                        if hk_stage != h_last_stage:
+                                                            emit_ipc_stage(hk_stage, hk_desc)
+                                                            print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} ({h_name})", flush=True)
+                                                            h_last_stage = hk_stage
+
+                                                        h_now = time.time()
+                                                        if abs(h_total_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_total_prog != h_last_prog):
+                                                            h_elapsed = (h_now - h_start) / 60.0
+                                                            print(f"  [Handoff Progress] {hk_desc} - {h_name}: {h_prog:.1f}% (Overall Handoff: {h_total_prog:.1f}%, Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                            h_last_prog = h_total_prog
+                                                            h_last_log = h_now
+
+                                                    if hb_state == "completed":
+                                                        h_elapsed = (time.time() - h_start) / 60.0
+                                                        print(f"\n  [Cluster] ✓ Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
+                                                        handoff_ok = True
+                                                        unified_succeeded = True
+                                                        break
+                                                    elif hb_state in ("failed", "aborted"):
+                                                        print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
+                                                        break
+
+                                                if handoff_ok:
+                                                    break
+                                        except Exception as e_h:
+                                            print(f"  [Cluster] Note: handoff exception: {e_h}", flush=True)
+                                        finally:
+                                            if failed_worker_id is not None:
+                                                try:
+                                                    net_client.setWorkerPaused(failed_worker_id, False)
+                                                except Exception:
+                                                    pass
+
                                 print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
                                 unified_succeeded = False
                                 break
@@ -4005,6 +4166,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary GLB export")
     parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=False, help="Export Wavefront OBJ model + 8K TIFF textures (.obj)")
     parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ export")
+    parser.add_argument("--texture-format", choices=["png", "tiff", "tif", "jpg", "jpeg"], default="png", help="Format for exported texture atlas files (default: png)")
     # Point Cloud Options
     parser.add_argument("--build-point-cloud", dest="build_point_cloud", action="store_true", default=True, help="Generate dense point cloud from depth maps (default: True)")
     parser.add_argument("--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation")
@@ -4179,6 +4341,7 @@ if __name__ == "__main__":
         export_ply=args.export_ply,
         export_dxf=args.export_dxf,
         export_tie_points=args.export_tie_points,
+        texture_format=getattr(args, "texture_format", "png"),
         network_enable=args.network_enable,
         network_host=args.network_host,
         network_port=args.network_port,
