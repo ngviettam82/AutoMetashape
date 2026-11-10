@@ -1130,5 +1130,78 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIn("mesh", stage_keys_no_align)
 
 
+    def test_single_chunk_autonomous_unified_batch_delegation(self) -> None:
+        """Verify single-chunk project delegates full pipeline into 1 dedicated batch with worker_limit=1."""
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"dummy_image_data")
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_meta.ReferencePreselectionMode.ReferencePreselectionEstimated = 1
+            mock_meta.FilterMode.ModerateFiltering = 2
+            mock_meta.DataSource.DepthMapsData = 1
+            mock_meta.DataSource.ElevationData = 2
+            mock_meta.DataSource.OrthomosaicData = 3
+            mock_meta.DataSource.PointCloudData = 4
+            mock_meta.SurfaceType.Arbitrary = 0
+            mock_meta.Interpolation.EnabledInterpolation = 1
+            mock_meta.FaceCount.CustomFaceCount = 1
+            mock_meta.MappingMode.GenericMapping = 0
+            mock_meta.BlendingMode.MosaicBlending = 1
+            mock_meta.ModelFormat.ModelFormatOBJ = 1
+            mock_meta.ModelFormat.ModelFormatGLTF = 2
+            mock_meta.ImageFormat.ImageFormatPNG = 1
+            mock_meta.RasterFormat.RasterFormatNone = 0
+            mock_meta.ImageFormat.ImageFormatTIFF = 2
+            mock_meta.PointCloudFormat.PointCloudFormatLAZ = 1
+
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [{"worker_id": 1, "host": "192.168.1.100", "paused": False}]
+            mock_net_client.createBatch.return_value = 555
+            mock_net_client.batchInfo.return_value = {
+                "state": "completed",
+                "tasks": [{"name": "MatchPhotos", "state": "completed", "progress": 100.0}],
+            }
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                mr.run_reconstruction(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    network_enable=True,
+                    network_independent_workers=True,
+                    multi_chunk="disable",
+                    export_glb=True,
+                    export_obj=False,
+                )
+
+            # Defend that createBatch was called for unified delegation
+            self.assertTrue(mock_net_client.createBatch.called)
+            # Defend that batch worker limit was locked to 1 for dedicated project execution
+            mock_net_client.setBatchWorkerLimit.assert_called_once_with(555, 1)
+            # Defend that batch was unpaused for immediate worker pickup
+            mock_net_client.setBatchPaused.assert_called_once_with(555, False)
+
+            # Defend that the unified batch received tasks including MatchPhotos and AlignCameras
+            batch_tasks = mock_net_client.createBatch.call_args[0][1]
+            self.assertGreater(len(batch_tasks), 5)
+
+
 if __name__ == "__main__":
     unittest.main()

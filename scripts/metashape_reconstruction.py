@@ -754,7 +754,7 @@ def print_pro_engineering_report(physics: dict, plan: dict, usgs_stats: dict = N
     print("  AUTOMETASHAPE: PRO PHOTOGRAMMETRY & GEOMATICS ENGINEERING REPORT", flush=True)
     print("=" * 80, flush=True)
     print(f"  Sensor Hardware:     {physics.get('sensor_name', 'Optical Sensor')}")
-    print(f"  Sensor Geometry:     {physics.get('sensor_w_mm', 0):.1f} x {physics.get('sensor_h_mm', 0):.1f} mm  |  Pixel Pitch: {physics.get('pixel_pitch_um', 0):.2f} µm")
+    print(f"  Sensor Geometry:     {physics.get('sensor_w_mm', 0):.1f} x {physics.get('sensor_h_mm', 0):.1f} mm  |  Pixel Pitch: {physics.get('pixel_pitch_um', 0):.2f} um")
     shutter_str = "Mechanical Leaf / Global Shutter [RS Comp: DISABLED]" if physics.get("shutter") == "mechanical" else "CMOS Electronic Rolling Shutter [RS Comp: ENABLED]"
     print(f"  Shutter Physics:     {shutter_str}")
     f_str = f"{physics.get('focal_mm', 0):.2f} mm" if physics.get('focal_mm') else "Auto"
@@ -1632,12 +1632,12 @@ def build_unified_cluster_pipeline_tasks(
                 t_type = "CleanTiePoints" if hasattr(ct, "criterion") else "OptimizeCameras"
                 stage_info.append((t_type, "align", "Gradual Selection Tie-Point Cleaning & Camera Optimization"))
 
-        if crop_method in ("gps-square", "structure"):
-            t_crop = build_cluster_crop_task(crop_method, padding=crop_padding)
-            if t_crop:
-                tasks.append(t_crop)
-                stage_info.append(("RunScript", "align", f"Auto-Crop Bounding Box ({crop_method})"))
-
+    # Auto-Crop Bounding Box (Runs after alignment, whether unified or pre-aligned multi-chunk)
+    if crop_method in ("gps-square", "structure"):
+        t_crop = build_cluster_crop_task(crop_method, padding=crop_padding)
+        if t_crop:
+            tasks.append(t_crop)
+            stage_info.append(("RunScript", "align", f"Auto-Crop Bounding Box ({crop_method})"))
     # 2. Multi-View Stereo Depth Maps
     if build_depth_maps:
         depth_downscale = DEPTH_DOWNSCALE_MAP.get((depth_quality or "high").lower(), 4)
@@ -1884,7 +1884,7 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  1. Open this project in Agisoft Metashape Pro GUI.", flush=True)
     print("  2. Use 'Resize Region' and 'Rotate Region' tools to frame the target structure.", flush=True)
     print("  3. Save the project inside Metashape Pro (Ctrl+S) and CLOSE Metashape Pro.", flush=True)
-    print("  4. In AutoMetashape Studio, click [▶️ Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
+    print("  4. In AutoMetashape Studio, click [[>] Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
     print("=========================================================================", flush=True)
 
     # 1. Interactive terminal with Windows notification popup
@@ -2495,7 +2495,7 @@ def run_reconstruction(
                             g_mask = getattr(w, "gpu_mask", 1)
                             prio = getattr(w, "priority", 0)
                             cpu_en = getattr(w, "cpu_enabled", False)
-                        print(f"    • Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})", flush=True)
+                        print(f"    * Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})", flush=True)
 
                     if len(active_cluster_workers) > 0:
                         net_client = client
@@ -2644,7 +2644,7 @@ def run_reconstruction(
 
                 if state == "completed":
                     elapsed_min = (time.time() - t_task_start) / 60.0
-                    print(f"  [Cluster] ✓ Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True)
+                    print(f"  [Cluster] [OK] Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True)
                     break
                 elif state in ("failed", "aborted"):
                     err_msgs = []
@@ -2692,7 +2692,7 @@ def run_reconstruction(
                                     rb_info = net_client.batchInfo(retry_batch_id)
                                     rb_state = rb_info.get("state")
                                     if rb_state == "completed":
-                                        print(f"  [Cluster] ✓ Task '{task_desc}' successfully finished on another cluster worker!", flush=True)
+                                        print(f"  [Cluster] [OK] Task '{task_desc}' successfully finished on another cluster worker!", flush=True)
                                         retry_ok = True
                                         break
                                     elif rb_state in ("failed", "aborted"):
@@ -2962,248 +2962,6 @@ def run_reconstruction(
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
-            # -------------------------------------------------------------
-            # Autonomous Unified Project Batch (Independent Project Mode)
-            # -------------------------------------------------------------
-            can_use_unified_batch = (
-                cluster_enabled
-                and network_independent_workers
-                and net_client is not None
-                and (not pause_after_crop)
-                and crop_method != "manual"
-            )
-            unified_succeeded = False
-            if can_use_unified_batch:
-                try:
-                    print("\n=========================================================================", flush=True)
-                    print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
-                    print("  Full Project Pipeline Bundled into 1 Dedicated Worker Batch", flush=True)
-                    print("  Worker Node Lock: 1 node (Zero Intermediate LAN Syncs, Zero Worker Hopping)", flush=True)
-                    print("=========================================================================", flush=True)
-
-                    doc.save(psx_out)
-                    rel_psx = get_cluster_rel_path()
-
-                    u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
-                        chunk=chunk,
-                        output_dir=output_dir,
-                        project_name=project_name,
-                        align_photos=align_photos,
-                        align_quality=align_quality,
-                        reference_preselection_mode=reference_preselection_mode,
-                        keypoint_limit=keypoint_limit,
-                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                        tiepoint_limit=tiepoint_limit,
-                        filter_stationary_points=filter_stationary_points,
-                        guided_matching=guided_matching,
-                        adaptive_fitting=adaptive_fitting,
-                        filter_tiepoints=filter_tiepoints,
-                        crop_method=crop_method,
-                        crop_padding=crop_padding,
-                        build_depth_maps=build_depth_maps,
-                        depth_quality=depth_quality,
-                        depth_filtering=depth_filtering,
-                        build_point_cloud=build_point_cloud,
-                        points_spacing=points_spacing,
-                        build_mesh=build_mesh,
-                        surface_type=surface_type,
-                        custom_faces=custom_faces,
-                        build_texture=build_texture,
-                        texture_pages=texture_pages,
-                        fill_holes=fill_holes,
-                        ghosting_filter=ghosting_filter,
-                        build_dem=build_dem,
-                        build_orthomosaic=build_orthomosaic,
-                        ortho_resolution=ortho_resolution,
-                        ortho_cull_faces=ortho_cull_faces,
-                        build_tiled_model=build_tiled_model,
-                        tile_size=tile_size,
-                        export_glb=export_glb,
-                        export_obj=export_obj,
-                        export_fbx=export_fbx,
-                        export_ply=export_ply,
-                        export_dxf=export_dxf,
-                        export_tie_points=export_tie_points,
-                        export_dem=export_dem,
-                        export_ortho=export_ortho,
-                        export_point_cloud=export_point_cloud,
-                        point_cloud_format=point_cloud_format,
-                        export_report=export_report,
-                        report_title=report_title,
-                        texture_format=texture_format,
-                        network_path=network_path,
-                        export_path_fn=get_cluster_export_path,
-                    )
-
-                    if u_tasks:
-                        net_tasks = [t.toNetworkTask(chunk) for t in u_tasks]
-                        batch_id = net_client.createBatch(rel_psx, net_tasks)
-                        net_client.setBatchWorkerLimit(batch_id, 1)
-                        net_client.setBatchPaused(batch_id, False)
-                        print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
-
-                        t_u_start = time.time()
-                        last_stage_key = None
-                        last_progress = -1.0
-                        last_log_time = 0.0
-
-                        while True:
-                            time.sleep(1.0)
-                            b_info = net_client.batchInfo(batch_id)
-                            state = b_info.get("state")
-                            tasks_info = b_info.get("tasks", [])
-                            if tasks_info:
-                                active_task = next((t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")), tasks_info[-1])
-                                t_sub_name = active_task.get("name", "Task")
-                                sub_prog = active_task.get("progress", 0.0)
-                                total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
-
-                                matching_stage = next(((k, d) for n, k, d in u_stages if n == t_sub_name), ("recon", t_sub_name))
-                                stage_k, stage_desc = matching_stage
-
-                                if stage_k != last_stage_key:
-                                    emit_ipc_stage(stage_k, stage_desc)
-                                    print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} ({t_sub_name})", flush=True)
-                                    last_stage_key = stage_k
-
-                                now_t = time.time()
-                                if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
-                                    elapsed_min = (now_t - t_u_start) / 60.0
-                                    print(f"  [Cluster Progress] {stage_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall Project: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
-                                    last_progress = total_prog
-                                    last_log_time = now_t
-
-                            if state == "completed":
-                                elapsed_min = (time.time() - t_u_start) / 60.0
-                                print(f"\n  [Cluster] ✓ Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!", flush=True)
-                                unified_succeeded = True
-                                break
-                            elif state in ("failed", "aborted"):
-                                err_msgs = []
-                                for t in tasks_info:
-                                    for err in t.get("errors", []):
-                                        err_msgs.append(str(err))
-                                err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
-                                print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
-
-                                is_bad_alloc = any(
-                                    any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
-                                    for t in tasks_info
-                                    for e in t.get("errors", [])
-                                )
-
-                                if is_bad_alloc:
-                                    failed_idx = -1
-                                    failed_worker_id = None
-                                    failed_task_name = "Task"
-                                    for i_t, t in enumerate(tasks_info):
-                                        has_err = any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))
-                                        if has_err or t.get("state") in ("failed", "aborted"):
-                                            failed_idx = i_t
-                                            failed_task_name = t.get("name", "Task")
-                                            failed_worker_id = t.get("worker_id")
-                                            break
-
-                                    if 0 <= failed_idx < len(u_tasks):
-                                        completed_count = failed_idx
-                                        remaining_u_tasks = u_tasks[failed_idx:]
-                                        remaining_u_stages = u_stages[failed_idx:]
-
-                                        print(f"\n  [Cluster Memory Alert] Dedicated worker {failed_worker_id} ran out of memory (bad allocation) during '{failed_task_name}' on project '{project_name}'!", flush=True)
-                                        print(f"  [Cluster Hand-off] Preserving completed stages ({completed_count}/{len(u_tasks)}). Transferring remaining {len(remaining_u_tasks)} task(s) to another cluster machine...", flush=True)
-                                        emit_ipc_event(f"@@AUTOMETASHAPE_HANDOFF:{project_name}:{failed_task_name}:{failed_worker_id}@@")
-
-                                        try:
-                                            if failed_worker_id is not None:
-                                                net_client.setWorkerPaused(failed_worker_id, True)
-
-                                            raw_w = net_client.workerList()
-                                            w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
-                                            other_workers = [
-                                                w for w in w_list
-                                                if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
-                                                and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
-                                            ]
-
-                                            if other_workers:
-                                                rem_net_tasks = [t.toNetworkTask(chunk) for t in remaining_u_tasks]
-                                                handoff_batch_id = net_client.createBatch(rel_psx, rem_net_tasks)
-                                                net_client.setBatchWorkerLimit(handoff_batch_id, 1)
-                                                net_client.setBatchPaused(handoff_batch_id, False)
-                                                print(f"  [Cluster] Created Handoff Continuation Batch ID={handoff_batch_id} with {len(remaining_u_tasks)} tasks for another worker.", flush=True)
-
-                                                # Immediately unpause failed worker so it is free to process the NEXT project in queue
-                                                if failed_worker_id is not None:
-                                                    net_client.setWorkerPaused(failed_worker_id, False)
-                                                    print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
-
-                                                h_start = time.time()
-                                                h_last_stage = None
-                                                h_last_prog = -1.0
-                                                h_last_log = 0.0
-
-                                                handoff_ok = False
-                                                while True:
-                                                    time.sleep(1.0)
-                                                    hb_info = net_client.batchInfo(handoff_batch_id)
-                                                    hb_state = hb_info.get("state")
-                                                    hb_tasks = hb_info.get("tasks", [])
-                                                    if hb_tasks:
-                                                        h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
-                                                        h_name = h_active.get("name", "Task")
-                                                        h_prog = h_active.get("progress", 0.0)
-                                                        h_total_prog = sum(t.get("progress", 0.0) for t in hb_tasks) / len(hb_tasks)
-
-                                                        matching_h = next(((k, d) for n, k, d in remaining_u_stages if n == h_name), ("recon", h_name))
-                                                        hk_stage, hk_desc = matching_h
-                                                        if hk_stage != h_last_stage:
-                                                            emit_ipc_stage(hk_stage, hk_desc)
-                                                            print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} ({h_name})", flush=True)
-                                                            h_last_stage = hk_stage
-
-                                                        h_now = time.time()
-                                                        if abs(h_total_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_total_prog != h_last_prog):
-                                                            h_elapsed = (h_now - h_start) / 60.0
-                                                            print(f"  [Handoff Progress] {hk_desc} - {h_name}: {h_prog:.1f}% (Overall Handoff: {h_total_prog:.1f}%, Elapsed: {h_elapsed:.1f} min)", flush=True)
-                                                            h_last_prog = h_total_prog
-                                                            h_last_log = h_now
-
-                                                    if hb_state == "completed":
-                                                        h_elapsed = (time.time() - h_start) / 60.0
-                                                        print(f"\n  [Cluster] ✓ Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
-                                                        handoff_ok = True
-                                                        unified_succeeded = True
-                                                        break
-                                                    elif hb_state in ("failed", "aborted"):
-                                                        print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
-                                                        break
-
-                                                if handoff_ok:
-                                                    break
-                                        except Exception as e_h:
-                                            print(f"  [Cluster] Note: handoff exception: {e_h}", flush=True)
-                                        finally:
-                                            if failed_worker_id is not None:
-                                                try:
-                                                    net_client.setWorkerPaused(failed_worker_id, False)
-                                                except Exception:
-                                                    pass
-
-                                print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
-                                unified_succeeded = False
-                                break
-
-                    if unified_succeeded:
-                        _safe_reopen()
-                        total_time = (time.time() - t_start) / 60.0
-                        print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
-                        emit_ipc_event(IPC_COMPLETE)
-                        if survey_physics and pro_plan:
-                            print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
-                        return
-                except Exception as e_unified:
-                    print(f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...", flush=True)
-                    unified_succeeded = False
 
         else:
             all_imgs = []
@@ -3237,6 +2995,253 @@ def run_reconstruction(
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
+        # -------------------------------------------------------------
+        # Autonomous Unified Project Batch (Independent Project Mode)
+        # -------------------------------------------------------------
+        can_use_unified_batch = (
+            cluster_enabled
+            and network_independent_workers
+            and net_client is not None
+            and (not pause_after_crop)
+            and crop_method != "manual"
+        )
+        unified_succeeded = False
+        if can_use_unified_batch:
+            try:
+                print("\n=========================================================================", flush=True)
+                print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
+                print("  Full Project Pipeline Bundled into 1 Dedicated Worker Batch", flush=True)
+                print("  Worker Node Lock: 1 node (Zero Intermediate LAN Syncs, Zero Worker Hopping)", flush=True)
+                print("=========================================================================", flush=True)
+
+                doc.save(psx_out)
+                rel_psx = get_cluster_rel_path()
+
+                u_align = align_photos and (not use_multi_chunk)
+                u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
+                    chunk=chunk,
+                    output_dir=output_dir,
+                    project_name=project_name,
+                    align_photos=u_align,
+                    align_quality=align_quality,
+                    reference_preselection_mode=reference_preselection_mode,
+                    keypoint_limit=keypoint_limit,
+                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                    tiepoint_limit=tiepoint_limit,
+                    filter_stationary_points=filter_stationary_points,
+                    guided_matching=guided_matching,
+                    adaptive_fitting=adaptive_fitting,
+                    filter_tiepoints=filter_tiepoints,
+                    crop_method=crop_method,
+                    crop_padding=crop_padding,
+                    build_depth_maps=build_depth_maps,
+                    depth_quality=depth_quality,
+                    depth_filtering=depth_filtering,
+                    build_point_cloud=build_point_cloud,
+                    points_spacing=points_spacing,
+                    build_mesh=build_mesh,
+                    surface_type=surface_type,
+                    custom_faces=custom_faces,
+                    build_texture=build_texture,
+                    texture_pages=texture_pages,
+                    fill_holes=fill_holes,
+                    ghosting_filter=ghosting_filter,
+                    build_dem=build_dem,
+                    build_orthomosaic=build_orthomosaic,
+                    ortho_resolution=ortho_resolution,
+                    ortho_cull_faces=ortho_cull_faces,
+                    build_tiled_model=build_tiled_model,
+                    tile_size=tile_size,
+                    export_glb=export_glb,
+                    export_obj=export_obj,
+                    export_fbx=export_fbx,
+                    export_ply=export_ply,
+                    export_dxf=export_dxf,
+                    export_tie_points=export_tie_points,
+                    export_dem=export_dem,
+                    export_ortho=export_ortho,
+                    export_point_cloud=export_point_cloud,
+                    point_cloud_format=point_cloud_format,
+                    export_report=export_report,
+                    report_title=report_title,
+                    texture_format=texture_format,
+                    network_path=network_path,
+                    export_path_fn=get_cluster_export_path,
+                )
+
+                if u_tasks:
+                    net_tasks = [t.toNetworkTask(chunk) for t in u_tasks]
+                    batch_id = net_client.createBatch(rel_psx, net_tasks)
+                    net_client.setBatchWorkerLimit(batch_id, 1)
+                    net_client.setBatchPaused(batch_id, False)
+                    print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
+
+                    t_u_start = time.time()
+                    last_stage_key = None
+                    last_progress = -1.0
+                    last_log_time = 0.0
+
+                    while True:
+                        time.sleep(1.0)
+                        b_info = net_client.batchInfo(batch_id)
+                        state = b_info.get("state")
+                        tasks_info = b_info.get("tasks", [])
+                        if tasks_info:
+                            active_task = next((t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")), tasks_info[-1])
+                            t_sub_name = active_task.get("name", "Task")
+                            sub_prog = active_task.get("progress", 0.0)
+                            total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
+
+                            matching_stage = next(((k, d) for n, k, d in u_stages if n == t_sub_name), ("recon", t_sub_name))
+                            stage_k, stage_desc = matching_stage
+
+                            if stage_k != last_stage_key:
+                                emit_ipc_stage(stage_k, stage_desc)
+                                print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} ({t_sub_name})", flush=True)
+                                last_stage_key = stage_k
+
+                            now_t = time.time()
+                            if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
+                                elapsed_min = (now_t - t_u_start) / 60.0
+                                print(f"  [Cluster Progress] {stage_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall Project: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                last_progress = total_prog
+                                last_log_time = now_t
+
+                        if state == "completed":
+                            elapsed_min = (time.time() - t_u_start) / 60.0
+                            print(f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!", flush=True)
+                            unified_succeeded = True
+                            break
+                        elif state in ("failed", "aborted"):
+                            err_msgs = []
+                            for t in tasks_info:
+                                for err in t.get("errors", []):
+                                    err_msgs.append(str(err))
+                            err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
+                            print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
+
+                            is_bad_alloc = any(
+                                any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
+                                for t in tasks_info
+                                for e in t.get("errors", [])
+                            )
+
+                            if is_bad_alloc:
+                                failed_idx = -1
+                                failed_worker_id = None
+                                failed_task_name = "Task"
+                                for i_t, t in enumerate(tasks_info):
+                                    has_err = any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))
+                                    if has_err or t.get("state") in ("failed", "aborted"):
+                                        failed_idx = i_t
+                                        failed_task_name = t.get("name", "Task")
+                                        failed_worker_id = t.get("worker_id")
+                                        break
+
+                                if 0 <= failed_idx < len(u_tasks):
+                                    completed_count = failed_idx
+                                    remaining_u_tasks = u_tasks[failed_idx:]
+                                    remaining_u_stages = u_stages[failed_idx:]
+
+                                    print(f"\n  [Cluster Memory Alert] Dedicated worker {failed_worker_id} ran out of memory (bad allocation) during '{failed_task_name}' on project '{project_name}'!", flush=True)
+                                    print(f"  [Cluster Hand-off] Preserving completed stages ({completed_count}/{len(u_tasks)}). Transferring remaining {len(remaining_u_tasks)} task(s) to another cluster machine...", flush=True)
+                                    emit_ipc_event(f"@@AUTOMETASHAPE_HANDOFF:{project_name}:{failed_task_name}:{failed_worker_id}@@")
+
+                                    try:
+                                        if failed_worker_id is not None:
+                                            net_client.setWorkerPaused(failed_worker_id, True)
+
+                                        raw_w = net_client.workerList()
+                                        w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                                        other_workers = [
+                                            w for w in w_list
+                                            if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
+                                            and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                                        ]
+
+                                        if other_workers:
+                                            rem_net_tasks = [t.toNetworkTask(chunk) for t in remaining_u_tasks]
+                                            handoff_batch_id = net_client.createBatch(rel_psx, rem_net_tasks)
+                                            net_client.setBatchWorkerLimit(handoff_batch_id, 1)
+                                            net_client.setBatchPaused(handoff_batch_id, False)
+                                            print(f"  [Cluster] Created Handoff Continuation Batch ID={handoff_batch_id} with {len(remaining_u_tasks)} tasks for another worker.", flush=True)
+
+                                            # Immediately unpause failed worker so it is free to process the NEXT project in queue
+                                            if failed_worker_id is not None:
+                                                net_client.setWorkerPaused(failed_worker_id, False)
+                                                print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
+
+                                            h_start = time.time()
+                                            h_last_stage = None
+                                            h_last_prog = -1.0
+                                            h_last_log = 0.0
+
+                                            handoff_ok = False
+                                            while True:
+                                                time.sleep(1.0)
+                                                hb_info = net_client.batchInfo(handoff_batch_id)
+                                                hb_state = hb_info.get("state")
+                                                hb_tasks = hb_info.get("tasks", [])
+                                                if hb_tasks:
+                                                    h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
+                                                    h_name = h_active.get("name", "Task")
+                                                    h_prog = h_active.get("progress", 0.0)
+                                                    h_total_prog = sum(t.get("progress", 0.0) for t in hb_tasks) / len(hb_tasks)
+
+                                                    matching_h = next(((k, d) for n, k, d in remaining_u_stages if n == h_name), ("recon", h_name))
+                                                    hk_stage, hk_desc = matching_h
+                                                    if hk_stage != h_last_stage:
+                                                        emit_ipc_stage(hk_stage, hk_desc)
+                                                        print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} ({h_name})", flush=True)
+                                                        h_last_stage = hk_stage
+
+                                                    h_now = time.time()
+                                                    if abs(h_total_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_total_prog != h_last_prog):
+                                                        h_elapsed = (h_now - h_start) / 60.0
+                                                        print(f"  [Handoff Progress] {hk_desc} - {h_name}: {h_prog:.1f}% (Overall Handoff: {h_total_prog:.1f}%, Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                        h_last_prog = h_total_prog
+                                                        h_last_log = h_now
+
+                                                if hb_state == "completed":
+                                                    h_elapsed = (time.time() - h_start) / 60.0
+                                                    print(f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
+                                                    handoff_ok = True
+                                                    unified_succeeded = True
+                                                    break
+                                                elif hb_state in ("failed", "aborted"):
+                                                    print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
+                                                    break
+
+                                            if handoff_ok:
+                                                break
+                                    except Exception as e_h:
+                                        print(f"  [Cluster] Note: handoff exception: {e_h}", flush=True)
+                                    finally:
+                                        if failed_worker_id is not None:
+                                            try:
+                                                net_client.setWorkerPaused(failed_worker_id, False)
+                                            except Exception:
+                                                pass
+
+                            print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
+                            unified_succeeded = False
+                            break
+
+                if unified_succeeded:
+                    _safe_reopen()
+                    total_time = (time.time() - t_start) / 60.0
+                    print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
+                    emit_ipc_event(IPC_COMPLETE)
+                    if survey_physics and pro_plan:
+                        print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
+                    return
+            except Exception as e_unified:
+                print(f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...", flush=True)
+                unified_succeeded = False
+
+
+        # Fallback Stage-by-Stage Feature Matching & Camera Alignment (Single-Chunk Mode)
+        if not use_multi_chunk:
             if not align_photos:
                 print("\n[INFO] Photo feature matching and camera alignment skipped by workflow selection.", flush=True)
             else:
@@ -3470,7 +3475,7 @@ def run_reconstruction(
                 c_size = ground_cell_size if ground_cell_size is not None else 50.0
                 m_ang = ground_max_angle if ground_max_angle is not None else 15.0
                 m_dist = ground_max_distance if ground_max_distance is not None else 1.0
-                print(f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f}°, max_distance={m_dist:.2f}m)...", flush=True)
+                print(f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f} deg, max_distance={m_dist:.2f}m)...", flush=True)
                 chunk.point_cloud.classifyGroundPoints(cell_size=c_size, max_angle=m_ang, max_distance=m_dist)
                 print("  Ground classification completed.", flush=True)
 
@@ -4001,7 +4006,7 @@ def run_reconstruction(
             if export_tasks:
                 cluster_exported = dispatch_cluster_task(export_tasks, f"Cluster Exporting Deliverables ({len(export_tasks)} formats)", "export")
                 if cluster_exported:
-                    print(f"  [Cluster] ✓ All {len(export_tasks)} production deliverables exported directly by cluster worker!", flush=True)
+                    print(f"  [Cluster] [OK] All {len(export_tasks)} production deliverables exported directly by cluster worker!", flush=True)
         except Exception as e_cl_exp:
             print(f"  [Cluster] Note: cluster export delegation exception: {e_cl_exp}. Falling back to local export.", flush=True)
             cluster_exported = False
