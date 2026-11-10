@@ -220,6 +220,13 @@ class TestCliArgs(unittest.TestCase):
         self.assertFalse(args_png.export_glb)
         self.assertFalse(args_png.export_obj)
 
+        for fmt in ("png", "tiff", "tif", "jpg", "jpeg"):
+            fmt_args = parser.parse_args([
+                "--project", "dummy.psx",
+                "--texture-format", fmt,
+            ])
+            self.assertEqual(fmt_args.texture_format, fmt)
+
     def test_metashape_cluster_binary_discovery(self) -> None:
         """Verify metashape-server and monitor binary discovery functions."""
         from autometashape_gui import find_metashape_monitor_path, find_metashape_path, find_metashape_server_path

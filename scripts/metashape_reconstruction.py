@@ -1761,7 +1761,13 @@ def build_unified_cluster_pipeline_tasks(
     rep_out = os.path.join(output_dir, f"{project_name}_report.pdf")
 
     tex_fmt = texture_format if texture_format else "png"
-    tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF if tex_fmt == "tiff" else Metashape.ImageFormat.ImageFormatPNG
+    fmt_lower = tex_fmt.lower()
+    if fmt_lower in ("tiff", "tif"):
+        tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF
+    elif fmt_lower in ("jpg", "jpeg"):
+        tex_image_fmt = Metashape.ImageFormat.ImageFormatJPEG
+    else:
+        tex_image_fmt = Metashape.ImageFormat.ImageFormatPNG
 
     if export_obj and build_mesh:
         t_obj = Metashape.Tasks.ExportModel()
@@ -1772,7 +1778,7 @@ def build_unified_cluster_pipeline_tasks(
         t_obj.save_colors = True
         t_obj.path = get_exp_path(obj_out)
         tasks.append(t_obj)
-        stage_info.append(("ExportModel", "export", "Exporting Wavefront OBJ + PNG Atlas"))
+        stage_info.append(("ExportModel", "export", f"Exporting Wavefront OBJ + {fmt_lower.upper()} Atlas"))
 
     if export_glb and build_mesh:
         t_glb = Metashape.Tasks.ExportModel()
@@ -2190,6 +2196,104 @@ def run_reconstruction(
     network_independent_workers: bool = False,
     project_name: str | None = None,
 ):
+    """Executes the complete AutoMetashape photogrammetry reconstruction pipeline.
+
+    Orchestrates end-to-end automated aerial and close-range photogrammetry processing:
+    1. EXIF telemetry inspection, GSD calculation, and sensor optics compensation.
+    2. Feature detection, tie-point matching, camera alignment, and self-calibration.
+    3. Gradual tie-point selection filtering (Reprojection Error, Reconstruction Uncertainty, Projection Accuracy).
+    4. MVS high-density depth map generation (CUDA/OpenCL hardware acceleration).
+    5. Dense point cloud generation with automated ground and multiclass semantic classification.
+    6. Arbitrary 3D surface mesh extraction with optional Laplacian smoothing and decimation.
+    7. Multi-page 8K photogrammetric texture atlas parameterization and mosaic blending (16-page standard).
+    8. Digital Elevation Model (DEM) and True Orthomosaic (direct mesh projection) generation.
+    9. Deliverables export (glTF/GLB, Wavefront OBJ, Autodesk FBX, Stanford PLY, DXF, LAZ/LAS, GeoTIFF, PDF report).
+    10. Distributed cluster processing support (Multi-Task delegate and Independent Project workers)
+        with automated bad allocation memory detection and dynamic worker handoff.
+
+    Args:
+        images_dir: Directory containing input survey images (JPEG, TIFF, DNG).
+        output_dir: Destination folder for output project (.psx) and exported assets.
+        align_quality: Camera alignment resolution ("highest", "high", "medium", "low", "lowest").
+        align_photos: Whether to run camera alignment.
+        build_depth_maps: Whether to compute multi-view stereo depth maps.
+        build_mesh: Whether to reconstruct 3D surface polygon mesh.
+        build_texture: Whether to bake multi-page 8K texture atlas.
+        keypoint_limit: Maximum feature keypoints detected per image.
+        keypoint_limit_per_mpx: Adaptive keypoints detected per image megapixel.
+        tiepoint_limit: Maximum tie-points matched per image pair.
+        filter_stationary_points: Mask stationary tie points (e.g. camera rigs/lens dirt).
+        guided_matching: Enable sub-pixel guided matching across image pairs.
+        adaptive_fitting: Enable adaptive camera focal and lens distortion fitting.
+        reference_preselection_mode: Pair preselection mode ("source", "estimated", "sequential").
+        filter_tiepoints: Run USGS standard 3-stage gradual selection tie-point filtering.
+        depth_quality: Depth map calculation quality level.
+        depth_filtering: Depth map filtering mode ("mild", "moderate", "aggressive", "disabled").
+        custom_faces: Target surface polygon count (e.g. 2,000,000 faces).
+        texture_pages: Number of 8192x8192 (8K) texture atlas pages (default: 16).
+        points_spacing: Point cloud sampling interval in meters.
+        ortho_resolution: Ground sampling distance for exported orthomosaic in meters.
+        ortho_cull_faces: Cull back-facing polygons during orthomosaic projection.
+        fill_holes: Enable hole filling during texture blending.
+        ghosting_filter: Enable ghosting artifact filter during texture blending.
+        rebake_texture: Force re-baking UV parameterization and textures even if present.
+        crop_method: Automated bounding box crop method ("gps", "tiepoints", or None).
+        crop_padding: Safety bounding box margin ratio (default: 0.05).
+        min_quality: Minimum image quality threshold for blur detection (0.0 to 1.0).
+        rolling_shutter: Enable rolling shutter compensation for electronic shutters.
+        close_holes: Planar surface hole closing level (0 to 100%).
+        pause_after_crop: Pause execution for manual region editing in Metashape GUI.
+        resume: Resume from existing project checkpoint without re-running finished stages.
+        multi_chunk: Multi-chunk handling mode ("disable", "chunk_per_folder", "merge").
+        chunk_align_method: Alignment method when merging chunks ("camera", "point").
+        preset: Predefined processing configuration ("pro", "speed", "quality", "custom").
+        auto_params: Automatically derive reconstruction settings from sensor telemetry.
+        ground_cell_size: Cell size for automated ground classification in meters.
+        ground_max_angle: Maximum terrain angle for ground classification in degrees.
+        ground_max_distance: Maximum distance to terrain model for ground classification.
+        build_orthomosaic: Build True Orthomosaic directly from 3D surface mesh.
+        export_ortho: Export GeoTIFF True Orthomosaic raster.
+        build_dem: Build Digital Elevation Model (DEM).
+        export_dem: Export GeoTIFF DEM raster.
+        build_point_cloud: Build dense point cloud.
+        export_point_cloud: Export dense point cloud file.
+        point_cloud_format: Format for exported point cloud ("laz", "las", "ply", "e57", "xyz").
+        classify_ground: Run automated ground point classification.
+        classify_points: Run multiclass AI semantic point classification.
+        filter_point_confidence: Minimum point confidence threshold for cloud filtering.
+        export_report: Export Metashape processing and calibration PDF report.
+        export_glb: Export Binary glTF (.glb) model with embedded textures.
+        export_obj: Export Wavefront OBJ (.obj) model with texture atlas.
+        report_title: Custom title for generated PDF report.
+        surface_type: Surface reconstruction type ("arbitrary" or "heightfield").
+        detect_markers: Automatically detect coded/uncoded circular ground control targets.
+        target_type: Marker target type ("circular12", "circular14", "circular16", "circular20").
+        marker_tolerance: Detection tolerance for target markers (0 to 100).
+        import_reference: Path to CSV reference file for camera coordinates / GCPs.
+        calibrate_colors: Execute radiometric calibration and white balance.
+        smooth_mesh: Apply Laplacian smoothing to surface mesh.
+        smooth_strength: Smoothing strength factor.
+        decimate_mesh: Target face count for mesh decimation.
+        remove_lighting: Apply texture delighting (shadow/highlight removal).
+        delighting_color_mode: Delighting color aggressiveness mode.
+        build_tiled_model: Generate hierarchical 3D tiled model (LOD).
+        tiled_model_format: Tiled model format ("cesium", "tls", "slpk", "osgb").
+        tile_size: Pixel dimension for LOD tiles (default: 256).
+        build_contours: Generate topographic contours from elevation model.
+        contour_interval: Vertical elevation interval between contours in meters.
+        contours_format: Topographic contour output format ("shp", "dxf", "geojson", "kml").
+        export_fbx: Export Autodesk FBX (.fbx) model.
+        export_ply: Export Stanford PLY (.ply) mesh model.
+        export_dxf: Export AutoCAD DXF (.dxf) 3D faces model.
+        export_tie_points: Export sparse tie points point cloud.
+        texture_format: Texture atlas image format ("png", "tiff", "tif", "jpg", "jpeg").
+        network_enable: Enable distributed Metashape network processing cluster.
+        network_host: IP address or hostname of the cluster server.
+        network_port: Port number of the cluster server (default: 5840).
+        network_path: Network root path prefix for shared storage translation.
+        network_independent_workers: Enable 1 worker per project independent cluster mode.
+        project_name: Custom base name for project files and deliverables.
+    """
     t_start = time.time()
     if not project_name:
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
@@ -3801,7 +3905,13 @@ def run_reconstruction(
         try:
             export_tasks = []
             tex_fmt = texture_format if texture_format else "png"
-            tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF if tex_fmt == "tiff" else Metashape.ImageFormat.ImageFormatPNG
+            fmt_lower = tex_fmt.lower()
+            if fmt_lower in ("tiff", "tif"):
+                tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF
+            elif fmt_lower in ("jpg", "jpeg"):
+                tex_image_fmt = Metashape.ImageFormat.ImageFormatJPEG
+            else:
+                tex_image_fmt = Metashape.ImageFormat.ImageFormatPNG
 
             if export_obj and chunk.model:
                 t_obj = Metashape.Tasks.ExportModel()
@@ -3910,16 +4020,23 @@ def run_reconstruction(
             print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
 
     if (not cluster_exported) and export_obj and chunk.model:
+        fmt_lower = (texture_format or "png").lower()
+        if fmt_lower in ("tiff", "tif"):
+            tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF
+        elif fmt_lower in ("jpg", "jpeg"):
+            tex_image_fmt = Metashape.ImageFormat.ImageFormatJPEG
+        else:
+            tex_image_fmt = Metashape.ImageFormat.ImageFormatPNG
         try:
             chunk.exportModel(
                 obj_out,
                 format=Metashape.ModelFormat.ModelFormatOBJ,
-                texture_format=Metashape.ImageFormat.ImageFormatPNG,
+                texture_format=tex_image_fmt,
                 save_texture=True,
                 save_normals=True,
                 save_colors=True,
             )
-            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ + PNG: {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ ({fmt_lower.upper()} textures): {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
         except Exception as e_obj:
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 

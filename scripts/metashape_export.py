@@ -323,15 +323,15 @@ def export_project_assets(
 
     # 2. Export Wavefront OBJ + textures
     if export_obj and chunk.model:
-        fmt_lower = texture_format.lower()
-        if fmt_lower == "png":
-            tex_fmt = Metashape.ImageFormat.ImageFormatPNG
-        elif fmt_lower == "tiff":
+        fmt_lower = (texture_format or "png").lower()
+        if fmt_lower in ("tiff", "tif"):
             tex_fmt = Metashape.ImageFormat.ImageFormatTIFF
-        else:
+        elif fmt_lower in ("jpg", "jpeg"):
             tex_fmt = Metashape.ImageFormat.ImageFormatJPEG
-        emit_ipc_stage("models", f"Exporting Wavefront OBJ (.obj) with {texture_format.upper()} texture atlas")
-        print(f"\n[2/2] Exporting Wavefront OBJ (.obj + .mtl) with {texture_format.upper()} texture atlas...", flush=True)
+        else:
+            tex_fmt = Metashape.ImageFormat.ImageFormatPNG
+        emit_ipc_stage("models", f"Exporting Wavefront OBJ (.obj) with {fmt_lower.upper()} texture atlas")
+        print(f"\n[2/2] Exporting Wavefront OBJ (.obj + .mtl) with {fmt_lower.upper()} texture atlas...", flush=True)
         t_obj = time.time()
         chunk.exportModel(
             obj_out,
@@ -556,7 +556,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--project", required=True, help="Path to existing Metashape project file (.psx)")
     parser.add_argument("--output", default=None, help="Output directory for exported 3D assets (default: same folder as .psx)")
     parser.add_argument("--project-name", default=None, help="Base name for exported 3D model, textures, point cloud, and reports (default: folder project name)")
-    parser.add_argument("--texture-format", choices=["png", "tiff", "jpeg"], default="png", help="Texture atlas format (default: png)")
+    parser.add_argument("--texture-format", choices=["png", "tiff", "tif", "jpg", "jpeg"], default="png", help="Texture atlas format (default: png)")
     parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=True, help="Export binary glTF (.glb) model (default: True)")
     parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary glTF (.glb) export")
     parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=True, help="Export Wavefront OBJ (.obj) model (default: True)")

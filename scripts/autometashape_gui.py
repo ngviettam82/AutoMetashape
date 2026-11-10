@@ -4532,9 +4532,9 @@ class AutoMetashapeStudio:
             "relief": relief_str,
             "reproj": "0.142 px (Sub-pixel)" if status == "completed" else "Pending",
             "shutter": shutter_str,
-            "meshDefault": "2,000,000 faces · 8x 8K" if status == "completed" else "Inferred ~2M faces",
-            "mesh5m": "5,000,000 faces · 8x 8K" if status == "completed" else "Optional 5M",
-            "texMem": "1.44 GB Atlas" if status == "completed" else "Pending",
+            "meshDefault": "2,000,000 faces · 16x 8K" if status == "completed" else "Inferred ~2M faces",
+            "mesh5m": "5,000,000 faces · 16x 8K" if status == "completed" else "Optional 5M",
+            "texMem": "2.88 GB Atlas (16x 8K)" if status == "completed" else "Pending",
             "selected": True,
         }
 
@@ -5668,7 +5668,7 @@ class AutoMetashapeStudio:
                         tag = "stage"
                     elif "[SUCCESS]" in line or "[CHECKPOINT]" in line:
                         tag = "success"
-                    elif "[WARNING]" in line or "[Hardware]" in line or "[pause_crop]" in line or "[CANCELLED]" in line:
+                    elif "[WARNING]" in line or "[Hardware]" in line or "[pause_crop]" in line or "[CANCELLED]" in line or "[CLUSTER" in line:
                         tag = "warning"
                     elif "[ERROR]" in line or "[EXCEPTION]" in line:
                         tag = "error"
