@@ -100,6 +100,8 @@ class UITheme:
     ACCENT_AMBER_TXT = "#f59e0b"    # Accessible amber text
     ACCENT_RED = "#dc2626"          # Semantic error / stop
     ACCENT_RED_HOVER = "#b91c1c"
+    STATUS_ERROR = "#dc2626"
+    STATUS_WARNING = "#f59e0b"
 
 
 # ---------------------------------------------------------------------------
@@ -726,7 +728,7 @@ class StudioPipelineStepper(tk.Frame):
         self.pause_msg = ""
         self.current_desc = ""
 
-        for i, (num, name, subtitle) in enumerate(self.stages):
+        for i, (num, _, _) in enumerate(self.stages):
             outer = self.stage_frames[i]
             inner = outer.winfo_children()[0]
             outer.config(bg=UITheme.BORDER)
@@ -902,7 +904,6 @@ class StudioPipelineStepper(tk.Frame):
     def set_done(self, idx: int, message: str = "") -> None:
         if not (0 <= idx < len(self.stage_frames)):
             return
-        num = self.stages[idx][0]
         name = self.stages[idx][1]
         self._apply_style(
             idx,
@@ -2744,7 +2745,7 @@ class AutoMetashapeStudio:
         port = self.var_network_port.get().strip() or "5840"
         root = self.var_network_path.get().strip()
         if not root:
-            root = self.var_export_root.get().strip() or self.var_output.get().strip()
+            root = self.var_export_root.get().strip() or self.var_export_out.get().strip()
         if not root:
             root = r"\\HOST_PC\SharedMetashape"
             messagebox.showwarning(
@@ -3478,7 +3479,7 @@ class AutoMetashapeStudio:
             return 0
         exts = (".jpg", ".jpeg", ".png", ".tif", ".tiff", ".dng")
         count = 0
-        for r, dirs, files in os.walk(folder):
+        for _, dirs, files in os.walk(folder):
             dirs[:] = [d for d in dirs if not d.lower().startswith(("export", "model", "output", "."))]
             for f in files:
                 if f.lower().endswith(exts):
@@ -3495,10 +3496,6 @@ class AutoMetashapeStudio:
             cnt = self._quick_count_photos(img_dir)
             return [{"path": img_dir, "name": name, "count": cnt}]
         return []
-
-    def _browse_images_dir(self) -> None:
-        """Add survey project to queue via directory picker."""
-        self._add_project_to_queue()
 
     def _browse_export_root(self) -> None:
         chosen = filedialog.askdirectory(
@@ -4458,7 +4455,7 @@ class AutoMetashapeStudio:
         possible_out_dirs = []
         if export_root:
             possible_out_dirs.append(os.path.join(export_root, name))
-        out_single = self.var_output.get().strip()
+        out_single = self.var_export_out.get().strip()
         if out_single:
             possible_out_dirs.append(out_single)
         if folder:
@@ -5162,10 +5159,6 @@ class AutoMetashapeStudio:
         if active_count == 0 and self.batch_submitted_idx >= len(self.batch_queue):
             self._check_batch_fully_finished()
 
-    def _run_next_batch_item(self) -> None:
-        """Backwards-compatible launcher alias mapping to _pump_batch_queue."""
-        self._pump_batch_queue()
-
     def _launch_cluster_recon_job(self, item: dict, idx: int) -> None:
         """Launches a project reconstruction subprocess into the cluster queue."""
         img_dir = item["path"]
@@ -5540,12 +5533,6 @@ class AutoMetashapeStudio:
         if getattr(self, "active_mode", "recon") == mode and hasattr(self, "stepper"):
             self.stepper.reset(is_export=(mode == "export"))
 
-    def _update_stepper_mode(self, mode: str, idx: int, desc: str) -> None:
-        """Applies a stage transition by numeric index safely via the main thread."""
-        keys = getattr(self, "mode_stage_keys", {}).get(mode, [])
-        if 0 <= idx < len(keys):
-            self.root.after(0, lambda: self._handle_stage_transition(mode, keys[idx], desc))
-
     def _complete_stepper_mode(self, mode: str) -> None:
         def _apply():
             if mode in self.mode_states:
@@ -5607,7 +5594,6 @@ class AutoMetashapeStudio:
         st["is_done"] = False
         st["is_paused"] = False
         if 0 <= idx < len(st["stages"]):
-            num = st["stages"][idx][0]
             name = st["stages"][idx][1]
             st["status_text"] = f"Running Stage {idx+1}/{len(st['stages'])}: {name} - {desc}"
             st["status_fg"] = UITheme.ACCENT_CYAN
@@ -5895,7 +5881,7 @@ class AutoMetashapeStudio:
                     self.batch_current_idx += 1
                     if self.batch_current_idx < len(self.batch_queue):
                         self._log(f"\n[PIPELINE OVERLAP] Advancing to next project on cluster immediately...", "stage")
-                        self.root.after(500, self._run_next_batch_item)
+                        self.root.after(500, self._pump_batch_queue)
                         return
                     else:
                         self._log(f"\n[PIPELINE] All {len(self.batch_queue)} projects submitted to cluster. Waiting for background exports to complete...", "stage")
@@ -5905,7 +5891,7 @@ class AutoMetashapeStudio:
                     self._log(f"[BATCH ITEM SUCCESS] Project {proj_name} complete.", "success")
                     self.batch_current_idx += 1
                     if self.batch_current_idx < len(self.batch_queue):
-                        self.root.after(1000, self._run_next_batch_item)
+                        self.root.after(1000, self._pump_batch_queue)
                         return
                     else:
                         self.batch_running = False

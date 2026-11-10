@@ -687,7 +687,6 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     - CMOS rolling shutter compensation enabled strictly for rolling shutter sensors
     - Gentle tie-point filtering capping point removal at <= 10% (retains >= 90% inliers)
     """
-    photo_count = physics.get("photo_count", 0)
     has_gps = physics.get("has_gps", False)
     relief_ratio = physics.get("relief_ratio", 0.0)
     shutter = physics.get("shutter", "mechanical")
@@ -870,7 +869,7 @@ def solve_ray_convergence_irls(aligned_cams, iterations: int = 3) -> tuple:
     active_cams = cam_data
     target_center = None
 
-    for it in range(iterations):
+    for _ in range(iterations):
         M = Metashape.Matrix([[0.0] * 3, [0.0] * 3, [0.0] * 3])
         V = Metashape.Vector([0.0, 0.0, 0.0])
 
@@ -2202,7 +2201,6 @@ def run_reconstruction(
     # -----------------------------------------------------------------------
     # Pro Photogrammetry Survey Physics & Telemetry Resolution
     # -----------------------------------------------------------------------
-    inferred_profile = None
     survey_physics = None
     pro_plan = None
     usgs_stats = None
@@ -2217,7 +2215,6 @@ def run_reconstruction(
         try:
             survey_physics = analyze_survey_physics(images_dir, output_dir=output_dir)
             pro_plan = derive_pro_photogrammetry_plan(survey_physics)
-            inferred_profile = survey_physics
             print_pro_engineering_report(survey_physics, pro_plan)
 
             if crop_method is None:
@@ -4089,11 +4086,6 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="Resume reconstruction from existing project checkpoint if available (default: False; restarts from scratch by default)",
-    )
-    parser.add_argument(
-        "--force-restart",
-        action="store_true",
-        help="Deprecated: restart from scratch is now the default; use --resume to resume from checkpoint",
     )
     return parser
 

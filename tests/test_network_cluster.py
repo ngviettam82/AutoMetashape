@@ -57,7 +57,7 @@ class TestNetworkCluster(unittest.TestCase):
         studio_mock = MagicMock()
         studio_mock._physics_cache = {}
         studio_mock.var_export_root.get.return_value = ""
-        studio_mock.var_output.get.return_value = ""
+        studio_mock.var_export_out.get.return_value = ""
         studio_mock.batch_running = False
         studio_mock.batch_queue = []
         studio_mock.batch_current_idx = -1
@@ -87,7 +87,7 @@ class TestNetworkCluster(unittest.TestCase):
             studio_mock.project_items = [{"path": "C:/Surveys/SiteB", "name": "SiteB", "count": 300}]
             studio_mock.var_images_dir.get.return_value = ""
             studio_mock.var_export_root.get.return_value = ""
-            studio_mock.var_output.get.return_value = ""
+            studio_mock.var_export_out.get.return_value = ""
             studio_mock.batch_running = False
             studio_mock.batch_queue = []
             studio_mock.batch_current_idx = -1
@@ -1034,7 +1034,7 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIn("export", stage_keys)
 
             # Test 4: When align_photos=False, MatchPhotos and AlignCameras are omitted
-            tasks_no_align, stages_no_align = mr.build_unified_cluster_pipeline_tasks(
+            _, stages_no_align = mr.build_unified_cluster_pipeline_tasks(
                 chunk=mock_chunk,
                 output_dir="C:/Out/Proj",
                 project_name="Proj",
