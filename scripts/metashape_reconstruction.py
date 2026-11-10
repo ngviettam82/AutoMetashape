@@ -1046,13 +1046,13 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
 
 
 def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
-    """Crops chunk.region horizontally to the smallest area horizontal square enclosing all camera images,
-    filtering outliers (such as GPS 0,0, missing coordinates, or distant takeoff points), while preserving
-    the full vertical elevation range so ground terrain and structures are protected.
+    """Crops chunk.region horizontally to the minimum area horizontal rectangle enclosing all camera images,
+    filtering outliers (such as GPS 0,0, missing coordinates, or distant takeoff points), with flight FOV safety
+    margins, while preserving the full vertical elevation range so ground terrain and structures are protected.
 
     Args:
         chunk: Active Metashape.Chunk.
-        padding: Safety margin padding applied to square dimensions (default: 0.05 / 5%).
+        padding: Safety margin padding applied to dimensions (default: 0.05 / 5%).
 
     Returns:
         True if bounding box was successfully updated; False if skipped.
@@ -1062,7 +1062,11 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         print("  [Auto-Crop-GPS] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
 
-    print(f"\n[Auto-Crop-GPS] Computing minimum area horizontal enclosing square from {len(aligned_cams)} cameras...", flush=True)
+    print(
+        f"\n[Auto-Crop-GPS] Computing minimum area horizontal enclosing rectangle "
+        f"from {len(aligned_cams)} cameras...",
+        flush=True,
+    )
 
     # 1. Filter invalid GPS outliers (e.g. GPS (0, 0) or unreferenced cameras)
     valid_cams = []
@@ -1109,8 +1113,8 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     if len(inlier_xs) < 2:
         inlier_xs, inlier_ys, inlier_zs = xs, ys, cam_zs
 
-    # 2. Find orientation in the horizontal plane that produces the SMALLEST AREA SQUARE
-    best_side = float("inf")
+    # 2. Find orientation in the horizontal plane that produces the SMALLEST AREA RECTANGLE (w * h)
+    best_area = float("inf")
     best_theta = 0.0
     best_bounds = (0.0, 0.0, 0.0, 0.0)
 
@@ -1122,40 +1126,52 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         ry = [-x * sin_t + y * cos_t for x, y in zip(inlier_xs, inlier_ys)]
         min_rx, max_rx = min(rx), max(rx)
         min_ry, max_ry = min(ry), max(ry)
-        span = max(max_rx - min_rx, max_ry - min_ry)
-        if span < best_side:
-            best_side = span
+        w = max_rx - min_rx
+        h = max_ry - min_ry
+        area = w * h
+        if area < best_area:
+            best_area = area
             best_theta = theta
             best_bounds = (min_rx, max_rx, min_ry, max_ry)
 
-    side = best_side * (1.0 + 2.0 * padding)
-
-    # Compute center of the smallest square in the rotated frame
-    mid_rx = (best_bounds[0] + best_bounds[1]) * 0.5
-    mid_ry = (best_bounds[2] + best_bounds[3]) * 0.5
-
-    # Rotate center back to the unrotated horizontal frame
-    cos_t = math.cos(best_theta)
-    sin_t = math.sin(best_theta)
-    mid_x = mid_rx * cos_t - mid_ry * sin_t
-    mid_y = mid_rx * sin_t + mid_ry * cos_t
+    min_rx, max_rx, min_ry, max_ry = best_bounds
+    span_x = max_rx - min_rx
+    span_y = max_ry - min_ry
 
     # 3. Preserve vertical extent covering terrain and roof features
     pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []
     if pts:
-        pt_zs = [(rot_t * p.coord[:3]).z for p in pts]
-        pt_zs.sort()
+        coords = [
+            Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w])
+            for p in pts
+        ]
+        pt_zs = sorted([(rot_t * v).z for v in coords])
         med_pz = pt_zs[len(pt_zs) // 2]
         devs_pz = sorted([abs(z - med_pz) for z in pt_zs])
         mad_pz = devs_pz[len(devs_pz) // 2]
         sigma_pz = 1.4826 * mad_pz
-        if sigma_pz > 1e-3:
-            filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz]
-        else:
-            filtered_pt_zs = pt_zs
+        filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] if sigma_pz > 1e-3 else pt_zs
         all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)
+        med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
+        flight_height = abs(med_cam_z - med_pz)
     else:
         all_zs = inlier_zs
+        flight_height = 0.0
+
+    # Camera FOV safety margin (ensures photo frustums are fully framed)
+    fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0
+    margin_x = max(span_x * padding, fov_margin)
+    margin_y = max(span_y * padding, fov_margin)
+    side_x = span_x + 2.0 * margin_x
+    side_y = span_y + 2.0 * margin_y
+
+    mid_rx = (min_rx + max_rx) * 0.5
+    mid_ry = (min_ry + max_ry) * 0.5
+
+    cos_t = math.cos(best_theta)
+    sin_t = math.sin(best_theta)
+    mid_x = mid_rx * cos_t - mid_ry * sin_t
+    mid_y = mid_rx * sin_t + mid_ry * cos_t
 
     min_z = min(all_zs)
     max_z = max(all_zs)
@@ -1166,11 +1182,11 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     Rz = Metashape.Matrix([
         [cos_t, -sin_t, 0.0],
         [sin_t,  cos_t, 0.0],
-        [  0.0,    0.0, 1.0]
+        [  0.0,    0.0, 1.0],
     ])
     new_rot = rot * Rz
     new_center = rot * Metashape.Vector([mid_x, mid_y, mid_z])
-    new_size = Metashape.Vector([side, side, span_z])
+    new_size = Metashape.Vector([side_x, side_y, span_z])
 
     region = chunk.region
     region.rot = new_rot
@@ -1179,10 +1195,19 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     chunk.region = region
 
     scale = chunk.transform.scale if chunk.transform and chunk.transform.scale else 1.0
-    print(f"  [Auto-Crop-GPS] Smallest enclosing horizontal square successfully calculated!", flush=True)
-    print(f"  Images Included: {len(inlier_xs)}/{len(aligned_cams)} (Outliers Pruned: {len(aligned_cams) - len(inlier_xs)})", flush=True)
-    print(f"  Optimal Angle: {math.degrees(best_theta):.1f} deg (Minimum Area Square)", flush=True)
-    print(f"  Horizontal Size: {side * scale:.2f}m x {side * scale:.2f}m [Padding: {int(padding * 100)}%]", flush=True)
+    pruned = len(aligned_cams) - len(inlier_xs)
+    print("  [Auto-Crop-GPS] Minimum area horizontal enclosing rectangle successfully calculated!", flush=True)
+    print(
+        f"  Images Included: {len(inlier_xs)}/{len(aligned_cams)} (Outliers Pruned: {pruned})",
+        flush=True,
+    )
+    print(f"  Optimal Angle: {math.degrees(best_theta):.1f} deg (Minimum Area Rectangle)", flush=True)
+    print(
+        f"  Horizontal Size: {side_x * scale:.2f}m x {side_y * scale:.2f}m "
+        f"(Span: {span_x * scale:.2f}m x {span_y * scale:.2f}m, "
+        f"FOV Margin: +{margin_x * scale:.2f}m, +{margin_y * scale:.2f}m)",
+        flush=True,
+    )
     print(f"  Vertical Extent: {span_z * scale:.2f}m (Z: [{min_z * scale:.2f}m, {max_z * scale:.2f}m])", flush=True)
     return True
 
@@ -1410,7 +1435,7 @@ def build_cluster_gradual_selection_tasks(
 
 
 def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.05):
-    """Builds a RunScript task that executes horizontal enclosing square or structure crop on the worker."""
+    """Builds a RunScript task that executes horizontal enclosing rectangle or structure crop on the worker."""
     if Metashape is None:
         return None
     pad_str = f"{padding:.4f}"
@@ -1439,7 +1464,7 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "        if sigma_d > 1e-3 and (d - med_d) > max(1000.0, 5.0 * sigma_d): continue\n"
             "        inlier_xs.append(x); inlier_ys.append(y); inlier_zs.append(z)\n"
             "    if len(inlier_xs) < 2: inlier_xs, inlier_ys, inlier_zs = xs, ys, zs\n"
-            "    best_side, best_theta, best_bounds = float('inf'), 0.0, (0.0, 0.0, 0.0, 0.0)\n"
+            "    best_area, best_theta, best_bounds = float('inf'), 0.0, (0.0, 0.0, 0.0, 0.0)\n"
             "    for step in range(180):\n"
             "        theta = math.radians(step * 0.5)\n"
             "        cos_t, sin_t = math.cos(theta), math.sin(theta)\n"
@@ -1447,16 +1472,13 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "        ry = [-x * sin_t + y * cos_t for x, y in zip(inlier_xs, inlier_ys)]\n"
             "        min_rx, max_rx = min(rx), max(rx)\n"
             "        min_ry, max_ry = min(ry), max(ry)\n"
-            "        span = max(max_rx - min_rx, max_ry - min_ry)\n"
-            "        if span < best_side:\n"
-            "            best_side = span; best_theta = theta; best_bounds = (min_rx, max_rx, min_ry, max_ry)\n"
+            "        area = (max_rx - min_rx) * (max_ry - min_ry)\n"
+            "        if area < best_area:\n"
+            "            best_area = area; best_theta = theta; best_bounds = (min_rx, max_rx, min_ry, max_ry)\n"
             f"    padding = {pad_str}\n"
-            "    side = best_side * (1.0 + 2.0 * padding)\n"
-            "    mid_rx = (best_bounds[0] + best_bounds[1]) * 0.5\n"
-            "    mid_ry = (best_bounds[2] + best_bounds[3]) * 0.5\n"
-            "    cos_t, sin_t = math.cos(best_theta), math.sin(best_theta)\n"
-            "    mid_x = mid_rx * cos_t - mid_ry * sin_t\n"
-            "    mid_y = mid_rx * sin_t + mid_ry * cos_t\n"
+            "    min_rx, max_rx, min_ry, max_ry = best_bounds\n"
+            "    span_x = max_rx - min_rx\n"
+            "    span_y = max_ry - min_ry\n"
             "    pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []\n"
             "    if pts:\n"
             "        coords = [Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, "
@@ -1469,16 +1491,30 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "        filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] "
             "if sigma_pz > 1e-3 else pt_zs\n"
             "        all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)\n"
+            "        med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]\n"
+            "        flight_height = abs(med_cam_z - med_pz)\n"
             "    else:\n"
             "        all_zs = inlier_zs\n"
+            "        flight_height = 0.0\n"
+            "    fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0\n"
+            "    margin_x = max(span_x * padding, fov_margin)\n"
+            "    margin_y = max(span_y * padding, fov_margin)\n"
+            "    side_x = span_x + 2.0 * margin_x\n"
+            "    side_y = span_y + 2.0 * margin_y\n"
+            "    mid_rx = (min_rx + max_rx) * 0.5\n"
+            "    mid_ry = (min_ry + max_ry) * 0.5\n"
+            "    cos_t, sin_t = math.cos(best_theta), math.sin(best_theta)\n"
+            "    mid_x = mid_rx * cos_t - mid_ry * sin_t\n"
+            "    mid_y = mid_rx * sin_t + mid_ry * cos_t\n"
             "    min_z, max_z = min(all_zs), max(all_zs)\n"
             "    span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))\n"
             "    mid_z = (min_z + max_z) * 0.5\n"
             "    Rz = Metashape.Matrix([[cos_t, -sin_t, 0.0], [sin_t, cos_t, 0.0], [0.0, 0.0, 1.0]])\n"
             "    chunk.region.rot = rot * Rz\n"
             "    chunk.region.center = rot * Metashape.Vector([mid_x, mid_y, mid_z])\n"
-            "    chunk.region.size = Metashape.Vector([side, side, span_z])\n"
-            "    print(f'  [Worker] Auto-Crop (GPS Square applied): Side={side:.1f}m, SpanZ={span_z:.1f}m')\n"
+            "    chunk.region.size = Metashape.Vector([side_x, side_y, span_z])\n"
+            "    print(f'  [Worker] Auto-Crop (Option A applied): "
+            "Size=({side_x:.1f}m x {side_y:.1f}m x {span_z:.1f}m)')\n"
         )
     elif crop_method == "structure":
         code = (
@@ -1501,7 +1537,8 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "    dx = (max_x - min_x) * (1.0 + padding)\n"
             "    dy = (max_y - min_y) * (1.0 + padding)\n"
             "    dz = (max_z - min_z) * (1.0 + padding * 2.0)\n"
-            "    chunk.region.center = rot * Metashape.Vector([(min_x + max_x)/2.0, (min_y + max_y)/2.0, (min_z + max_z)/2.0])\n"
+            "    chunk.region.center = rot * Metashape.Vector([(min_x + max_x)/2.0, (min_y + max_y)/2.0, "
+            "(min_z + max_z)/2.0])\n"
             "    chunk.region.size = Metashape.Vector([dx, dy, dz])\n"
             "    print(f'  [Worker] Auto-Crop (Structure applied): Size=({dx:.1f}m, {dy:.1f}m, {dz:.1f}m)')\n"
         )
