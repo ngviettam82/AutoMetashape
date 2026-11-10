@@ -560,7 +560,7 @@ class TestNetworkCluster(unittest.TestCase):
             # Workflow parameters are updated to Pro standards
             self.assertEqual(gui_mock.var_align_quality.get(), "high")
             self.assertEqual(gui_mock.var_faces.get(), "2000000")
-            self.assertEqual(gui_mock.var_tex_pages.get(), "22")
+            self.assertEqual(gui_mock.var_tex_pages.get(), "16")
             self.assertTrue(gui_mock.var_build_ortho.get())
             self.assertFalse(gui_mock.var_build_dem.get())
 
@@ -862,29 +862,17 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertIsInstance(ram, float)
         self.assertGreater(ram, 0.0)
 
-    def test_ram_guard_texture_page_budget_scaling(self) -> None:
-        """Verify texture atlas page scaling rule: 4 pages if <16GB, 8 pages if <32GB, full if >=32GB."""
-        def scale_pages(req_pages: int, ram_gb: float) -> int:
-            eff = req_pages
-            if ram_gb < 16.0:
-                if eff > 4:
-                    eff = 4
-            elif ram_gb < 32.0:
-                if eff > 8:
-                    eff = 8
-            return eff
+    def test_deterministic_texture_pages_no_ram_guard(self) -> None:
+        """Verify texture atlas page count is strictly deterministic (16 pages) across all worker machines with no RAM downscaling."""
+        def get_pages(req_pages: int, ram_gb: float) -> int:
+            return req_pages or 16
 
-        # 16 GB worker machine (e.g. 15.8 GB detected)
-        self.assertEqual(scale_pages(22, 15.8), 4)
-        self.assertEqual(scale_pages(2, 15.8), 2)  # smaller budgets not artificially inflated
-
-        # 32 GB worker machine (e.g. 31.7 GB detected)
-        self.assertEqual(scale_pages(22, 31.7), 8)
-        self.assertEqual(scale_pages(4, 31.7), 4)
-
-        # 64 GB workstation
-        self.assertEqual(scale_pages(22, 63.8), 22)
-        self.assertEqual(scale_pages(30, 63.8), 30)
+        # 16 GB worker machine retains full requested budget
+        self.assertEqual(get_pages(16, 15.8), 16)
+        # 32 GB worker machine retains full requested budget
+        self.assertEqual(get_pages(16, 31.7), 16)
+        # 64 GB workstation retains full requested budget
+        self.assertEqual(get_pages(16, 63.8), 16)
 
     def test_stepper_multi_set_done(self) -> None:
         """Verify StudioPipelineStepper.set_done marks specific stage completed with checkmark."""
@@ -1034,7 +1022,7 @@ class TestNetworkCluster(unittest.TestCase):
         mock_meta.Tasks.BuildDepthMaps = lambda: MagicMock(name="BuildDepthMaps")
         mock_meta.Tasks.BuildPointCloud = lambda: MagicMock(name="BuildPointCloud")
         mock_meta.Tasks.BuildModel = lambda: MagicMock(name="BuildModel")
-        mock_meta.Tasks.BuildUV = lambda: MagicMock(name="BuildUV", page_count=22)
+        mock_meta.Tasks.BuildUV = lambda: MagicMock(name="BuildUV", page_count=16)
         mock_meta.Tasks.BuildTexture = lambda: MagicMock(name="BuildTexture")
         mock_meta.Tasks.BuildDem = lambda: MagicMock(name="BuildDem")
         mock_meta.Tasks.BuildOrthomosaic = lambda: MagicMock(name="BuildOrthomosaic")
@@ -1048,7 +1036,7 @@ class TestNetworkCluster(unittest.TestCase):
         mock_chunk.cameras = []
 
         with patch.object(mr, "Metashape", mock_meta):
-            # Test 1: Full Pro Preset with RAM < 16GB
+            # Test 1: Full Pro Preset with RAM < 16GB (strictly preserves deterministic 16 pages, no RAM guard clamping)
             tasks_16, stages_16 = mr.build_unified_cluster_pipeline_tasks(
                 chunk=mock_chunk,
                 output_dir="C:/Out/Proj",
@@ -1060,7 +1048,7 @@ class TestNetworkCluster(unittest.TestCase):
                 build_point_cloud=True,
                 build_mesh=True,
                 build_texture=True,
-                texture_pages=22,
+                texture_pages=16,
                 build_dem=True,
                 build_orthomosaic=True,
                 export_obj=True,
@@ -1073,19 +1061,19 @@ class TestNetworkCluster(unittest.TestCase):
             )
             # Find BuildUV task in tasks_16
             uv_task_16 = next(t for t, (name, _, _) in zip(tasks_16, stages_16) if name == "BuildUV")
-            self.assertEqual(uv_task_16.page_count, 4)
+            self.assertEqual(uv_task_16.page_count, 16)
 
-            # Test 2: RAM < 32GB
+            # Test 2: RAM < 32GB (strictly preserves deterministic 16 pages, no RAM guard clamping)
             tasks_32, stages_32 = mr.build_unified_cluster_pipeline_tasks(
                 chunk=mock_chunk,
                 output_dir="C:/Out/Proj",
                 project_name="Proj",
                 build_texture=True,
-                texture_pages=22,
+                texture_pages=16,
                 worker_ram_gb=31.8,
             )
             uv_task_32 = next(t for t, (name, _, _) in zip(tasks_32, stages_32) if name == "BuildUV")
-            self.assertEqual(uv_task_32.page_count, 8)
+            self.assertEqual(uv_task_32.page_count, 16)
 
             # Test 3: Stage info contains expected stepper stages
             stage_keys = [k for _, k, _ in stages_16]

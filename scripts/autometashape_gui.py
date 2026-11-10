@@ -1121,7 +1121,7 @@ class AutoMetashapeStudio:
         self.var_keypoint_limit = tk.StringVar(value="200000")
         self.var_tiepoint_limit = tk.StringVar(value="25000")
         self.var_faces = tk.StringVar(value="2000000")
-        self.var_tex_pages = tk.StringVar(value="22")
+        self.var_tex_pages = tk.StringVar(value="16")
         self.var_crop = tk.StringVar(value="gps-square")
         self.var_depth_quality = tk.StringVar(value="high")
         self.var_depth_filtering = tk.StringVar(value="moderate")
@@ -1923,8 +1923,8 @@ class AutoMetashapeStudio:
         _make_preset(
             "pro",
             "Pro Photogrammetry & Geomatics Engine (Default)",
-            "Gentle Filter (90%+ retained) · 2M Arbitrary 3D · 22-Page 8K · True Ortho",
-            "Production geomatics standard: gentle tie-point filtering, 2M polygon arbitrary 3D mesh, 22-page 8K texture atlas, 2.0 cm/px true orthomosaic GeoTIFF, and sensor optics compensation.",
+            "Gentle Filter (90%+ retained) · 2M Arbitrary 3D · 16-Page 8K · True Ortho",
+            "Production geomatics standard: gentle tie-point filtering, 2M polygon arbitrary 3D mesh, 16-page 8K texture atlas, 2.0 cm/px true orthomosaic GeoTIFF, and sensor optics compensation.",
         )
         _make_preset(
             "custom",
@@ -3918,7 +3918,7 @@ class AutoMetashapeStudio:
             if hasattr(self, "var_presel_mode"):
                 self.var_presel_mode.set("estimated")
             self.var_faces.set("2000000")
-            self.var_tex_pages.set("22")
+            self.var_tex_pages.set("16")
             self.var_crop.set("gps-square")
             self.var_depth_quality.set("high")
             self.var_depth_filtering.set("moderate")
@@ -4091,7 +4091,7 @@ class AutoMetashapeStudio:
             keys.extend(["mesh", "texture"])
             stages.extend([
                 (str(step_num), "Mesh", "2M arbitrary mesh"),
-                (str(step_num + 1), "Texture", "22-page 8K atlas"),
+                (str(step_num + 1), "Texture", "16-page 8K atlas"),
             ])
             step_num += 2
 
@@ -4146,7 +4146,7 @@ class AutoMetashapeStudio:
             step_num += 1
 
         if do_tex:
-            pages_str = "22-page 8K"
+            pages_str = "16-page 8K"
             if hasattr(self, "var_tex_pages") and self.var_tex_pages.get():
                 pages_str = f"{self.var_tex_pages.get().strip()}-page 8K"
             keys.append("texture")

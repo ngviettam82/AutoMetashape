@@ -13,7 +13,7 @@ Configured with production-grade defaults:
 - Camera Optimization: Rolling shutter compensation enabled, Gradual Selection tie-point filtering.
 - Bounding Box: gps-square auto-crop (smallest enclosing square of camera GPS poses with uncropped vertical bounds).
 - Depth Maps & Meshing: High quality depth maps (downscale=2), Moderate depth filtering, 600,000 (600K) custom faces.
-- Texture Atlas: 22-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
+- Texture Atlas: 16-page 8K photographic mosaic blending texture atlas (hole filling and ghosting filter enabled).
 """
 
 from __future__ import annotations
@@ -680,7 +680,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
 
     Standard Production Geomatics Profile:
     - Strictly Arbitrary 3D surface (never 2.5D heightfield to prevent wall flattening)
-    - Fixed 22-page 8K texture atlas (retains full architectural sharpness)
+    - Fixed 16-page 8K texture atlas (retains full architectural sharpness)
     - 2,000,000 polygon surface mesh
     - Native meshing interpolation with no aggressive hole-closing webbing (close_holes = False)
     - True orthomosaic GeoTIFF enabled (DEM disabled by default; True Ortho uses 3D mesh)
@@ -697,7 +697,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     surface_type = "arbitrary"
     crop_method = "gps-square"
     custom_faces = 2000000
-    texture_pages = 22
+    texture_pages = 16
     build_orthomosaic = True
     build_dem = False
     build_point_cloud = True
@@ -1699,11 +1699,7 @@ def build_unified_cluster_pipeline_tasks(
 
     # 5. Texture Atlas Parameterization & Mosaic Blending
     if build_texture:
-        eff_pages = texture_pages or 22
-        if worker_ram_gb < 16.0:
-            eff_pages = min(eff_pages, 4)
-        elif worker_ram_gb < 32.0:
-            eff_pages = min(eff_pages, 8)
+        eff_pages = texture_pages or 16
 
         t_uv = Metashape.Tasks.BuildUV()
         t_uv.mapping_mode = Metashape.MappingMode.GenericMapping
@@ -2326,7 +2322,7 @@ def run_reconstruction(
     if custom_faces is None:
         custom_faces = 2000000
     if texture_pages is None:
-        texture_pages = 22
+        texture_pages = 16
     is_pro_preset = (preset == "pro" or is_auto)
     if build_orthomosaic is None:
         build_orthomosaic = True if is_pro_preset else False
@@ -3430,38 +3426,13 @@ def run_reconstruction(
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
-        # Dynamically size texture atlas for 1:1 ground texel parity if unforced
-        eff_pages = texture_pages or 22
+        # Deterministic texture atlas allocation (identical across all projects and cluster nodes)
+        eff_pages = texture_pages or 16
         if texture_pages is None and chunk.model and survey_physics and survey_physics.get("gsd_cm"):
             optimal_budget = calculate_optimal_texel_budget(chunk, gsd_cm=survey_physics["gsd_cm"])
             if optimal_budget:
                 eff_pages = optimal_budget
-
-        # RAM Guard: Adjust to 8 pages if < 32GB RAM, and to 4 pages if < 16GB RAM
-        ram_gb = get_system_ram_gb()
-        if cluster_enabled and net_client:
-            try:
-                w_data = net_client.workerList()
-                workers = w_data.get("workers", []) if isinstance(w_data, dict) else []
-                w_rams = [w["memory_size"] / (1024 ** 3) for w in workers if "memory_size" in w and w.get("state") != "aborted"]
-                if w_rams:
-                    min_w_ram = min(w_rams)
-                    if min_w_ram < ram_gb:
-                        print(f"  [RAM Guard] Cluster worker node with lower physical RAM detected: {min_w_ram:.1f} GB. Adjusting RAM guard threshold for cluster dispatch.", flush=True)
-                        ram_gb = min_w_ram
-            except Exception as e_w_ram:
-                print(f"  [RAM Guard] Note: could not query cluster worker RAM: {e_w_ram}", flush=True)
-
-        if ram_gb < 16.0:
-            if eff_pages > 4:
-                print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (<16GB). Adjusting texture atlas from {eff_pages} to 4 pages to prevent bad allocation.", flush=True)
-                eff_pages = 4
-        elif ram_gb < 32.0:
-            if eff_pages > 8:
-                print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (<32GB). Adjusting texture atlas from {eff_pages} to 8 pages to prevent bad allocation.", flush=True)
-                eff_pages = 8
-        else:
-            print(f"  [RAM Guard] Worker physical RAM is {ram_gb:.1f} GB (>=32GB). Retaining full {eff_pages}-page texture atlas budget.", flush=True)
+        print(f"  [Texture] Baking {eff_pages}x 8K texture atlas (deterministic parity across all nodes).", flush=True)
 
         t_tex = time.time()
         tex_computed = False
@@ -4037,7 +4008,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--preset",
         choices=["pro", "custom", "building"],
         default="pro",
-        help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 22-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
+        help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 16-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
     )
     # Granular Workflow Steps (Metashape Process Stages)
     parser.add_argument("--align-photos", dest="align_photos", action="store_true", default=True, help="Execute camera matching and alignment (default: True)")
@@ -4098,7 +4069,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
     parser.add_argument("--close-holes", dest="close_holes", action="store_true", default=None, help="Enable mesh hole closing (bridges voids up to level 30)")
     parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", help="Disable mesh hole closing (default: disabled to prevent planar webbing artifacts)")
-    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 22 in 'pro' preset, or custom specified)")
+    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 16 in 'pro' preset, or custom specified)")
     parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
     parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
     parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
