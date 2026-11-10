@@ -85,7 +85,7 @@ To re-bake UV mapping, a 16-page 8K texture atlas, and apply delighting (shadow 
 ### 4. Decoupled Pipelined Overlap Export
 In the AutoMetashape Studio architecture, `scripts/metashape_export.py` functions as the decoupled background exporter:
 - As soon as the GPU reconstruction cluster finishes meshing a project, it triggers this script in the background on the Host CPU.
-- Operates concurrently with bounded concurrency limits (1 to 4, default 2), isolating project folders and `.psx` document locks.
+- Operates concurrently with bounded concurrency limits (1 to 8, default 5), isolating project folders and `.psx` document locks.
 - Command recipe generated automatically by the coordinator:
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \

@@ -181,7 +181,7 @@ The **Pipelined Compute-Export Overlap Engine** decouples reconstruction from as
    - The coordinator instantly dispatches `Project_N+1` to the GPU cluster workers.
 3. **Concurrent Background Host CPU Export**:
    - The host machine asynchronously launches `scripts/metashape_export.py` in the background for `Project_N`.
-   - **Process Concurrency Throttle (1 to 4, Default: 2)**: Bounds the number of concurrent export jobs to prevent host RAM exhaustion (each 8K atlas bake requires 8–16 GB RAM) and NVMe write-queue saturation.
+   - **Process Concurrency Throttle (1 to 8, Default: 5)**: Bounds the number of concurrent export jobs to prevent host RAM exhaustion (each 8K atlas bake requires 8–16 GB RAM) and NVMe write-queue saturation.
    - If maximum concurrent export slots are full when `Project_N+1` finishes, the subsequent project waits in a background thread while the cluster continues crunching `Project_N+2`.
 
 ```

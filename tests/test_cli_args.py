@@ -271,6 +271,23 @@ class TestCliArgs(unittest.TestCase):
             ])
             self.assertEqual(args.texture_format, fmt)
 
+    def test_gui_pipelined_export_defaults(self) -> None:
+        """Defend GUI pipelined compute-export overlap concurrency default is 5 and texture format default is png."""
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        try:
+            root.withdraw()
+            studio = AutoMetashapeStudio.__new__(AutoMetashapeStudio)
+            studio.root = root
+            studio._init_variables()
+            self.assertEqual(studio.var_max_concurrent_exports.get(), 5)
+            self.assertEqual(studio.var_exp_format.get(), "png")
+            self.assertTrue(studio.var_pipelined_export.get())
+        finally:
+            root.destroy()
+
 
 if __name__ == "__main__":
     unittest.main()

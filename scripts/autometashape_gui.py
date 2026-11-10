@@ -1232,7 +1232,7 @@ class AutoMetashapeStudio:
         self.batch_current_idx: int = -1
         self.lbl_queue_status = tk.StringVar(value="0 projects in queue")
         self.var_pipelined_export = tk.BooleanVar(value=True)
-        self.var_max_concurrent_exports = tk.IntVar(value=2)
+        self.var_max_concurrent_exports = tk.IntVar(value=5)
         self.active_background_exports: list[dict] = []
         self.bg_export_lock = threading.Lock()
         self.var_cluster_concurrent_projects = tk.IntVar(value=8)
@@ -1733,7 +1733,7 @@ class AutoMetashapeStudio:
         spn_exports = tk.Spinbox(
             row_pipeline_opts,
             from_=1,
-            to=4,
+            to=8,
             width=3,
             textvariable=self.var_max_concurrent_exports,
             font=("Segoe UI", 8),
@@ -2034,7 +2034,37 @@ class AutoMetashapeStudio:
         # Col 1: 3D Surface Models
         tk.Label(col1, text="3D SURFACE MODELS", font=("Segoe UI", 7, "bold"), bg=UITheme.BG_ROOT, fg=UITheme.TEXT_SECONDARY, anchor=tk.W).pack(fill=tk.X, pady=(0, 4))
         _c(col1, "Binary glTF (.glb)", self.var_export_glb)
-        _c(col1, "Wavefront OBJ (.obj + textures)", self.var_export_obj)
+
+        row_obj = tk.Frame(col1, bg=UITheme.BG_ROOT)
+        row_obj.pack(fill=tk.X, pady=1)
+        tk.Checkbutton(
+            row_obj,
+            text="Wavefront OBJ (.obj)",
+            variable=self.var_export_obj,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_PRIMARY,
+            selectcolor=UITheme.BG_SURFACE,
+            activebackground=UITheme.BG_ROOT,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            bd=0,
+            anchor=tk.W,
+            command=self._on_recon_export_checklist_changed,
+        ).pack(side=tk.LEFT)
+        self.cbo_obj_fmt = ttk.Combobox(
+            row_obj,
+            textvariable=self.var_exp_format,
+            values=["png", "tiff", "jpeg"],
+            state="readonly",
+            width=5,
+            font=("Segoe UI", 7),
+        )
+        self.cbo_obj_fmt.pack(side=tk.LEFT, padx=(4, 0))
+        self.cbo_obj_fmt.bind(
+            "<<ComboboxSelected>>",
+            lambda e: (self.var_export_obj.set(True), self._on_recon_export_checklist_changed()),
+        )
+
         _c(col1, "Autodesk FBX (.fbx)", self.var_export_fbx)
         _c(col1, "Stanford PLY (.ply)", self.var_export_ply)
         _c(col1, "AutoCAD DXF (.dxf)", self.var_export_dxf)
@@ -5312,12 +5342,12 @@ class AutoMetashapeStudio:
             self.stepper_multi.set_active(idx, f"Exporting: {proj_name}")
 
         def _bg_worker():
-            max_conc = 2
+            max_conc = 5
             try:
                 max_conc = int(self.var_max_concurrent_exports.get())
             except Exception:
-                max_conc = 2
-            max_conc = max(1, min(max_conc, 4))
+                max_conc = 5
+            max_conc = max(1, min(max_conc, 16))
 
             # Wait if active exports reached concurrency limit
             while True:
