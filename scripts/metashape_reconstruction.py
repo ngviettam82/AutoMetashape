@@ -1581,6 +1581,7 @@ def build_unified_cluster_pipeline_tasks(
     ortho_cull_faces: bool = True,
     build_tiled_model: bool = False,
     tile_size: int = 256,
+    tiled_model_format: str = "cesium",
     export_glb: bool = False,
     export_obj: bool = False,
     export_fbx: bool = False,
@@ -1611,7 +1612,7 @@ def build_unified_cluster_pipeline_tasks(
 
     # 1. Feature Matching & Camera Alignment
     if align_photos:
-        align_downscale = ALIGN_DOWNSCALE_MAP.get((align_quality or "high").lower(), 2)
+        align_downscale = ALIGN_DOWNSCALE_MAP.get((align_quality or "high").lower(), 1)
         presel_mode_enum = PRESEL_MODE_MAP.get(
             (reference_preselection_mode or "estimated").lower(),
             Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
@@ -1651,7 +1652,7 @@ def build_unified_cluster_pipeline_tasks(
             stage_info.append(("RunScript", "align", f"Auto-Crop Bounding Box ({crop_method})"))
     # 2. Multi-View Stereo Depth Maps
     if build_depth_maps:
-        depth_downscale = DEPTH_DOWNSCALE_MAP.get((depth_quality or "high").lower(), 4)
+        depth_downscale = DEPTH_DOWNSCALE_MAP.get((depth_quality or "high").lower(), 2)
         filter_mode_arg = DEPTH_FILTER_MAP.get((depth_filtering or "moderate").lower(), Metashape.FilterMode.ModerateFiltering)
         t_d = Metashape.Tasks.BuildDepthMaps()
         t_d.downscale = depth_downscale
@@ -1720,6 +1721,22 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_tl)
         stage_info.append(("BuildTiledModel", "tiled_model", f"Building 3D Tiled Model ({tile_size}px tiles)"))
 
+        tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(
+            (tiled_model_format or "cesium").lower(),
+            (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json")
+        )
+        tiled_fmt, tiled_ext = tiled_fmt_tuple
+        if (tiled_model_format or "cesium").lower() == "cesium":
+            tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
+            tiled_out = os.path.join(tiled_dir, "tileset.json")
+        else:
+            tiled_out = os.path.join(output_dir, f"{project_name}_tiled_model{tiled_ext}")
+        t_etl = Metashape.Tasks.ExportTiledModel()
+        t_etl.format = tiled_fmt
+        t_etl.path = get_exp_path(tiled_out)
+        tasks.append(t_etl)
+        stage_info.append(("ExportTiledModel", "export", f"Exporting 3D Tiled Model ({(tiled_model_format or 'cesium').upper()})"))
+
     # Geodesy / Projection Setup for DEM & Ortho
     proj = Metashape.OrthoProjection()
     target_crs = chunk.crs if chunk else None
@@ -1750,7 +1767,7 @@ def build_unified_cluster_pipeline_tasks(
     # 8. True Orthomosaic
     if build_orthomosaic:
         t_om = Metashape.Tasks.BuildOrthomosaic()
-        t_om.surface_data = Metashape.DataSource.ModelData
+        t_om.surface_data = Metashape.DataSource.ElevationData if build_dem else Metashape.DataSource.ModelData
         t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
         t_om.fill_holes = fill_holes
         t_om.ghosting_filter = ghosting_filter
@@ -1828,11 +1845,25 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_dxf)
         stage_info.append(("ExportModel", "export", "Exporting AutoCAD DXF Mesh"))
 
+    if export_tie_points:
+        tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
+        t_tp = Metashape.Tasks.ExportPointCloud()
+        t_tp.format = Metashape.PointCloudFormat.PointCloudFormatPLY
+        t_tp.source_data = Metashape.DataSource.TiePointsData
+        t_tp.path = get_exp_path(tp_out)
+        tasks.append(t_tp)
+        stage_info.append(("ExportPointCloud", "export", "Exporting Sparse Tie Points (PLY)"))
+
     if export_dem and build_dem:
         t_dem = Metashape.Tasks.ExportRaster()
         t_dem.source_data = Metashape.DataSource.ElevationData
         t_dem.format = Metashape.RasterFormat.RasterFormatNone
         t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
+        comp = Metashape.ImageCompression()
+        comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+        comp.tiff_big = True
+        t_dem.image_compression = comp
+        t_dem.save_world = True
         t_dem.path = get_exp_path(dem_out)
         tasks.append(t_dem)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Elevation Model (DEM)"))
@@ -1842,6 +1873,12 @@ def build_unified_cluster_pipeline_tasks(
         t_ortho.source_data = Metashape.DataSource.OrthomosaicData
         t_ortho.format = Metashape.RasterFormat.RasterFormatNone
         t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
+        comp = Metashape.ImageCompression()
+        comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+        comp.tiff_big = True
+        t_ortho.image_compression = comp
+        t_ortho.save_world = True
+        t_ortho.save_alpha = True
         t_ortho.path = get_exp_path(ortho_out)
         tasks.append(t_ortho)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Orthomosaic"))
@@ -2995,6 +3032,11 @@ def run_reconstruction(
             if min_quality > 0.0:
                 filter_image_quality(chunk, min_quality=min_quality)
 
+            if rolling_shutter:
+                for s in chunk.sensors:
+                    s.rolling_shutter = Metashape.Shutter.Model.Regularized
+                print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+
             if import_reference and os.path.isfile(import_reference):
                 print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
                 try:
@@ -3070,6 +3112,7 @@ def run_reconstruction(
                     ortho_cull_faces=ortho_cull_faces,
                     build_tiled_model=build_tiled_model,
                     tile_size=tile_size,
+                    tiled_model_format=tiled_model_format,
                     export_glb=export_glb,
                     export_obj=export_obj,
                     export_fbx=export_fbx,
@@ -3247,6 +3290,7 @@ def run_reconstruction(
 
                 if unified_succeeded:
                     _safe_reopen()
+                    chunk = doc.chunk
                     total_time = (time.time() - t_start) / 60.0
                     print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
                     emit_ipc_event(IPC_COMPLETE)
@@ -3860,10 +3904,11 @@ def run_reconstruction(
                 if target_crs:
                     proj.crs = target_crs
                 ortho_computed = False
+                surf_data = Metashape.DataSource.ElevationData if (build_dem or (chunk and getattr(chunk, "elevation", None) is not None)) else Metashape.DataSource.ModelData
                 if cluster_enabled:
                     try:
                         t_om = Metashape.Tasks.BuildOrthomosaic()
-                        t_om.surface_data = Metashape.DataSource.ModelData
+                        t_om.surface_data = surf_data
                         t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
                         t_om.fill_holes = fill_holes
                         t_om.ghosting_filter = ghosting_filter
@@ -3871,7 +3916,8 @@ def run_reconstruction(
                         t_om.projection = proj
                         if getattr(proj.crs, "projcs", None) and ortho_resolution > 0:
                             t_om.resolution = ortho_resolution
-                        ortho_computed = dispatch_cluster_task(t_om, "Generating Orthomosaic from Reconstructed Surface Mesh", "ortho")
+                        ortho_desc = "Generating True Orthomosaic from Elevation Surface (DEM)" if surf_data == Metashape.DataSource.ElevationData else "Generating Orthomosaic from Reconstructed Surface Mesh"
+                        ortho_computed = dispatch_cluster_task(t_om, ortho_desc, "ortho")
                         if ortho_computed:
                             chunk = doc.chunk
                     except Exception as e_om_disp:
@@ -3880,7 +3926,7 @@ def run_reconstruction(
 
                 if not ortho_computed:
                     chunk.buildOrthomosaic(
-                        surface_data=Metashape.DataSource.ModelData,
+                        surface_data=surf_data,
                         blending_mode=Metashape.BlendingMode.MosaicBlending,
                         fill_holes=fill_holes,
                         ghosting_filter=ghosting_filter,
@@ -3988,6 +4034,11 @@ def run_reconstruction(
                 t_dem.source_data = Metashape.DataSource.ElevationData
                 t_dem.format = Metashape.RasterFormat.RasterFormatNone
                 t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
+                comp = Metashape.ImageCompression()
+                comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+                comp.tiff_big = True
+                t_dem.image_compression = comp
+                t_dem.save_world = True
                 t_dem.path = get_cluster_export_path(dem_out)
                 export_tasks.append(t_dem)
 
@@ -3997,6 +4048,12 @@ def run_reconstruction(
                 t_ortho.source_data = Metashape.DataSource.OrthomosaicData
                 t_ortho.format = Metashape.RasterFormat.RasterFormatNone
                 t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
+                comp = Metashape.ImageCompression()
+                comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
+                comp.tiff_big = True
+                t_ortho.image_compression = comp
+                t_ortho.save_world = True
+                t_ortho.save_alpha = True
                 t_ortho.path = get_cluster_export_path(ortho_out)
                 export_tasks.append(t_ortho)
 
