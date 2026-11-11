@@ -21,6 +21,7 @@ import argparse
 import math
 import os
 import re
+import shutil
 import sys
 import threading
 import time
@@ -1691,6 +1692,7 @@ def build_unified_cluster_pipeline_tasks(
         t_m.face_count_custom = face_count_custom_arg
         t_m.vertex_colors = True
         t_m.vertex_confidence = True
+        t_m.replace_asset = True
         tasks.append(t_m)
         stage_info.append(("BuildModel", "mesh", f"Surface Meshing ({face_count_custom_arg:,} faces)"))
 
@@ -1718,6 +1720,7 @@ def build_unified_cluster_pipeline_tasks(
         t_tl = Metashape.Tasks.BuildTiledModel()
         t_tl.tile_size = tile_size or 256
         t_tl.source_data = Metashape.DataSource.DepthMapsData
+        t_tl.replace_asset = True
         tasks.append(t_tl)
         stage_info.append(("BuildTiledModel", "tiled_model", f"Building 3D Tiled Model ({tile_size}px tiles)"))
 
@@ -1759,6 +1762,7 @@ def build_unified_cluster_pipeline_tasks(
         t_dm = Metashape.Tasks.BuildDem()
         t_dm.source_data = dem_source
         t_dm.interpolation = Metashape.Interpolation.EnabledInterpolation
+        t_dm.replace_asset = True
         if target_crs:
             t_dm.projection = proj
         tasks.append(t_dm)
@@ -1768,6 +1772,7 @@ def build_unified_cluster_pipeline_tasks(
     if build_orthomosaic:
         t_om = Metashape.Tasks.BuildOrthomosaic()
         t_om.surface_data = Metashape.DataSource.ElevationData if build_dem else Metashape.DataSource.ModelData
+        t_om.replace_asset = True
         t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
         t_om.fill_holes = fill_holes
         t_om.ghosting_filter = ghosting_filter
@@ -2166,6 +2171,75 @@ def infer_project_name(
             return base
 
     return "project"
+
+
+def safe_create_cluster_batch(
+    net_client: Metashape.NetworkClient,
+    rel_psx: str,
+    net_tasks: list,
+    worker_limit: int | None = 1,
+    force_fresh: bool = True,
+) -> tuple[int, bool]:
+    """Safely creates a cluster batch, resolving 'Duplicate batch' conflicts on the Network Server.
+
+    If force_fresh is True, any existing batch for rel_psx (stale, failed, completed)
+    is aborted on the server first to release the unique path constraint.
+    """
+    if net_client is None:
+        raise ValueError("NetworkClient is not connected or None")
+
+    try:
+        raw_b = net_client.batchList()
+        batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else (raw_b if isinstance(raw_b, (list, tuple)) else [])
+        for b in batches:
+            b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
+            if b_path == rel_psx:
+                b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
+                b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
+                if not force_fresh and b_state in ("inprogress", "running", "submitted", "pending", "queued"):
+                    print(f"  [Cluster] Attaching to active batch #{b_id} for '{rel_psx}' ({b_state}).", flush=True)
+                    return b_id, True
+                else:
+                    try:
+                        net_client.abortBatch(b_id)
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+    except Exception as e_pre:
+        print(f"  [Cluster] Note: Pre-dispatch batch check: {e_pre}", flush=True)
+
+    try:
+        batch_id = net_client.createBatch(rel_psx, net_tasks)
+    except Exception as e_create:
+        if "duplicate batch" in str(e_create).lower():
+            try:
+                raw_b = net_client.batchList()
+                batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else (raw_b if isinstance(raw_b, (list, tuple)) else [])
+                for b in batches:
+                    if (b.get("path") if isinstance(b, dict) else getattr(b, "path", None)) == rel_psx:
+                        b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
+                        try:
+                            net_client.abortBatch(b_id)
+                        except Exception:
+                            pass
+                time.sleep(1.0)
+                batch_id = net_client.createBatch(rel_psx, net_tasks)
+            except Exception as e_retry:
+                raise e_retry
+        else:
+            raise e_create
+
+    if worker_limit is not None and worker_limit > 0:
+        try:
+            net_client.setBatchWorkerLimit(batch_id, worker_limit)
+        except Exception:
+            pass
+    try:
+        net_client.setBatchPaused(batch_id, False)
+    except Exception:
+        pass
+
+    return batch_id, False
 
 
 def run_reconstruction(
@@ -2665,14 +2739,12 @@ def run_reconstruction(
                 print(f"  [Cluster] [ERROR] Document has no active chunk for '{task_desc}'", flush=True)
                 return False
             net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
-            batch_id = net_client.createBatch(rel_psx, net_tasks)
-            if network_independent_workers:
-                try:
-                    net_client.setBatchWorkerLimit(batch_id, 1)
-                    print("  [Cluster] Mode: Independent Worker (worker_limit=1 locked to 1 node)", flush=True)
-                except Exception as e_limit:
-                    print(f"  [Cluster] Note: could not set batch worker limit: {e_limit}", flush=True)
-            net_client.setBatchPaused(batch_id, False)
+            w_limit = 1 if network_independent_workers else None
+            batch_id, was_attached = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False)
+            if was_attached:
+                print(f"  [Cluster] Attached to existing batch #{batch_id} for '{task_desc}'", flush=True)
+            elif network_independent_workers:
+                print("  [Cluster] Mode: Independent Worker (worker_limit=1 locked to 1 node)", flush=True)
 
             t_task_start = time.time()
             last_progress = -1.0
@@ -2738,8 +2810,7 @@ def run_reconstruction(
 
                             if other_workers:
                                 print(f"  [Cluster] Found {len(other_workers)} other active cluster node(s). Re-dispatching '{task_desc}'...", flush=True)
-                                retry_batch_id = net_client.createBatch(rel_psx, net_tasks)
-                                net_client.setBatchPaused(retry_batch_id, False)
+                                retry_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=1 if network_independent_workers else None, force_fresh=True)
 
                                 retry_ok = False
                                 while True:
@@ -2822,15 +2893,25 @@ def run_reconstruction(
             chunk = doc.addChunk()
             chunk.label = "Production_Reconstruction"
     else:
-        if not resume and os.path.exists(psx_out):
-            print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--resume not specified). Overwriting previous run in: {output_dir}", flush=True)
-            files_dir = get_psx_files_dir(psx_out)
-            lock_file = os.path.join(files_dir, "lock")
-            if os.path.isfile(lock_file):
-                try:
-                    os.remove(lock_file)
-                except Exception:
-                    pass
+        files_dir = get_psx_files_dir(psx_out)
+        if not resume:
+            if os.path.isdir(files_dir) or os.path.exists(psx_out) or (target_psx and os.path.exists(target_psx)):
+                print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--resume not specified). Overwriting previous run in: {output_dir}", flush=True)
+                if os.path.isdir(files_dir):
+                    try:
+                        shutil.rmtree(files_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+                if os.path.isfile(psx_out):
+                    try:
+                        os.remove(psx_out)
+                    except Exception:
+                        pass
+                if target_psx and target_psx != psx_out and os.path.isfile(target_psx):
+                    try:
+                        os.remove(target_psx)
+                    except Exception:
+                        pass
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
@@ -3132,10 +3213,11 @@ def run_reconstruction(
 
                 if u_tasks:
                     net_tasks = [t.toNetworkTask(chunk) for t in u_tasks]
-                    batch_id = net_client.createBatch(rel_psx, net_tasks)
-                    net_client.setBatchWorkerLimit(batch_id, 1)
-                    net_client.setBatchPaused(batch_id, False)
-                    print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
+                    batch_id, was_attached = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=1, force_fresh=False)
+                    if was_attached:
+                        print(f"  [Cluster] Attached to active Unified Batch ID={batch_id} on dedicated worker node.", flush=True)
+                    else:
+                        print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
 
                     t_u_start = time.time()
                     last_stage_key = None
@@ -3222,9 +3304,7 @@ def run_reconstruction(
 
                                         if other_workers:
                                             rem_net_tasks = [t.toNetworkTask(chunk) for t in remaining_u_tasks]
-                                            handoff_batch_id = net_client.createBatch(rel_psx, rem_net_tasks)
-                                            net_client.setBatchWorkerLimit(handoff_batch_id, 1)
-                                            net_client.setBatchPaused(handoff_batch_id, False)
+                                            handoff_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, rem_net_tasks, worker_limit=1, force_fresh=True)
                                             print(f"  [Cluster] Created Handoff Continuation Batch ID={handoff_batch_id} with {len(remaining_u_tasks)} tasks for another worker.", flush=True)
 
                                             # Immediately unpause failed worker so it is free to process the NEXT project in queue
@@ -3275,6 +3355,71 @@ def run_reconstruction(
 
                                             if handoff_ok:
                                                 break
+                                            else:
+                                                # Tier 2: Repeated failure (handoff also failed)! Try restarting from scratch on a clean worker node
+                                                print(f"\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.", flush=True)
+                                                print(f"  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...", flush=True)
+                                                emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
+                                                try:
+                                                    files_dir = get_psx_files_dir(psx_out)
+                                                    if os.path.isdir(files_dir):
+                                                        try:
+                                                            shutil.rmtree(files_dir, ignore_errors=True)
+                                                        except Exception:
+                                                            pass
+                                                    doc = Metashape.Document()
+                                                    fresh_chunk = doc.addChunk()
+                                                    fresh_chunk.label = "Production_Reconstruction"
+                                                    fresh_chunk.addPhotos(all_imgs)
+                                                    if rolling_shutter:
+                                                        for s in fresh_chunk.sensors:
+                                                            s.rolling_shutter = Metashape.Shutter.Model.Regularized
+                                                    doc.save(psx_out)
+
+                                                    scratch_net_tasks = [t.toNetworkTask(fresh_chunk) for t in u_tasks]
+                                                    scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, scratch_net_tasks, worker_limit=1, force_fresh=True)
+                                                    print(f"  [Cluster] Created Fresh Scratch Batch ID={scratch_batch_id} with all {len(u_tasks)} tasks on clean worker node.", flush=True)
+
+                                                    sc_start = time.time()
+                                                    sc_last_stage = None
+                                                    sc_last_prog = -1.0
+                                                    sc_last_log = 0.0
+                                                    scratch_ok = False
+                                                    while True:
+                                                        time.sleep(1.0)
+                                                        sc_info = net_client.batchInfo(scratch_batch_id)
+                                                        sc_state = sc_info.get("state")
+                                                        sc_tasks = sc_info.get("tasks", [])
+                                                        if sc_tasks:
+                                                            sc_active = next((t for t in sc_tasks if t.get("state") in ("running", "inprogress", "submitted")), sc_tasks[-1])
+                                                            sc_name = sc_active.get("name", "Task")
+                                                            sc_prog = sc_active.get("progress", 0.0)
+                                                            sc_total_prog = sum(t.get("progress", 0.0) for t in sc_tasks) / len(sc_tasks)
+                                                            matching_sc = next(((k, d) for n, k, d in u_stages if n == sc_name), ("recon", sc_name))
+                                                            sck_stage, sck_desc = matching_sc
+                                                            if sck_stage != sc_last_stage:
+                                                                emit_ipc_stage(sck_stage, sck_desc)
+                                                                print(f"\n>>> [Scratch Retry Stage] Active on Clean Worker: {sck_desc} ({sc_name})", flush=True)
+                                                                sc_last_stage = sck_stage
+                                                            sc_now = time.time()
+                                                            if abs(sc_total_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_total_prog != sc_last_prog):
+                                                                sc_elapsed = (sc_now - sc_start) / 60.0
+                                                                print(f"  [Scratch Progress] {sck_desc} - {sc_name}: {sc_prog:.1f}% (Overall: {sc_total_prog:.1f}%, Elapsed: {sc_elapsed:.1f} min)", flush=True)
+                                                                sc_last_prog = sc_total_prog
+                                                                sc_last_log = sc_now
+                                                        if sc_state == "completed":
+                                                            sc_elapsed = (time.time() - sc_start) / 60.0
+                                                            print(f"\n  [Cluster] [OK] Fresh restart from scratch successfully completed on cluster worker in {sc_elapsed:.2f} min!", flush=True)
+                                                            scratch_ok = True
+                                                            unified_succeeded = True
+                                                            break
+                                                        elif sc_state in ("failed", "aborted"):
+                                                            print(f"  [Cluster] [ERROR] Fresh scratch batch {sc_state} on clean worker node.", flush=True)
+                                                            break
+                                                    if scratch_ok:
+                                                        break
+                                                except Exception as e_scratch:
+                                                    print(f"  [Cluster] Note: scratch restart exception: {e_scratch}", flush=True)
                                     except Exception as e_h:
                                         print(f"  [Cluster] Note: handoff exception: {e_h}", flush=True)
                                     finally:
@@ -3593,6 +3738,7 @@ def run_reconstruction(
                     t_m.face_count_custom = face_count_custom_arg
                     t_m.vertex_colors = True
                     t_m.vertex_confidence = True
+                    t_m.replace_asset = True
                     mesh_computed = dispatch_cluster_task(t_m, f"Surface Mesh ({custom_faces:,} faces)", "mesh")
                     if mesh_computed:
                         chunk = doc.chunk
@@ -3747,6 +3893,7 @@ def run_reconstruction(
                         t_tl = Metashape.Tasks.BuildTiledModel()
                         t_tl.tile_size = tile_size
                         t_tl.source_data = Metashape.DataSource.DepthMapsData
+                        t_tl.replace_asset = True
                         tiled_computed = dispatch_cluster_task(t_tl, f"Building 3D Tiled Model (Tile Size: {tile_size})", "tiled_model")
                         if tiled_computed:
                             chunk = doc.chunk
@@ -3812,6 +3959,7 @@ def run_reconstruction(
                         t_dm = Metashape.Tasks.BuildDem()
                         t_dm.source_data = dem_source
                         t_dm.interpolation = Metashape.Interpolation.EnabledInterpolation
+                        t_dm.replace_asset = True
                         if target_crs:
                             t_dm.projection = proj
                         dem_computed = dispatch_cluster_task(t_dm, "Building Digital Elevation Model (DEM/DSM)", "dem")
@@ -3909,6 +4057,7 @@ def run_reconstruction(
                     try:
                         t_om = Metashape.Tasks.BuildOrthomosaic()
                         t_om.surface_data = surf_data
+                        t_om.replace_asset = True
                         t_om.blending_mode = Metashape.BlendingMode.MosaicBlending
                         t_om.fill_holes = fill_holes
                         t_om.ghosting_filter = ghosting_filter

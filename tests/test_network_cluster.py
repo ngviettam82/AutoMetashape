@@ -1203,5 +1203,176 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertGreater(len(batch_tasks), 5)
 
 
+    def test_safe_create_cluster_batch_aborts_stale_when_force_fresh(self) -> None:
+        """Verify safe_create_cluster_batch aborts stale batches on server before creating fresh batch."""
+        import metashape_reconstruction as mr
+        mock_net = MagicMock()
+        mock_net.batchList.return_value = {
+            "batches": [
+                {"batch_id": 101, "path": "SiteA/project.psx", "state": "failed"},
+                {"batch_id": 102, "path": "SiteB/project.psx", "state": "completed"},
+            ]
+        }
+        mock_net.createBatch.return_value = 202
+
+        batch_id, was_attached = mr.safe_create_cluster_batch(
+            mock_net, "SiteA/project.psx", [MagicMock()], worker_limit=1, force_fresh=True
+        )
+
+        mock_net.abortBatch.assert_called_once_with(101)
+        mock_net.createBatch.assert_called_once()
+        mock_net.setBatchWorkerLimit.assert_called_once_with(202, 1)
+        mock_net.setBatchPaused.assert_called_once_with(202, False)
+        self.assertEqual(batch_id, 202)
+        self.assertFalse(was_attached)
+
+    def test_safe_create_cluster_batch_attaches_when_not_force_fresh(self) -> None:
+        """Verify safe_create_cluster_batch re-attaches to active batch when force_fresh=False."""
+        import metashape_reconstruction as mr
+        mock_net = MagicMock()
+        mock_net.batchList.return_value = {
+            "batches": [
+                {"batch_id": 303, "path": "SiteA/project.psx", "state": "inprogress"},
+            ]
+        }
+
+        batch_id, was_attached = mr.safe_create_cluster_batch(
+            mock_net, "SiteA/project.psx", [MagicMock()], worker_limit=1, force_fresh=False
+        )
+
+        self.assertEqual(batch_id, 303)
+        self.assertTrue(was_attached)
+        mock_net.abortBatch.assert_not_called()
+        mock_net.createBatch.assert_not_called()
+
+    def test_safe_create_cluster_batch_catches_duplicate_batch_and_retries(self) -> None:
+        """Verify safe_create_cluster_batch catches Duplicate Batch error, aborts stale ID, and retries."""
+        import metashape_reconstruction as mr
+        mock_net = MagicMock()
+        mock_net.batchList.side_effect = [
+            {"batches": []},
+            {"batches": [{"batch_id": 404, "path": "SiteA/project.psx", "state": "aborted"}]},
+        ]
+        mock_net.createBatch.side_effect = [
+            RuntimeError("Duplicate batch: SiteA/project.psx"),
+            505,
+        ]
+
+        batch_id, was_attached = mr.safe_create_cluster_batch(
+            mock_net, "SiteA/project.psx", [MagicMock()], worker_limit=1, force_fresh=False
+        )
+
+        self.assertEqual(batch_id, 505)
+        self.assertFalse(was_attached)
+        mock_net.abortBatch.assert_called_once_with(404)
+        self.assertEqual(mock_net.createBatch.call_count, 2)
+
+    def test_replace_asset_configured_on_reconstruction_tasks(self) -> None:
+        """Verify replace_asset=True is configured across Model, DEM, Ortho, and Tiled Model tasks."""
+        from unittest.mock import patch
+        import metashape_reconstruction as mr
+
+        mock_meta = MagicMock()
+        mock_meta.Tasks.BuildModel = lambda: MagicMock(name="BuildModel")
+        mock_meta.Tasks.BuildTiledModel = lambda: MagicMock(name="BuildTiledModel")
+        mock_meta.Tasks.BuildDem = lambda: MagicMock(name="BuildDem")
+        mock_meta.Tasks.BuildOrthomosaic = lambda: MagicMock(name="BuildOrthomosaic")
+        mock_meta.Tasks.ExportModel = lambda: MagicMock(name="ExportModel")
+        mock_meta.Tasks.ExportRaster = lambda: MagicMock(name="ExportRaster")
+
+        mock_chunk = MagicMock()
+        mock_chunk.crs = None
+        mock_chunk.cameras = []
+
+        with patch.object(mr, "Metashape", mock_meta):
+            tasks, stage_info = mr.build_unified_cluster_pipeline_tasks(
+                chunk=mock_chunk,
+                output_dir="C:/Out/TestReplace",
+                project_name="TestReplace",
+                align_photos=False,
+                build_depth_maps=False,
+                build_mesh=True,
+                build_tiled_model=True,
+                build_dem=True,
+                build_orthomosaic=True,
+            )
+
+        task_dict = {name: t for (name, _, _), t in zip(stage_info, tasks)}
+
+        self.assertIn("BuildModel", task_dict)
+        self.assertTrue(getattr(task_dict["BuildModel"], "replace_asset", False))
+
+        self.assertIn("BuildTiledModel", task_dict)
+        self.assertTrue(getattr(task_dict["BuildTiledModel"], "replace_asset", False))
+
+        self.assertIn("BuildDem", task_dict)
+        self.assertTrue(getattr(task_dict["BuildDem"], "replace_asset", False))
+
+        self.assertIn("BuildOrthomosaic", task_dict)
+        self.assertTrue(getattr(task_dict["BuildOrthomosaic"], "replace_asset", False))
+
+    def test_clean_scratch_purge_removes_existing_files_dir_and_psx(self) -> None:
+        """Verify running reconstruction from scratch (resume=False) cleanly purges old files directory and psx."""
+        import tempfile
+        from unittest.mock import MagicMock, patch
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+
+            with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"dummy")
+
+            # Create existing psx and files directory simulating a previous run
+            psx_path = os.path.join(out_dir, "TestCleanProject.psx")
+            files_dir = os.path.join(out_dir, "TestCleanProject.files")
+            old_model_dir = os.path.join(files_dir, "0", "0", "model.1")
+            os.makedirs(old_model_dir, exist_ok=True)
+            with open(psx_path, "w") as f:
+                f.write("<dummy_xml/>")
+            with open(os.path.join(files_dir, "lock"), "w") as f:
+                f.write("locked")
+
+            self.assertTrue(os.path.exists(psx_path))
+            self.assertTrue(os.path.isdir(files_dir))
+            self.assertTrue(os.path.exists(old_model_dir))
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = []
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.point_cloud = None
+            mock_chunk.model = None
+            mock_chunk.elevation = None
+            mock_chunk.orthomosaic = None
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            with patch.object(mr, "Metashape", mock_meta):
+                mr.run_reconstruction(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    project_name="TestCleanProject",
+                    network_enable=False,
+                    resume=False,
+                    align_photos=False,
+                    build_depth_maps=False,
+                    build_mesh=False,
+                    build_texture=False,
+                    build_dem=False,
+                    build_orthomosaic=False,
+                    export_glb=False,
+                    export_obj=False,
+                )
+
+            # Assert that stale psx and stale files dir were cleanly purged
+            self.assertFalse(os.path.exists(old_model_dir))
+            self.assertFalse(os.path.exists(os.path.join(files_dir, "lock")))
+
+
 if __name__ == "__main__":
     unittest.main()
