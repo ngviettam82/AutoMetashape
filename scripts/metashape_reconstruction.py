@@ -1646,7 +1646,7 @@ def build_unified_cluster_pipeline_tasks(
                 stage_info.append((t_type, "align", "Gradual Selection Tie-Point Cleaning & Camera Optimization"))
 
     # Auto-Crop Bounding Box (Runs after alignment, whether unified or pre-aligned multi-chunk)
-    if crop_method in ("gps-square", "structure"):
+    if align_photos and crop_method in ("gps-square", "structure"):
         t_crop = build_cluster_crop_task(crop_method, padding=crop_padding)
         if t_crop:
             tasks.append(t_crop)
@@ -2173,6 +2173,12 @@ def infer_project_name(
     return "project"
 
 
+def _norm_cluster_path(p: str | None) -> str:
+    if not p:
+        return ""
+    return p.strip().replace("\\", "/").rstrip("/").lower()
+
+
 def safe_create_cluster_batch(
     net_client: Metashape.NetworkClient,
     rel_psx: str,
@@ -2188,12 +2194,34 @@ def safe_create_cluster_batch(
     if net_client is None:
         raise ValueError("NetworkClient is not connected or None")
 
+    norm_target = _norm_cluster_path(rel_psx)
+
+    # 1. Native findBatch check if available
+    if hasattr(net_client, "findBatch"):
+        try:
+            fb_id = net_client.findBatch(rel_psx)
+            if fb_id is not None and fb_id > 0:
+                fb_info = net_client.batchInfo(fb_id)
+                fb_state = (fb_info.get("state", "") if isinstance(fb_info, dict) else getattr(fb_info, "state", "")).lower()
+                if not force_fresh and fb_state in ("inprogress", "running", "submitted", "pending", "queued"):
+                    print(f"  [Cluster] Attaching to active batch #{fb_id} via findBatch for '{rel_psx}' ({fb_state}).", flush=True)
+                    return fb_id, True
+                else:
+                    try:
+                        net_client.abortBatch(fb_id)
+                        time.sleep(0.5)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    # 2. Comprehensive batchList check with slash and case normalization
     try:
         raw_b = net_client.batchList()
         batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else (raw_b if isinstance(raw_b, (list, tuple)) else [])
         for b in batches:
             b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
-            if b_path == rel_psx:
+            if _norm_cluster_path(b_path) == norm_target:
                 b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
                 b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
                 if not force_fresh and b_state in ("inprogress", "running", "submitted", "pending", "queued"):
@@ -2213,15 +2241,26 @@ def safe_create_cluster_batch(
     except Exception as e_create:
         if "duplicate batch" in str(e_create).lower():
             try:
+                aborted_ids = set()
                 raw_b = net_client.batchList()
                 batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else (raw_b if isinstance(raw_b, (list, tuple)) else [])
                 for b in batches:
-                    if (b.get("path") if isinstance(b, dict) else getattr(b, "path", None)) == rel_psx:
+                    b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
+                    if _norm_cluster_path(b_path) == norm_target:
                         b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
-                        try:
-                            net_client.abortBatch(b_id)
-                        except Exception:
-                            pass
+                        if b_id is not None:
+                            try:
+                                net_client.abortBatch(b_id)
+                                aborted_ids.add(b_id)
+                            except Exception:
+                                pass
+                if not aborted_ids and hasattr(net_client, "findBatch"):
+                    try:
+                        fb_id = net_client.findBatch(rel_psx)
+                        if fb_id is not None and fb_id not in aborted_ids:
+                            net_client.abortBatch(fb_id)
+                    except Exception:
+                        pass
                 time.sleep(1.0)
                 batch_id = net_client.createBatch(rel_psx, net_tasks)
             except Exception as e_retry:
@@ -3158,7 +3197,67 @@ def run_reconstruction(
                 doc.save(psx_out)
                 rel_psx = get_cluster_rel_path()
 
+                has_depth = False
+                if chunk and chunk.depth_maps is not None:
+                    try:
+                        has_depth = len(chunk.depth_maps.keys()) > 0 if hasattr(chunk.depth_maps, "keys") else bool(chunk.depth_maps)
+                    except Exception:
+                        has_depth = bool(chunk.depth_maps)
+
+                has_point_cloud = False
+                if chunk and chunk.point_cloud is not None:
+                    try:
+                        has_point_cloud = getattr(chunk.point_cloud, "point_count", 0) > 0
+                    except Exception:
+                        has_point_cloud = False
+
+                has_mesh = False
+                if chunk and chunk.model is not None:
+                    try:
+                        has_mesh = len(chunk.model.faces) > 0 if hasattr(chunk.model, "faces") else True
+                    except Exception:
+                        has_mesh = False
+
+                has_tex = False
+                if has_mesh and chunk.model is not None and not rebake_texture:
+                    try:
+                        if hasattr(chunk.model, "textures"):
+                            has_tex = len(chunk.model.textures) == (texture_pages or 16)
+                        elif hasattr(chunk.model, "texture") and chunk.model.texture():
+                            has_tex = ((texture_pages or 16) == 1)
+                    except Exception:
+                        has_tex = False
+
+                has_dem_asset = bool(chunk and getattr(chunk, "elevation", None) is not None)
+                has_ortho_asset = bool(chunk and getattr(chunk, "orthomosaic", None) is not None)
+
                 u_align = align_photos and (not use_multi_chunk) and (not resumed)
+                u_depth = build_depth_maps and not (resumed and has_depth)
+                u_pc = build_point_cloud and not (resumed and has_point_cloud)
+                u_mesh = build_mesh and not (resumed and has_mesh)
+                u_tex = build_texture and not (resumed and has_tex)
+                u_dem = build_dem and not (resumed and has_dem_asset)
+                u_ortho = build_orthomosaic and not (resumed and has_ortho_asset)
+
+                if resumed:
+                    reused_items = []
+                    if not u_align:
+                        reused_items.append("Aligned Cameras")
+                    if has_depth and not u_depth:
+                        reused_items.append("Depth Maps")
+                    if has_point_cloud and not u_pc:
+                        reused_items.append("Point Cloud")
+                    if has_mesh and not u_mesh:
+                        reused_items.append("Surface Mesh")
+                    if has_tex and not u_tex:
+                        reused_items.append("Texture Atlas")
+                    if has_dem_asset and not u_dem:
+                        reused_items.append("DEM")
+                    if has_ortho_asset and not u_ortho:
+                        reused_items.append("Orthomosaic")
+                    if reused_items:
+                        print(f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}", flush=True)
+
                 u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
                     chunk=chunk,
                     output_dir=output_dir,
@@ -3175,20 +3274,20 @@ def run_reconstruction(
                     filter_tiepoints=filter_tiepoints,
                     crop_method=crop_method,
                     crop_padding=crop_padding,
-                    build_depth_maps=build_depth_maps,
+                    build_depth_maps=u_depth,
                     depth_quality=depth_quality,
                     depth_filtering=depth_filtering,
-                    build_point_cloud=build_point_cloud,
+                    build_point_cloud=u_pc,
                     points_spacing=points_spacing,
-                    build_mesh=build_mesh,
+                    build_mesh=u_mesh,
                     surface_type=surface_type,
                     custom_faces=custom_faces,
-                    build_texture=build_texture,
+                    build_texture=u_tex,
                     texture_pages=texture_pages,
                     fill_holes=fill_holes,
                     ghosting_filter=ghosting_filter,
-                    build_dem=build_dem,
-                    build_orthomosaic=build_orthomosaic,
+                    build_dem=u_dem,
+                    build_orthomosaic=u_ortho,
                     ortho_resolution=ortho_resolution,
                     ortho_cull_faces=ortho_cull_faces,
                     build_tiled_model=build_tiled_model,
@@ -3370,15 +3469,75 @@ def run_reconstruction(
                                                     doc = Metashape.Document()
                                                     fresh_chunk = doc.addChunk()
                                                     fresh_chunk.label = "Production_Reconstruction"
-                                                    fresh_chunk.addPhotos(all_imgs)
+
+                                                    fresh_imgs = []
+                                                    if 'all_imgs' in locals() and all_imgs:
+                                                        fresh_imgs = all_imgs
+                                                    else:
+                                                        for f_imgs in discover_image_subfolder_groups(images_dir, output_dir=output_dir).values():
+                                                            fresh_imgs.extend(f_imgs)
+                                                        fresh_imgs = sorted(fresh_imgs)
+                                                    fresh_chunk.addPhotos(fresh_imgs)
+
                                                     if rolling_shutter:
                                                         for s in fresh_chunk.sensors:
                                                             s.rolling_shutter = Metashape.Shutter.Model.Regularized
                                                     doc.save(psx_out)
 
-                                                    scratch_net_tasks = [t.toNetworkTask(fresh_chunk) for t in u_tasks]
+                                                    scratch_tasks, scratch_stages = build_unified_cluster_pipeline_tasks(
+                                                        chunk=fresh_chunk,
+                                                        output_dir=output_dir,
+                                                        project_name=project_name,
+                                                        align_photos=True,
+                                                        align_quality=align_quality,
+                                                        reference_preselection_mode=reference_preselection_mode,
+                                                        keypoint_limit=keypoint_limit,
+                                                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                                                        tiepoint_limit=tiepoint_limit,
+                                                        filter_stationary_points=filter_stationary_points,
+                                                        guided_matching=guided_matching,
+                                                        adaptive_fitting=adaptive_fitting,
+                                                        filter_tiepoints=filter_tiepoints,
+                                                        crop_method=crop_method,
+                                                        crop_padding=crop_padding,
+                                                        build_depth_maps=build_depth_maps,
+                                                        depth_quality=depth_quality,
+                                                        depth_filtering=depth_filtering,
+                                                        build_point_cloud=build_point_cloud,
+                                                        points_spacing=points_spacing,
+                                                        build_mesh=build_mesh,
+                                                        surface_type=surface_type,
+                                                        custom_faces=custom_faces,
+                                                        build_texture=build_texture,
+                                                        texture_pages=texture_pages,
+                                                        fill_holes=fill_holes,
+                                                        ghosting_filter=ghosting_filter,
+                                                        build_dem=build_dem,
+                                                        build_orthomosaic=build_orthomosaic,
+                                                        ortho_resolution=ortho_resolution,
+                                                        ortho_cull_faces=ortho_cull_faces,
+                                                        build_tiled_model=build_tiled_model,
+                                                        tile_size=tile_size,
+                                                        tiled_model_format=tiled_model_format,
+                                                        export_glb=export_glb,
+                                                        export_obj=export_obj,
+                                                        export_fbx=export_fbx,
+                                                        export_ply=export_ply,
+                                                        export_dxf=export_dxf,
+                                                        export_tie_points=export_tie_points,
+                                                        export_dem=export_dem,
+                                                        export_ortho=export_ortho,
+                                                        export_point_cloud=export_point_cloud,
+                                                        point_cloud_format=point_cloud_format,
+                                                        export_report=export_report,
+                                                        report_title=report_title,
+                                                        texture_format=texture_format,
+                                                        network_path=network_path,
+                                                        export_path_fn=get_cluster_export_path,
+                                                    )
+                                                    scratch_net_tasks = [t.toNetworkTask(fresh_chunk) for t in scratch_tasks]
                                                     scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, scratch_net_tasks, worker_limit=1, force_fresh=True)
-                                                    print(f"  [Cluster] Created Fresh Scratch Batch ID={scratch_batch_id} with all {len(u_tasks)} tasks on clean worker node.", flush=True)
+                                                    print(f"  [Cluster] Created Fresh Scratch Batch ID={scratch_batch_id} with all {len(scratch_tasks)} tasks on clean worker node.", flush=True)
 
                                                     sc_start = time.time()
                                                     sc_last_stage = None
@@ -3395,7 +3554,7 @@ def run_reconstruction(
                                                             sc_name = sc_active.get("name", "Task")
                                                             sc_prog = sc_active.get("progress", 0.0)
                                                             sc_total_prog = sum(t.get("progress", 0.0) for t in sc_tasks) / len(sc_tasks)
-                                                            matching_sc = next(((k, d) for n, k, d in u_stages if n == sc_name), ("recon", sc_name))
+                                                            matching_sc = next(((k, d) for n, k, d in scratch_stages if n == sc_name), ("recon", sc_name))
                                                             sck_stage, sck_desc = matching_sc
                                                             if sck_stage != sc_last_stage:
                                                                 emit_ipc_stage(sck_stage, sck_desc)
@@ -3432,6 +3591,9 @@ def run_reconstruction(
                             print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
                             unified_succeeded = False
                             break
+                else:
+                    print("  [Cluster] All requested photogrammetry stages and deliverables already completed in project checkpoint.", flush=True)
+                    unified_succeeded = True
 
                 if unified_succeeded:
                     _safe_reopen()

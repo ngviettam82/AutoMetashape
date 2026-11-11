@@ -1464,5 +1464,53 @@ class TestNetworkCluster(unittest.TestCase):
             root.destroy()
 
 
+    def test_norm_cluster_path_handles_mixed_slashes_and_case(self) -> None:
+        """Verify _norm_cluster_path normalizes backslashes, forward slashes, trailing slashes, and casing."""
+        from metashape_reconstruction import _norm_cluster_path
+
+        p1 = r"041126\Result\0211\0211.psx"
+        p2 = "041126/result/0211/0211.psx"
+        p3 = "041126/Result/0211/0211.psx/"
+        self.assertEqual(_norm_cluster_path(p1), "041126/result/0211/0211.psx")
+        self.assertEqual(_norm_cluster_path(p1), _norm_cluster_path(p2))
+        self.assertEqual(_norm_cluster_path(p2), _norm_cluster_path(p3))
+
+    def test_safe_create_cluster_batch_find_batch_attachment(self) -> None:
+        """Verify safe_create_cluster_batch attaches to active batch found via findBatch."""
+        import metashape_reconstruction as mr
+        mock_net = MagicMock()
+        mock_net.findBatch.return_value = 888
+        mock_net.batchInfo.return_value = {"state": "inprogress"}
+
+        batch_id, was_attached = mr.safe_create_cluster_batch(
+            mock_net, "041126/Result/SiteA/SiteA.psx", [MagicMock()], worker_limit=1, force_fresh=False
+        )
+
+        self.assertEqual(batch_id, 888)
+        self.assertTrue(was_attached)
+        mock_net.createBatch.assert_not_called()
+
+    def test_unified_pipeline_skips_crop_when_align_photos_false(self) -> None:
+        """Verify build_unified_cluster_pipeline_tasks omits auto-crop when align_photos is False."""
+        import metashape_reconstruction as mr
+        mock_chunk = MagicMock()
+
+        tasks, stages = mr.build_unified_cluster_pipeline_tasks(
+            chunk=mock_chunk,
+            output_dir="C:/Out/TestNoCrop",
+            project_name="TestNoCrop",
+            align_photos=False,
+            crop_method="gps-square",
+            build_depth_maps=True,
+            build_mesh=True,
+        )
+
+        stage_keys = [k for _, k, _ in stages]
+        self.assertNotIn("align", stage_keys)
+        # Verify no RunScript auto-crop task exists
+        task_names = [name for name, _, _ in stages]
+        self.assertNotIn("RunScript", task_names)
+
+
 if __name__ == "__main__":
     unittest.main()
