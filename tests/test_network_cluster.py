@@ -1374,5 +1374,95 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertFalse(os.path.exists(os.path.join(files_dir, "lock")))
 
 
+    def test_cli_argparse_resume_boolean_optional_action(self) -> None:
+        """Verify argparse default is resume=True and accepts both --resume and --no-resume flags."""
+        from metashape_reconstruction import build_arg_parser
+
+        parser = build_arg_parser()
+        args_default = parser.parse_args(["--images", "C:/dummy"])
+        self.assertTrue(args_default.resume)
+
+        args_resume = parser.parse_args(["--images", "C:/dummy", "--resume"])
+        self.assertTrue(args_resume.resume)
+
+        args_no_resume = parser.parse_args(["--images", "C:/dummy", "--no-resume"])
+        self.assertFalse(args_no_resume.resume)
+
+    def test_build_reconstruction_cmd_reflects_resume_toggle(self) -> None:
+        """Verify _build_reconstruction_cmd outputs --resume or --no-resume based on var_resume."""
+        from unittest.mock import MagicMock
+        from autometashape_gui import AutoMetashapeStudio
+
+        gui_mock = MagicMock()
+        gui_mock.selected_preset_key = "pro"
+        gui_mock.var_align_quality.get.return_value = "high"
+        gui_mock.var_faces.get.return_value = "2000000"
+        gui_mock.var_tex_pages.get.return_value = "16"
+        gui_mock.var_crop.get.return_value = "gps-square"
+        gui_mock.var_depth_quality.get.return_value = "high"
+        gui_mock.var_depth_filtering.get.return_value = "moderate"
+        gui_mock.var_keypoint_limit.get.return_value = "200000"
+        gui_mock.var_tiepoint_limit.get.return_value = "25000"
+        gui_mock.var_filter_tiepoints.get.return_value = True
+        gui_mock.var_presel_mode.get.return_value = "estimated"
+        gui_mock.var_guided.get.return_value = True
+        gui_mock.var_rolling.get.return_value = True
+        gui_mock.var_stationary.get.return_value = True
+        gui_mock.var_adaptive_fitting.get.return_value = True
+        gui_mock.var_close_holes.get.return_value = False
+        gui_mock.var_fill_holes.get.return_value = True
+        gui_mock.var_ghosting.get.return_value = True
+        gui_mock.var_remove_lighting.get.return_value = False
+        gui_mock.var_export_glb.get.return_value = False
+        gui_mock.var_export_obj.get.return_value = False
+        gui_mock.var_export_obj_tiff.get.return_value = False
+        gui_mock.var_export_fbx.get.return_value = False
+        gui_mock.var_export_ply.get.return_value = False
+        gui_mock.var_build_point_cloud.get.return_value = False
+        gui_mock.var_export_point_cloud.get.return_value = False
+        gui_mock.var_build_dem.get.return_value = False
+        gui_mock.var_export_dem.get.return_value = False
+        gui_mock.var_build_ortho.get.return_value = False
+        gui_mock.var_export_ortho.get.return_value = False
+        gui_mock.var_build_tiled_model.get.return_value = False
+        gui_mock.var_export_tiles.get.return_value = False
+        gui_mock.var_export_report.get.return_value = False
+        gui_mock.var_pc_format.get.return_value = "laz"
+        gui_mock.var_classify_ground.get.return_value = False
+        gui_mock.var_classify_points.get.return_value = False
+        gui_mock.var_pause_crop.get.return_value = False
+        gui_mock.var_rebake.get.return_value = False
+        gui_mock.var_multi_chunk.get.return_value = "disable"
+        gui_mock.var_chunk_align_method.get.return_value = "camera"
+        gui_mock.var_network_enable.get.return_value = False
+
+        # When var_resume is True -> cmd must contain --resume
+        gui_mock.var_resume.get.return_value = True
+        cmd_true = AutoMetashapeStudio._build_reconstruction_cmd(gui_mock, r"C:\Images", r"C:\Output", "ProjectA")
+        self.assertIn("--resume", cmd_true)
+        self.assertNotIn("--no-resume", cmd_true)
+
+        # When var_resume is False -> cmd must contain --no-resume
+        gui_mock.var_resume.get.return_value = False
+        cmd_false = AutoMetashapeStudio._build_reconstruction_cmd(gui_mock, r"C:\Images", r"C:\Output", "ProjectA")
+        self.assertIn("--no-resume", cmd_false)
+        self.assertNotIn("--resume", cmd_false)
+
+    def test_gui_resume_variable_defaults_to_true(self) -> None:
+        """Verify AutoMetashapeStudio initializes var_resume with True default."""
+        import tkinter as tk
+        from autometashape_gui import AutoMetashapeStudio
+
+        root = tk.Tk()
+        root.withdraw()
+        try:
+            studio = AutoMetashapeStudio.__new__(AutoMetashapeStudio)
+            studio.root = root
+            studio.var_resume = tk.BooleanVar(value=True)
+            self.assertTrue(studio.var_resume.get())
+        finally:
+            root.destroy()
+
+
 if __name__ == "__main__":
     unittest.main()

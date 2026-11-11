@@ -1151,7 +1151,7 @@ class AutoMetashapeStudio:
         self.var_ghosting = tk.BooleanVar(value=True)
         self.var_pause_crop = tk.BooleanVar(value=False)
         self.var_rebake = tk.BooleanVar(value=False)
-        self.var_resume = tk.BooleanVar(value=False)
+        self.var_resume = tk.BooleanVar(value=True)
         # Export Deliverables Checklist (Default: False · Only make project Metashape)
         self.var_export_glb = tk.BooleanVar(value=False)
         self.var_export_obj = tk.BooleanVar(value=False)  # Default: False (Strictly tick-driven)
@@ -1945,12 +1945,76 @@ class AutoMetashapeStudio:
             "Manual photogrammetry parameters: customize polygon density, texture atlas pages, keypoint budgets, depth filtering, hole closing, and geomatics flags.",
         )
 
+        # Checkpoint Resume Toggle (Universal: Available across ALL presets)
+        self.frame_resume = tk.Frame(
+            self.card_preset.body,
+            bg=UITheme.BG_ROOT,
+            bd=1,
+            relief=tk.SOLID,
+            highlightbackground=UITheme.BORDER,
+            padx=10,
+            pady=8,
+        )
+        self.frame_resume.pack(fill=tk.X, pady=(6, 2))
+
+        top_resume = tk.Frame(self.frame_resume, bg=UITheme.BG_ROOT)
+        top_resume.pack(fill=tk.X)
+
+        self.chk_resume = tk.Checkbutton(
+            top_resume,
+            text="Resume from checkpoint (skip completed steps if project exists)",
+            variable=self.var_resume,
+            font=("Segoe UI", 9, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_PRIMARY,
+            selectcolor=UITheme.BG_SURFACE,
+            activebackground=UITheme.BG_ROOT,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            cursor="hand2",
+            command=self._on_resume_toggle_changed,
+        )
+        self.chk_resume.pack(side=tk.LEFT)
+
+        self.lbl_resume_badge = tk.Label(
+            top_resume,
+            text="RESUME: ON" if self.var_resume.get() else "SCRATCH: ON",
+            font=("Segoe UI", 8, "bold"),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.ACCENT_GREEN if self.var_resume.get() else UITheme.ACCENT_AMBER,
+        )
+        self.lbl_resume_badge.pack(side=tk.RIGHT)
+
+        self.lbl_resume_hint = tk.Label(
+            self.frame_resume,
+            text="Default: ON · Automatically detects existing project in export folder and resumes without re-running finished stages. Uncheck to cleanly wipe old files and restart from scratch.",
+            font=("Segoe UI", 7),
+            bg=UITheme.BG_ROOT,
+            fg=UITheme.TEXT_MUTED,
+            anchor=tk.W,
+            justify=tk.LEFT,
+        )
+        self.lbl_resume_hint.pack(fill=tk.X, pady=(2, 0))
+
     def _on_preset_hover(self, key: str, is_hover: bool) -> None:
         if key == self.selected_preset_key:
             return
         card = self.preset_cards.get(key)
         if card:
             card["outer"].config(bg=UITheme.BORDER_HOVER if is_hover else UITheme.BORDER)
+
+    def _on_resume_toggle_changed(self) -> None:
+        val = self.var_resume.get()
+        if hasattr(self, "lbl_resume_badge"):
+            if val:
+                self.lbl_resume_badge.config(
+                    text="RESUME: ON",
+                    fg=UITheme.ACCENT_GREEN,
+                )
+            else:
+                self.lbl_resume_badge.config(
+                    text="SCRATCH: ON",
+                    fg=UITheme.ACCENT_AMBER,
+                )
 
     # -----------------------------------------------------------------------
     # Step 3: Export Deliverables Checklist Card (Default: Project Only)
@@ -3356,7 +3420,21 @@ class AutoMetashapeStudio:
 
         chk_lifecycle = tk.Frame(self.body_adv, bg=UITheme.BG_SURFACE)
         chk_lifecycle.pack(fill=tk.X, pady=(2, 6))
-        _c(chk_lifecycle, "Resume from checkpoint (skip completed steps)", self.var_resume).pack(side=tk.LEFT)
+        cb_adv_resume = tk.Checkbutton(
+            chk_lifecycle,
+            text="Resume from checkpoint (skip completed steps)",
+            variable=self.var_resume,
+            font=("Segoe UI", 8),
+            bg=UITheme.BG_SURFACE,
+            fg=UITheme.TEXT_PRIMARY,
+            selectcolor=UITheme.BG_SURFACE_RAISED,
+            activebackground=UITheme.BG_SURFACE,
+            activeforeground=UITheme.TEXT_PRIMARY,
+            bd=0,
+            cursor="hand2",
+            command=self._on_resume_toggle_changed,
+        )
+        cb_adv_resume.pack(side=tk.LEFT)
 
     def _toggle_advanced(self) -> None:
         self.adv_expanded = not self.adv_expanded
@@ -5086,6 +5164,8 @@ class AutoMetashapeStudio:
             cmd.append("--rebake-texture")
         if self.var_resume.get():
             cmd.append("--resume")
+        else:
+            cmd.append("--no-resume")
         if hasattr(self, "var_multi_chunk") and self.var_multi_chunk.get() != "disable":
             cmd.extend(["--multi-chunk", self.var_multi_chunk.get()])
         if hasattr(self, "var_chunk_align_method") and self.var_chunk_align_method.get() != "camera":

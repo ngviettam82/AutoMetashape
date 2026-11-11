@@ -2274,7 +2274,7 @@ def run_reconstruction(
     rolling_shutter: bool = True,
     close_holes: bool = False,
     pause_after_crop: bool = False,
-    resume: bool = False,
+    resume: bool = True,
     multi_chunk: str = "disable",
     chunk_align_method: str = "camera",
     preset: str = "pro",
@@ -2536,7 +2536,7 @@ def run_reconstruction(
     print(f"  Dense Point Cloud:  {'ENABLED' if build_point_cloud else 'DISABLED'} (Classify Ground: {classify_ground})")
     print(f"  Elevation (DEM):    {'ENABLED' if build_dem else 'DISABLED'} | Orthomosaic: {'ENABLED' if build_orthomosaic else 'DISABLED'}")
     print(f"  Quality PDF Report: {'ENABLED' if export_report else 'DISABLED'}")
-    print(f"  Execution Mode:     {'RESUME CHECKPOINT' if resume else 'RESTART FROM SCRATCH (DEFAULT)'}")
+    print(f"  Execution Mode:     {'RESUME CHECKPOINT (DEFAULT)' if resume else 'RESTART FROM SCRATCH'}")
     print("=========================================================================", flush=True)
 
     # Enable all available NVIDIA / high-performance GPUs
@@ -2846,7 +2846,7 @@ def run_reconstruction(
             return False
 
     if resume and target_psx:
-        print(f"\n[Checkpoint] Found existing project (--resume specified): {target_psx}", flush=True)
+        print(f"\n[Checkpoint] Found existing project (resume enabled): {target_psx}", flush=True)
         try:
             files_dir = get_psx_files_dir(psx_out)
             lock_file = os.path.join(files_dir, "lock")
@@ -2896,7 +2896,7 @@ def run_reconstruction(
         files_dir = get_psx_files_dir(psx_out)
         if not resume:
             if os.path.isdir(files_dir) or os.path.exists(psx_out) or (target_psx and os.path.exists(target_psx)):
-                print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--resume not specified). Overwriting previous run in: {output_dir}", flush=True)
+                print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--no-resume specified). Overwriting previous run in: {output_dir}", flush=True)
                 if os.path.isdir(files_dir):
                     try:
                         shutil.rmtree(files_dir, ignore_errors=True)
@@ -3158,7 +3158,7 @@ def run_reconstruction(
                 doc.save(psx_out)
                 rel_psx = get_cluster_rel_path()
 
-                u_align = align_photos and (not use_multi_chunk)
+                u_align = align_photos and (not use_multi_chunk) and (not resumed)
                 u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
                     chunk=chunk,
                     output_dir=output_dir,
@@ -4591,9 +4591,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--resume",
-        action="store_true",
-        default=False,
-        help="Resume reconstruction from existing project checkpoint if available (default: False; restarts from scratch by default)",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Resume reconstruction from existing project checkpoint if available (default: True). Use --no-resume to force a fresh restart from scratch.",
     )
     return parser
 
