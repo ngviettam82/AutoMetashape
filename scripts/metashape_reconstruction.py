@@ -51,14 +51,55 @@ IPC_PAUSE_CROP = "@@AUTOMETASHAPE_PAUSE_CROP@@"
 IPC_COMPLETE = "@@AUTOMETASHAPE_COMPLETE@@"
 
 
-def emit_ipc_stage(stage_key: str, description: str) -> None:
+_ACTIVE_STATUS_FILE: str | None = None
+
+
+def set_active_status_file(path: str | None) -> None:
+    """Set the active status sidecar JSON file path for worker IPC telemetry."""
+    global _ACTIVE_STATUS_FILE
+    _ACTIVE_STATUS_FILE = path
+
+
+def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> None:
     """Emits an explicit machine-readable IPC milestone sentinel to stdout for GUI tracking."""
     print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{description}{IPC_SENTINEL_SUFFIX}", flush=True)
+    global _ACTIVE_STATUS_FILE
+    if _ACTIVE_STATUS_FILE:
+        try:
+            import socket
+            data = {
+                "stage_key": stage_key,
+                "stage_desc": description,
+                "progress": float(progress),
+                "worker_node": socket.gethostname(),
+                "status": "running",
+                "timestamp": time.time(),
+            }
+            with open(_ACTIVE_STATUS_FILE, "w", encoding="utf-8") as sf:
+                json.dump(data, sf)
+        except Exception:
+            pass
 
 
 def emit_ipc_event(sentinel: str) -> None:
     """Emits an explicit machine-readable IPC control event to stdout."""
     print(sentinel, flush=True)
+    global _ACTIVE_STATUS_FILE
+    if _ACTIVE_STATUS_FILE and "COMPLETE" in sentinel:
+        try:
+            import socket
+            data = {
+                "stage_key": "complete",
+                "stage_desc": "Pipeline Complete",
+                "progress": 100.0,
+                "worker_node": socket.gethostname(),
+                "status": "completed",
+                "timestamp": time.time(),
+            }
+            with open(_ACTIVE_STATUS_FILE, "w", encoding="utf-8") as sf:
+                json.dump(data, sf)
+        except Exception:
+            pass
 
 
 # Comprehensive list of all image and camera RAW formats supported by Agisoft Metashape
@@ -1548,6 +1589,163 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
     return t_crop
 
 
+def build_monolithic_runscript_task(
+    images_dir: str,
+    output_dir: str,
+    project_name: str,
+    preset: str = "pro",
+    align_quality: str = "high",
+    depth_quality: str = "high",
+    depth_filtering: str = "moderate",
+    custom_faces: int | None = 2000000,
+    texture_pages: int | None = 16,
+    crop_method: str | None = "none",
+    texture_format: str = "png",
+    align_photos: bool = True,
+    build_depth_maps: bool = True,
+    build_mesh: bool = True,
+    build_texture: bool = True,
+    build_dem: bool = False,
+    build_orthomosaic: bool = True,
+    build_point_cloud: bool = True,
+    export_obj: bool = True,
+    export_glb: bool = False,
+    export_fbx: bool = False,
+    export_ply: bool = False,
+    export_dxf: bool = False,
+    export_dem: bool = False,
+    export_ortho: bool = True,
+    export_point_cloud: bool = False,
+    point_cloud_format: str = "laz",
+    export_report: bool = False,
+    resume: bool = True,
+    network_path: str = "",
+    status_file: str | None = None,
+) -> tuple:
+    """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask.
+
+    Bundles the entire end-to-end photogrammetry pipeline into a single atomic task
+    (workitem_count = 1) executed locally on one dedicated cluster worker node.
+    This guarantees 100% zero worker hopping, zero LAN sync pauses between stages,
+    and real-time IPC progress monitoring via a shared JSON status sidecar.
+    """
+    import subprocess
+    import shutil
+
+    if not status_file:
+        status_file = os.path.join(output_dir, "_autometashape_status.json")
+
+    # 1. Resolve shared runner script inside network root if cluster network_path is configured
+    shared_script = None
+    if network_path and os.path.isdir(network_path):
+        shared_scripts_dir = os.path.join(network_path, ".autometashape", "scripts")
+        try:
+            os.makedirs(shared_scripts_dir, exist_ok=True)
+            shared_script = os.path.join(shared_scripts_dir, "metashape_reconstruction.py")
+            current_script = os.path.abspath(__file__)
+            if os.path.exists(current_script):
+                shutil.copy2(current_script, shared_script)
+        except Exception:
+            shared_script = None
+
+    if shared_script and os.path.exists(shared_script):
+        try:
+            rel_script = os.path.relpath(shared_script, network_path).replace("\\", "/")
+        except Exception:
+            rel_script = shared_script.replace("\\", "/")
+    else:
+        current_script = os.path.abspath(__file__)
+        if network_path and os.path.abspath(current_script).startswith(os.path.abspath(network_path)):
+            rel_script = os.path.relpath(current_script, network_path).replace("\\", "/")
+        else:
+            rel_script = current_script.replace("\\", "/")
+
+    # 2. Build paths relative to network root for portable remote worker resolution
+    if network_path and os.path.abspath(images_dir).startswith(os.path.abspath(network_path)):
+        rel_images = os.path.relpath(images_dir, network_path).replace("\\", "/")
+    else:
+        rel_images = images_dir.replace("\\", "/")
+
+    if network_path and os.path.abspath(output_dir).startswith(os.path.abspath(network_path)):
+        rel_output = os.path.relpath(output_dir, network_path).replace("\\", "/")
+    else:
+        rel_output = output_dir.replace("\\", "/")
+
+    if network_path and os.path.abspath(status_file).startswith(os.path.abspath(network_path)):
+        rel_status = os.path.relpath(status_file, network_path).replace("\\", "/")
+    else:
+        rel_status = status_file.replace("\\", "/")
+
+    # 3. Assemble CLI arguments for standalone execution on dedicated worker node
+    worker_args = [
+        "--images", rel_images,
+        "--output", rel_output,
+        "--project-name", project_name,
+        "--preset", preset,
+        "--align-quality", align_quality,
+        "--depth-quality", depth_quality,
+        "--depth-filtering", depth_filtering,
+        "--faces", str(custom_faces or 2000000),
+        "--texture-pages", str(texture_pages or 16),
+        "--crop-method", crop_method or "none",
+        "--texture-format", texture_format,
+        "--status-file", rel_status,
+    ]
+    if resume:
+        worker_args.append("--resume")
+    else:
+        worker_args.append("--no-resume")
+
+    if not align_photos:
+        worker_args.append("--no-align-photos")
+    if not build_depth_maps:
+        worker_args.append("--no-build-depth-maps")
+    if not build_mesh:
+        worker_args.append("--no-build-mesh")
+    if not build_texture:
+        worker_args.append("--no-build-texture")
+    if not build_dem:
+        worker_args.append("--no-build-dem")
+    if not build_orthomosaic:
+        worker_args.append("--no-build-orthomosaic")
+    if not build_point_cloud:
+        worker_args.append("--no-build-point-cloud")
+
+    if export_obj:
+        worker_args.append("--export-obj")
+    if export_glb:
+        worker_args.append("--export-glb")
+    if export_fbx:
+        worker_args.append("--export-fbx")
+    if export_ply:
+        worker_args.append("--export-ply")
+    if export_dxf:
+        worker_args.append("--export-dxf")
+    if export_dem:
+        worker_args.append("--export-dem")
+    if export_ortho:
+        worker_args.append("--export-ortho")
+    if export_point_cloud:
+        worker_args.append("--export-point-cloud")
+        worker_args.extend(["--point-cloud-format", point_cloud_format])
+    if export_report:
+        worker_args.append("--export-report")
+
+    # 4. Instantiate RunScript task with full CUDA GPU support enabled
+    rs = Metashape.Tasks.RunScript()
+    rs.path = rel_script
+    rs.args = subprocess.list2cmdline(worker_args)
+    net_task = rs.toNetworkTask()
+    try:
+        net_task.gpu_support = True
+    except Exception:
+        pass
+    if not isinstance(getattr(net_task, "name", None), str):
+        net_task.name = "RunScript"
+
+    return net_task, rel_script, status_file
+
+
 def build_unified_cluster_pipeline_tasks(
     chunk,
     output_dir: str,
@@ -2177,6 +2375,15 @@ def _norm_cluster_path(p: str | None) -> str:
     return p.strip().replace("\\", "/").rstrip("/").lower()
 
 
+def _has_dense_points(chunk) -> bool:
+    """Helper to safely check if chunk has dense points, resilient against Mock objects in unit tests."""
+    if chunk and chunk.point_cloud is not None:
+        cnt = getattr(chunk.point_cloud, "point_count", 0)
+        if isinstance(cnt, (int, float)):
+            return cnt > 0
+    return False
+
+
 def safe_create_cluster_batch(
     net_client: Metashape.NetworkClient,
     rel_psx: str,
@@ -2361,6 +2568,7 @@ def run_reconstruction(
     network_path: str = "",
     network_independent_workers: bool = False,
     project_name: str | None = None,
+    status_file: str | None = None,
 ):
     """Executes the complete AutoMetashape photogrammetry reconstruction pipeline.
 
@@ -2702,6 +2910,8 @@ def run_reconstruction(
             doc.read_only = False
         except Exception:
             pass
+        if status_file:
+            set_active_status_file(status_file)
         if doc.chunk is None and len(doc.chunks) > 0:
             doc.chunk = doc.chunks[0]
 
@@ -3256,65 +3466,51 @@ def run_reconstruction(
                     if reused_items:
                         print(f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}", flush=True)
 
-                u_tasks, u_stages = build_unified_cluster_pipeline_tasks(
-                    chunk=chunk,
-                    output_dir=output_dir,
-                    project_name=project_name,
-                    align_photos=u_align,
-                    align_quality=align_quality,
-                    reference_preselection_mode=reference_preselection_mode,
-                    keypoint_limit=keypoint_limit,
-                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                    tiepoint_limit=tiepoint_limit,
-                    filter_stationary_points=filter_stationary_points,
-                    guided_matching=guided_matching,
-                    adaptive_fitting=adaptive_fitting,
-                    filter_tiepoints=filter_tiepoints,
-                    crop_method=crop_method,
-                    crop_padding=crop_padding,
-                    build_depth_maps=u_depth,
-                    depth_quality=depth_quality,
-                    depth_filtering=depth_filtering,
-                    build_point_cloud=u_pc,
-                    points_spacing=points_spacing,
-                    build_mesh=u_mesh,
-                    surface_type=surface_type,
-                    custom_faces=custom_faces,
-                    build_texture=u_tex,
-                    texture_pages=texture_pages,
-                    fill_holes=fill_holes,
-                    ghosting_filter=ghosting_filter,
-                    build_dem=u_dem,
-                    build_orthomosaic=u_ortho,
-                    ortho_resolution=ortho_resolution,
-                    ortho_cull_faces=ortho_cull_faces,
-                    build_tiled_model=build_tiled_model,
-                    tile_size=tile_size,
-                    tiled_model_format=tiled_model_format,
-                    export_glb=export_glb,
-                    export_obj=export_obj,
-                    export_fbx=export_fbx,
-                    export_ply=export_ply,
-                    export_dxf=export_dxf,
-                    export_tie_points=export_tie_points,
-                    export_dem=export_dem,
-                    export_ortho=export_ortho,
-                    export_point_cloud=export_point_cloud,
-                    point_cloud_format=point_cloud_format,
-                    export_report=export_report,
-                    report_title=report_title,
-                    texture_format=texture_format,
-                    network_path=network_path,
-                    export_path_fn=get_cluster_export_path,
-                )
+                # Check if all requested reconstruction stages are already satisfied in checkpoint
+                if not any([u_align, u_depth, u_mesh, u_tex, u_dem, u_ortho, u_pc]):
+                    print(f"  [Cluster Checkpoint] All reconstruction stages already complete in checkpoint. Skipping cluster dispatch.", flush=True)
+                    unified_succeeded = True
+                else:
+                    net_task, rel_script, status_file = build_monolithic_runscript_task(
+                        images_dir=images_dir,
+                        output_dir=output_dir,
+                        project_name=project_name,
+                        preset=preset,
+                        align_quality=align_quality,
+                        depth_quality=depth_quality,
+                        depth_filtering=depth_filtering,
+                        custom_faces=custom_faces,
+                        texture_pages=texture_pages,
+                        crop_method=crop_method,
+                        texture_format=texture_format,
+                        align_photos=u_align,
+                        build_depth_maps=u_depth,
+                        build_mesh=u_mesh,
+                        build_texture=u_tex,
+                        build_dem=u_dem,
+                        build_orthomosaic=u_ortho,
+                        build_point_cloud=u_pc,
+                        export_obj=export_obj,
+                        export_glb=export_glb,
+                        export_fbx=export_fbx,
+                        export_ply=export_ply,
+                        export_dxf=export_dxf,
+                        export_dem=export_dem,
+                        export_ortho=export_ortho,
+                        export_point_cloud=export_point_cloud,
+                        point_cloud_format=point_cloud_format,
+                        export_report=export_report,
+                        resume=resume,
+                        network_path=network_path,
+                    )
 
-                if u_tasks:
-                    net_tasks = [t.toNetworkTask(chunk) for t in u_tasks]
-                    batch_id, was_attached = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=1, force_fresh=False)
+                    batch_id, was_attached = safe_create_cluster_batch(
+                        net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
+                    )
                     if was_attached:
-                        print(f"  [Cluster] Attached to active Unified Batch ID={batch_id} on dedicated worker node.", flush=True)
+                        print(f"  [Cluster] Attached to active Monolithic Batch ID={batch_id} on dedicated worker node.", flush=True)
                     else:
-                        print(f"  [Cluster] Created Unified Batch ID={batch_id} with {len(u_tasks)} tasks locked to 1 worker node.", flush=True)
+                        print(f"  [Cluster] Created Monolithic RunScript Batch ID={batch_id} locked to 1 dedicated worker node.", flush=True)
 
                     t_u_start = time.time()
                     last_stage_key = None
@@ -3326,25 +3522,40 @@ def run_reconstruction(
                         b_info = net_client.batchInfo(batch_id)
                         state = b_info.get("state")
                         tasks_info = b_info.get("tasks", [])
-                        if tasks_info:
+
+                        # Real-time sidecar status file telemetry from dedicated worker
+                        if status_file and os.path.exists(status_file):
+                            try:
+                                with open(status_file, "r", encoding="utf-8") as sf:
+                                    s_data = json.load(sf)
+                                stage_k = s_data.get("stage_key", "recon")
+                                stage_desc = s_data.get("stage_desc", "Reconstructing")
+                                sub_prog = float(s_data.get("progress", 0.0))
+                                worker_node = s_data.get("worker_node", "Worker Node")
+
+                                if stage_k != last_stage_key:
+                                    emit_ipc_stage(stage_k, stage_desc)
+                                    print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} (Node: {worker_node})", flush=True)
+                                    last_stage_key = stage_k
+
+                                now_t = time.time()
+                                if abs(sub_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and sub_prog != last_progress):
+                                    elapsed_min = (now_t - t_u_start) / 60.0
+                                    print(f"  [Cluster Progress] {stage_desc}: {sub_prog:.1f}% (Worker: {worker_node}, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                    last_progress = sub_prog
+                                    last_log_time = now_t
+                            except Exception:
+                                pass
+                        elif tasks_info:
                             active_task = next((t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")), tasks_info[-1])
-                            t_sub_name = active_task.get("name", "Task")
+                            t_sub_name = active_task.get("name", "RunScript")
                             sub_prog = active_task.get("progress", 0.0)
-                            total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
-
-                            matching_stage = next(((k, d) for n, k, d in u_stages if n == t_sub_name), ("recon", t_sub_name))
-                            stage_k, stage_desc = matching_stage
-
-                            if stage_k != last_stage_key:
-                                emit_ipc_stage(stage_k, stage_desc)
-                                print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} ({t_sub_name})", flush=True)
-                                last_stage_key = stage_k
 
                             now_t = time.time()
-                            if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
+                            if abs(sub_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and sub_prog != last_progress):
                                 elapsed_min = (now_t - t_u_start) / 60.0
-                                print(f"  [Cluster Progress] {stage_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall Project: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
-                                last_progress = total_prog
+                                print(f"  [Cluster Progress] Dedicated Worker Processing - {t_sub_name}: {sub_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                last_progress = sub_prog
                                 last_log_time = now_t
 
                         if state == "completed":
@@ -3360,238 +3571,241 @@ def run_reconstruction(
                             err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
                             print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
 
-                            is_bad_alloc = any(
-                                any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
-                                for t in tasks_info
-                                for e in t.get("errors", [])
-                            )
+                            failed_worker_id = None
+                            for t in tasks_info:
+                                if t.get("errors") and t.get("worker_id") is not None:
+                                    failed_worker_id = t.get("worker_id")
+                                    break
+                            if failed_worker_id is None and tasks_info:
+                                failed_worker_id = tasks_info[0].get("worker_id")
 
-                            if is_bad_alloc:
-                                failed_idx = -1
-                                failed_worker_id = None
-                                failed_task_name = "Task"
-                                for i_t, t in enumerate(tasks_info):
-                                    has_err = any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))
-                                    if has_err or t.get("state") in ("failed", "aborted"):
-                                        failed_idx = i_t
-                                        failed_task_name = t.get("name", "Task")
-                                        failed_worker_id = t.get("worker_id")
-                                        break
+                            emit_ipc_event(f"@@AUTOMETASHAPE_UNIFIED_FAIL:{batch_id}:{failed_worker_id or 'unknown'}@@")
 
-                                if 0 <= failed_idx < len(u_tasks):
-                                    completed_count = failed_idx
-                                    remaining_u_tasks = u_tasks[failed_idx:]
-                                    remaining_u_stages = u_stages[failed_idx:]
-
-                                    print(f"\n  [Cluster Memory Alert] Dedicated worker {failed_worker_id} ran out of memory (bad allocation) during '{failed_task_name}' on project '{project_name}'!", flush=True)
-                                    print(f"  [Cluster Hand-off] Preserving completed stages ({completed_count}/{len(u_tasks)}). Transferring remaining {len(remaining_u_tasks)} task(s) to another cluster machine...", flush=True)
-                                    emit_ipc_event(f"@@AUTOMETASHAPE_HANDOFF:{project_name}:{failed_task_name}:{failed_worker_id}@@")
-
+                            # Tier 1 Handoff / Resume: Re-dispatch RunScript task with resume=True to another cluster node
+                            try:
+                                if failed_worker_id is not None:
                                     try:
-                                        if failed_worker_id is not None:
-                                            net_client.setWorkerPaused(failed_worker_id, True)
+                                        net_client.setWorkerPaused(failed_worker_id, True)
+                                    except Exception:
+                                        pass
 
-                                        raw_w = net_client.workerList()
-                                        w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
-                                        other_workers = [
-                                            w for w in w_list
-                                            if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
-                                            and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
-                                        ]
+                                raw_w = net_client.workerList()
+                                w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                                other_workers = [
+                                    w for w in w_list
+                                    if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
+                                    and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                                ]
 
-                                        if other_workers:
-                                            rem_net_tasks = [t.toNetworkTask(chunk) for t in remaining_u_tasks]
-                                            handoff_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, rem_net_tasks, worker_limit=1, force_fresh=True)
-                                            print(f"  [Cluster] Created Handoff Continuation Batch ID={handoff_batch_id} with {len(remaining_u_tasks)} tasks for another worker.", flush=True)
+                                if other_workers:
+                                    handoff_net_task, _, _ = build_monolithic_runscript_task(
+                                        images_dir=images_dir,
+                                        output_dir=output_dir,
+                                        project_name=project_name,
+                                        preset=preset,
+                                        align_quality=align_quality,
+                                        depth_quality=depth_quality,
+                                        depth_filtering=depth_filtering,
+                                        custom_faces=custom_faces,
+                                        texture_pages=texture_pages,
+                                        crop_method=crop_method,
+                                        texture_format=texture_format,
+                                        align_photos=u_align,
+                                        build_depth_maps=u_depth,
+                                        build_mesh=u_mesh,
+                                        build_texture=u_tex,
+                                        build_dem=u_dem,
+                                        build_orthomosaic=u_ortho,
+                                        build_point_cloud=u_pc,
+                                        export_obj=export_obj,
+                                        export_glb=export_glb,
+                                        export_fbx=export_fbx,
+                                        export_ply=export_ply,
+                                        export_dxf=export_dxf,
+                                        export_dem=export_dem,
+                                        export_ortho=export_ortho,
+                                        export_point_cloud=export_point_cloud,
+                                        point_cloud_format=point_cloud_format,
+                                        export_report=export_report,
+                                        resume=True,
+                                        network_path=network_path,
+                                    )
+                                    handoff_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True)
+                                    print(f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.", flush=True)
 
-                                            # Immediately unpause failed worker so it is free to process the NEXT project in queue
-                                            if failed_worker_id is not None:
-                                                net_client.setWorkerPaused(failed_worker_id, False)
-                                                print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
+                                    if failed_worker_id is not None:
+                                        try:
+                                            net_client.setWorkerPaused(failed_worker_id, False)
+                                            print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
+                                        except Exception:
+                                            pass
 
-                                            h_start = time.time()
-                                            h_last_stage = None
-                                            h_last_prog = -1.0
-                                            h_last_log = 0.0
+                                    h_start = time.time()
+                                    h_last_stage = None
+                                    h_last_prog = -1.0
+                                    h_last_log = 0.0
 
-                                            handoff_ok = False
-                                            while True:
-                                                time.sleep(1.0)
-                                                hb_info = net_client.batchInfo(handoff_batch_id)
-                                                hb_state = hb_info.get("state")
-                                                hb_tasks = hb_info.get("tasks", [])
-                                                if hb_tasks:
-                                                    h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
-                                                    h_name = h_active.get("name", "Task")
-                                                    h_prog = h_active.get("progress", 0.0)
-                                                    h_total_prog = sum(t.get("progress", 0.0) for t in hb_tasks) / len(hb_tasks)
+                                    handoff_ok = False
+                                    while True:
+                                        time.sleep(1.0)
+                                        hb_info = net_client.batchInfo(handoff_batch_id)
+                                        hb_state = hb_info.get("state")
+                                        hb_tasks = hb_info.get("tasks", [])
 
-                                                    matching_h = next(((k, d) for n, k, d in remaining_u_stages if n == h_name), ("recon", h_name))
-                                                    hk_stage, hk_desc = matching_h
-                                                    if hk_stage != h_last_stage:
-                                                        emit_ipc_stage(hk_stage, hk_desc)
-                                                        print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} ({h_name})", flush=True)
-                                                        h_last_stage = hk_stage
-
-                                                    h_now = time.time()
-                                                    if abs(h_total_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_total_prog != h_last_prog):
-                                                        h_elapsed = (h_now - h_start) / 60.0
-                                                        print(f"  [Handoff Progress] {hk_desc} - {h_name}: {h_prog:.1f}% (Overall Handoff: {h_total_prog:.1f}%, Elapsed: {h_elapsed:.1f} min)", flush=True)
-                                                        h_last_prog = h_total_prog
-                                                        h_last_log = h_now
-
-                                                if hb_state == "completed":
-                                                    h_elapsed = (time.time() - h_start) / 60.0
-                                                    print(f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
-                                                    handoff_ok = True
-                                                    unified_succeeded = True
-                                                    break
-                                                elif hb_state in ("failed", "aborted"):
-                                                    print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
-                                                    break
-
-                                            if handoff_ok:
-                                                break
-                                            else:
-                                                # Tier 2: Repeated failure (handoff also failed)! Try restarting from scratch on a clean worker node
-                                                print(f"\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.", flush=True)
-                                                print(f"  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...", flush=True)
-                                                emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
-                                                try:
-                                                    files_dir = get_psx_files_dir(psx_out)
-                                                    if os.path.isdir(files_dir):
-                                                        try:
-                                                            shutil.rmtree(files_dir, ignore_errors=True)
-                                                        except Exception:
-                                                            pass
-                                                    doc = Metashape.Document()
-                                                    fresh_chunk = doc.addChunk()
-                                                    fresh_chunk.label = "Production_Reconstruction"
-
-                                                    fresh_imgs = []
-                                                    if 'all_imgs' in locals() and all_imgs:
-                                                        fresh_imgs = all_imgs
-                                                    else:
-                                                        for f_imgs in discover_image_subfolder_groups(images_dir, output_dir=output_dir).values():
-                                                            fresh_imgs.extend(f_imgs)
-                                                        fresh_imgs = sorted(fresh_imgs)
-                                                    fresh_chunk.addPhotos(fresh_imgs)
-
-                                                    if rolling_shutter:
-                                                        for s in fresh_chunk.sensors:
-                                                            s.rolling_shutter = Metashape.Shutter.Model.Regularized
-                                                    doc.save(psx_out)
-
-                                                    scratch_tasks, scratch_stages = build_unified_cluster_pipeline_tasks(
-                                                        chunk=fresh_chunk,
-                                                        output_dir=output_dir,
-                                                        project_name=project_name,
-                                                        align_photos=True,
-                                                        align_quality=align_quality,
-                                                        reference_preselection_mode=reference_preselection_mode,
-                                                        keypoint_limit=keypoint_limit,
-                                                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                                                        tiepoint_limit=tiepoint_limit,
-                                                        filter_stationary_points=filter_stationary_points,
-                                                        guided_matching=guided_matching,
-                                                        adaptive_fitting=adaptive_fitting,
-                                                        filter_tiepoints=filter_tiepoints,
-                                                        crop_method=crop_method,
-                                                        crop_padding=crop_padding,
-                                                        build_depth_maps=build_depth_maps,
-                                                        depth_quality=depth_quality,
-                                                        depth_filtering=depth_filtering,
-                                                        build_point_cloud=build_point_cloud,
-                                                        points_spacing=points_spacing,
-                                                        build_mesh=build_mesh,
-                                                        surface_type=surface_type,
-                                                        custom_faces=custom_faces,
-                                                        build_texture=build_texture,
-                                                        texture_pages=texture_pages,
-                                                        fill_holes=fill_holes,
-                                                        ghosting_filter=ghosting_filter,
-                                                        build_dem=build_dem,
-                                                        build_orthomosaic=build_orthomosaic,
-                                                        ortho_resolution=ortho_resolution,
-                                                        ortho_cull_faces=ortho_cull_faces,
-                                                        build_tiled_model=build_tiled_model,
-                                                        tile_size=tile_size,
-                                                        tiled_model_format=tiled_model_format,
-                                                        export_glb=export_glb,
-                                                        export_obj=export_obj,
-                                                        export_fbx=export_fbx,
-                                                        export_ply=export_ply,
-                                                        export_dxf=export_dxf,
-                                                        export_tie_points=export_tie_points,
-                                                        export_dem=export_dem,
-                                                        export_ortho=export_ortho,
-                                                        export_point_cloud=export_point_cloud,
-                                                        point_cloud_format=point_cloud_format,
-                                                        export_report=export_report,
-                                                        report_title=report_title,
-                                                        texture_format=texture_format,
-                                                        network_path=network_path,
-                                                        export_path_fn=get_cluster_export_path,
-                                                    )
-                                                    scratch_net_tasks = [t.toNetworkTask(fresh_chunk) for t in scratch_tasks]
-                                                    scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, scratch_net_tasks, worker_limit=1, force_fresh=True)
-                                                    print(f"  [Cluster] Created Fresh Scratch Batch ID={scratch_batch_id} with all {len(scratch_tasks)} tasks on clean worker node.", flush=True)
-
-                                                    sc_start = time.time()
-                                                    sc_last_stage = None
-                                                    sc_last_prog = -1.0
-                                                    sc_last_log = 0.0
-                                                    scratch_ok = False
-                                                    while True:
-                                                        time.sleep(1.0)
-                                                        sc_info = net_client.batchInfo(scratch_batch_id)
-                                                        sc_state = sc_info.get("state")
-                                                        sc_tasks = sc_info.get("tasks", [])
-                                                        if sc_tasks:
-                                                            sc_active = next((t for t in sc_tasks if t.get("state") in ("running", "inprogress", "submitted")), sc_tasks[-1])
-                                                            sc_name = sc_active.get("name", "Task")
-                                                            sc_prog = sc_active.get("progress", 0.0)
-                                                            sc_total_prog = sum(t.get("progress", 0.0) for t in sc_tasks) / len(sc_tasks)
-                                                            matching_sc = next(((k, d) for n, k, d in scratch_stages if n == sc_name), ("recon", sc_name))
-                                                            sck_stage, sck_desc = matching_sc
-                                                            if sck_stage != sc_last_stage:
-                                                                emit_ipc_stage(sck_stage, sck_desc)
-                                                                print(f"\n>>> [Scratch Retry Stage] Active on Clean Worker: {sck_desc} ({sc_name})", flush=True)
-                                                                sc_last_stage = sck_stage
-                                                            sc_now = time.time()
-                                                            if abs(sc_total_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_total_prog != sc_last_prog):
-                                                                sc_elapsed = (sc_now - sc_start) / 60.0
-                                                                print(f"  [Scratch Progress] {sck_desc} - {sc_name}: {sc_prog:.1f}% (Overall: {sc_total_prog:.1f}%, Elapsed: {sc_elapsed:.1f} min)", flush=True)
-                                                                sc_last_prog = sc_total_prog
-                                                                sc_last_log = sc_now
-                                                        if sc_state == "completed":
-                                                            sc_elapsed = (time.time() - sc_start) / 60.0
-                                                            print(f"\n  [Cluster] [OK] Fresh restart from scratch successfully completed on cluster worker in {sc_elapsed:.2f} min!", flush=True)
-                                                            scratch_ok = True
-                                                            unified_succeeded = True
-                                                            break
-                                                        elif sc_state in ("failed", "aborted"):
-                                                            print(f"  [Cluster] [ERROR] Fresh scratch batch {sc_state} on clean worker node.", flush=True)
-                                                            break
-                                                    if scratch_ok:
-                                                        break
-                                                except Exception as e_scratch:
-                                                    print(f"  [Cluster] Note: scratch restart exception: {e_scratch}", flush=True)
-                                    except Exception as e_h:
-                                        print(f"  [Cluster] Note: handoff exception: {e_h}", flush=True)
-                                    finally:
-                                        if failed_worker_id is not None:
+                                        if status_file and os.path.exists(status_file):
                                             try:
-                                                net_client.setWorkerPaused(failed_worker_id, False)
+                                                with open(status_file, "r", encoding="utf-8") as sf:
+                                                    hs_data = json.load(sf)
+                                                hk_stage = hs_data.get("stage_key", "recon")
+                                                hk_desc = hs_data.get("stage_desc", "Handoff Reconstructing")
+                                                h_prog = float(hs_data.get("progress", 0.0))
+                                                h_node = hs_data.get("worker_node", "Second Worker")
+                                                if hk_stage != h_last_stage:
+                                                    emit_ipc_stage(hk_stage, hk_desc)
+                                                    print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} (Node: {h_node})", flush=True)
+                                                    h_last_stage = hk_stage
+
+                                                h_now = time.time()
+                                                if abs(h_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_prog != h_last_prog):
+                                                    h_elapsed = (h_now - h_start) / 60.0
+                                                    print(f"  [Handoff Progress] {hk_desc}: {h_prog:.1f}% (Worker: {h_node}, Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                    h_last_prog = h_prog
+                                                    h_last_log = h_now
                                             except Exception:
                                                 pass
+                                        elif hb_tasks:
+                                            h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
+                                            h_name = h_active.get("name", "RunScript")
+                                            h_prog = h_active.get("progress", 0.0)
+                                            h_now = time.time()
+                                            if abs(h_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_prog != h_last_prog):
+                                                h_elapsed = (h_now - h_start) / 60.0
+                                                print(f"  [Handoff Progress] {h_name}: {h_prog:.1f}% (Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                h_last_prog = h_prog
+                                                h_last_log = h_now
 
-                            print("  [Cluster] Falling back to stage-by-stage / local execution...", flush=True)
-                            unified_succeeded = False
+                                        if hb_state == "completed":
+                                            h_elapsed = (time.time() - h_start) / 60.0
+                                            print(f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
+                                            handoff_ok = True
+                                            unified_succeeded = True
+                                            break
+                                        elif hb_state in ("failed", "aborted"):
+                                            print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
+                                            break
+
+                                    if handoff_ok:
+                                        break
+                                    else:
+                                        # Tier 2: Repeated failure! Try restarting from scratch on a clean worker node
+                                        print(f"\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.", flush=True)
+                                        print(f"  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...", flush=True)
+                                        emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
+                                        try:
+                                            files_dir = get_psx_files_dir(psx_out)
+                                            if os.path.isdir(files_dir):
+                                                try:
+                                                    shutil.rmtree(files_dir, ignore_errors=True)
+                                                except Exception:
+                                                    pass
+                                            if os.path.exists(psx_out):
+                                                try:
+                                                    os.remove(psx_out)
+                                                except Exception:
+                                                    pass
+
+                                            scratch_net_task, _, _ = build_monolithic_runscript_task(
+                                                images_dir=images_dir,
+                                                output_dir=output_dir,
+                                                project_name=project_name,
+                                                preset=preset,
+                                                align_quality=align_quality,
+                                                depth_quality=depth_quality,
+                                                depth_filtering=depth_filtering,
+                                                custom_faces=custom_faces,
+                                                texture_pages=texture_pages,
+                                                crop_method=crop_method,
+                                                texture_format=texture_format,
+                                                align_photos=True,
+                                                build_depth_maps=build_depth_maps,
+                                                build_mesh=build_mesh,
+                                                build_texture=build_texture,
+                                                build_dem=build_dem,
+                                                build_orthomosaic=build_orthomosaic,
+                                                build_point_cloud=build_point_cloud,
+                                                export_obj=export_obj,
+                                                export_glb=export_glb,
+                                                export_fbx=export_fbx,
+                                                export_ply=export_ply,
+                                                export_dxf=export_dxf,
+                                                export_dem=export_dem,
+                                                export_ortho=export_ortho,
+                                                export_point_cloud=export_point_cloud,
+                                                point_cloud_format=point_cloud_format,
+                                                export_report=export_report,
+                                                resume=False,
+                                                network_path=network_path,
+                                            )
+                                            scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [scratch_net_task], worker_limit=1, force_fresh=True)
+                                            print(f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.", flush=True)
+
+                                            sc_start = time.time()
+                                            sc_last_stage = None
+                                            sc_last_prog = -1.0
+                                            sc_last_log = 0.0
+
+                                            while True:
+                                                time.sleep(1.0)
+                                                sc_info = net_client.batchInfo(scratch_batch_id)
+                                                sc_state = sc_info.get("state")
+                                                sc_tasks = sc_info.get("tasks", [])
+
+                                                if status_file and os.path.exists(status_file):
+                                                    try:
+                                                        with open(status_file, "r", encoding="utf-8") as sf:
+                                                            scs_data = json.load(sf)
+                                                        sck_stage = scs_data.get("stage_key", "recon")
+                                                        sck_desc = scs_data.get("stage_desc", "Scratch Reconstructing")
+                                                        sc_prog = float(scs_data.get("progress", 0.0))
+                                                        sc_node = scs_data.get("worker_node", "Scratch Worker")
+                                                        if sck_stage != sc_last_stage:
+                                                            emit_ipc_stage(sck_stage, sck_desc)
+                                                            print(f"\n>>> [Scratch Stage] Active: {sck_desc} (Node: {sc_node})", flush=True)
+                                                            sc_last_stage = sck_stage
+
+                                                        sc_now = time.time()
+                                                        if abs(sc_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog):
+                                                            sc_elapsed = (sc_now - sc_start) / 60.0
+                                                            print(f"  [Scratch Progress] {sck_desc}: {sc_prog:.1f}% (Worker: {sc_node}, Elapsed: {sc_elapsed:.1f} min)", flush=True)
+                                                            sc_last_prog = sc_prog
+                                                            sc_last_log = sc_now
+                                                    except Exception:
+                                                        pass
+                                                elif sc_tasks:
+                                                    sc_active = next((t for t in sc_tasks if t.get("state") in ("running", "inprogress", "submitted")), sc_tasks[-1])
+                                                    sc_name = sc_active.get("name", "RunScript")
+                                                    sc_prog = sc_active.get("progress", 0.0)
+                                                    sc_now = time.time()
+                                                    if abs(sc_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog):
+                                                        sc_elapsed = (sc_now - sc_start) / 60.0
+                                                        print(f"  [Scratch Progress] {sc_name}: {sc_prog:.1f}% (Elapsed: {sc_elapsed:.1f} min)", flush=True)
+                                                        sc_last_prog = sc_prog
+                                                        sc_last_log = sc_now
+
+                                                if sc_state == "completed":
+                                                    sc_elapsed = (time.time() - sc_start) / 60.0
+                                                    print(f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!", flush=True)
+                                                    unified_succeeded = True
+                                                    break
+                                                elif sc_state in ("failed", "aborted"):
+                                                    print(f"  [Cluster] [ERROR] Fresh scratch batch {sc_state}.", flush=True)
+                                                    break
+                                        except Exception as e_scratch:
+                                            print(f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True)
+                                            break
+                            except Exception as e_failover:
+                                print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
                             break
-                else:
-                    print("  [Cluster] All requested photogrammetry stages and deliverables already completed in project checkpoint.", flush=True)
-                    unified_succeeded = True
 
                 if unified_succeeded:
                     _safe_reopen()
@@ -3795,7 +4009,7 @@ def run_reconstruction(
 
     # Step 4b: Dense Point Cloud Generation & Classification
     if build_point_cloud:
-        has_point_cloud = chunk.point_cloud is not None and chunk.point_cloud.point_count > 0
+        has_point_cloud = _has_dense_points(chunk)
         if has_point_cloud:
             emit_ipc_stage("point_cloud", f"Reusing existing Dense Point Cloud ({chunk.point_cloud.point_count:,} points)")
             print(f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).", flush=True)
@@ -4112,7 +4326,7 @@ def run_reconstruction(
                                 target_crs = chunk.crs
                 if target_crs:
                     proj.crs = target_crs
-                dem_source = Metashape.DataSource.PointCloudData if (chunk.point_cloud and chunk.point_cloud.point_count > 0) else Metashape.DataSource.DepthMapsData
+                dem_source = Metashape.DataSource.PointCloudData if _has_dense_points(chunk) else Metashape.DataSource.DepthMapsData
                 dem_computed = False
                 if cluster_enabled:
                     try:
@@ -4508,7 +4722,7 @@ def run_reconstruction(
 
     # Step 7d: Dense Point Cloud Export
     if (not cluster_exported) and export_point_cloud:
-        if chunk.point_cloud and chunk.point_cloud.point_count > 0:
+        if _has_dense_points(chunk):
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
             pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
@@ -4748,6 +4962,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Chunk alignment method for multi-chunk mode: 'camera' (method=2, Camera/GPS-based, robust against symmetric structure inversion) or 'point' (method=0, Point-based RANSAC ICP) (default: camera)",
     )
     parser.add_argument(
+        "--status-file",
+        default=None,
+        help="Path to JSON file for real-time IPC stage and progress reporting across cluster nodes",
+    )
+    parser.add_argument(
         "--resume",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -4852,4 +5071,5 @@ if __name__ == "__main__":
         network_path=args.network_path,
         network_independent_workers=args.network_independent_workers,
         project_name=args.project_name,
+        status_file=getattr(args, "status_file", None),
     )

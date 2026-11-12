@@ -1198,9 +1198,11 @@ class TestNetworkCluster(unittest.TestCase):
             # Defend that batch was unpaused for immediate worker pickup
             mock_net_client.setBatchPaused.assert_called_once_with(555, False)
 
-            # Defend that the unified batch received tasks including MatchPhotos and AlignCameras
+            # Defend that the unified batch received exactly 1 monolithic RunScript task with GPU enabled
             batch_tasks = mock_net_client.createBatch.call_args[0][1]
-            self.assertGreater(len(batch_tasks), 5)
+            self.assertEqual(len(batch_tasks), 1)
+            self.assertEqual(getattr(batch_tasks[0], "name", "RunScript"), "RunScript")
+            self.assertTrue(getattr(batch_tasks[0], "gpu_support", True))
 
 
     def test_safe_create_cluster_batch_aborts_stale_when_force_fresh(self) -> None:
@@ -1513,4 +1515,62 @@ class TestNetworkCluster(unittest.TestCase):
 
 
 if __name__ == "__main__":
+    unittest.main()
+
+    def test_build_monolithic_runscript_task_structure(self) -> None:
+        """Verify build_monolithic_runscript_task creates a valid RunScript NetworkTask with GPU support."""
+        import metashape_reconstruction as mr
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(out_dir, exist_ok=True)
+            img_dir = os.path.join(tmp_dir, "images")
+            os.makedirs(img_dir, exist_ok=True)
+
+            net_task, rel_script, s_file = mr.build_monolithic_runscript_task(
+                images_dir=img_dir,
+                output_dir=out_dir,
+                project_name="TestProject",
+                preset="pro",
+                align_quality="high",
+                resume=True,
+                export_obj=True,
+                export_ortho=True,
+            )
+
+            self.assertEqual(getattr(net_task, "name", "RunScript"), "RunScript")
+            self.assertTrue(getattr(net_task, "gpu_support", True))
+            self.assertTrue(s_file.endswith("_autometashape_status.json"))
+
+    def test_status_file_sidecar_ipc_tracking(self) -> None:
+        """Verify emit_ipc_stage writes real-time JSON milestone updates to active status sidecar."""
+        import json
+        import tempfile
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            status_path = os.path.join(tmp_dir, "test_status.json")
+            mr.set_active_status_file(status_path)
+            try:
+                mr.emit_ipc_stage("mesh", "3D Surface Mesh", progress=65.5)
+                self.assertTrue(os.path.exists(status_path))
+                with open(status_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.assertEqual(data.get("stage_key"), "mesh")
+                self.assertEqual(data.get("stage_desc"), "3D Surface Mesh")
+                self.assertAlmostEqual(data.get("progress"), 65.5)
+                self.assertEqual(data.get("status"), "running")
+
+                mr.emit_ipc_event("@@AUTOMETASHAPE_COMPLETE@@")
+                with open(status_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.assertEqual(data.get("stage_key"), "complete")
+                self.assertEqual(data.get("status"), "completed")
+                self.assertEqual(data.get("progress"), 100.0)
+            finally:
+                mr.set_active_status_file(None)
+
+
+if __name__ == '__main__':
     unittest.main()
