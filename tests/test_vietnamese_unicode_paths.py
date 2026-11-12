@@ -19,8 +19,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..",
 
 import metashape_reconstruction as mr
 import metashape_export as me
-from autometashape_gui import (
-    AutoMetashapeStudio,
+from cluster_utils import (
     generate_worker_bat_content,
     parse_ipc_line,
 )

@@ -14,7 +14,7 @@ import unittest
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-from autometashape_gui import parse_ipc_line, IPC_SENTINEL_PREFIX, IPC_SENTINEL_SUFFIX
+from cluster_utils import parse_ipc_line, IPC_SENTINEL_PREFIX, IPC_SENTINEL_SUFFIX
 
 
 class TestIpcStepper(unittest.TestCase):

@@ -24,21 +24,24 @@ Release details and release notes: [GitHub Release v1.4.0](https://github.com/ng
 
 ## Quickstart
 
-### 1. Launch AutoMetashape Studio (Desktop GUI)
+### 1. Launch Distributed Cluster Daemons (1-Click)
 
-Run the desktop launcher:
-
+**Worker Node Workstations (Run on any network PC with a GPU):**
 ```powershell
-# Windows:
-.\gui.bat
+# Windows 1-Click (interactively saves configuration on first run):
+.\launch_worker.bat
 
 # Linux / macOS:
-./gui.sh
+./launch_worker.sh
 ```
 
-Or run directly with Python:
+**Coordinator Workstation (Starts the Cluster Server):**
 ```powershell
-python scripts/autometashape_gui.py
+# Windows 1-Click:
+.\launch_server.bat
+
+# Linux / macOS:
+./launch_server.sh
 ```
 
 ### 2. Autonomous CLI Execution
@@ -114,22 +117,20 @@ Recursively scans image folders and nested directories for all supported formats
 
 ---
 
-## Desktop GUI Studio (AutoMetashape Studio)
+## Distributed Network Processing & Resilient Worker Launcher
 
-`gui.bat` launches the desktop studio application:
+AutoMetashape runs as a lean, production-grade, headless engine orchestrated directly by AI Agents and CLI workflows:
 
-- **Dual-Column Responsive Layout**: Parameter configuration and hardware monitor on the left, live execution console and visual stepper on the right.
-- **8 Categorized Process Sections in Parameters**:
-  1. `ALIGN`: Matching quality, keypoints (40K/60K), tiepoints (25K), guided matching, adaptive fitting, CMOS rolling shutter, tie-point filtering, target marker detection, GCP reference CSV import, and color calibration.
-  2. `REGION`: Bounding box cropping strategy (`gps-square`, `none`, `structure`, `manual`) and pause toggle.
-  3. `MODEL`: Depth map downscale, filtering mode, surface type (Arbitrary / HeightField), custom face budget ($600\text{K} - 2\text{M}$), hole closing, Laplacian smoothing, and export toggles for FBX, PLY, and DXF.
-  4. `POINT CLOUD`: Dense point cloud toggle, format selection (`laz`, `las`, `ply`, `e57`, `xyz`), ground point classification, semantic multiclass AI, confidence filter, and sparse tie points export.
-  5. `TILED MODEL`: Hierarchical 3D Tiled Model (LOD) toggle, format selection (`cesium`, `tls`, `slpk`, `osgb`), and tile size (`256`, `512`).
-  6. `ELEVATION & CONTOURS`: DEM generation toggle, GeoTIFF orthomosaic toggle, topographic contours toggle, elevation interval (0.5m - 10m), and format (`shp`, `dxf`, `geojson`, `kml`).
-  7. `TEXTURE`: UV parameterization, 8K texture atlas page budget (4 to 16 pages), hole filling, ghosting filters, and texture delighting (shadow removal).
-  8. `REPORT`: Executive PDF calibration report toggle, custom report title, and execution lifecycle (`--resume`).
-- **Dynamic Preset Switching**: Instant auto-fill of all parameters when switching between **Autonomous (Learned)**, **Building (600K faces, 16-page 8K)**, and **Map (2M faces, 4-page 8K, DEM & Ortho)** presets.
-- **Export & Texture Re-Baking Tab**: Re-bake UV textures with delighting, export 3D Tiled Models (Cesium), topographic contours (SHP/DXF), dense point clouds, DEMs, orthomosaics, FBX, PLY, and PDF reports directly from existing `.psx` projects without re-aligning.
+- **1-Click Resilient Worker Node (`launch_worker.bat`)**:
+  - Automatically loads server address and shared network root from `worker_config.json`.
+  - First-run interactive setup wizard with LAN auto-discovery.
+  - Built-in pre-flight health diagnostics (Metashape executable discovery, TCP port 5840 reachability test, and Shared UNC storage access check).
+  - Resilient auto-reconnect loop: automatically reconnects if the coordinator restarts or network drops temporarily.
+- **Atomic Monolithic `RunScript` Delegation**:
+  - Independent project workflows are bundled into single-node network tasks (`workitem_count = 1`), eliminating worker hopping and LAN latency between stages.
+  - Intermediate checkpoints saved to `.files` for instant resumption (`--resume`).
+- **Autonomous AI Agent Skill Protocol**:
+  - Managed via [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md) for 1-hour automated progress audits and self-healing dropped network workers.
 
 ---
 

@@ -201,70 +201,91 @@ For multi-PC local area networks (LAN), Metashape Network Processing divides lar
   New-NetFirewallRule -DisplayName "Metashape Server Port 5840" -Direction Inbound -LocalPort 5840 -Protocol TCP -Action Allow
   ```
 
-#### 5.2 Starting the Server on the Host PC
-The server process coordinates task dispatching and job tracking. It is lightweight and consumes near-zero CPU/GPU.
-- **Via GUI**: In AutoMetashape Studio, scroll to **Distributed LAN Network Cluster** and click **Start Server**.
-- **Via CLI / PowerShell**:
+#### 5.2 Starting the Cluster Server Daemon (Coordinator Workstation)
+The server process coordinates task dispatching and job tracking across all participating cluster nodes.
+- **1-Click Windows Launcher**:
   ```powershell
-  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --server --control <HOST_IP>:5840 --dispatch <HOST_IP>:5840
+  .\launch_server.bat
+  ```
+  *(Automatically detects Metashape Server binary, checks port availability, and prints LAN IP connection instructions for remote worker PCs).*
+- **Linux / Bash**:
+  ```bash
+  ./launch_server.sh
+  ```
+- **Custom Ports / CLI Override**:
+  ```powershell
+  .\launch_server.bat --port 5840 --dispatch-port 5841
   ```
 
-#### 5.3 Starting a Local Worker on the Host PC (Resource Maximization)
+#### 5.3 Starting Cluster Worker Nodes (All Participating Workstations)
+To harness GPUs and high-core CPUs across your local network:
+- **1-Click Windows Launcher**:
+  ```powershell
+  .\launch_worker.bat
+  ```
+  *On first run*: Prompts interactively for Cluster Server IP and Shared UNC Storage root, then saves to `worker_config.json`.
+  *Subsequent runs*: Double-click `launch_worker.bat` to connect instantly with zero typing!
+- **Headless / Automation CLI**:
+  ```powershell
+  .\launch_worker.bat --host <SERVER_IP> --root "\\SERVER\catp" --gpu 1 --cpu 1
+  ```
+- **Pre-Flight Health Diagnostics Built-in**:
+  1. Validates Metashape Pro executable path.
+  2. Tests TCP port 5840 reachability to server host (flags firewall blocks immediately).
+  3. Tests Shared UNC storage directory access and permissions.
+  4. Auto-detects NVIDIA GPUs and enables CPU fallback.
+  5. **Auto-Reconnect**: Automatically retries every 10s if the server restarts or network fluctuates.
+
+#### 5.4 Checking Connectivity & Connected Worker Discovery
+Inspect connected cluster nodes via Python or CLI:
+```python
+import Metashape
+client = Metashape.NetworkClient()
+client.connect("<SERVER_IP>:5840")
+workers = client.workerList()
+active_workers = workers.get("workers", []) if isinstance(workers, dict) else workers
+print(f"Connected Workers ({len(active_workers)}):")
+for w in active_workers:
+    host = w.get("hostname", "Worker")
+    ram_gb = w.get("memory_size", 0) / (1024 ** 3)
+    print(f"  • Host: {host} | State: {w.get('state')} | RAM: {ram_gb:.1f} GB")
+```
+
+#### 5.5 Autonomous 1-Hour Monitoring & Self-Healing Protocol
+For massive multi-flight photogrammetry reconstructions running on the cluster (4–12+ hours), the AI Agent executes an autonomous **1-Hour Monitoring & Self-Healing Cycle**:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    HOURLY AGENT AUDIT & HEALING CYCLE                       │
+├─────────────────────────────────────────────────────────────────────────────┤
+│ 1. Telemetry & Milestone Inspection:                                        │
+│    - Query Metashape.NetworkClient (serverInfo, batchList, workerList)      │
+│    - Read _autometashape_status.json sidecar from shared output folder      │
+│ 2. Formulate Structured Hourly Production Report:                           │
+│    - Active Batches: Current stage, subtask completion %, elapsed time, ETA│
+│    - Worker Health: Active/idle states, GPU utilization, memory usage       │
+│    - Disk Deliverables: Completed .obj, .glb, .tif orthomosaics             │
+│ 3. Automated Connection & Self-Healing Diagnostics:                         │
+│    - Dropped Worker Node? -> Pings host, alerts user or restarts daemon     │
+│    - Stalled Task (>45m 0% progress)? -> Triggers safe checkpoint resume    │
+│    - Storage Latency / Access Drops? -> Audits SMB UNC path connectivity    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
 > [!IMPORTANT]
-> Running `--server` alone only runs the coordinator daemon and does **not** perform any 3D processing! If the Host PC has a powerful GPU (e.g. RTX 4080/4090) and high-core CPU, those resources will sit completely idle unless a worker process is also spawned on the Host PC.
-
-- **Via GUI**: Click **Start Local Worker** in the cluster panel.
-- **Via CLI / PowerShell**:
-  ```powershell
-  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --worker --host 127.0.0.1 --port 5840 --root "\\HOST_PC\SharedMetashape" --gpu-mask 1 --cpu-enable 1
-  ```
-  This engages the host PC's GPU and CPU cores at 100% capacity to crunch reconstruction tasks alongside external network workers.
-
-#### 5.4 Starting Remote Workers on Other LAN Machines
-- **Export Worker Launcher**: In AutoMetashape Studio, click **Export launch_worker.bat**.
-- **Distribute to Worker PCs**: Copy `launch_worker.bat` to any secondary PC on the LAN with Metashape installed.
-- **Run Worker**: Double-click `launch_worker.bat` on the worker machine. The script auto-detects `metashape.exe`, resolves the host IP, configures CPU fallback (`--cpu-enable 1`), and connects to the cluster server.
-- **Manual Remote CLI Launch**:
-  ```powershell
-  & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" --worker --host <HOST_IP> --port 5840 --root "\\HOST_PC\SharedMetashape" --gpu-mask 1 --cpu-enable 1
-  ```
-
-#### 5.5 Checking Connectivity & Connected Worker Discovery
-Before starting a multi-gigabyte reconstruction, verify network connectivity and worker registration:
-1. **Test Port Reachability from Worker PC**:
-   ```powershell
-   Test-NetConnection -ComputerName <HOST_IP> -Port 5840
-   ```
-   Must return `TcpTestSucceeded : True`. If it fails, check Windows Defender Firewall on the Host PC.
-2. **Test Shared Storage Access from Worker PC**:
-   ```powershell
-   Test-Path "\\HOST_PC\SharedMetashape"
-   ```
-   Must return `True`. Verify the worker can read and create files in the folder.
-3. **Inspect Connected Workers via Python API**:
-   ```python
-   import Metashape
-   client = Metashape.NetworkClient()
-   client.connect("<HOST_IP>", 5840)
-   workers = client.workerList() if hasattr(client, "workerList") else client.workers
-   print(f"Connected Workers ({len(workers)}):")
-   for w in workers:
-       addr = getattr(w, "host", getattr(w, "name", "Worker"))
-       print(f"  • Host: {addr} | Status: {getattr(w, 'status', 'Active')}")
-   ```
-4. **GUI Live Telemetry**: AutoMetashape Studio's cluster panel displays real-time badges showing all registered worker IPs, active tasks, and completion percentages.
+> **Strict Non-Destructive Code Governance Boundary**:
+> * **Permitted Self-Healing Actions**: Network reconnection, daemon restarts, batch retry via `--resume`, lockfile cleanup, and structured progress reporting.
+> * **STRICTLY PROHIBITED**: The agent must **NEVER** autonomously rewrite, mutate, refactor, or modify core reconstruction code, pipeline scripts, or algorithm presets during monitoring runs.
+> * **User Intent Invariant**: All code modifications and pipeline rewrites strictly require explicit user instructions and authorization.
 
 #### 5.6 Submitting Distributed Reconstructions & Pipelined Export Overlap
 Dispatch autonomous reconstruction to the active cluster:
 ```powershell
 & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py \
-    --images "\\HOST_PC\SharedMetashape\Surveys\Site_A" \
+    --images "\\SERVER\catp\041126\0043" \
     --preset pro \
-    --network-enable --network-host <HOST_IP> --network-port 5840 --network-path "\\HOST_PC\SharedMetashape" \
-    --no-export-glb --no-export-obj --no-export-dem --no-export-ortho
+    --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\catp"
 ```
-- **Dynamic Work-Stealing**: Faster nodes (e.g. RTX 4090) automatically pull and complete more depth map slices than medium nodes (e.g. RTX 3060), self-balancing without operator intervention.
-- **Pipelined Overlap**: Once the cluster finishes 3D meshing, the Host PC immediately delegates the next survey project to the cluster while concurrently running `scripts/metashape_export.py` on the Host CPU.
 
 ### 6. Web Studio Dynamic Telemetry Dashboard
 
@@ -343,7 +364,7 @@ Reconstruction outputs must satisfy the following quality criteria:
 - Ensure `metashape.exe` is installed at `C:/Program Files/Agisoft/Metashape Pro/metashape.exe` or configured on the system PATH.
 - Verify NVIDIA GPU CUDA runtime with `nvidia-smi` to ensure Metashape GPU acceleration is active.
 - Keep `scripts/metashape_reconstruction.py` updated to match Agisoft Metashape Python API versions.
-- Maintain synchronization between `scripts/metashape_reconstruction.py`, `scripts/metashape_export.py`, and `scripts/autometashape_gui.py`.
+- Maintain synchronization between `scripts/metashape_reconstruction.py`, `scripts/metashape_export.py`, and `scripts/cluster_utils.py`.
 
 ---
 
@@ -352,7 +373,9 @@ Reconstruction outputs must satisfy the following quality criteria:
 - [evaluations.md](evaluations.md)
 - [scripts/metashape_reconstruction.py](../../../scripts/metashape_reconstruction.py)
 - [scripts/metashape_export.py](../../../scripts/metashape_export.py)
-- [scripts/autometashape_gui.py](../../../scripts/autometashape_gui.py)
+- [scripts/cluster_utils.py](../../../scripts/cluster_utils.py)
+- [launch_worker.bat](../../../launch_worker.bat)
+- [launch_server.bat](../../../launch_server.bat)
 - [Agisoft Metashape Professional User Manual (v2.x)](https://www.agisoft.com/downloads/user-manuals/)
 - [Open Geospatial Consortium (OGC) 3D Tiles Specification](https://www.ogc.org/standards/3DTiles)
 - [USGS National Geospatial Program Photogrammetry Standards](https://www.usgs.gov/core-science-systems/ngp)

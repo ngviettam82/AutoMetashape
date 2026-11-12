@@ -229,7 +229,7 @@ class TestCliArgs(unittest.TestCase):
 
     def test_metashape_cluster_binary_discovery(self) -> None:
         """Verify metashape-server and monitor binary discovery functions."""
-        from autometashape_gui import find_metashape_monitor_path, find_metashape_path, find_metashape_server_path
+        from cluster_utils import find_metashape_monitor_path, find_metashape_path, find_metashape_server_path
 
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
@@ -245,7 +245,7 @@ class TestCliArgs(unittest.TestCase):
 
     def test_generate_worker_bat_content(self) -> None:
         """Verify automated launcher batch file generation."""
-        from autometashape_gui import generate_worker_bat_content
+        from cluster_utils import generate_worker_bat_content
 
         bat = generate_worker_bat_content(
             host="192.168.1.100",
@@ -271,23 +271,25 @@ class TestCliArgs(unittest.TestCase):
             ])
             self.assertEqual(args.texture_format, fmt)
 
-    def test_gui_pipelined_export_defaults(self) -> None:
-        """Defend GUI pipelined compute-export overlap concurrency default is 5 and texture format default is png."""
-        import tkinter as tk
-        from autometashape_gui import AutoMetashapeStudio
+    def test_worker_launcher_parser(self) -> None:
+        """Defend launch_worker argument parser accepts required and optional cluster flags."""
+        import launch_worker as lw
 
-        root = tk.Tk()
-        try:
-            root.withdraw()
-            studio = AutoMetashapeStudio.__new__(AutoMetashapeStudio)
-            studio.root = root
-            studio._init_variables()
-            self.assertEqual(studio.var_max_concurrent_exports.get(), 5)
-            self.assertEqual(studio.var_exp_format.get(), "png")
-            self.assertTrue(studio.var_pipelined_export.get())
-        finally:
-            root.destroy()
-
+        parser = lw.build_arg_parser()
+        args = parser.parse_args([
+            "--host", "10.2.8.43",
+            "--port", "5840",
+            "--root", r"\\SERVER\catp",
+            "--cpu-enable", "1",
+            "--gpu-mask", "1",
+            "--no-reconnect",
+        ])
+        self.assertEqual(args.host, "10.2.8.43")
+        self.assertEqual(args.port, "5840")
+        self.assertEqual(args.root, r"\\SERVER\catp")
+        self.assertEqual(args.cpu_enable, 1)
+        self.assertEqual(args.gpu_mask, "1")
+        self.assertTrue(args.no_reconnect)
 
 if __name__ == "__main__":
     unittest.main()

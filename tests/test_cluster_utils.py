@@ -1,0 +1,107 @@
+# Copyright (c) 2026, AutoMetashape Contributors.
+# All rights reserved.
+#
+# SPDX-License-Identifier: Apache-2.0
+
+import os
+import sys
+import tempfile
+import unittest
+from unittest.mock import MagicMock, patch
+
+# Ensure scripts directory is in sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
+
+import cluster_utils as cu
+
+
+class TestClusterUtils(unittest.TestCase):
+    """Test suite for cluster_utils module functions and diagnostics."""
+
+    def test_parse_ipc_line_sentinel(self) -> None:
+        """Verify parse_ipc_line parses valid sentinel lines."""
+        line = "@@AUTOMETASHAPE_STAGE:depth:MVS Dense Stereopsis@@"
+        parsed = cu.parse_ipc_line(line)
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed, ("depth", "MVS Dense Stereopsis"))
+
+    def test_parse_ipc_line_anchored_tags(self) -> None:
+        """Verify parse_ipc_line recognizes anchored [X/Y] stage tags."""
+        line = "[2/7] Matching photos..."
+        parsed = cu.parse_ipc_line(line, mode="recon")
+        self.assertIsNotNone(parsed)
+        self.assertEqual(parsed[0], "match")
+
+        # Export mode
+        export_line = "[1/2] Exporting Binary glTF (.glb)..."
+        parsed_exp = cu.parse_ipc_line(export_line, mode="export")
+        self.assertIsNotNone(parsed_exp)
+        self.assertEqual(parsed_exp[0], "models")
+
+    def test_parse_ipc_line_ignores_non_milestone(self) -> None:
+        """Verify parse_ipc_line returns None for non-milestone lines."""
+        self.assertIsNone(cu.parse_ipc_line("Elevation: ENABLED | Orthomosaic: ENABLED"))
+        self.assertIsNone(cu.parse_ipc_line(""))
+        self.assertIsNone(cu.parse_ipc_line("Just some normal output"))
+
+    def test_format_file_size(self) -> None:
+        """Verify format_file_size formats bytes to human-readable strings."""
+        self.assertEqual(cu.format_file_size(500), "500 B")
+        self.assertEqual(cu.format_file_size(2048), "2.0 KB")
+        self.assertEqual(cu.format_file_size(5 * 1024 * 1024), "5.0 MB")
+        self.assertEqual(cu.format_file_size(2 * 1024 * 1024 * 1024), "2.00 GB")
+
+    def test_get_primary_lan_ip(self) -> None:
+        """Verify get_primary_lan_ip returns a non-empty string."""
+        ip = cu.get_primary_lan_ip()
+        self.assertIsInstance(ip, str)
+        self.assertTrue(len(ip) >= 7)
+
+    def test_normalize_unicode_path(self) -> None:
+        """Verify normalize_unicode_path handles Vietnamese diacritics."""
+        p = cu.normalize_unicode_path("C:/Surveys/Khảo sát Đà Nẵng/ảnh/")
+        self.assertTrue("Đà Nẵng" in p)
+
+    def test_config_load_and_save(self) -> None:
+        """Verify saving and loading JSON configuration."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            conf_path = os.path.join(tmpdir, "test_worker_config.json")
+            data = {"host": "10.2.8.43", "port": "5840", "root": r"\\SERVER\catp"}
+            saved_path = cu.save_cluster_config(data, conf_path)
+            self.assertEqual(saved_path, conf_path)
+            self.assertTrue(os.path.isfile(conf_path))
+
+            loaded = cu.load_cluster_config(conf_path)
+            self.assertEqual(loaded, data)
+
+    def test_unc_path_validation(self) -> None:
+        """Verify test_unc_path accurately verifies directories."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            valid, err = cu.test_unc_path(tmpdir)
+            self.assertTrue(valid)
+            self.assertEqual(err, "")
+
+            invalid, err = cu.test_unc_path(os.path.join(tmpdir, "non_existent_folder_xyz"))
+            self.assertFalse(invalid)
+            self.assertIn("does not exist", err)
+
+            empty_valid, empty_err = cu.test_unc_path("")
+            self.assertFalse(empty_valid)
+            self.assertIn("cannot be empty", empty_err)
+
+    @patch("socket.socket")
+    def test_tcp_connection_mock(self, mock_socket_cls: MagicMock) -> None:
+        """Verify test_tcp_connection handles success and failure."""
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+
+        # Success case
+        self.assertTrue(cu.test_tcp_connection("127.0.0.1", 5840))
+
+        # Failure case
+        mock_sock.connect.side_effect = OSError("Connection refused")
+        self.assertFalse(cu.test_tcp_connection("127.0.0.1", 5840))
+
+
+if __name__ == "__main__":
+    unittest.main()
