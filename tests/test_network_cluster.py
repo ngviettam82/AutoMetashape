@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import json
 import os
+import tempfile
 import sys
 import unittest
 from unittest.mock import MagicMock
@@ -797,8 +799,61 @@ class TestNetworkCluster(unittest.TestCase):
                 self.assertEqual(data.get("stage_key"), "complete")
                 self.assertEqual(data.get("status"), "completed")
                 self.assertEqual(data.get("progress"), 100.0)
+
+                mr.emit_ipc_error("texture", "Out of VRAM during 8K packing")
+                with open(status_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.assertEqual(data.get("stage_key"), "texture")
+                self.assertEqual(data.get("status"), "error")
+                self.assertIn("Out of VRAM", data.get("error", ""))
             finally:
                 mr.set_active_status_file(None)
+
+    def test_status_file_sidecar_parent_dir_auto_creation(self) -> None:
+        """Verify emit_ipc_stage automatically creates parent directory if it does not exist yet."""
+        import json
+        import tempfile
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            nested_status_path = os.path.join(tmp_dir, "nested", "subfolder", "_status.json")
+            self.assertFalse(os.path.exists(os.path.dirname(nested_status_path)))
+            mr.set_active_status_file(nested_status_path)
+            try:
+                mr.emit_ipc_stage("ingest", "Ingesting raw photos", progress=10.0)
+                self.assertTrue(os.path.exists(nested_status_path))
+                with open(nested_status_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self.assertEqual(data.get("stage_key"), "ingest")
+                self.assertEqual(data.get("status"), "running")
+            finally:
+                mr.set_active_status_file(None)
+
+    def test_monolithic_runscript_passes_network_path_arg(self) -> None:
+        """Verify build_monolithic_runscript_task appends --network-path to worker args."""
+        import subprocess
+        from unittest.mock import patch
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            net_path = os.path.join(tmp_dir, "shared_root")
+            os.makedirs(net_path, exist_ok=True)
+            img_dir = os.path.join(net_path, "survey_a")
+            out_dir = os.path.join(net_path, "survey_a", "output")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+
+            with patch("subprocess.list2cmdline", side_effect=lambda args: " ".join(args)) as mock_cmd:
+                task, rel_script, s_file = mr.build_monolithic_runscript_task(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    project_name="survey_a",
+                    network_path=net_path,
+                )
+                called_args = mock_cmd.call_args[0][0]
+                self.assertIn("--network-path", called_args)
+                idx = called_args.index("--network-path")
+                self.assertEqual(called_args[idx + 1], net_path)
 
 
 if __name__ == '__main__':

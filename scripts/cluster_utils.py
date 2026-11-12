@@ -295,10 +295,18 @@ if "%TARGET_ROOT%"=="" (
 
 echo [OK] Shared Network Root   : %TARGET_ROOT%
 
-:: Detect Metashape installation on worker PC
+:: Detect Metashape installation dynamically across environment paths and mounted drives
 set "METASHAPE_EXE="
-if exist "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
-    set "METASHAPE_EXE=C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
+if exist "%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe"
+) else if exist "%ProgramW6432%\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=%ProgramW6432%\\Agisoft\\Metashape Pro\\metashape.exe"
+) else if exist "%LOCALAPPDATA%\\Programs\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=%LOCALAPPDATA%\\Programs\\Agisoft\\Metashape Pro\\metashape.exe"
+) else if exist "D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
+) else if exist "E:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
+    set "METASHAPE_EXE=E:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
 ) else (
     where metashape.exe >nul 2>nul
     if !errorlevel! equ 0 (
@@ -420,12 +428,14 @@ def load_cluster_config(config_path: str | None = None, filename: str = DEFAULT_
 
 
 def save_cluster_config(config: dict[str, Any], config_path: str | None = None, filename: str = DEFAULT_WORKER_CONFIG_FILENAME) -> str:
-    """Save cluster configuration dictionary to JSON file on disk."""
+    """Save cluster configuration dictionary to JSON file on disk atomically."""
     path = config_path or get_default_config_path(filename)
     parent_dir = os.path.dirname(os.path.abspath(path))
     if parent_dir and not os.path.exists(parent_dir):
         os.makedirs(parent_dir, exist_ok=True)
 
-    with open(path, "w", encoding="utf-8") as f:
+    tmp_path = f"{path}.tmp"
+    with open(tmp_path, "w", encoding="utf-8") as f:
         json.dump(config, f, indent=2, ensure_ascii=False)
+    os.replace(tmp_path, path)
     return path

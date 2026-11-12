@@ -102,6 +102,14 @@ class TestClusterUtils(unittest.TestCase):
         mock_sock.connect.side_effect = OSError("Connection refused")
         self.assertFalse(cu.test_tcp_connection("127.0.0.1", 5840))
 
+    def test_generate_worker_bat_dynamic_paths(self) -> None:
+        """Verify generate_worker_bat_content uses dynamic environment variables and drive scans."""
+        bat = cu.generate_worker_bat_content(host="192.168.1.100", port="5840", root_path=r"\\SERVER\SharedMetashape")
+        self.assertIn("%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe", bat)
+        self.assertIn("%ProgramW6432%\\Agisoft\\Metashape Pro\\metashape.exe", bat)
+        self.assertIn("192.168.1.100:5840", bat)
+        self.assertIn(r"\\SERVER\SharedMetashape", bat)
+
 
 if __name__ == "__main__":
     unittest.main()

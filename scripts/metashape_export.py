@@ -360,7 +360,7 @@ def export_project_assets(
     emit_ipc_stage("deliverables", "Exporting Production Deliverables (Cloud, DEM, Ortho, Report)")
     if export_point_cloud and chunk.point_cloud and chunk.point_cloud.point_count > 0:
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
         pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         print(f"\n[Point Cloud] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
         chunk.exportPointCloud(
@@ -497,7 +497,7 @@ def export_project_assets(
                 chunk.buildTiledModel(tile_size=tile_size, source_data=Metashape.DataSource.DepthMapsData)
                 doc.save()
 
-            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
+            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json") if Metashape is not None else (None, "tileset.json"))
             tiled_fmt, tiled_ext = tiled_fmt_tuple
             if tiled_model_format.lower() == "cesium":
                 tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
@@ -534,7 +534,7 @@ def export_project_assets(
             try:
                 print(f"\n[Contours] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
                 chunk.buildContours(source_data=Metashape.DataSource.ElevationData, interval=contour_interval, prevent_intersections=True)
-                sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
+                sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp") if Metashape is not None else (None, ".shp"))
                 cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
                 print(f"  Exporting Contour Shapes to: {cnt_out}...", flush=True)
                 chunk.exportShapes(path=cnt_out, format=sh_fmt, save_polylines=True, save_elevation=True, save_attributes=True)

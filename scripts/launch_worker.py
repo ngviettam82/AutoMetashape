@@ -48,7 +48,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)")
     parser.add_argument("--port", type=str, default="5840", help="Cluster Server control port")
-    parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\catp)")
+    parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)")
     parser.add_argument("--cpu-enable", type=int, default=1, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
     parser.add_argument("--gpu-mask", type=str, default="1", help="Bitmask of GPU devices to engage (1 = first GPU)")
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON worker configuration file")

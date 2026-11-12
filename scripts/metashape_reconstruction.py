@@ -23,6 +23,8 @@ import math
 import os
 import re
 import shutil
+import socket
+import subprocess
 import sys
 import threading
 import time
@@ -62,12 +64,14 @@ def set_active_status_file(path: str | None) -> None:
 
 
 def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> None:
-    """Emits an explicit machine-readable IPC milestone sentinel to stdout for GUI tracking."""
+    """Emits an explicit machine-readable IPC milestone sentinel to stdout and atomic status sidecar."""
     print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{description}{IPC_SENTINEL_SUFFIX}", flush=True)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE:
         try:
-            import socket
+            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
             data = {
                 "stage_key": stage_key,
                 "stage_desc": description,
@@ -76,19 +80,23 @@ def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> N
                 "status": "running",
                 "timestamp": time.time(),
             }
-            with open(_ACTIVE_STATUS_FILE, "w", encoding="utf-8") as sf:
-                json.dump(data, sf)
+            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as sf:
+                json.dump(data, sf, indent=2)
+            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
         except Exception:
             pass
 
 
 def emit_ipc_event(sentinel: str) -> None:
-    """Emits an explicit machine-readable IPC control event to stdout."""
+    """Emits an explicit machine-readable IPC control event to stdout and updates status sidecar."""
     print(sentinel, flush=True)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE and "COMPLETE" in sentinel:
         try:
-            import socket
+            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
             data = {
                 "stage_key": "complete",
                 "stage_desc": "Pipeline Complete",
@@ -97,8 +105,37 @@ def emit_ipc_event(sentinel: str) -> None:
                 "status": "completed",
                 "timestamp": time.time(),
             }
-            with open(_ACTIVE_STATUS_FILE, "w", encoding="utf-8") as sf:
-                json.dump(data, sf)
+            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as sf:
+                json.dump(data, sf, indent=2)
+            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
+        except Exception:
+            pass
+
+
+def emit_ipc_error(stage_key: str, error_message: str) -> None:
+    """Emits an explicit error status to stdout and the status sidecar JSON."""
+    err_line = f"[ERROR] Pipeline error in stage '{stage_key}': {error_message}"
+    print(err_line, file=sys.stderr, flush=True)
+    global _ACTIVE_STATUS_FILE
+    if _ACTIVE_STATUS_FILE:
+        try:
+            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
+            if parent and not os.path.exists(parent):
+                os.makedirs(parent, exist_ok=True)
+            data = {
+                "stage_key": stage_key,
+                "stage_desc": f"Error: {error_message}",
+                "progress": 0.0,
+                "worker_node": socket.gethostname(),
+                "status": "error",
+                "error": error_message,
+                "timestamp": time.time(),
+            }
+            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
+            with open(tmp_path, "w", encoding="utf-8") as sf:
+                json.dump(data, sf, indent=2)
+            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
         except Exception:
             pass
 
@@ -1630,8 +1667,7 @@ def build_monolithic_runscript_task(
     This guarantees 100% zero worker hopping, zero LAN sync pauses between stages,
     and real-time IPC progress monitoring via a shared JSON status sidecar.
     """
-    import subprocess
-    import shutil
+
 
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
@@ -1692,6 +1728,8 @@ def build_monolithic_runscript_task(
         "--texture-format", texture_format,
         "--status-file", rel_status,
     ]
+    if network_path:
+        worker_args.extend(["--network-path", network_path])
     if resume:
         worker_args.append("--resume")
     else:
@@ -1733,10 +1771,11 @@ def build_monolithic_runscript_task(
         worker_args.append("--export-report")
 
     # 4. Instantiate RunScript task with full CUDA GPU support enabled
+    cmd_args = subprocess.list2cmdline(worker_args)
     if Metashape is not None:
         rs = Metashape.Tasks.RunScript()
         rs.path = rel_script
-        rs.args = subprocess.list2cmdline(worker_args)
+        rs.args = cmd_args
         net_task = rs.toNetworkTask()
         try:
             net_task.gpu_support = True
@@ -1749,6 +1788,7 @@ def build_monolithic_runscript_task(
         net_task = MagicMock()
         net_task.name = "RunScript"
         net_task.gpu_support = True
+        net_task.args = cmd_args
 
     return net_task, rel_script, status_file
 
@@ -2096,7 +2136,7 @@ def build_unified_cluster_pipeline_tasks(
 
     if export_point_cloud and build_point_cloud:
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+        pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
         pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         t_pc = Metashape.Tasks.ExportPointCloud()
         t_pc.format = pc_fmt
@@ -2679,6 +2719,20 @@ def run_reconstruction(
         project_name: Custom base name for project files and deliverables.
     """
     t_start = time.time()
+    # Normalize paths and resolve relative paths against network_path if running on worker node
+    if network_path:
+        network_path = os.path.normpath(network_path.strip())
+        if not os.path.isabs(images_dir) or not os.path.exists(images_dir):
+            cand = os.path.normpath(os.path.join(network_path, images_dir))
+            if os.path.exists(cand):
+                images_dir = cand
+        if output_dir and (not os.path.isabs(output_dir) or not os.path.exists(output_dir)):
+            cand = os.path.normpath(os.path.join(network_path, output_dir))
+            if os.path.exists(cand) or os.path.exists(os.path.dirname(cand)):
+                output_dir = cand
+        if status_file and not os.path.isabs(status_file):
+            status_file = os.path.normpath(os.path.join(network_path, status_file))
+
     if not project_name:
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
     if not output_dir:
@@ -2686,6 +2740,11 @@ def run_reconstruction(
     os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, f"{project_name}.psx")
     legacy_psx = os.path.join(output_dir, "building_reconstruction.psx")
+
+    # Initialize active status sidecar immediately for real-time IPC tracking
+    if not status_file:
+        status_file = os.path.join(output_dir, "_autometashape_status.json")
+    set_active_status_file(status_file)
 
     # -----------------------------------------------------------------------
     # Pro Photogrammetry Survey Physics & Telemetry Resolution
@@ -4596,7 +4655,7 @@ def run_reconstruction(
 
             if export_point_cloud and (chunk.point_cloud is not None or build_point_cloud):
                 pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-                pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+                pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
                 pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
                 t_pc = Metashape.Tasks.ExportPointCloud()
                 t_pc.format = pc_fmt
@@ -4740,7 +4799,7 @@ def run_reconstruction(
     if (not cluster_exported) and export_point_cloud:
         if _has_dense_points(chunk):
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-            pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"))
+            pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
             pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
             print(f"\n[7d/7] [EXPORT] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
             chunk.exportPointCloud(
@@ -5009,7 +5068,8 @@ if __name__ == "__main__":
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
     auto_params = args.auto or args.pro or (args.preset == "pro")
 
-    run_reconstruction(
+    try:
+        run_reconstruction(
         images_dir=args.images,
         output_dir=args.output,
         align_quality=args.align_quality,
@@ -5089,3 +5149,6 @@ if __name__ == "__main__":
         project_name=args.project_name,
         status_file=getattr(args, "status_file", None),
     )
+    except Exception as exc:
+        emit_ipc_error("pipeline", str(exc))
+        raise
