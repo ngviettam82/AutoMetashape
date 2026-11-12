@@ -227,7 +227,7 @@ To harness GPUs and high-core CPUs across your local network:
   *Subsequent runs*: Double-click `launch_worker.bat` to connect instantly with zero typing!
 - **Headless / Automation CLI**:
   ```powershell
-  .\launch_worker.bat --host <SERVER_IP> --root "\\SERVER\catp" --gpu 1 --cpu 1
+  .\launch_worker.bat --host <SERVER_IP> --root "\\SERVER\SharedMetashape" --gpu 1 --cpu 1
   ```
 - **Pre-Flight Health Diagnostics Built-in**:
   1. Validates Metashape Pro executable path.
@@ -282,9 +282,9 @@ For massive multi-flight photogrammetry reconstructions running on the cluster (
 Dispatch autonomous reconstruction to the active cluster:
 ```powershell
 & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py \
-    --images "\\SERVER\catp\041126\0043" \
+    --images "\\SERVER\SharedMetashape\041126\0043" \
     --preset pro \
-    --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\catp"
+    --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\SharedMetashape"
 ```
 
 ### 6. Web Studio Dynamic Telemetry Dashboard
@@ -327,7 +327,7 @@ The integrated Web Studio (`web/projects_dashboard.html`) provides real-time sur
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
     --images "\\HOST_PC\SharedMetashape\Site_A" \
     --preset pro \
-    --network-enable --network-host 10.2.8.43 --network-port 5840 --network-path "\\HOST_PC\SharedMetashape"
+    --network-enable --network-host 192.168.1.100 --network-port 5840 --network-path "\\HOST_PC\SharedMetashape"
 
 # Decoupled Pipelined Reconstruction (Export Suppressed for Host Background Overlap):
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \

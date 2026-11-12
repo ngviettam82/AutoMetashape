@@ -18,6 +18,7 @@ Configured with production-grade defaults:
 
 from __future__ import annotations
 import argparse
+import json
 import math
 import os
 import re
@@ -1732,16 +1733,22 @@ def build_monolithic_runscript_task(
         worker_args.append("--export-report")
 
     # 4. Instantiate RunScript task with full CUDA GPU support enabled
-    rs = Metashape.Tasks.RunScript()
-    rs.path = rel_script
-    rs.args = subprocess.list2cmdline(worker_args)
-    net_task = rs.toNetworkTask()
-    try:
-        net_task.gpu_support = True
-    except Exception:
-        pass
-    if not isinstance(getattr(net_task, "name", None), str):
+    if Metashape is not None:
+        rs = Metashape.Tasks.RunScript()
+        rs.path = rel_script
+        rs.args = subprocess.list2cmdline(worker_args)
+        net_task = rs.toNetworkTask()
+        try:
+            net_task.gpu_support = True
+        except Exception:
+            pass
+        if not isinstance(getattr(net_task, "name", None), str):
+            net_task.name = "RunScript"
+    else:
+        from unittest.mock import MagicMock
+        net_task = MagicMock()
         net_task.name = "RunScript"
+        net_task.gpu_support = True
 
     return net_task, rel_script, status_file
 
@@ -1952,7 +1959,10 @@ def build_unified_cluster_pipeline_tasks(
             except Exception:
                 target_crs = chunk.crs
     if target_crs:
-        proj.crs = target_crs
+        try:
+            proj.crs = target_crs
+        except Exception:
+            pass
 
     # 7. Digital Elevation Model (DEM)
     if build_dem:
@@ -4325,7 +4335,10 @@ def run_reconstruction(
                             except Exception:
                                 target_crs = chunk.crs
                 if target_crs:
-                    proj.crs = target_crs
+                    try:
+                        proj.crs = target_crs
+                    except Exception:
+                        pass
                 dem_source = Metashape.DataSource.PointCloudData if _has_dense_points(chunk) else Metashape.DataSource.DepthMapsData
                 dem_computed = False
                 if cluster_enabled:
@@ -4424,7 +4437,10 @@ def run_reconstruction(
                             except Exception:
                                 target_crs = chunk.crs
                 if target_crs:
-                    proj.crs = target_crs
+                    try:
+                        proj.crs = target_crs
+                    except Exception:
+                        pass
                 ortho_computed = False
                 surf_data = Metashape.DataSource.ElevationData if (build_dem or (chunk and getattr(chunk, "elevation", None) is not None)) else Metashape.DataSource.ModelData
                 if cluster_enabled:

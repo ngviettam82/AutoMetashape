@@ -745,8 +745,6 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertNotIn("RunScript", task_names)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
     def test_build_monolithic_runscript_task_structure(self) -> None:
         """Verify build_monolithic_runscript_task creates a valid RunScript NetworkTask with GPU support."""

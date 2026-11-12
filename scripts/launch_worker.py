@@ -46,7 +46,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="AutoMetashape Distributed Cluster Worker Launcher",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 10.2.8.43 or ctuav)")
+    parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)")
     parser.add_argument("--port", type=str, default="5840", help="Cluster Server control port")
     parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\catp)")
     parser.add_argument("--cpu-enable", type=int, default=1, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
@@ -77,8 +77,8 @@ def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tu
     port_input = input(f"[?] Enter Cluster Server Port {prompt_port}: ").strip()
     target_port = port_input or "5840"
 
-    suggested_root = default_root or r"\\SERVER\catp"
-    root_input = input(f"[?] Enter Shared Storage UNC Path (e.g. \\\\SERVER\\catp) [{suggested_root}]: ").strip()
+    suggested_root = default_root or r"\\SERVER\SharedMetashape"
+    root_input = input(f"[?] Enter Shared Storage UNC Path (e.g. \\\\SERVER\\SharedMetashape) [{suggested_root}]: ").strip()
     target_root = root_input or suggested_root
 
     save_input = input("[?] Save settings to worker_config.json for 1-click launch? [Y/n]: ").strip().lower()

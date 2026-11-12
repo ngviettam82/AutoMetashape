@@ -66,7 +66,7 @@ class TestClusterUtils(unittest.TestCase):
         """Verify saving and loading JSON configuration."""
         with tempfile.TemporaryDirectory() as tmpdir:
             conf_path = os.path.join(tmpdir, "test_worker_config.json")
-            data = {"host": "10.2.8.43", "port": "5840", "root": r"\\SERVER\catp"}
+            data = {"host": "192.168.1.100", "port": "5840", "root": r"\\SERVER\SharedMetashape"}
             saved_path = cu.save_cluster_config(data, conf_path)
             self.assertEqual(saved_path, conf_path)
             self.assertTrue(os.path.isfile(conf_path))

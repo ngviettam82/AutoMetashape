@@ -277,16 +277,16 @@ class TestCliArgs(unittest.TestCase):
 
         parser = lw.build_arg_parser()
         args = parser.parse_args([
-            "--host", "10.2.8.43",
+            "--host", "192.168.1.100",
             "--port", "5840",
-            "--root", r"\\SERVER\catp",
+            "--root", r"\\SERVER\SharedMetashape",
             "--cpu-enable", "1",
             "--gpu-mask", "1",
             "--no-reconnect",
         ])
-        self.assertEqual(args.host, "10.2.8.43")
+        self.assertEqual(args.host, "192.168.1.100")
         self.assertEqual(args.port, "5840")
-        self.assertEqual(args.root, r"\\SERVER\catp")
+        self.assertEqual(args.root, r"\\SERVER\SharedMetashape")
         self.assertEqual(args.cpu_enable, 1)
         self.assertEqual(args.gpu_mask, "1")
         self.assertTrue(args.no_reconnect)
