@@ -24,6 +24,20 @@ Release details and release notes: [GitHub Release v1.4.0](https://github.com/ng
 
 ## Quickstart
 
+### 0. 1-Click In-Place Updater (Zero Git Dependency)
+
+Update any node (coordinator or remote worker) directly from GitHub `main` with zero folder nesting:
+```powershell
+# Update in-place:
+.\update.bat
+
+# Update and immediately launch worker daemon:
+.\update.bat --worker
+
+# Update and immediately launch cluster server:
+.\update.bat --server
+```
+
 ### 1. Launch Distributed Cluster Daemons (1-Click)
 
 **Worker Node Workstations (Run on any network PC with a GPU):**
@@ -40,12 +54,11 @@ Release details and release notes: [GitHub Release v1.4.0](https://github.com/ng
 
 ### 2. Autonomous CLI Execution
 
-Run photogrammetry reconstruction directly from PowerShell or terminal:
+Run photogrammetry reconstruction directly from PowerShell or terminal. Standard Python automatically discovers Metashape Pro across all installed drives and delegates execution seamlessly:
 
 ```powershell
 # Pro Photogrammetry & Geomatics Engine (Default):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
-    --images "C:/path/to/your/images" --preset pro
+python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
 
 # Drone Survey with Dense Point Cloud, DEM, Contours & Cesium 3D Tiles:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \

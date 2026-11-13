@@ -201,42 +201,53 @@ For multi-PC local area networks (LAN), Metashape Network Processing divides lar
   New-NetFirewallRule -DisplayName "Metashape Server Port 5840" -Direction Inbound -LocalPort 5840 -Protocol TCP -Action Allow
   ```
 
-#### 5.2 Starting the Cluster Server Daemon (Coordinator Workstation)
-The server process coordinates task dispatching and job tracking across all participating cluster nodes.
+#### 5.2 Zero-Dependency Automated Node Updater (`update.bat`)
+Updates any worker or coordinator node directly from GitHub `main` in-place with zero Git dependency, no nested directories, automatic worker termination to release file locks, and user config preservation:
+- **In-Place Update**:
+  ```powershell
+  .\update.bat
+  ```
+- **Update and Immediately Launch Worker Daemon**:
+  ```powershell
+  .\update.bat --worker
+  ```
+- **Update and Immediately Launch Cluster Server**:
+  ```powershell
+  .\update.bat --server
+  ```
+
+#### 5.3 Starting the Cluster Server Daemon (Coordinator Workstation)
+The server process coordinates task dispatching and job tracking across all participating cluster nodes:
 - **1-Click Windows Launcher**:
   ```powershell
   .\launch_server.bat
   ```
-  *(Automatically detects Metashape Server binary, checks port availability, and prints LAN IP connection instructions for remote worker PCs).*
-- **Linux / Bash**:
-  ```bash
-  ./launch_server.sh
-  ```
+  *(Dynamically discovers Metashape Pro across all drives `C:`, `D:`, `E:`, `F:`, `G:`, detects host LAN IP even on airgapped networks, and displays worker connection instructions).*
 - **Custom Ports / CLI Override**:
   ```powershell
   .\launch_server.bat --port 5840 --dispatch-port 5841
   ```
 
-#### 5.3 Starting Cluster Worker Nodes (All Participating Workstations)
+#### 5.4 Starting Cluster Worker Nodes (All Participating Workstations)
 To harness GPUs and high-core CPUs across your local network:
 - **1-Click Windows Launcher**:
   ```powershell
   .\launch_worker.bat
   ```
-  *On first run*: Prompts interactively for Cluster Server IP and Shared UNC Storage root, then saves to `worker_config.json`.
+  *On first run*: Interactively prompts for the Cluster Server IP and Shared UNC Storage root, then saves to `worker_config.json`.
   *Subsequent runs*: Double-click `launch_worker.bat` to connect instantly with zero typing!
 - **Headless / Automation CLI**:
   ```powershell
-  .\launch_worker.bat --host <SERVER_IP> --root "\\SERVER\SharedMetashape" --gpu 1 --cpu 1
+  .\launch_worker.bat --host <SERVER_IP> --root "\\HOST_PC\SharedMetashape" --gpu 1 --cpu 1
   ```
 - **Pre-Flight Health Diagnostics Built-in**:
-  1. Validates Metashape Pro executable path.
-  2. Tests TCP port 5840 reachability to server host (flags firewall blocks immediately).
+  1. Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
+  2. Tests TCP port reachability to server host (flags firewall issues immediately).
   3. Tests Shared UNC storage directory access and permissions.
-  4. Auto-detects NVIDIA GPUs and enables CPU fallback.
-  5. **Auto-Reconnect**: Automatically retries every 10s if the server restarts or network fluctuates.
+  4. Auto-detects NVIDIA GPUs and enables CPU compute fallback.
+  5. **Auto-Reconnect**: Automatically reconnects every 10s if the server restarts or network fluctuates.
 
-#### 5.4 Checking Connectivity & Connected Worker Discovery
+#### 5.5 Checking Connectivity & Connected Worker Discovery
 Inspect connected cluster nodes via Python or CLI:
 ```python
 import Metashape
@@ -374,6 +385,7 @@ Reconstruction outputs must satisfy the following quality criteria:
 - [scripts/metashape_reconstruction.py](../../../scripts/metashape_reconstruction.py)
 - [scripts/metashape_export.py](../../../scripts/metashape_export.py)
 - [scripts/cluster_utils.py](../../../scripts/cluster_utils.py)
+- [update.bat](../../../update.bat)
 - [launch_worker.bat](../../../launch_worker.bat)
 - [launch_server.bat](../../../launch_server.bat)
 - [Agisoft Metashape Professional User Manual (v2.x)](https://www.agisoft.com/downloads/user-manuals/)

@@ -39,7 +39,7 @@ Execute project validation tools before staging changes:
 ```powershell
 python tools/skills/cli.py check
 python tools/check_licenses.py
-./format_code.bat
+.\format_code.bat
 ```
 
 ### 3. Atomic Conventional Commits

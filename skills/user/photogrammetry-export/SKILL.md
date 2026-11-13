@@ -52,7 +52,11 @@ flowchart LR
 ```
 
 ### 1. Basic Export Command
-Run export operations directly against the existing project file:
+Run export operations directly against the existing project file. You can execute using standard Python (which automatically detects Metashape Pro across all installed drives and re-launches with `-r`) or via the Metashape binary:
+```powershell
+python scripts/metashape_export.py --project "<path_to_project>/building_reconstruction.psx"
+```
+Or directly via Metashape Pro:
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
     --project "<path_to_project>/building_reconstruction.psx"
@@ -126,5 +130,6 @@ Verify exported assets:
 
 - [evaluations.md](evaluations.md)
 - [scripts/metashape_export.py](../../../scripts/metashape_export.py)
+- [update.bat](../../../update.bat)
 - [Agisoft Metashape User Manual](https://www.agisoft.com/downloads/user-manuals/)
 - [Open Geospatial Consortium (OGC) 3D Tiles Specification](https://www.ogc.org/standards/3DTiles)

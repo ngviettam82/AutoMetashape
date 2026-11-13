@@ -46,11 +46,7 @@ Every source file must begin with the project's canonical SPDX license header:
 ### 3. Automated Formatting
 Always execute repository formatters before submitting changes:
 ```powershell
-./format_code.bat
-```
-On POSIX environments:
-```bash
-format_code.bat
+.\format_code.bat
 ```
 
 ---
