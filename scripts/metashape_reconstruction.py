@@ -2853,25 +2853,37 @@ def run_reconstruction(
     print(f"  Execution Mode:     {'RESUME CHECKPOINT (DEFAULT)' if resume else 'RESTART FROM SCRATCH'}")
     print("=========================================================================", flush=True)
 
-    # Enable all available NVIDIA / high-performance GPUs
-    gpus = Metashape.app.enumGPUDevices()
-    nvidia_mask = 0
+    # Enable all available discrete high-performance GPUs (NVIDIA, AMD Radeon, Intel Arc), excluding integrated graphics
+    gpus = Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
+    discrete_mask = 0
     active_gpu_names = []
     for i, g in enumerate(gpus):
-        vendor = g.get("vendor", "").lower()
         name = g.get("name", "").lower()
-        if "nvidia" in vendor or "geforce" in name or "rtx" in name:
-            nvidia_mask |= (1 << i)
+        vendor = g.get("vendor", "").lower()
+        # Exclude integrated graphics (Intel UHD/HD, AMD APU Radeon)
+        is_igpu = any(ig in name for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "intel(r) iris", "radeon(tm) graphics", "radeon graphics"))
+        if is_igpu:
+            continue
+        # Include discrete compute devices (NVIDIA, discrete AMD Radeon, discrete Intel Arc)
+        is_discrete = any(k in vendor or k in name for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc", "arc(tm)"))
+        if is_discrete:
+            discrete_mask |= (1 << i)
             active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
 
-    if nvidia_mask:
-        Metashape.app.gpu_mask = nvidia_mask
-        print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {nvidia_mask})", flush=True)
-    elif gpus:
-        Metashape.app.gpu_mask = (1 << len(gpus)) - 1
-        print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
+    # When running in network worker mode, omit setting gpu_mask so the server dynamically orchestrates hardware
+    is_network_worker = any("--worker" in arg.lower() for arg in sys.argv) or (bool(network_path) and not network_enable)
+    if not is_network_worker:
+        if discrete_mask:
+            Metashape.app.gpu_mask = discrete_mask
+            print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
+        elif gpus and not any(any(ig in g.get("name", "").lower() for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "radeon(tm) graphics")) for g in gpus):
+            Metashape.app.gpu_mask = (1 << len(gpus)) - 1
+            print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
+        else:
+            Metashape.app.gpu_mask = 0
+            print("[Hardware] Running on CPU.", flush=True)
     else:
-        print("[Hardware] Running on CPU.", flush=True)
+        print("[Hardware] Network worker execution: honoring server/engine dynamic GPU orchestration.", flush=True)
 
     # Distributed Network Cluster Processing
     net_client = None

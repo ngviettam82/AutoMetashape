@@ -278,8 +278,25 @@ def get_primary_lan_ip() -> str:
 # ---------------------------------------------------------------------------
 # Hardware & GPU Device Discovery
 # ---------------------------------------------------------------------------
+def is_integrated_gpu(name: str) -> bool:
+    """Return True if GPU device name matches known integrated graphics (Intel iGPU, AMD APU)."""
+    lower = name.lower()
+    return any(
+        ig in lower
+        for ig in (
+            "intel(r) graphics",
+            "intel(r) hd",
+            "intel(r) uhd",
+            "intel(r) iris",
+            "radeon(tm) graphics",
+            "radeon graphics",
+            "vega",
+        )
+    )
+
+
 def detect_gpu_devices() -> list[dict[str, Any]]:
-    """Detect available GPU devices on the system using Metashape API, nvidia-smi, or system WMI.
+    """Detect available discrete high-performance GPU devices, filtering out integrated graphics.
 
     Returns:
         List of dicts: [{"index": int, "name": str, "mem_mb": int}]
@@ -290,14 +307,18 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
         if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices"):
             gpus = Metashape.app.enumGPUDevices()
             if gpus:
-                return [
-                    {
+                devices = []
+                for i, g in enumerate(gpus):
+                    name = g.get("name", f"GPU {i}")
+                    if is_integrated_gpu(name):
+                        continue
+                    devices.append({
                         "index": i,
-                        "name": g.get("name", f"GPU {i}"),
+                        "name": name,
                         "mem_mb": int(g.get("mem_size", 0) // (1024 * 1024)),
-                    }
-                    for i, g in enumerate(gpus)
-                ]
+                    })
+                if devices:
+                    return devices
     except Exception:
         pass
 
@@ -343,7 +364,7 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
                 devices = []
                 for name in res.stdout.strip().splitlines():
                     clean_name = name.strip()
-                    if not clean_name:
+                    if not clean_name or is_integrated_gpu(clean_name):
                         continue
                     lower = clean_name.lower()
                     if any(k in lower for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc")):
@@ -356,11 +377,20 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
     return []
 
 
-def calculate_optimal_gpu_mask(gpu_devices: list[dict[str, Any]] | None = None) -> tuple[int, list[str]]:
-    """Calculates optimal GPU bitmask enabling all detected high-performance GPUs.
+def calculate_optimal_gpu_mask(gpu_devices: list[dict[str, Any]] | None = None) -> tuple[int | None, list[str]]:
+    """Inspects available discrete GPUs for telemetry and diagnostic reporting.
+
+    .. deprecated:: 2.3.0
+       Synthetic bitmask calculation based on external device enumeration is deprecated.
+       External device indexes (from nvidia-smi or WMI) frequently conflict with Metashape's
+       internal OpenCL/CUDA device table (e.g. on systems where Intel iGPUs precede NVIDIA GPUs).
+       Metashape Pro natively benchmarks all available compute devices, bypasses integrated graphics,
+       and manages multi-GPU load balancing automatically when --gpu-mask is omitted.
 
     Returns:
-        Tuple of (bitmask: int, device_labels: list[str])
+        Tuple of (bitmask: None | int, device_labels: list[str]). Returns 0 if no discrete GPUs
+        exist (CPU-only mode), or None when discrete GPUs exist so callers omit --gpu-mask to
+        defer to native Metashape hardware benchmarking and selection.
     """
     if gpu_devices is None:
         gpu_devices = detect_gpu_devices()
@@ -368,14 +398,12 @@ def calculate_optimal_gpu_mask(gpu_devices: list[dict[str, Any]] | None = None) 
     if not gpu_devices:
         return 0, []
 
-    mask = 0
     names = []
     for i, dev in enumerate(gpu_devices):
-        mask |= (1 << i)
         mem_str = f" ({dev['mem_mb'] / 1024:.1f} GB)" if dev.get("mem_mb") else ""
         names.append(f"{dev.get('name', f'GPU {i}')}{mem_str}")
 
-    return mask, names
+    return None, names
 
 
 def generate_worker_bat_content(
@@ -398,7 +426,7 @@ def generate_worker_bat_content(
     gpu_flag = ""
     if gpu_mask is not None:
         mask_str = str(gpu_mask).strip()
-        if mask_str and mask_str != "0":
+        if mask_str and mask_str != "0" and mask_str.lower() not in ("auto", "none", "default"):
             gpu_flag = f" --gpu-mask {mask_str}"
 
     return f"""@echo off

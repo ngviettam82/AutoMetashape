@@ -238,13 +238,13 @@ To harness GPUs and high-core CPUs across your local network:
   *Subsequent runs*: Double-click `launch_worker.bat` to connect instantly with zero typing!
 - **Headless / Automation CLI**:
   ```powershell
-  .\launch_worker.bat --host <SERVER_IP> --root "\\HOST_PC\SharedMetashape" --gpu 1 --cpu 1
+  .\launch_worker.bat --host <SERVER_IP> --root "\\HOST_PC\SharedMetashape" --cpu 1
   ```
 - **Pre-Flight Health Diagnostics Built-in**:
   1. Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
   2. Tests TCP port reachability to server host (flags firewall issues immediately).
   3. Tests Shared UNC storage directory access and permissions.
-  4. **Dynamic Multi-GPU Discovery & Bitmask Calculation**: Automatically detects all GPUs via Metashape API, `nvidia-smi`, or Windows WMI, calculating the optimal bitmask (`1` for 1 GPU, `3` for 2 GPUs, `15` for 4 GPUs), and safely omits `--gpu-mask` for CPU-only nodes.
+  4. **Native Multi-GPU Benchmark & Discovery**: When `--gpu-mask` is omitted (default), Metashape Pro's native C++ engine automatically discovers, benchmarks, and engages all high-performance discrete GPUs while bypassing integrated graphics (Intel UHD/HD, AMD APU). Explicit bitmasks (e.g. `--gpu-mask 0` for CPU-only) are supported as manual overrides.
   5. **Auto-Reconnect**: Automatically reconnects every 10s if the server restarts or network fluctuates.
 
 #### 5.5 Worker Node Configuration (`worker_config.json`) & Unattended Provisioning
@@ -264,7 +264,7 @@ When `launch_worker.bat` runs interactively, it automatically creates `worker_co
   - `port` *(string)*: Cluster Server control port (default `"5840"`).
   - `root` *(string)*: Universal Windows UNC network share path accessible identically across all nodes.
   - `cpu_enable` *(int)*: Set to `1` to utilize CPU compute cores, or `0` for GPU-only execution.
-  - `gpu_mask` *(string, optional)*: GPU device bitmask (e.g. `"1"` = 1 GPU, `"3"` = 2 GPUs, `"15"` = 4 GPUs, `"0"` = CPU-only). When omitted or empty, `launch_worker.py` dynamically auto-detects and activates all available system GPUs.
+  - `gpu_mask` *(string, optional)*: Manual GPU device bitmask override (e.g. `"0"` for CPU-only, or an explicit device bitmask). When omitted or set to `"Auto"` (recommended default), Metashape Pro dynamically benchmarks and engages all available discrete GPUs natively.
 - **Interactive Reconfiguration**:
   To update an existing node's configuration at any time, run:
   ```powershell

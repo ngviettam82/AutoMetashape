@@ -108,11 +108,15 @@ def run_interactive_wizard(
     print("No complete configuration found. Please configure this worker node.\n")
 
     # 1. Hardware Discovery
-    detected_mask, detected_gpu_names = cu.calculate_optimal_gpu_mask()
+    gpu_devices = cu.detect_gpu_devices()
+    detected_gpu_names = []
+    for d in gpu_devices:
+        mem_str = f" ({d['mem_mb'] / 1024:.1f} GB)" if d.get("mem_mb") else ""
+        detected_gpu_names.append(f"{d['name']}{mem_str}")
     cpu_cores = os.cpu_count() or 4
     if detected_gpu_names:
-        print(f"[Hardware] Detected {len(detected_gpu_names)} GPU(s): {', '.join(detected_gpu_names)}")
-        print(f"           Optimal GPU Mask: {detected_mask} (Enables all {len(detected_gpu_names)} GPU(s))")
+        print(f"[Hardware] Detected {len(detected_gpu_names)} discrete GPU(s): {', '.join(detected_gpu_names)}")
+        print("           Hardware Strategy: Metashape Pro native engine benchmarks and engages all discrete GPUs.")
     else:
         print("[Hardware] No discrete GPUs detected (running in CPU-only compute mode).")
     print(f"[Hardware] Detected {cpu_cores} CPU threads.\n")
@@ -142,9 +146,11 @@ def run_interactive_wizard(
             print("[!] Shared storage UNC path is required for cluster network processing. Please provide a valid path.")
 
     # 5. GPU Mask
-    suggested_gpu = default_gpu if default_gpu is not None else (str(detected_mask) if detected_mask > 0 else "0")
-    gpu_input = input(f"[?] Enter GPU Device Bitmask (e.g. 1=GPU0, 3=GPU0+1, 0=CPU-only) [{suggested_gpu}]: ").strip()
+    suggested_gpu = default_gpu or "Auto"
+    gpu_input = input(f"[?] Enter GPU Device Bitmask (e.g. 1=GPU0, 3=GPU0+1, 0=CPU-only, Auto=Native) [{suggested_gpu}]: ").strip()
     target_gpu_mask = gpu_input or suggested_gpu
+    if target_gpu_mask.lower() in ("auto", "default", "none", ""):
+        target_gpu_mask = ""
 
     # 6. CPU Enable
     suggested_cpu = str(default_cpu)
@@ -189,7 +195,11 @@ def _run_worker_lifecycle() -> int:
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME)
     saved_config = cu.load_cluster_config(config_path)
 
-    detected_mask, detected_gpu_names = cu.calculate_optimal_gpu_mask()
+    gpu_devices = cu.detect_gpu_devices()
+    detected_gpu_names = []
+    for d in gpu_devices:
+        mem_str = f" ({d['mem_mb'] / 1024:.1f} GB)" if d.get("mem_mb") else ""
+        detected_gpu_names.append(f"{d['name']}{mem_str}")
 
     host = args.host or saved_config.get("host", "")
     port = args.port or saved_config.get("port", "5840")
@@ -233,7 +243,7 @@ def _run_worker_lifecycle() -> int:
             )
             return 1
 
-        suggested_gpu = explicit_gpu_mask if explicit_gpu_mask is not None else (str(detected_mask) if detected_mask > 0 else "0")
+        suggested_gpu = explicit_gpu_mask if explicit_gpu_mask is not None else "Auto"
         host, port, root_path, cpu_enable, target_gpu_mask, should_save = run_interactive_wizard(
             default_host=host,
             default_port=port,
@@ -241,8 +251,12 @@ def _run_worker_lifecycle() -> int:
             default_cpu=cpu_enable,
             default_gpu=suggested_gpu,
         )
-        if target_gpu_mask and target_gpu_mask != "0":
+        if target_gpu_mask and target_gpu_mask.lower() not in ("auto", "default", "none", ""):
             explicit_gpu_mask = target_gpu_mask
+            is_manual_override = True
+        else:
+            explicit_gpu_mask = None
+            is_manual_override = False
 
         if should_save:
             conf_data = {
@@ -251,8 +265,8 @@ def _run_worker_lifecycle() -> int:
                 "root": root_path,
                 "cpu_enable": cpu_enable,
             }
-            if args.gpu_mask is not None:
-                conf_data["gpu_mask"] = args.gpu_mask
+            if explicit_gpu_mask is not None:
+                conf_data["gpu_mask"] = explicit_gpu_mask
             saved_file = cu.save_cluster_config(conf_data, config_path)
             print(f"[OK] Configuration saved to: {saved_file}\n")
 

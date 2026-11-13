@@ -149,37 +149,61 @@ class TestClusterUtils(unittest.TestCase):
         ip = cu.get_primary_lan_ip()
         self.assertEqual(ip, "127.0.0.1")
 
+    def test_is_integrated_gpu(self) -> None:
+        """Verify is_integrated_gpu correctly identifies integrated graphics vs discrete GPUs."""
+        # Integrated GPUs should be detected
+        self.assertTrue(cu.is_integrated_gpu("Intel(R) UHD Graphics 770"))
+        self.assertTrue(cu.is_integrated_gpu("Intel(R) HD Graphics 630"))
+        self.assertTrue(cu.is_integrated_gpu("Intel(R) Iris(R) Xe Graphics"))
+        self.assertTrue(cu.is_integrated_gpu("AMD Radeon(TM) Graphics"))
+        self.assertTrue(cu.is_integrated_gpu("AMD Radeon Graphics"))
+
+        # Discrete GPUs should NOT be flagged as integrated
+        self.assertFalse(cu.is_integrated_gpu("NVIDIA GeForce RTX 5080"))
+        self.assertFalse(cu.is_integrated_gpu("NVIDIA GeForce RTX 4090"))
+        self.assertFalse(cu.is_integrated_gpu("AMD Radeon RX 7900 XTX"))
+        self.assertFalse(cu.is_integrated_gpu("Intel(R) Arc(TM) A770 Graphics"))
+
     def test_calculate_optimal_gpu_mask(self) -> None:
-        """Verify dynamic calculation of optimal GPU bitmask across multi-GPU and CPU setups."""
+        """Verify dynamic GPU detection defers to Metashape native discovery (None) rather than synthetic masks."""
         # 0 GPUs (CPU only)
         mask0, names0 = cu.calculate_optimal_gpu_mask([])
         self.assertEqual(mask0, 0)
         self.assertEqual(names0, [])
 
-        # 1 GPU
+        # 1 Discrete GPU -> None (defers to Metashape Pro native engine benchmark)
         gpus1 = [{"index": 0, "name": "RTX 4090", "mem_mb": 24576}]
         mask1, names1 = cu.calculate_optimal_gpu_mask(gpus1)
-        self.assertEqual(mask1, 1)
+        self.assertIsNone(mask1)
         self.assertEqual(len(names1), 1)
+        self.assertIn("RTX 4090", names1[0])
 
-        # 2 GPUs (Dual GPU worker)
+        # 2 GPUs (Dual GPU worker) -> None (defers to native multi-GPU discovery)
         gpus2 = [
             {"index": 0, "name": "RTX 4090", "mem_mb": 24576},
             {"index": 1, "name": "RTX 4090", "mem_mb": 24576},
         ]
         mask2, names2 = cu.calculate_optimal_gpu_mask(gpus2)
-        self.assertEqual(mask2, 3)  # Binary 11 = GPU 0 and GPU 1
+        self.assertIsNone(mask2)
         self.assertEqual(len(names2), 2)
 
-        # 4 GPUs (Quad GPU cluster workstation)
-        gpus4 = [{"index": i, "name": f"RTX A6000", "mem_mb": 49152} for i in range(4)]
+        # 4 GPUs (Quad GPU cluster workstation) -> None (defers to native discovery)
+        gpus4 = [{"index": i, "name": "RTX A6000", "mem_mb": 49152} for i in range(4)]
         mask4, names4 = cu.calculate_optimal_gpu_mask(gpus4)
-        self.assertEqual(mask4, 15)  # Binary 1111 = GPUs 0, 1, 2, 3
+        self.assertIsNone(mask4)
         self.assertEqual(len(names4), 4)
 
     def test_generate_worker_bat_with_gpu_mask(self) -> None:
-        """Verify generate_worker_bat_content configures custom and multi-GPU masks."""
-        # Multi-GPU mask
+        """Verify generate_worker_bat_content omits --gpu-mask by default and handles explicit overrides."""
+        # Default behavior: no gpu_mask specified -> omitted from batch file
+        bat_default = cu.generate_worker_bat_content(
+            host="192.168.1.100",
+            port="5840",
+            root_path=r"\\SERVER\SharedMetashape",
+        )
+        self.assertNotIn("--gpu-mask", bat_default)
+
+        # Multi-GPU manual override mask
         bat_dual = cu.generate_worker_bat_content(
             host="192.168.1.100",
             port="5840",
@@ -190,7 +214,7 @@ class TestClusterUtils(unittest.TestCase):
         self.assertIn("--cpu-enable 0", bat_dual)
         self.assertIn("--gpu-mask 3", bat_dual)
 
-        # CPU only mode (gpu_mask = 0)
+        # CPU only mode (gpu_mask = 0) -> omitted from batch file
         bat_cpu = cu.generate_worker_bat_content(
             host="192.168.1.100",
             port="5840",
@@ -201,6 +225,14 @@ class TestClusterUtils(unittest.TestCase):
         self.assertIn("--cpu-enable 1", bat_cpu)
         self.assertNotIn("--gpu-mask", bat_cpu)
 
+        # Auto mode -> omitted from batch file
+        bat_auto = cu.generate_worker_bat_content(
+            host="192.168.1.100",
+            port="5840",
+            root_path=r"\\SERVER\SharedMetashape",
+            gpu_mask="Auto",
+        )
+        self.assertNotIn("--gpu-mask", bat_auto)
 
 if __name__ == "__main__":
     unittest.main()
