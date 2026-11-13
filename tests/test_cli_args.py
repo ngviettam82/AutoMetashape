@@ -431,10 +431,8 @@ class TestCliArgs(unittest.TestCase):
                                     cmd = mock_popen.call_args[0][0]
                                     self.assertIn("10.5.10.202:5840", cmd)
                                     self.assertIn(r"\\ctuav\catp", cmd)
-                                    # Dynamic optimal GPU bitmask is passed to Metashape
-                                    self.assertIn("--gpu-mask", cmd)
-                                    gpu_idx = cmd.index("--gpu-mask")
-                                    self.assertTrue(cmd[gpu_idx + 1].isdigit())
+                                    # STRICT INVARIANT: Do not pass --gpu-mask when omitted by user
+                                    self.assertNotIn("--gpu-mask", cmd)
 
     def test_worker_launcher_auto_persists_config_without_hardcoded_gpu(self) -> None:
         """Verify launch_worker auto-persists valid host/root without injecting hardcoded gpu_mask."""
@@ -518,6 +516,37 @@ class TestCliArgs(unittest.TestCase):
             with open(cfg_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             self.assertNotIn("gpu_mask", saved)
+
+
+    def test_worker_launcher_explicit_gpu_mask_passed_to_metashape(self) -> None:
+        """Verify launch_worker passes --gpu-mask when explicitly requested via CLI."""
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+            with patch("os.path.isfile", return_value=True):
+                with patch("cluster_utils.test_tcp_connection", return_value=True):
+                    with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                        with patch("subprocess.Popen") as mock_popen:
+                            mock_proc = mock_popen.return_value
+                            mock_proc.wait.return_value = 0
+                            mock_proc.returncode = 0
+                            mock_proc.poll.return_value = 0
+
+                            with patch("sys.argv", [
+                                "launch_worker.py",
+                                "--headless",
+                                "--no-reconnect",
+                                "--host", "10.5.10.202",
+                                "--root", r"\\ctuav\catp",
+                                "--gpu-mask", "2",
+                            ]):
+                                ret = lw._run_worker_lifecycle()
+                                self.assertEqual(ret, 0)
+                                cmd = mock_popen.call_args[0][0]
+                                self.assertIn("--gpu-mask", cmd)
+                                idx = cmd.index("--gpu-mask")
+                                self.assertEqual(cmd[idx + 1], "2")
 
 
 if __name__ == "__main__":

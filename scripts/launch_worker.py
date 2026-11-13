@@ -301,15 +301,16 @@ def _run_worker_lifecycle() -> int:
         return 1
 
     # Resolve active GPU mask and display diagnostics
+    # STRICT INVARIANT: Only pass --gpu-mask when explicitly requested via CLI.
+    # When omitted, Metashape Pro's native C++ engine benchmarks devices at startup,
+    # skips integrated Intel iGPUs, and auto-selects discrete NVIDIA GPUs (reporting correct mask).
     if is_manual_override and explicit_gpu_mask is not None:
         active_gpu_mask = explicit_gpu_mask
         gpu_display_label = f"{explicit_gpu_mask} (Manual Override via CLI)"
-    elif detected_mask > 0:
-        active_gpu_mask = str(detected_mask)
-        gpu_display_label = f"{detected_mask} (Dynamic auto-detection: {len(detected_gpu_names)} GPU(s) active: {', '.join(detected_gpu_names)})"
     else:
-        active_gpu_mask = "0"
-        gpu_display_label = "0 (CPU-only compute mode: 0 discrete GPUs detected)"
+        active_gpu_mask = None
+        detected_label = f" ({len(detected_gpu_names)} discrete GPU(s) detected)" if detected_gpu_names else ""
+        gpu_display_label = f"Auto (Metashape native hardware benchmark & auto-selection){detected_label}"
 
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
@@ -342,7 +343,7 @@ def _run_worker_lifecycle() -> int:
         print(f"  [WARNING] Storage verification issue: {unc_err}", file=sys.stderr)
         print("  Ensure network credentials and file sharing permissions are granted.", file=sys.stderr)
 
-    # 8. Build Worker Command with Dynamic GPU Bitmask
+    # 8. Build Worker Command
     worker_cmd = [
         ms_exe,
         "--worker",
@@ -352,9 +353,12 @@ def _run_worker_lifecycle() -> int:
         root_path,
         "--cpu-enable",
         str(cpu_enable),
-        "--gpu-mask",
-        active_gpu_mask,
     ]
+    # STRICT INVARIANT: Only append --gpu-mask if explicitly specified via CLI.
+    # When omitted, Metashape Pro native engine benchmarks hardware, skips Intel iGPUs,
+    # and automatically selects discrete NVIDIA GPUs.
+    if active_gpu_mask is not None:
+        worker_cmd.extend(["--gpu-mask", active_gpu_mask])
 
     print("\n[READY] Launching Metashape Worker daemon...")
     print(f"Command: {' '.join(worker_cmd)}")
