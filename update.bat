@@ -22,6 +22,8 @@ if exist "%SCRIPT_DIR%\launch_worker.bat" (
 
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 set "LAN_ZIP=%AUTOMETASHAPE_LAN_ZIP%"
+if "%LAN_ZIP%"=="" if exist "%SCRIPT_DIR%\AutoMetashape_main.zip" set "LAN_ZIP=%SCRIPT_DIR%\AutoMetashape_main.zip"
+if "%LAN_ZIP%"=="" if exist "\\ctuav\catp\AutoMetashape_main.zip" set "LAN_ZIP=\\ctuav\catp\AutoMetashape_main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 
