@@ -346,7 +346,10 @@ class TestCliArgs(unittest.TestCase):
             port = args.port or saved_config.get("port", "5840")
             root_path = args.root or saved_config.get("root", "")
             cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
-            gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", "1")
+            raw_gpu = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", None)
+            gpu_mask = str(raw_gpu).strip() if raw_gpu is not None else None
+            if gpu_mask and gpu_mask.lower() in ("auto", "none", "", "default"):
+                gpu_mask = None
 
             self.assertEqual(host, "10.0.0.5")
             self.assertEqual(port, "5842")
@@ -357,10 +360,27 @@ class TestCliArgs(unittest.TestCase):
             # Case B: CLI args provided -> should override config file
             args_override = parser.parse_args(["--config", cfg_file, "--cpu", "1", "--gpu", "3"])
             cpu_override = args_override.cpu_enable if args_override.cpu_enable is not None else saved_config.get("cpu_enable", 1)
-            gpu_override = args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", "1")
+            raw_gpu_override = args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", None)
+            gpu_override = str(raw_gpu_override).strip() if raw_gpu_override is not None else None
 
             self.assertEqual(cpu_override, 1)
             self.assertEqual(gpu_override, "3")
+
+            # Case C: Dynamic auto-detect when gpu_mask is omitted or auto
+            cfg_auto = os.path.join(tmpdir, "worker_auto.json")
+            with open(cfg_auto, "w", encoding="utf-8") as f:
+                json.dump({
+                    "host": "10.0.0.5",
+                    "root": r"\\NAS\MetashapeData",
+                    "gpu_mask": "auto",
+                }, f)
+            args_auto = parser.parse_args(["--config", cfg_auto])
+            saved_auto = lw.cu.load_cluster_config(args_auto.config)
+            raw_gpu_auto = args_auto.gpu_mask if args_auto.gpu_mask is not None else saved_auto.get("gpu_mask", None)
+            gpu_auto = str(raw_gpu_auto).strip() if raw_gpu_auto is not None else None
+            if gpu_auto and gpu_auto.lower() in ("auto", "none", "", "default"):
+                gpu_auto = None
+            self.assertIsNone(gpu_auto)
 
 if __name__ == "__main__":
     unittest.main()

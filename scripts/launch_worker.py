@@ -50,7 +50,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=str, default=None, help="Cluster Server control port (default: 5840)")
     parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)")
     parser.add_argument("--cpu-enable", "--cpu", dest="cpu_enable", type=int, default=None, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
-    parser.add_argument("--gpu-mask", "--gpu", dest="gpu_mask", type=str, default=None, help="Bitmask of GPU devices to engage (1 = first GPU)")
+    parser.add_argument(
+        "--gpu-mask",
+        "--gpu",
+        dest="gpu_mask",
+        type=str,
+        default=None,
+        help="Bitmask of GPU devices to engage (default: auto-detected by Metashape)",
+    )
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON worker configuration file")
     parser.add_argument("--interactive", action="store_true", help="Force interactive configuration prompt")
     parser.add_argument("--no-reconnect", action="store_true", help="Do not automatically reconnect on disconnection")
@@ -110,7 +117,12 @@ def main() -> int:
     port = args.port or saved_config.get("port", "5840")
     root_path = args.root or saved_config.get("root", "")
     cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
-    gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", "1")
+
+    # Resolve GPU mask: CLI flag -> Config file -> None (auto-detect by Metashape)
+    raw_gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", None)
+    gpu_mask = str(raw_gpu_mask).strip() if raw_gpu_mask is not None else None
+    if gpu_mask and gpu_mask.lower() in ("auto", "none", "", "default"):
+        gpu_mask = None
 
     if args.interactive or not host or not root_path:
         host, port, root_path, should_save = run_interactive_wizard(default_host=host, default_root=root_path)
@@ -120,8 +132,9 @@ def main() -> int:
                 "port": port,
                 "root": root_path,
                 "cpu_enable": cpu_enable,
-                "gpu_mask": gpu_mask,
             }
+            if gpu_mask is not None:
+                conf_data["gpu_mask"] = gpu_mask
             saved_file = cu.save_cluster_config(conf_data, config_path)
             print(f"[OK] Configuration saved to: {saved_file}\n")
 
@@ -136,6 +149,11 @@ def main() -> int:
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
     print(f"  Cluster Server  : {host}:{port}")
     print(f"  Shared Storage  : {root_path}")
+    print(f"  CPU Processing  : {'Enabled (1)' if cpu_enable else 'Disabled (0)'}")
+    if gpu_mask:
+        print(f"  GPU Device Mask : {gpu_mask} (Manual Override)")
+    else:
+        print(f"  GPU Device Mask : Auto (Metashape native hardware auto-discovery)")
     print(f"  Metashape Binary: {ms_exe}")
     print("=" * 72)
 
