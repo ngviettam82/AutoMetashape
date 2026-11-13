@@ -5068,6 +5068,26 @@ if __name__ == "__main__":
     min_quality = 0.0 if args.disable_quality_filter else args.min_quality
     auto_params = args.auto or args.pro or (args.preset == "pro")
 
+    # Seamless auto-handoff: if executed in standard Python, launch via Metashape Pro
+    if Metashape is None:
+        try:
+            import cluster_utils as cu
+            ms_exe = cu.find_metashape_path()
+        except Exception:
+            ms_exe = None
+
+        if ms_exe and os.path.isfile(ms_exe):
+            print(f"[AutoMetashape] Metashape Python environment not detected in current interpreter.")
+            print(f"[AutoMetashape] Automatically launching via Metashape Pro: {ms_exe}", flush=True)
+            relaunch_cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:]
+            proc = subprocess.run(relaunch_cmd)
+            sys.exit(proc.returncode)
+        else:
+            print("[FATAL ERROR] Agisoft Metashape Python module is not loaded and metashape.exe was not found.", file=sys.stderr)
+            print("Please ensure Agisoft Metashape Professional is installed, or execute via:", file=sys.stderr)
+            print(f"  & \"<path_to_metashape.exe>\" -r scripts/metashape_reconstruction.py {' '.join(sys.argv[1:])}", file=sys.stderr)
+            sys.exit(1)
+
     try:
         run_reconstruction(
         images_dir=args.images,
