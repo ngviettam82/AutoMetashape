@@ -47,10 +47,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)")
-    parser.add_argument("--port", type=str, default="5840", help="Cluster Server control port")
+    parser.add_argument("--port", type=str, default=None, help="Cluster Server control port (default: 5840)")
     parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)")
-    parser.add_argument("--cpu-enable", "--cpu", dest="cpu_enable", type=int, default=1, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
-    parser.add_argument("--gpu-mask", "--gpu", dest="gpu_mask", type=str, default="1", help="Bitmask of GPU devices to engage (1 = first GPU)")
+    parser.add_argument("--cpu-enable", "--cpu", dest="cpu_enable", type=int, default=None, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
+    parser.add_argument("--gpu-mask", "--gpu", dest="gpu_mask", type=str, default=None, help="Bitmask of GPU devices to engage (1 = first GPU)")
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON worker configuration file")
     parser.add_argument("--interactive", action="store_true", help="Force interactive configuration prompt")
     parser.add_argument("--no-reconnect", action="store_true", help="Do not automatically reconnect on disconnection")
@@ -109,6 +109,8 @@ def main() -> int:
     host = args.host or saved_config.get("host", "")
     port = args.port or saved_config.get("port", "5840")
     root_path = args.root or saved_config.get("root", "")
+    cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+    gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", "1")
 
     if args.interactive or not host or not root_path:
         host, port, root_path, should_save = run_interactive_wizard(default_host=host, default_root=root_path)
@@ -117,8 +119,8 @@ def main() -> int:
                 "host": host,
                 "port": port,
                 "root": root_path,
-                "cpu_enable": args.cpu_enable,
-                "gpu_mask": args.gpu_mask,
+                "cpu_enable": cpu_enable,
+                "gpu_mask": gpu_mask,
             }
             saved_file = cu.save_cluster_config(conf_data, config_path)
             print(f"[OK] Configuration saved to: {saved_file}\n")
@@ -168,10 +170,10 @@ def main() -> int:
         "--root",
         root_path,
         "--cpu-enable",
-        str(args.cpu_enable),
+        str(cpu_enable),
     ]
-    if args.gpu_mask:
-        worker_cmd.extend(["--gpu-mask", str(args.gpu_mask)])
+    if gpu_mask:
+        worker_cmd.extend(["--gpu-mask", str(gpu_mask)])
 
     print("\n[READY] Launching Metashape Worker daemon...")
     print(f"Command: {' '.join(worker_cmd)}")

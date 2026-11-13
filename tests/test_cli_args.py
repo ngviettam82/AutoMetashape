@@ -320,5 +320,47 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.server)
         self.assertEqual(args.port, "5840")
 
+    def test_worker_launcher_loads_and_prioritizes_worker_config(self) -> None:
+        """Verify launch_worker resolves parameters from worker_config.json with CLI override."""
+        import tempfile
+        import json
+        import launch_worker as lw
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "host": "10.0.0.5",
+                    "port": "5842",
+                    "root": r"\\NAS\MetashapeData",
+                    "cpu_enable": 0,
+                    "gpu_mask": "2",
+                }, f)
+
+            parser = lw.build_arg_parser()
+
+            # Case A: CLI args omitted -> should resolve from config file
+            args = parser.parse_args(["--config", cfg_file])
+            saved_config = lw.cu.load_cluster_config(args.config)
+            host = args.host or saved_config.get("host", "")
+            port = args.port or saved_config.get("port", "5840")
+            root_path = args.root or saved_config.get("root", "")
+            cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+            gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", "1")
+
+            self.assertEqual(host, "10.0.0.5")
+            self.assertEqual(port, "5842")
+            self.assertEqual(root_path, r"\\NAS\MetashapeData")
+            self.assertEqual(cpu_enable, 0)
+            self.assertEqual(gpu_mask, "2")
+
+            # Case B: CLI args provided -> should override config file
+            args_override = parser.parse_args(["--config", cfg_file, "--cpu", "1", "--gpu", "3"])
+            cpu_override = args_override.cpu_enable if args_override.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+            gpu_override = args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", "1")
+
+            self.assertEqual(cpu_override, 1)
+            self.assertEqual(gpu_override, "3")
+
 if __name__ == "__main__":
     unittest.main()
