@@ -50,7 +50,7 @@ Always execute repository formatters before submitting changes:
 ```
 On POSIX environments:
 ```bash
-./format_code.sh
+format_code.bat
 ```
 
 ---
@@ -58,7 +58,7 @@ On POSIX environments:
 ## Validation
 
 Verify code compliance before committing:
-1. Run pre-commit checks or formatting scripts (`./format_code.bat` or `./format_code.sh`).
+1. Run pre-commit checks or formatting scripts (`./format_code.bat` or `format_code.bat`).
 2. Run license and SPDX audit:
    ```powershell
    python tools/check_licenses.py

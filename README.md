@@ -4,7 +4,7 @@
 [![Release](https://img.shields.io/badge/Release-v1.4.0-green.svg)](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.4.0)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-informational.svg)](https://www.python.org/)
 [![Hardware](https://img.shields.io/badge/CUDA-Accelerated-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
-[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)]()
 [![Engine](https://img.shields.io/badge/Engine-Agisoft%20Metashape%20Pro%202.x-orange.svg)](https://www.agisoft.com/)
 
 **AutoMetashape** is an autonomous, high-precision photogrammetry and aerial survey pipeline that transforms drone imagery and ground camera captures into millimeter-accurate 3D models (`.obj`, `.mtl`, `.glb`, `.fbx`, `.ply`), classified dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK), Digital Elevation Models (`dem.tif`), topographic contour vector maps (`.shp`, `.dxf`), GeoTIFF orthomosaics (`.tif`, `.tfw`), executive calibration reports (`report.pdf`), and native Agisoft Metashape projects (`.psx`) with **NVIDIA CUDA** GPU acceleration.
@@ -30,18 +30,12 @@ Release details and release notes: [GitHub Release v1.4.0](https://github.com/ng
 ```powershell
 # Windows 1-Click (interactively saves configuration on first run):
 .\launch_worker.bat
-
-# Linux / macOS:
-./launch_worker.sh
 ```
 
 **Coordinator Workstation (Starts the Cluster Server):**
 ```powershell
 # Windows 1-Click:
 .\launch_server.bat
-
-# Linux / macOS:
-./launch_server.sh
 ```
 
 ### 2. Autonomous CLI Execution
