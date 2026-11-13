@@ -308,9 +308,14 @@ The integrated Web Studio (`web/projects_dashboard.html`) provides real-time sur
 
 ### 7. CLI Recipes & Usage
 
+You can execute reconstructions using either **Option A (Direct via Metashape Pro)** or **Option B (Standard Python Auto-Handoff)**:
+
 ```powershell
-# Pro Photogrammetry & Geomatics Engine (Default):
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset pro
+# Option A: Direct via Metashape Pro binary:
+& "metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset pro
+
+# Option B: Standard Python (Auto-locates Metashape across all drives and runs inside Metashape runtime):
+python scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset pro
 
 # Full Drone Topographic Survey with Point Cloud, DEM, Contours & Cesium 3D Tiles:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \

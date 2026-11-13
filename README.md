@@ -54,20 +54,30 @@ Update any node (coordinator or remote worker) directly from GitHub `main` with 
 
 ### 2. Autonomous CLI Execution
 
-Run photogrammetry reconstruction directly from PowerShell or terminal. Standard Python automatically discovers Metashape Pro across all installed drives and delegates execution seamlessly:
+AutoMetashape provides two equivalent execution methods:
 
+#### Option A: Direct via Metashape Pro (Canonical)
+Executes directly through Agisoft Metashape's embedded Python runtime:
 ```powershell
-# Pro Photogrammetry & Geomatics Engine (Default):
-python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
+& "metashape.exe" -r scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
+```
 
+#### Option B: Standard Python (Automatic Runtime Auto-Handoff)
+Executes under standard Python, which automatically discovers `metashape.exe` across `%ProgramFiles%` and all drives (`C:`, `D:`, `E:`, `F:`, `G:`) and delegates execution into Metashape's embedded runtime with zero path configuration:
+```powershell
+python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
+```
+
+#### Production Survey Recipes:
+```powershell
 # Drone Survey with Dense Point Cloud, DEM, Contours & Cesium 3D Tiles:
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
+python scripts/metashape_reconstruction.py \
     --images "C:/path/to/your/images" \
     --preset pro \
     --build-point-cloud --build-dem --build-contours --build-tiled-model
 
 # Building Facade with Coded Target Detection, Delighting & FBX Export:
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py \
+python scripts/metashape_reconstruction.py \
     --images "C:/path/to/your/images" \
     --preset building \
     --detect-markers --remove-lighting --export-fbx
