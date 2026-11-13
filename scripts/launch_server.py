@@ -48,13 +48,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--port", type=str, default="5840", help="Control port for client and worker connections")
     parser.add_argument("--dispatch-port", type=str, default="5841", help="Dispatch port for task distribution")
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON server configuration file")
+    parser.add_argument("--server", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 def main() -> int:
     """Main server launcher entrypoint."""
     parser = build_arg_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        cleaned = [u for u in unknown if u != "--server"]
+        if cleaned:
+            print(f"[NOTICE] Ignoring unrecognized server arguments: {' '.join(cleaned)}")
 
     # 1. Resolve Configuration
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_SERVER_CONFIG_FILENAME)

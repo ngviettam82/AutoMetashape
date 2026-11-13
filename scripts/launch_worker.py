@@ -49,11 +49,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)")
     parser.add_argument("--port", type=str, default="5840", help="Cluster Server control port")
     parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)")
-    parser.add_argument("--cpu-enable", type=int, default=1, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
-    parser.add_argument("--gpu-mask", type=str, default="1", help="Bitmask of GPU devices to engage (1 = first GPU)")
+    parser.add_argument("--cpu-enable", "--cpu", dest="cpu_enable", type=int, default=1, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
+    parser.add_argument("--gpu-mask", "--gpu", dest="gpu_mask", type=str, default="1", help="Bitmask of GPU devices to engage (1 = first GPU)")
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON worker configuration file")
     parser.add_argument("--interactive", action="store_true", help="Force interactive configuration prompt")
     parser.add_argument("--no-reconnect", action="store_true", help="Do not automatically reconnect on disconnection")
+    parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -91,7 +92,11 @@ def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tu
 def main() -> int:
     """Main worker launcher entrypoint with pre-flight diagnostics and reconnect loop."""
     parser = build_arg_parser()
-    args = parser.parse_args()
+    args, unknown = parser.parse_known_args()
+    if unknown:
+        cleaned = [u for u in unknown if u != "--worker"]
+        if cleaned:
+            print(f"[NOTICE] Ignoring unrecognized worker arguments: {' '.join(cleaned)}")
 
     # 1. Resolve configuration (CLI args -> Config File -> Interactive Wizard)
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME)

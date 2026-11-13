@@ -94,15 +94,21 @@ echo   [SUCCESS] AutoMetashape node successfully updated in-place (Zero Nesting)
 echo   Target: %TARGET_DIR%
 echo =========================================================================
 
-:: Optional launch flags
-if "%~1"=="--worker" (
+:: Optional launch flags with stripped mode argument
+set "ACTION_FLAG=%~1"
+set "FORWARD_ARGS="
+if not "%ACTION_FLAG%"=="" (
+    for /f "tokens=1,* delims= " %%a in ("%*") do set "FORWARD_ARGS=%%b"
+)
+
+if "%ACTION_FLAG%"=="--worker" (
     echo Launching cluster worker daemon...
     cd /d "%TARGET_DIR%"
-    start "AutoMetashape Cluster Worker Node" cmd.exe /c "launch_worker.bat %*"
-) else if "%~1"=="--server" (
+    start "AutoMetashape Cluster Worker Node" cmd.exe /c "launch_worker.bat !FORWARD_ARGS!"
+) else if "%ACTION_FLAG%"=="--server" (
     echo Launching cluster server daemon...
     cd /d "%TARGET_DIR%"
-    start "AutoMetashape Cluster Server Daemon" cmd.exe /c "launch_server.bat %*"
+    start "AutoMetashape Cluster Server Daemon" cmd.exe /c "launch_server.bat !FORWARD_ARGS!"
 ) else (
     echo Node files are ready in %TARGET_DIR%.
 )

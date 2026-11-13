@@ -291,5 +291,34 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(args.gpu_mask, "1")
         self.assertTrue(args.no_reconnect)
 
+    def test_worker_launcher_accepts_worker_flag_and_aliases(self) -> None:
+        """Verify launch_worker parser accepts --worker, --gpu, and --cpu aliases without error."""
+        import launch_worker as lw
+
+        parser = lw.build_arg_parser()
+        args = parser.parse_args([
+            "--worker",
+            "--host", "192.168.1.100",
+            "--root", r"\\SERVER\SharedMetashape",
+            "--cpu", "1",
+            "--gpu", "1",
+        ])
+        self.assertTrue(args.worker)
+        self.assertEqual(args.cpu_enable, 1)
+        self.assertEqual(args.gpu_mask, "1")
+
+    def test_server_launcher_accepts_server_flag(self) -> None:
+        """Verify launch_server parser accepts --server flag without error."""
+        import launch_server as ls
+
+        parser = ls.build_arg_parser()
+        args = parser.parse_args([
+            "--server",
+            "--host", "0.0.0.0",
+            "--port", "5840",
+        ])
+        self.assertTrue(args.server)
+        self.assertEqual(args.port, "5840")
+
 if __name__ == "__main__":
     unittest.main()
