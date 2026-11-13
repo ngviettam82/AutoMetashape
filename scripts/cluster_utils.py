@@ -258,9 +258,20 @@ def get_primary_lan_ip() -> str:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
     except Exception:
-        return "127.0.0.1"
+        pass
     finally:
         s.close()
+
+    # Airgapped / offline LAN fallback: inspect hostname IP resolution
+    try:
+        host_name = socket.gethostname()
+        ip = socket.gethostbyname(host_name)
+        if ip and not ip.startswith("127."):
+            return ip
+    except Exception:
+        pass
+
+    return "127.0.0.1"
 
 
 def generate_worker_bat_content(host: str | None = None, port: str = "5840", root_path: str = "") -> str:
@@ -303,11 +314,17 @@ if exist "%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe" (
     set "METASHAPE_EXE=%ProgramW6432%\\Agisoft\\Metashape Pro\\metashape.exe"
 ) else if exist "%LOCALAPPDATA%\\Programs\\Agisoft\\Metashape Pro\\metashape.exe" (
     set "METASHAPE_EXE=%LOCALAPPDATA%\\Programs\\Agisoft\\Metashape Pro\\metashape.exe"
-) else if exist "D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
-    set "METASHAPE_EXE=D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
-) else if exist "E:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
-    set "METASHAPE_EXE=E:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
-) else (
+)
+
+if "%METASHAPE_EXE%"=="" (
+    for %%D in (C D E F G) do (
+        if exist "%%D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" (
+            set "METASHAPE_EXE=%%D:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe"
+        )
+    )
+)
+
+if "%METASHAPE_EXE%"=="" (
     where metashape.exe >nul 2>nul
     if !errorlevel! equ 0 (
         set "METASHAPE_EXE=metashape.exe"

@@ -12,7 +12,11 @@ set "LAUNCHER_PY=%SCRIPT_DIR%scripts\launch_worker.py"
 :: 1. Locate Python executable (prioritize Metashape Pro bundled Python)
 set "PYTHON_EXE="
 
-if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
+if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
+) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"
+) else if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_EXE=C:\Program Files\Agisoft\Metashape Pro\python\python.exe"
 )
 
@@ -50,9 +54,16 @@ if not "%PYTHON_EXE%"=="" (
 ) else (
     echo [NOTICE] Python executable not found. Falling back to direct Metashape worker binary...
     set "MS_EXE="
-    for %%D in (C D E F G) do (
-        if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe" (
-            set "MS_EXE=%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe"
+    if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" (
+        set "MS_EXE=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
+    ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" (
+        set "MS_EXE=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
+    )
+    if "!MS_EXE!"=="" (
+        for %%D in (C D E F G) do (
+            if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe" (
+                set "MS_EXE=%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe"
+            )
         )
     )
     if not "!MS_EXE!"=="" (

@@ -10,13 +10,34 @@ REM Detect Agisoft Metashape Python or system Python
 set "PYTHON_CMD="
 if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_CMD=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
+) else if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_CMD=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"
 ) else if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_CMD=%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe"
 ) else if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_CMD=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe"
-) else (
-    where python >nul 2>nul
-    if !ERRORLEVEL! equ 0 set "PYTHON_CMD=python"
+)
+
+if "%PYTHON_CMD%"=="" (
+    for %%D in (C D E F G) do (
+        if exist "%%D:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
+            set "PYTHON_CMD=%%D:\Program Files\Agisoft\Metashape Pro\python\python.exe"
+        )
+    )
+)
+
+if "%PYTHON_CMD%"=="" (
+    python.exe -c "import sys" >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=python.exe"
+    )
+)
+
+if "%PYTHON_CMD%"=="" (
+    py.exe -3 -c "import sys" >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "PYTHON_CMD=py.exe -3"
+    )
 )
 
 if "!PYTHON_CMD!"=="" (

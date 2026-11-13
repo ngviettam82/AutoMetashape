@@ -12,7 +12,11 @@ set "LAUNCHER_PY=%SCRIPT_DIR%scripts\launch_server.py"
 :: 1. Locate Python executable (prioritize Metashape Pro bundled Python)
 set "PYTHON_EXE="
 
-if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
+if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
+) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" (
+    set "PYTHON_EXE=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"
+) else if exist "C:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_EXE=C:\Program Files\Agisoft\Metashape Pro\python\python.exe"
 )
 
@@ -50,9 +54,23 @@ if not "%PYTHON_EXE%"=="" (
 ) else (
     echo [NOTICE] Python executable not found. Falling back to direct Metashape server binary...
     set "SERVER_BIN="
-    for %%D in (C D E F G) do (
-        if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe" (
-            set "SERVER_BIN=%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe"
+    if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape-server.exe" (
+        set "SERVER_BIN=%ProgramFiles%\Agisoft\Metashape Pro\metashape-server.exe"
+    ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape-server.exe" (
+        set "SERVER_BIN=%ProgramW6432%\Agisoft\Metashape Pro\metashape-server.exe"
+    )
+    if "!SERVER_BIN!"=="" (
+        for %%D in (C D E F G) do (
+            if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe" (
+                set "SERVER_BIN=%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe"
+            )
+        )
+    )
+    if "!SERVER_BIN!"=="" (
+        if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" (
+            set "SERVER_BIN=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
+        ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" (
+            set "SERVER_BIN=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
         )
     )
     if "!SERVER_BIN!"=="" (

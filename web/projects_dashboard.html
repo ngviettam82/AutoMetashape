@@ -1331,7 +1331,7 @@
         alert("No projects selected.");
         return;
       }
-      const cmds = selected.map(p => `& "C:\\Program Files\\Agisoft\\Metashape Pro\\metashape.exe" -r scripts\\metashape_reconstruction.py --images "${p.path}" --project-name "${(p.name || '').includes('/') ? p.name.split('/').pop().trim() : (p.name || 'Project')}" --preset pro`).join("\n");
+      const cmds = selected.map(p => `python scripts\\metashape_reconstruction.py --images "${p.path}" --project-name "${(p.name || '').includes('/') ? p.name.split('/').pop().trim() : (p.name || 'Project')}" --preset pro`).join("\n");
       navigator.clipboard.writeText(cmds);
       alert(`Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
     });

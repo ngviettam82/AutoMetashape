@@ -78,9 +78,13 @@ def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tu
     port_input = input(f"[?] Enter Cluster Server Port {prompt_port}: ").strip()
     target_port = port_input or "5840"
 
-    suggested_root = default_root or r"\\SERVER\SharedMetashape"
-    root_input = input(f"[?] Enter Shared Storage UNC Path (e.g. \\\\SERVER\\SharedMetashape) [{suggested_root}]: ").strip()
-    target_root = root_input or suggested_root
+    target_root = ""
+    while not target_root:
+        prompt_root = f"[{default_root}]" if default_root else ""
+        root_input = input(f"[?] Enter Shared Storage UNC Path (e.g. \\\\HOST_PC\\SharedMetashape) {prompt_root}: ").strip()
+        target_root = root_input or default_root
+        if not target_root:
+            print("[!] Shared storage UNC path is required for cluster network processing. Please provide a valid path.")
 
     save_input = input("[?] Save settings to worker_config.json for 1-click launch? [Y/n]: ").strip().lower()
     save_config = save_input in ("", "y", "yes")

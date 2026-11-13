@@ -21,11 +21,7 @@ if exist "%SCRIPT_DIR%\launch_worker.bat" (
 )
 
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
-if not "%AUTOMETASHAPE_LAN_ZIP%"=="" (
-    set "LAN_ZIP=%AUTOMETASHAPE_LAN_ZIP%"
-) else (
-    set "LAN_ZIP=\\SERVER\SharedMetashape\AutoMetashape_main.zip"
-)
+set "LAN_ZIP=%AUTOMETASHAPE_LAN_ZIP%"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 
@@ -41,8 +37,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('%REPO_ZIP_URL%', '%TEMP_ZIP%')" >nul 2>&1
 
 if not exist "%TEMP_ZIP%" (
-    echo [NOTICE] GitHub download unavailable. Checking LAN cache fallback...
-    if exist "%LAN_ZIP%" copy /y "%LAN_ZIP%" "%TEMP_ZIP%" >nul 2>&1
+    if not "%LAN_ZIP%"=="" (
+        echo [NOTICE] GitHub download unavailable. Checking LAN cache fallback from %LAN_ZIP%...
+        if exist "%LAN_ZIP%" copy /y "%LAN_ZIP%" "%TEMP_ZIP%" >nul 2>&1
+    )
 )
 
 if not exist "%TEMP_ZIP%" (
@@ -76,18 +74,7 @@ if exist "%TARGET_DIR%\AutoMetashape-main" (
 del /f /q "%TEMP_ZIP%" >nul 2>&1
 if exist "%TEMP_EXTRACT%" rmdir /s /q "%TEMP_EXTRACT%" >nul 2>&1
 
-:: Write default worker configuration if none exists
-if not exist "%TARGET_DIR%\worker_config.json" (
-    (
-        echo {
-        echo   "host": "192.168.1.100",
-        echo   "port": "5840",
-        echo   "root": "\\\\SERVER\\SharedMetashape",
-        echo   "cpu_enable": 1,
-        echo   "gpu_mask": "1"
-        echo }
-    ) > "%TARGET_DIR%\worker_config.json"
-)
+:: Preserve user configuration without injecting hardcoded defaults
 
 echo =========================================================================
 echo   [SUCCESS] AutoMetashape node successfully updated in-place (Zero Nesting)!

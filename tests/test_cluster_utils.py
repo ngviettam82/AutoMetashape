@@ -107,8 +107,47 @@ class TestClusterUtils(unittest.TestCase):
         bat = cu.generate_worker_bat_content(host="192.168.1.100", port="5840", root_path=r"\\SERVER\SharedMetashape")
         self.assertIn("%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe", bat)
         self.assertIn("%ProgramW6432%\\Agisoft\\Metashape Pro\\metashape.exe", bat)
+        self.assertIn("for %%D in (C D E F G)", bat)
         self.assertIn("192.168.1.100:5840", bat)
         self.assertIn(r"\\SERVER\SharedMetashape", bat)
+
+    @patch("socket.gethostbyname")
+    @patch("socket.gethostname")
+    @patch("socket.socket")
+    def test_get_primary_lan_ip_airgapped_fallback(
+        self,
+        mock_socket_cls: MagicMock,
+        mock_gethostname: MagicMock,
+        mock_gethostbyname: MagicMock,
+    ) -> None:
+        """Verify get_primary_lan_ip recovers local IP on airgapped offline cluster networks."""
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        mock_sock.connect.side_effect = OSError("Network is unreachable")
+        mock_gethostname.return_value = "cluster-node-1"
+        mock_gethostbyname.return_value = "10.2.8.43"
+
+        ip = cu.get_primary_lan_ip()
+        self.assertEqual(ip, "10.2.8.43")
+
+    @patch("socket.gethostbyname")
+    @patch("socket.gethostname")
+    @patch("socket.socket")
+    def test_get_primary_lan_ip_offline_loopback(
+        self,
+        mock_socket_cls: MagicMock,
+        mock_gethostname: MagicMock,
+        mock_gethostbyname: MagicMock,
+    ) -> None:
+        """Verify get_primary_lan_ip falls back to loopback when no IP is resolvable."""
+        mock_sock = MagicMock()
+        mock_socket_cls.return_value = mock_sock
+        mock_sock.connect.side_effect = OSError("Network unreachable")
+        mock_gethostname.return_value = "offline-node"
+        mock_gethostbyname.return_value = "127.0.0.1"
+
+        ip = cu.get_primary_lan_ip()
+        self.assertEqual(ip, "127.0.0.1")
 
 
 if __name__ == "__main__":
