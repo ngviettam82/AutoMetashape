@@ -518,6 +518,53 @@ class TestCliArgs(unittest.TestCase):
             self.assertNotIn("gpu_mask", saved)
 
 
+    def test_worker_launcher_preserves_custom_gpu_mask_in_config(self) -> None:
+        """Verify launch_worker preserves and respects custom non-legacy gpu_mask from worker_config.json."""
+        import tempfile
+        import json
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            # Write a custom config with explicit non-legacy gpu_mask 2
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "host": "10.5.10.202",
+                    "port": "5840",
+                    "root": r"\\ctuav\catp",
+                    "cpu_enable": 1,
+                    "gpu_mask": "2",
+                }, f)
+
+            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                with patch("os.path.isfile", return_value=True):
+                    with patch("cluster_utils.test_tcp_connection", return_value=True):
+                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = mock_popen.return_value
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_proc.poll.return_value = 0
+
+                                with patch("sys.argv", [
+                                    "launch_worker.py",
+                                    "--headless",
+                                    "--no-reconnect",
+                                    "--config", cfg_file,
+                                ]):
+                                    ret = lw._run_worker_lifecycle()
+                                    self.assertEqual(ret, 0)
+                                    cmd = mock_popen.call_args[0][0]
+                                    self.assertIn("--gpu-mask", cmd)
+                                    idx = cmd.index("--gpu-mask")
+                                    self.assertEqual(cmd[idx + 1], "2")
+
+            # Check that custom non-legacy gpu_mask is preserved on disk
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(saved.get("gpu_mask"), "2")
+
     def test_worker_launcher_explicit_gpu_mask_passed_to_metashape(self) -> None:
         """Verify launch_worker passes --gpu-mask when explicitly requested via CLI."""
         from unittest.mock import patch

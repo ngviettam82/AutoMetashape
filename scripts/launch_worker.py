@@ -219,15 +219,28 @@ def _run_worker_lifecycle() -> int:
     else:
         cpu_enable = 1
 
-    # Dynamic Hardware Discovery on startup
-    # STRICT INVARIANT: Do not read hardcoded legacy gpu_mask from saved_config.
-    # Dynamic hardware autodetection (cu.calculate_optimal_gpu_mask) always governs unless overridden via CLI.
+    # Dynamic Hardware Discovery & GPU Mask Resolution:
+    # 1. CLI Override: --gpu-mask <val> takes top priority.
+    #    - If val is "auto", "default", "none", "": native discovery (omit --gpu-mask).
+    #    - Otherwise (e.g. "2", "3", "0"): explicit manual override passed to Metashape.
+    # 2. Saved Config: worker_config.json
+    #    - If val is legacy "1" or "auto": purge from config, use native discovery.
+    #    - If val is custom (e.g. "2", "0", "3"): respect as saved override.
+    # 3. Default: Native discovery (omit --gpu-mask), allowing Metashape Pro's native
+    #    C++ engine to benchmark hardware, bypass iGPUs, and auto-select discrete GPUs.
     explicit_gpu_mask = None
     is_manual_override = False
     if args.gpu_mask is not None:
         raw = str(args.gpu_mask).strip()
         if raw and raw.lower() not in ("auto", "none", "default"):
             explicit_gpu_mask = raw
+            is_manual_override = True
+    elif "gpu_mask" in saved_config:
+        raw_cfg = str(saved_config["gpu_mask"]).strip()
+        if raw_cfg.lower() in ("1", "auto", "none", "default", ""):
+            saved_config.pop("gpu_mask", None)
+        else:
+            explicit_gpu_mask = raw_cfg
             is_manual_override = True
 
     # 3. Interactive Wizard or Headless Error Handling
@@ -280,13 +293,15 @@ def _run_worker_lifecycle() -> int:
 
         for target_cfg in target_cfg_paths:
             existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
-            # Auto-purge legacy hardcoded gpu_mask from pre-existing worker_config.json if not explicitly passed
+            # Auto-purge legacy hardcoded gpu_mask ("1" or "auto") from pre-existing worker_config.json if not explicitly passed
             if "gpu_mask" in existing_cfg and args.gpu_mask is None:
-                existing_cfg.pop("gpu_mask", None)
-                try:
-                    cu.save_cluster_config(existing_cfg, target_cfg)
-                except Exception:
-                    pass
+                val = str(existing_cfg.get("gpu_mask", "")).strip().lower()
+                if val in ("1", "auto", "none", "default", ""):
+                    existing_cfg.pop("gpu_mask", None)
+                    try:
+                        cu.save_cluster_config(existing_cfg, target_cfg)
+                    except Exception:
+                        pass
 
             is_missing = not os.path.isfile(target_cfg)
             is_incomplete = not existing_cfg.get("host") or not existing_cfg.get("root")
@@ -298,9 +313,9 @@ def _run_worker_lifecycle() -> int:
                     "root": root_path,
                     "cpu_enable": int(cpu_enable),
                 }
-                # STRICT INVARIANT: NEVER write hardcoded gpu_mask unless explicitly passed via CLI
-                if args.gpu_mask is not None:
-                    persist_data["gpu_mask"] = str(args.gpu_mask).strip()
+                # STRICT INVARIANT: Only persist gpu_mask if explicitly configured with a non-auto override
+                if explicit_gpu_mask is not None:
+                    persist_data["gpu_mask"] = explicit_gpu_mask
                 try:
                     saved_p = cu.save_cluster_config(persist_data, target_cfg)
                     print(f"[OK] Auto-persisted worker configuration to: {saved_p}")
@@ -320,7 +335,8 @@ def _run_worker_lifecycle() -> int:
     # skips integrated Intel iGPUs, and auto-selects discrete NVIDIA GPUs (reporting correct mask).
     if is_manual_override and explicit_gpu_mask is not None:
         active_gpu_mask = explicit_gpu_mask
-        gpu_display_label = f"{explicit_gpu_mask} (Manual Override via CLI)"
+        override_src = "via CLI" if args.gpu_mask is not None else "via Config"
+        gpu_display_label = f"{explicit_gpu_mask} (Manual Override {override_src})"
     else:
         active_gpu_mask = None
         detected_label = f" ({len(detected_gpu_names)} discrete GPU(s) detected)" if detected_gpu_names else ""

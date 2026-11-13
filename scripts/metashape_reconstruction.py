@@ -2942,12 +2942,12 @@ def run_reconstruction(
                     for idx, w in enumerate(workers, 1):
                         if isinstance(w, dict):
                             host_label = w.get("hostname", "Node")
-                            g_mask = w.get("gpu_mask", 1)
+                            g_mask = w.get("gpu_mask", "Auto")
                             prio = w.get("priority", 0)
                             cpu_en = w.get("cpu_enabled", False)
                         else:
                             host_label = getattr(w, "host", getattr(w, "hostname", "Node"))
-                            g_mask = getattr(w, "gpu_mask", 1)
+                            g_mask = getattr(w, "gpu_mask", "Auto")
                             prio = getattr(w, "priority", 0)
                             cpu_en = getattr(w, "cpu_enabled", False)
                         print(f"    * Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})", flush=True)

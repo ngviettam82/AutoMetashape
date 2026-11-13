@@ -19,7 +19,6 @@ import os
 import subprocess
 import sys
 import tempfile
-import time
 
 # Ensure scripts directory is importable
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))

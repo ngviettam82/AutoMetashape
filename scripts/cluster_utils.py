@@ -377,35 +377,6 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
     return []
 
 
-def calculate_optimal_gpu_mask(gpu_devices: list[dict[str, Any]] | None = None) -> tuple[int | None, list[str]]:
-    """Inspects available discrete GPUs for telemetry and diagnostic reporting.
-
-    .. deprecated:: 2.3.0
-       Synthetic bitmask calculation based on external device enumeration is deprecated.
-       External device indexes (from nvidia-smi or WMI) frequently conflict with Metashape's
-       internal OpenCL/CUDA device table (e.g. on systems where Intel iGPUs precede NVIDIA GPUs).
-       Metashape Pro natively benchmarks all available compute devices, bypasses integrated graphics,
-       and manages multi-GPU load balancing automatically when --gpu-mask is omitted.
-
-    Returns:
-        Tuple of (bitmask: None | int, device_labels: list[str]). Returns 0 if no discrete GPUs
-        exist (CPU-only mode), or None when discrete GPUs exist so callers omit --gpu-mask to
-        defer to native Metashape hardware benchmarking and selection.
-    """
-    if gpu_devices is None:
-        gpu_devices = detect_gpu_devices()
-
-    if not gpu_devices:
-        return 0, []
-
-    names = []
-    for i, dev in enumerate(gpu_devices):
-        mem_str = f" ({dev['mem_mb'] / 1024:.1f} GB)" if dev.get("mem_mb") else ""
-        names.append(f"{dev.get('name', f'GPU {i}')}{mem_str}")
-
-    return None, names
-
-
 def generate_worker_bat_content(
     host: str | None = None,
     port: str = "5840",
@@ -426,7 +397,7 @@ def generate_worker_bat_content(
     gpu_flag = ""
     if gpu_mask is not None:
         mask_str = str(gpu_mask).strip()
-        if mask_str and mask_str != "0" and mask_str.lower() not in ("auto", "none", "default"):
+        if mask_str and mask_str.lower() not in ("auto", "none", "default"):
             gpu_flag = f" --gpu-mask {mask_str}"
 
     return f"""@echo off
