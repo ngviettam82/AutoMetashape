@@ -6,6 +6,16 @@ rem SPDX-License-Identifier: Apache-2.0
 setlocal EnableDelayedExpansion
 title AutoMetashape Node Updater
 
+:: 0. Decoupled Staging: If running directly inside target codebase, hand off to temporary copy
+:: This releases all open file locks on update.bat itself so the codebase can be mirrored cleanly.
+if not defined AUTOMETASHAPE_UPDATING (
+    set "AUTOMETASHAPE_UPDATING=1"
+    set "STAGE_BAT=%TEMP%\AutoMetashape_updater.bat"
+    copy /y "%~f0" "!STAGE_BAT!" >nul 2>&1
+    cmd.exe /c ""!STAGE_BAT!" %*"
+    exit /b !errorlevel!
+)
+
 echo =========================================================================
 echo   AutoMetashape: Automated In-Place Node Updater (Release main)
 echo =========================================================================
@@ -26,12 +36,35 @@ if "%LAN_ZIP%"=="" if exist "%SCRIPT_DIR%\AutoMetashape_main.zip" set "LAN_ZIP=%
 if "%LAN_ZIP%"=="" if exist "\\ctuav\catp\AutoMetashape_main.zip" set "LAN_ZIP=\\ctuav\catp\AutoMetashape_main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
+set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
 
-echo [1/4] Terminating active Metashape worker processes...
+echo [1/4] Terminating active Metashape worker processes and server connections...
+:: Graceful close first allowing Metashape to send network disconnect packet
+taskkill /IM metashape.exe >nul 2>&1
+taskkill /IM metashape-server.exe >nul 2>&1
+timeout /t 1 /nobreak >nul
+
+:: Terminate tracked worker Python process by PID
+if exist "%WORKER_PID_FILE%" (
+    for /f "usebackq tokens=*" %%p in ("%WORKER_PID_FILE%") do (
+        taskkill /F /PID %%p >nul 2>&1
+    )
+    del /f /q "%WORKER_PID_FILE%" >nul 2>&1
+)
+
+:: Force kill binaries and windows
 taskkill /F /IM metashape.exe >nul 2>&1
+taskkill /F /IM metashape-server.exe >nul 2>&1
 taskkill /F /FI "WINDOWTITLE eq AutoMetashape Cluster Worker Node*" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'metashape.exe' -or $_.Name -like 'python*' -or $_.Name -eq 'py.exe') -and ($_.CommandLine -like '*launch_worker*' -or $_.CommandLine -like '*--worker*') -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
-timeout /t 2 /nobreak >nul
+taskkill /F /FI "WINDOWTITLE eq AutoMetashape Cluster Server Daemon*" >nul 2>&1
+
+:: Terminate Python processes running from Metashape Pro or AutoMetashape (unprivileged path check)
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+    "$myPid = $PID; " ^
+    "Get-Process -Name python, py -ErrorAction SilentlyContinue | Where-Object { " ^
+    "    $_.Id -ne $myPid -and ($_.Path -like '*Metashape*' -or $_.Path -like '*AutoMetashape*') " ^
+    "} | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+timeout /t 1 /nobreak >nul
 
 echo [2/4] Downloading latest AutoMetashape source code from GitHub (main)...
 if exist "%TEMP_ZIP%" del /f /q "%TEMP_ZIP%"
@@ -61,25 +94,32 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-echo [4/4] Placing fresh upstream AutoMetashape into %TARGET_DIR%...
+echo [4/4] Replacing codebase in %TARGET_DIR% (Purging obsolete files, preserving config)...
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 
-:: Move files directly in place without nesting AutoMetashape-main
-robocopy "%TEMP_EXTRACT%\AutoMetashape-main" "%TARGET_DIR%" /E /MOVE /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
+:: Backup existing configuration files
+set "CFG_BACKUP=%TEMP%\autometashape_worker_config_backup.json"
+if exist "%TARGET_DIR%\worker_config.json" copy /y "%TARGET_DIR%\worker_config.json" "%CFG_BACKUP%" >nul 2>&1
 
-:: Clean up any nested folder left behind by older manual unzips
+:: Mirror directory: copies new files, removes obsolete old files, preserves worker/server configs
+robocopy "%TEMP_EXTRACT%\AutoMetashape-main" "%TARGET_DIR%" /MIR /XF worker_config.json server_config.json /W:1 /R:2 /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
+
+:: Ensure configuration is restored if it was missing from source
+if exist "%CFG_BACKUP%" (
+    if not exist "%TARGET_DIR%\worker_config.json" copy /y "%CFG_BACKUP%" "%TARGET_DIR%\worker_config.json" >nul 2>&1
+    del /f /q "%CFG_BACKUP%" >nul 2>&1
+)
+
+:: Clean up nested folders if left by older manual unzips
 if exist "%TARGET_DIR%\AutoMetashape-main" (
-    robocopy "%TARGET_DIR%\AutoMetashape-main" "%TARGET_DIR%" /E /MOVE /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
     rmdir /s /q "%TARGET_DIR%\AutoMetashape-main" >nul 2>&1
 )
 
 del /f /q "%TEMP_ZIP%" >nul 2>&1
 if exist "%TEMP_EXTRACT%" rmdir /s /q "%TEMP_EXTRACT%" >nul 2>&1
 
-:: Preserve user configuration without injecting hardcoded defaults
-
 echo =========================================================================
-echo   [SUCCESS] AutoMetashape node successfully updated in-place (Zero Nesting)!
+echo   [SUCCESS] AutoMetashape codebase cleanly replaced and updated in-place!
 echo   Target: %TARGET_DIR%
 echo =========================================================================
 
@@ -93,6 +133,32 @@ if not "%ACTION_FLAG%"=="" (
 if "%ACTION_FLAG%"=="--worker" (
     echo Launching cluster worker daemon...
     cd /d "%TARGET_DIR%"
+
+    :: Smart UNC Share Auto-Inference: if no --host/--root passed and SCRIPT_DIR is a UNC path
+    echo !FORWARD_ARGS! | findstr /i "\<--host\>" >nul 2>&1
+    set "HAS_HOST=!errorlevel!"
+    echo !FORWARD_ARGS! | findstr /i "\<--root\>" >nul 2>&1
+    set "HAS_ROOT=!errorlevel!"
+
+    if !HAS_HOST! neq 0 (
+        if !HAS_ROOT! neq 0 (
+            if "%SCRIPT_DIR:~0,2%"=="\\" (
+                for /f "tokens=1,2 delims=\" %%i in ("%SCRIPT_DIR:~2%") do (
+                    set "INFERRED_HOST=%%i"
+                    set "INFERRED_ROOT=\\%%i\%%j"
+                    set "FORWARD_ARGS=--host !INFERRED_HOST! --root !INFERRED_ROOT! !FORWARD_ARGS!"
+                    echo [AUTO-INFERRED] Inferred cluster server: !INFERRED_HOST!, storage root: !INFERRED_ROOT!
+                )
+            )
+        )
+    )
+
+    :: Ensure non-interactive execution for headless node updates
+    echo !FORWARD_ARGS! | findstr /i "\<--non-interactive\>" >nul 2>&1
+    if !errorlevel! neq 0 (
+        set "FORWARD_ARGS=--non-interactive !FORWARD_ARGS!"
+    )
+
     start "AutoMetashape Cluster Worker Node" cmd.exe /c "launch_worker.bat !FORWARD_ARGS!"
 ) else if "%ACTION_FLAG%"=="--server" (
     echo Launching cluster server daemon...

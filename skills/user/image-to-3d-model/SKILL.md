@@ -326,6 +326,26 @@ Dispatch autonomous reconstruction to the active cluster:
     --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\SharedMetashape"
 ```
 
+#### 5.9 Host-Initiated Autonomous Worker Fleet Update Protocol
+When maintaining or upgrading remote cluster worker nodes from the Host/Coordinator workstation (`CTUAV`), strictly execute the **Autonomous Worker Fleet Update Protocol**:
+
+1. **Zero Fleet-Wide Blind Kills**:
+   - Never kill, trigger, or push fleet-wide updates across all remote cluster worker nodes simultaneously.
+   - Broad simultaneous kills sever the cluster compute fabric and risk collective fleet timeouts or network saturation.
+2. **Single Canary Node Verification Gate**:
+   - Updates must always be tested on exactly **ONE canary worker node** first (e.g. `tan` or `DESKTOP-RJUQ6L8`).
+   - Monitor the canary node's lifecycle state via `Metashape.NetworkClient().workerList()`:
+     $$\text{inprogress (dispatched probe)} \longrightarrow \text{offline (releasing file locks)} \longrightarrow \text{ready (online with fresh code)}$$
+   - Confirm the canary worker node completes self-update, auto-discovers GPUs, and re-registers cleanly as `ready` within **60–90 seconds**.
+   - Only after the canary node passes the verification gate may update batches proceed across remaining worker nodes in staggered waves.
+3. **Preserve Host / Coordinator Exemption**:
+   - The coordinator workstation (`CTUAV` / `10.5.10.202`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
+   - Remote worker update probes must only target designated remote worker hosts (`host != "CTUAV"`).
+4. **Zero-Touch Headless Invariants**:
+   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (`\\ctuav\catp`).
+   - Remote worker updates must never block on interactive console prompts (`input()`) or unmanaged binary fallbacks.
+   - Dynamic multi-GPU detection is preserved without injecting hardcoded `gpu_mask` values into `worker_config.json`.
+
 ### 6. Web Studio Dynamic Telemetry Dashboard
 
 The integrated Web Studio (`web/projects_dashboard.html`) provides real-time survey asset intelligence, optics audits, and KPI tracking without mock data or static placeholders:

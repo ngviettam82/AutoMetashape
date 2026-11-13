@@ -43,48 +43,19 @@ if "%PYTHON_EXE%"=="" (
     )
 )
 
-:: 2. Launch Server Script via Python, or fallback directly to Metashape server binary
+:: 2. Launch Server Script via Python (Strictly no unmanaged binary fallback)
 if not "%PYTHON_EXE%"=="" (
     "%PYTHON_EXE%" "%LAUNCHER_PY%" %*
-    if !errorlevel! neq 0 (
+    set "LAUNCH_EXIT=!errorlevel!"
+    if !LAUNCH_EXIT! neq 0 (
         echo.
-        echo [EXIT] Server launcher terminated with exit code !errorlevel!.
+        echo [EXIT] Server launcher terminated with exit code !LAUNCH_EXIT!.
         pause
+        exit /b !LAUNCH_EXIT!
     )
 ) else (
-    echo [NOTICE] Python executable not found. Falling back to direct Metashape server binary...
-    set "SERVER_BIN="
-    if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape-server.exe" (
-        set "SERVER_BIN=%ProgramFiles%\Agisoft\Metashape Pro\metashape-server.exe"
-    ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape-server.exe" (
-        set "SERVER_BIN=%ProgramW6432%\Agisoft\Metashape Pro\metashape-server.exe"
-    )
-    if "!SERVER_BIN!"=="" (
-        for %%D in (C D E F G) do (
-            if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe" (
-                set "SERVER_BIN=%%D:\Program Files\Agisoft\Metashape Pro\metashape-server.exe"
-            )
-        )
-    )
-    if "!SERVER_BIN!"=="" (
-        if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" (
-            set "SERVER_BIN=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
-        ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" (
-            set "SERVER_BIN=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
-        )
-    )
-    if "!SERVER_BIN!"=="" (
-        for %%D in (C D E F G) do (
-            if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe" (
-                set "SERVER_BIN=%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe"
-            )
-        )
-    )
-    if not "!SERVER_BIN!"=="" (
-        "!SERVER_BIN!" --host 0.0.0.0:5840 %*
-    ) else (
-        echo [ERROR] Metashape Server binary was not found. Please verify Metashape Pro is installed.
-        pause
-        exit /b 1
-    )
+    echo [ERROR] Python runtime was not found.
+    echo Please install Agisoft Metashape Pro or Python 3.10+ to run the cluster server daemon.
+    pause
+    exit /b 1
 )

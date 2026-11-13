@@ -20,6 +20,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 # Ensure scripts directory is importable
@@ -29,15 +30,36 @@ if _SCRIPTS_DIR not in sys.path:
 
 import cluster_utils as cu
 
-# Configure Windows console streams for international Unicode paths
-if sys.platform == "win32":
-    for _stream_name in ("stdout", "stderr", "stdin"):
-        _stream = getattr(sys, _stream_name, None)
-        if _stream and hasattr(_stream, "reconfigure"):
-            try:
-                _stream.reconfigure(encoding="utf-8", errors="replace")
-            except Exception:
-                pass
+PID_FILE_PATH = os.path.join(tempfile.gettempdir(), "autometashape_worker.pid")
+
+
+def record_worker_pid() -> None:
+    """Record current process ID to a well-known temp file for deterministic process management."""
+    try:
+        with open(PID_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def clear_worker_pid() -> None:
+    """Remove worker PID tracking file on clean exit."""
+    try:
+        if os.path.isfile(PID_FILE_PATH):
+            os.remove(PID_FILE_PATH)
+    except Exception:
+        pass
+
+
+def cleanup_stale_worker_processes() -> None:
+    """Terminate orphaned metashape worker processes on this host to prevent duplicate connections."""
+    if sys.platform == "win32":
+        try:
+            subprocess.run(["taskkill", "/IM", "metashape.exe"], capture_output=True, timeout=2)
+            time.sleep(0.5)
+            subprocess.run(["taskkill", "/F", "/IM", "metashape.exe"], capture_output=True, timeout=2)
+        except Exception:
+            pass
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -60,6 +82,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON worker configuration file")
     parser.add_argument("--interactive", action="store_true", help="Force interactive configuration prompt")
+    parser.add_argument(
+        "--non-interactive",
+        "--headless",
+        dest="non_interactive",
+        action="store_true",
+        help="Run without interactive prompts (headless/automated execution)",
+    )
     parser.add_argument("--no-reconnect", action="store_true", help="Do not automatically reconnect on disconnection")
     parser.add_argument("--worker", action="store_true", help=argparse.SUPPRESS)
     return parser
@@ -135,6 +164,16 @@ def run_interactive_wizard(
 
 def main() -> int:
     """Main worker launcher entrypoint with pre-flight diagnostics and reconnect loop."""
+    record_worker_pid()
+    cleanup_stale_worker_processes()
+    try:
+        return _run_worker_lifecycle()
+    finally:
+        clear_worker_pid()
+
+
+def _run_worker_lifecycle() -> int:
+    """Execute worker configuration resolution, pre-flight diagnostics, and resilient execution loop."""
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -142,16 +181,26 @@ def main() -> int:
         if cleaned:
             print(f"[NOTICE] Ignoring unrecognized worker arguments: {' '.join(cleaned)}")
 
-    # 1. Resolve configuration (CLI args -> Config File -> Dynamic Discovery -> Interactive Wizard)
+    # 1. Resolve headless / non-interactive execution mode
+    is_tty = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
+    is_headless = args.non_interactive or not is_tty
+
+    # 2. Resolve configuration (CLI args -> Environment -> Config File -> Dynamic Discovery)
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME)
     saved_config = cu.load_cluster_config(config_path)
 
     detected_mask, detected_gpu_names = cu.calculate_optimal_gpu_mask()
-    default_gpu_mask = str(detected_mask) if detected_mask > 0 else "0"
 
     host = args.host or saved_config.get("host", "")
     port = args.port or saved_config.get("port", "5840")
     root_path = args.root or saved_config.get("root", "")
+
+    # Fallback to standard environment variables if parameters remain unresolved
+    if not host:
+        host = os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip()
+    if not root_path:
+        root_path = os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
+
     # CPU Enable Resolution
     if args.cpu_enable is not None:
         cpu_enable = args.cpu_enable
@@ -160,25 +209,41 @@ def main() -> int:
     else:
         cpu_enable = 1
 
-    # GPU Mask Resolution: CLI arg -> saved config -> dynamically detected optimal mask
-    raw_gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", None)
-    if raw_gpu_mask is not None:
-        gpu_str = str(raw_gpu_mask).strip()
-        if gpu_str.lower() in ("auto", "none", "", "default"):
-            gpu_mask = default_gpu_mask
-        else:
-            gpu_mask = gpu_str
-    else:
-        gpu_mask = default_gpu_mask
+    # GPU Mask Resolution: Only set explicit mask if explicitly provided by user (CLI or saved override)
+    explicit_gpu_mask = None
+    if args.gpu_mask is not None:
+        raw = str(args.gpu_mask).strip()
+        if raw and raw.lower() not in ("auto", "none", "default"):
+            explicit_gpu_mask = raw
+    elif "gpu_mask" in saved_config:
+        raw = str(saved_config["gpu_mask"]).strip()
+        if raw and raw.lower() not in ("auto", "none", "default"):
+            explicit_gpu_mask = raw
 
-    if args.interactive or not host or not root_path:
-        host, port, root_path, cpu_enable, gpu_mask, should_save = run_interactive_wizard(
+    # 3. Interactive Wizard or Headless Error Handling
+    if not host or not root_path or args.interactive:
+        if is_headless:
+            print(
+                f"[FATAL ERROR] Missing required cluster parameters in non-interactive/headless mode (host='{host}', root='{root_path}').",
+                file=sys.stderr,
+            )
+            print(
+                "Please provide --host and --root via CLI arguments, environment variables (AUTOMETASHAPE_CLUSTER_HOST, AUTOMETASHAPE_CLUSTER_ROOT), or worker_config.json.",
+                file=sys.stderr,
+            )
+            return 1
+
+        suggested_gpu = explicit_gpu_mask if explicit_gpu_mask is not None else (str(detected_mask) if detected_mask > 0 else "0")
+        host, port, root_path, cpu_enable, target_gpu_mask, should_save = run_interactive_wizard(
             default_host=host,
             default_port=port,
             default_root=root_path,
             default_cpu=cpu_enable,
-            default_gpu=gpu_mask,
+            default_gpu=suggested_gpu,
         )
+        if target_gpu_mask and target_gpu_mask != "0":
+            explicit_gpu_mask = target_gpu_mask
+
         if should_save:
             conf_data = {
                 "host": host,
@@ -186,12 +251,41 @@ def main() -> int:
                 "root": root_path,
                 "cpu_enable": cpu_enable,
             }
-            if gpu_mask is not None:
-                conf_data["gpu_mask"] = gpu_mask
+            if args.gpu_mask is not None:
+                conf_data["gpu_mask"] = args.gpu_mask
             saved_file = cu.save_cluster_config(conf_data, config_path)
             print(f"[OK] Configuration saved to: {saved_file}\n")
 
-    # 2. Pre-Flight Diagnostic 1: Metashape Pro Binary Locator
+    # 4. Auto-persist valid configuration to Documents\AutoMetashape\worker_config.json if missing/incomplete
+    if host and root_path:
+        target_cfg_paths = [config_path]
+        doc_dir = os.path.join(os.path.expanduser("~"), "Documents", "AutoMetashape")
+        doc_cfg = os.path.join(doc_dir, cu.DEFAULT_WORKER_CONFIG_FILENAME)
+        if doc_cfg not in target_cfg_paths:
+            target_cfg_paths.append(doc_cfg)
+
+        for target_cfg in target_cfg_paths:
+            existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
+            is_missing = not os.path.isfile(target_cfg)
+            is_incomplete = not existing_cfg.get("host") or not existing_cfg.get("root")
+
+            if is_missing or is_incomplete:
+                persist_data = {
+                    "host": host,
+                    "port": str(port),
+                    "root": root_path,
+                    "cpu_enable": int(cpu_enable),
+                }
+                # STRICT INVARIANT: NEVER write hardcoded gpu_mask unless explicitly passed via CLI
+                if args.gpu_mask is not None:
+                    persist_data["gpu_mask"] = str(args.gpu_mask).strip()
+                try:
+                    saved_p = cu.save_cluster_config(persist_data, target_cfg)
+                    print(f"[OK] Auto-persisted worker configuration to: {saved_p}")
+                except Exception:
+                    pass
+
+    # 5. Pre-Flight Diagnostic 1: Metashape Pro Binary Locator
     ms_exe = cu.find_metashape_path()
     if not ms_exe or not os.path.isfile(ms_exe):
         print(f"[FATAL ERROR] Agisoft Metashape Pro executable was not found on this system.", file=sys.stderr)
@@ -203,15 +297,15 @@ def main() -> int:
     print(f"  Cluster Server  : {host}:{port}")
     print(f"  Shared Storage  : {root_path}")
     print(f"  Metashape Binary: {ms_exe}")
-    if gpu_mask and str(gpu_mask).strip() not in ("0", ""):
-        gpu_count_label = f" ({len(detected_gpu_names)} GPU(s) active)" if detected_gpu_names else ""
-        print(f"  GPU Device Mask : {gpu_mask}{gpu_count_label}")
+    if explicit_gpu_mask and explicit_gpu_mask not in ("0", ""):
+        print(f"  GPU Device Mask : {explicit_gpu_mask} (Manual Override)")
     else:
-        print("  Compute Mode    : CPU Only (All CPU threads)")
+        detected_label = f" ({len(detected_gpu_names)} GPU(s) available)" if detected_gpu_names else ""
+        print(f"  GPU Device Mask : Auto (Metashape native hardware auto-discovery){detected_label}")
     print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
     print("=" * 72)
 
-    # 3. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
+    # 6. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
     try:
         port_num = int(port)
     except ValueError:
@@ -224,7 +318,7 @@ def main() -> int:
         print(f"  [WARNING] Could not reach server at {host}:{port_num}.", file=sys.stderr)
         print("  Check that metashape-server is running and TCP port 5840 is open in firewall.", file=sys.stderr)
 
-    # 4. Pre-Flight Diagnostic 3: Shared Storage UNC Access Test
+    # 7. Pre-Flight Diagnostic 3: Shared Storage UNC Access Test
     print(f"[PRE-FLIGHT] Validating shared network storage access: {root_path}...")
     valid_unc, unc_err = cu.test_unc_path(root_path)
     if valid_unc:
@@ -233,7 +327,7 @@ def main() -> int:
         print(f"  [WARNING] Storage verification issue: {unc_err}", file=sys.stderr)
         print("  Ensure network credentials and file sharing permissions are granted.", file=sys.stderr)
 
-    # 5. Build Worker Command
+    # 8. Build Worker Command
     worker_cmd = [
         ms_exe,
         "--worker",
@@ -244,16 +338,18 @@ def main() -> int:
         "--cpu-enable",
         str(cpu_enable),
     ]
-    if gpu_mask and str(gpu_mask).strip() not in ("0", ""):
-        worker_cmd.extend(["--gpu-mask", str(gpu_mask).strip()])
+    # Only append --gpu-mask when explicitly requested; otherwise Metashape native auto-detection selects discrete GPUs
+    if explicit_gpu_mask and explicit_gpu_mask not in ("0", ""):
+        worker_cmd.extend(["--gpu-mask", explicit_gpu_mask])
 
     print("\n[READY] Launching Metashape Worker daemon...")
     print(f"Command: {' '.join(worker_cmd)}")
     print("Press Ctrl+C in this terminal at any time to disconnect this worker node.\n")
 
-    # 6. Resilient Execution & Auto-Reconnect Loop
+    # 9. Resilient Execution & Auto-Reconnect Loop
     reconnect_delay = 10.0
     while True:
+        proc = None
         try:
             start_t = time.time()
             proc = subprocess.Popen(worker_cmd)
@@ -277,6 +373,16 @@ def main() -> int:
             if args.no_reconnect:
                 return 1
             time.sleep(reconnect_delay)
+        finally:
+            if proc and proc.poll() is None:
+                try:
+                    proc.terminate()
+                    proc.wait(timeout=2)
+                except Exception:
+                    try:
+                        proc.kill()
+                    except Exception:
+                        pass
 
 
 if __name__ == "__main__":

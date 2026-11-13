@@ -382,5 +382,97 @@ class TestCliArgs(unittest.TestCase):
                 gpu_auto = None
             self.assertIsNone(gpu_auto)
 
+    def test_worker_launcher_non_interactive_flags(self) -> None:
+        """Verify launch_worker parser accepts --non-interactive and --headless flags."""
+        import launch_worker as lw
+
+        parser = lw.build_arg_parser()
+        args1 = parser.parse_args(["--non-interactive"])
+        self.assertTrue(args1.non_interactive)
+
+        args2 = parser.parse_args(["--headless"])
+        self.assertTrue(args2.non_interactive)
+
+    def test_worker_launcher_headless_missing_params_exits_without_input(self) -> None:
+        """Verify that launch_worker in headless mode exits with code 1 and never calls input()."""
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        # If input() were called, mock raises AssertionError
+        with patch("builtins.input", side_effect=AssertionError("input() must not be called in headless mode!")):
+            with patch("sys.argv", ["launch_worker.py", "--headless", "--config", "non_existent_config.json"]):
+                ret = lw._run_worker_lifecycle()
+                self.assertEqual(ret, 1)
+
+    def test_worker_launcher_headless_resolves_env_vars(self) -> None:
+        """Verify that launch_worker resolves AUTOMETASHAPE_CLUSTER_HOST and AUTOMETASHAPE_CLUSTER_ROOT."""
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        env_vars = {
+            "AUTOMETASHAPE_CLUSTER_HOST": "10.5.10.202",
+            "AUTOMETASHAPE_CLUSTER_ROOT": r"\\ctuav\catp",
+        }
+        with patch.dict(os.environ, env_vars):
+            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                with patch("os.path.isfile", return_value=True):
+                    with patch("cluster_utils.test_tcp_connection", return_value=True):
+                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = mock_popen.return_value
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_proc.poll.return_value = 0
+
+                                with patch("sys.argv", ["launch_worker.py", "--headless", "--no-reconnect"]):
+                                    ret = lw._run_worker_lifecycle()
+                                    self.assertEqual(ret, 0)
+                                    # Verify command built uses the env-resolved values
+                                    cmd = mock_popen.call_args[0][0]
+                                    self.assertIn("10.5.10.202:5840", cmd)
+                                    self.assertIn(r"\\ctuav\catp", cmd)
+                                    # Strict Invariant: Do not append --gpu-mask when not explicitly passed
+                                    self.assertNotIn("--gpu-mask", cmd)
+
+    def test_worker_launcher_auto_persists_config_without_hardcoded_gpu(self) -> None:
+        """Verify launch_worker auto-persists valid host/root without injecting hardcoded gpu_mask."""
+        import tempfile
+        import json
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                with patch("os.path.isfile", return_value=True):
+                    with patch("cluster_utils.test_tcp_connection", return_value=True):
+                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = mock_popen.return_value
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_proc.poll.return_value = 0
+
+                                with patch("sys.argv", [
+                                    "launch_worker.py",
+                                    "--headless",
+                                    "--no-reconnect",
+                                    "--host", "10.5.10.202",
+                                    "--root", r"\\ctuav\catp",
+                                    "--config", cfg_file,
+                                ]):
+                                    ret = lw._run_worker_lifecycle()
+                                    self.assertEqual(ret, 0)
+
+            # Check persisted file contents
+            self.assertTrue(os.path.isfile(cfg_file))
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
+            self.assertEqual(saved["host"], "10.5.10.202")
+            self.assertEqual(saved["root"], r"\\ctuav\catp")
+            # STRICT INVARIANT: gpu_mask MUST NOT be in saved config when not explicitly requested
+            self.assertNotIn("gpu_mask", saved)
+
+
 if __name__ == "__main__":
     unittest.main()

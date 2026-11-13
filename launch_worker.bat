@@ -43,34 +43,26 @@ if "%PYTHON_EXE%"=="" (
     )
 )
 
-:: 2. Launch Resilient Worker Script via Python, or fallback directly to Metashape binary
+:: 2. Detect headless/non-interactive invocation
+set "IS_HEADLESS="
+for %%A in (%*) do (
+    if /i "%%~A"=="--non-interactive" set "IS_HEADLESS=1"
+    if /i "%%~A"=="--headless" set "IS_HEADLESS=1"
+)
+
+:: 3. Launch Resilient Worker Script via Python (Strictly no unmanaged binary fallback)
 if not "%PYTHON_EXE%"=="" (
     "%PYTHON_EXE%" "%LAUNCHER_PY%" %*
-    if !errorlevel! neq 0 (
+    set "LAUNCH_EXIT=!errorlevel!"
+    if !LAUNCH_EXIT! neq 0 (
         echo.
-        echo [EXIT] Worker launcher terminated with exit code !errorlevel!.
-        pause
+        echo [EXIT] Worker launcher terminated with exit code !LAUNCH_EXIT!.
+        if not defined IS_HEADLESS pause
+        exit /b !LAUNCH_EXIT!
     )
 ) else (
-    echo [NOTICE] Python executable not found. Falling back to direct Metashape worker binary...
-    set "MS_EXE="
-    if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" (
-        set "MS_EXE=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
-    ) else if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" (
-        set "MS_EXE=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
-    )
-    if "!MS_EXE!"=="" (
-        for %%D in (C D E F G) do (
-            if exist "%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe" (
-                set "MS_EXE=%%D:\Program Files\Agisoft\Metashape Pro\metashape.exe"
-            )
-        )
-    )
-    if not "!MS_EXE!"=="" (
-        "!MS_EXE!" --worker %*
-    ) else (
-        echo [ERROR] Metashape Pro was not found. Please verify Metashape Pro is installed.
-        pause
-        exit /b 1
-    )
+    echo [ERROR] Python runtime was not found.
+    echo Please install Agisoft Metashape Pro or Python 3.10+ to run the resilient worker daemon.
+    if not defined IS_HEADLESS pause
+    exit /b 1
 )
