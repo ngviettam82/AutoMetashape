@@ -28,7 +28,7 @@ set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 echo [1/4] Terminating active Metashape worker processes...
 taskkill /F /IM metashape.exe >nul 2>&1
 taskkill /F /FI "WINDOWTITLE eq AutoMetashape Cluster Worker Node*" >nul 2>&1
-powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -like '*launch_worker*' -or $_.CommandLine -like '*--worker*' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Get-CimInstance Win32_Process | Where-Object { ($_.Name -eq 'metashape.exe' -or $_.Name -like 'python*' -or $_.Name -eq 'py.exe') -and ($_.CommandLine -like '*launch_worker*' -or $_.CommandLine -like '*--worker*') -and $_.ProcessId -ne $PID } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 timeout /t 2 /nobreak >nul
 
 echo [2/4] Downloading latest AutoMetashape source code from GitHub (main)...
