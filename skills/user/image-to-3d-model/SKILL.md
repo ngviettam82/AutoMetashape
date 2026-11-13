@@ -254,9 +254,8 @@ When `launch_worker.bat` runs interactively, it automatically creates `worker_co
 {
   "host": "10.2.8.43",
   "port": "5840",
-  "root": "\\HOST_PC\SharedMetashape",
-  "cpu_enable": 1,
-  "gpu_mask": "1"
+  "root": "\\\\HOST_PC\\SharedMetashape",
+  "cpu_enable": 1
 }
 ```
 
@@ -265,7 +264,7 @@ When `launch_worker.bat` runs interactively, it automatically creates `worker_co
   - `port` *(string)*: Cluster Server control port (default `"5840"`).
   - `root` *(string)*: Universal Windows UNC network share path accessible identically across all nodes.
   - `cpu_enable` *(int)*: Set to `1` to utilize CPU compute cores, or `0` for GPU-only execution.
-  - `gpu_mask` *(string)*: GPU device bitmask (`"1"` = first GPU, `"3"` = GPUs 0 & 1, `"15"` = 4 GPUs).
+  - `gpu_mask` *(string, optional)*: Optional manual GPU device bitmask override (e.g. `"1"`, `"2"`, `"3"`). When omitted, Metashape automatically auto-detects and selects the optimal discrete GPU devices per machine.
 - **Interactive Reconfiguration**:
   To update an existing node's configuration at any time, run:
   ```powershell
