@@ -9,7 +9,7 @@ Starts the central Agisoft Metashape Network Processing Server daemon on the
 coordinator workstation. Features:
 - Port availability pre-flight check (guards against port collisions).
 - LAN IP auto-detection and instructions for remote worker connection.
-- Clean shutdown on Ctrl+C.
+- Clean shutdown on Ctrl+C and deterministic PID lifecycle tracking.
 """
 
 from __future__ import annotations
@@ -18,6 +18,7 @@ import argparse
 import os
 import subprocess
 import sys
+import tempfile
 import time
 
 # Ensure scripts directory is importable
@@ -26,6 +27,27 @@ if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
 import cluster_utils as cu
+
+PID_FILE_PATH = os.path.join(tempfile.gettempdir(), "autometashape_server.pid")
+
+
+def record_server_pid() -> None:
+    """Record current server process ID to a well-known temp file for deterministic process management."""
+    try:
+        with open(PID_FILE_PATH, "w", encoding="utf-8") as f:
+            f.write(str(os.getpid()))
+    except Exception:
+        pass
+
+
+def clear_server_pid() -> None:
+    """Remove server PID tracking file on clean exit."""
+    try:
+        if os.path.isfile(PID_FILE_PATH):
+            os.remove(PID_FILE_PATH)
+    except Exception:
+        pass
+
 
 # Configure Windows console streams for international Unicode paths
 if sys.platform == "win32":
@@ -54,6 +76,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """Main server launcher entrypoint."""
+    record_server_pid()
+    try:
+        return _run_server_lifecycle()
+    finally:
+        clear_server_pid()
+
+
+def _run_server_lifecycle() -> int:
+    """Execute server configuration resolution, diagnostics, and process lifecycle."""
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args()
     if unknown:
@@ -127,6 +158,7 @@ def main() -> int:
     print(f"Command: {' '.join(server_cmd)}")
     print("Press Ctrl+C in this terminal to stop the cluster server.\n")
 
+    proc = None
     try:
         proc = subprocess.Popen(server_cmd)
         proc.wait()
@@ -137,6 +169,16 @@ def main() -> int:
     except Exception as e:
         print(f"\n[ERROR] Server execution error: {e}", file=sys.stderr)
         return 1
+    finally:
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                proc.wait(timeout=2)
+            except Exception:
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
 
 if __name__ == "__main__":

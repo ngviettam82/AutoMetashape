@@ -209,16 +209,16 @@ def _run_worker_lifecycle() -> int:
     else:
         cpu_enable = 1
 
-    # GPU Mask Resolution: Only set explicit mask if explicitly provided by user (CLI or saved override)
+    # Dynamic Hardware Discovery on startup
+    # STRICT INVARIANT: Do not read hardcoded legacy gpu_mask from saved_config.
+    # Dynamic hardware autodetection (cu.calculate_optimal_gpu_mask) always governs unless overridden via CLI.
     explicit_gpu_mask = None
+    is_manual_override = False
     if args.gpu_mask is not None:
         raw = str(args.gpu_mask).strip()
         if raw and raw.lower() not in ("auto", "none", "default"):
             explicit_gpu_mask = raw
-    elif "gpu_mask" in saved_config:
-        raw = str(saved_config["gpu_mask"]).strip()
-        if raw and raw.lower() not in ("auto", "none", "default"):
-            explicit_gpu_mask = raw
+            is_manual_override = True
 
     # 3. Interactive Wizard or Headless Error Handling
     if not host or not root_path or args.interactive:
@@ -266,6 +266,14 @@ def _run_worker_lifecycle() -> int:
 
         for target_cfg in target_cfg_paths:
             existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
+            # Auto-purge legacy hardcoded gpu_mask from pre-existing worker_config.json if not explicitly passed
+            if "gpu_mask" in existing_cfg and args.gpu_mask is None:
+                existing_cfg.pop("gpu_mask", None)
+                try:
+                    cu.save_cluster_config(existing_cfg, target_cfg)
+                except Exception:
+                    pass
+
             is_missing = not os.path.isfile(target_cfg)
             is_incomplete = not existing_cfg.get("host") or not existing_cfg.get("root")
 
@@ -292,16 +300,23 @@ def _run_worker_lifecycle() -> int:
         print("Please verify Metashape Professional is installed and accessible.", file=sys.stderr)
         return 1
 
+    # Resolve active GPU mask and display diagnostics
+    if is_manual_override and explicit_gpu_mask is not None:
+        active_gpu_mask = explicit_gpu_mask
+        gpu_display_label = f"{explicit_gpu_mask} (Manual Override via CLI)"
+    elif detected_mask > 0:
+        active_gpu_mask = str(detected_mask)
+        gpu_display_label = f"{detected_mask} (Dynamic auto-detection: {len(detected_gpu_names)} GPU(s) active: {', '.join(detected_gpu_names)})"
+    else:
+        active_gpu_mask = "0"
+        gpu_display_label = "0 (CPU-only compute mode: 0 discrete GPUs detected)"
+
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
     print(f"  Cluster Server  : {host}:{port}")
     print(f"  Shared Storage  : {root_path}")
     print(f"  Metashape Binary: {ms_exe}")
-    if explicit_gpu_mask and explicit_gpu_mask not in ("0", ""):
-        print(f"  GPU Device Mask : {explicit_gpu_mask} (Manual Override)")
-    else:
-        detected_label = f" ({len(detected_gpu_names)} GPU(s) available)" if detected_gpu_names else ""
-        print(f"  GPU Device Mask : Auto (Metashape native hardware auto-discovery){detected_label}")
+    print(f"  GPU Device Mask : {gpu_display_label}")
     print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
     print("=" * 72)
 
@@ -327,7 +342,7 @@ def _run_worker_lifecycle() -> int:
         print(f"  [WARNING] Storage verification issue: {unc_err}", file=sys.stderr)
         print("  Ensure network credentials and file sharing permissions are granted.", file=sys.stderr)
 
-    # 8. Build Worker Command
+    # 8. Build Worker Command with Dynamic GPU Bitmask
     worker_cmd = [
         ms_exe,
         "--worker",
@@ -337,10 +352,9 @@ def _run_worker_lifecycle() -> int:
         root_path,
         "--cpu-enable",
         str(cpu_enable),
+        "--gpu-mask",
+        active_gpu_mask,
     ]
-    # Only append --gpu-mask when explicitly requested; otherwise Metashape native auto-detection selects discrete GPUs
-    if explicit_gpu_mask and explicit_gpu_mask not in ("0", ""):
-        worker_cmd.extend(["--gpu-mask", explicit_gpu_mask])
 
     print("\n[READY] Launching Metashape Worker daemon...")
     print(f"Command: {' '.join(worker_cmd)}")

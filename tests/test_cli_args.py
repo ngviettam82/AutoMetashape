@@ -431,8 +431,10 @@ class TestCliArgs(unittest.TestCase):
                                     cmd = mock_popen.call_args[0][0]
                                     self.assertIn("10.5.10.202:5840", cmd)
                                     self.assertIn(r"\\ctuav\catp", cmd)
-                                    # Strict Invariant: Do not append --gpu-mask when not explicitly passed
-                                    self.assertNotIn("--gpu-mask", cmd)
+                                    # Dynamic optimal GPU bitmask is passed to Metashape
+                                    self.assertIn("--gpu-mask", cmd)
+                                    gpu_idx = cmd.index("--gpu-mask")
+                                    self.assertTrue(cmd[gpu_idx + 1].isdigit())
 
     def test_worker_launcher_auto_persists_config_without_hardcoded_gpu(self) -> None:
         """Verify launch_worker auto-persists valid host/root without injecting hardcoded gpu_mask."""
@@ -471,6 +473,50 @@ class TestCliArgs(unittest.TestCase):
             self.assertEqual(saved["host"], "10.5.10.202")
             self.assertEqual(saved["root"], r"\\ctuav\catp")
             # STRICT INVARIANT: gpu_mask MUST NOT be in saved config when not explicitly requested
+            self.assertNotIn("gpu_mask", saved)
+
+
+    def test_worker_launcher_purges_legacy_hardcoded_gpu_from_config(self) -> None:
+        """Verify launch_worker purges legacy hardcoded gpu_mask from pre-existing worker_config.json."""
+        import tempfile
+        import json
+        from unittest.mock import patch
+        import launch_worker as lw
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            # Write a legacy config with hardcoded gpu_mask 1
+            with open(cfg_file, "w", encoding="utf-8") as f:
+                json.dump({
+                    "host": "10.5.10.202",
+                    "port": "5840",
+                    "root": r"\\ctuav\catp",
+                    "cpu_enable": 1,
+                    "gpu_mask": "1",
+                }, f)
+
+            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                with patch("os.path.isfile", return_value=True):
+                    with patch("cluster_utils.test_tcp_connection", return_value=True):
+                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = mock_popen.return_value
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_proc.poll.return_value = 0
+
+                                with patch("sys.argv", [
+                                    "launch_worker.py",
+                                    "--headless",
+                                    "--no-reconnect",
+                                    "--config", cfg_file,
+                                ]):
+                                    ret = lw._run_worker_lifecycle()
+                                    self.assertEqual(ret, 0)
+
+            # Check that legacy gpu_mask has been purged from disk
+            with open(cfg_file, "r", encoding="utf-8") as f:
+                saved = json.load(f)
             self.assertNotIn("gpu_mask", saved)
 
 
