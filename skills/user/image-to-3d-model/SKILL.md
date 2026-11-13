@@ -247,7 +247,36 @@ To harness GPUs and high-core CPUs across your local network:
   4. Auto-detects NVIDIA GPUs and enables CPU compute fallback.
   5. **Auto-Reconnect**: Automatically reconnects every 10s if the server restarts or network fluctuates.
 
-#### 5.5 Checking Connectivity & Connected Worker Discovery
+#### 5.5 Worker Node Configuration (`worker_config.json`) & Unattended Provisioning
+When `launch_worker.bat` runs interactively, it automatically creates `worker_config.json`. For automated deployment or mass provisioning across multiple worker PCs without interactive prompts, place a `worker_config.json` file in the AutoMetashape root directory:
+
+```json
+{
+  "host": "10.2.8.43",
+  "port": "5840",
+  "root": "\\HOST_PC\SharedMetashape",
+  "cpu_enable": 1,
+  "gpu_mask": "1"
+}
+```
+
+- **Configuration Fields**:
+  - `host` *(string)*: Cluster Coordinator workstation LAN IP address or DNS hostname.
+  - `port` *(string)*: Cluster Server control port (default `"5840"`).
+  - `root` *(string)*: Universal Windows UNC network share path accessible identically across all nodes.
+  - `cpu_enable` *(int)*: Set to `1` to utilize CPU compute cores, or `0` for GPU-only execution.
+  - `gpu_mask` *(string)*: GPU device bitmask (`"1"` = first GPU, `"3"` = GPUs 0 & 1, `"15"` = 4 GPUs).
+- **Interactive Reconfiguration**:
+  To update an existing node's configuration at any time, run:
+  ```powershell
+  .\launch_worker.bat --interactive
+  ```
+- **Custom Config File Override**:
+  ```powershell
+  .\launch_worker.bat --config "D:\configs\custom_worker.json"
+  ```
+
+#### 5.6 Checking Connectivity & Connected Worker Discovery
 Inspect connected cluster nodes via Python or CLI:
 ```python
 import Metashape
@@ -262,7 +291,7 @@ for w in active_workers:
     print(f"  • Host: {host} | State: {w.get('state')} | RAM: {ram_gb:.1f} GB")
 ```
 
-#### 5.5 Autonomous 1-Hour Monitoring & Self-Healing Protocol
+#### 5.7 Autonomous 1-Hour Monitoring & Self-Healing Protocol
 For massive multi-flight photogrammetry reconstructions running on the cluster (4–12+ hours), the AI Agent executes an autonomous **1-Hour Monitoring & Self-Healing Cycle**:
 
 ```
@@ -289,7 +318,7 @@ For massive multi-flight photogrammetry reconstructions running on the cluster (
 > * **STRICTLY PROHIBITED**: The agent must **NEVER** autonomously rewrite, mutate, refactor, or modify core reconstruction code, pipeline scripts, or algorithm presets during monitoring runs.
 > * **User Intent Invariant**: All code modifications and pipeline rewrites strictly require explicit user instructions and authorization.
 
-#### 5.6 Submitting Distributed Reconstructions & Pipelined Export Overlap
+#### 5.8 Submitting Distributed Reconstructions & Pipelined Export Overlap
 Dispatch autonomous reconstruction to the active cluster:
 ```powershell
 & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py \
