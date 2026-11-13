@@ -244,7 +244,7 @@ To harness GPUs and high-core CPUs across your local network:
   1. Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
   2. Tests TCP port reachability to server host (flags firewall issues immediately).
   3. Tests Shared UNC storage directory access and permissions.
-  4. Auto-detects NVIDIA GPUs and enables CPU compute fallback.
+  4. **Dynamic Multi-GPU Discovery & Bitmask Calculation**: Automatically detects all GPUs via Metashape API, `nvidia-smi`, or Windows WMI, calculating the optimal bitmask (`1` for 1 GPU, `3` for 2 GPUs, `15` for 4 GPUs), and safely omits `--gpu-mask` for CPU-only nodes.
   5. **Auto-Reconnect**: Automatically reconnects every 10s if the server restarts or network fluctuates.
 
 #### 5.5 Worker Node Configuration (`worker_config.json`) & Unattended Provisioning
@@ -264,7 +264,7 @@ When `launch_worker.bat` runs interactively, it automatically creates `worker_co
   - `port` *(string)*: Cluster Server control port (default `"5840"`).
   - `root` *(string)*: Universal Windows UNC network share path accessible identically across all nodes.
   - `cpu_enable` *(int)*: Set to `1` to utilize CPU compute cores, or `0` for GPU-only execution.
-  - `gpu_mask` *(string, optional)*: Optional manual GPU device bitmask override (e.g. `"1"`, `"2"`, `"3"`). When omitted, Metashape automatically auto-detects and selects the optimal discrete GPU devices per machine.
+  - `gpu_mask` *(string, optional)*: GPU device bitmask (e.g. `"1"` = 1 GPU, `"3"` = 2 GPUs, `"15"` = 4 GPUs, `"0"` = CPU-only). When omitted or empty, `launch_worker.py` dynamically auto-detects and activates all available system GPUs.
 - **Interactive Reconfiguration**:
   To update an existing node's configuration at any time, run:
   ```powershell

@@ -45,8 +45,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Binding host IP for control server")
-    parser.add_argument("--port", type=str, default="5840", help="Control port for client and worker connections")
-    parser.add_argument("--dispatch-port", type=str, default="5841", help="Dispatch port for task distribution")
+    parser.add_argument("--port", type=str, default=None, help="Control port for client and worker connections (default: 5840)")
+    parser.add_argument("--dispatch-port", type=str, default=None, help="Dispatch port for task distribution (default: 5841)")
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON server configuration file")
     parser.add_argument("--server", action="store_true", help=argparse.SUPPRESS)
     return parser

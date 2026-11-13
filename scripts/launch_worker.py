@@ -65,13 +65,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tuple[str, str, str, bool]:
-    """Run interactive setup wizard when configuration is missing."""
+def run_interactive_wizard(
+    default_host: str = "",
+    default_port: str = "5840",
+    default_root: str = "",
+    default_cpu: int = 1,
+    default_gpu: str | None = None,
+) -> tuple[str, str, str, int, str, bool]:
+    """Run interactive setup wizard with dynamic hardware discovery."""
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Worker Setup Wizard")
     print("=" * 72)
-    print("No existing configuration found. Please configure this worker node.\n")
+    print("No complete configuration found. Please configure this worker node.\n")
 
+    # 1. Hardware Discovery
+    detected_mask, detected_gpu_names = cu.calculate_optimal_gpu_mask()
+    cpu_cores = os.cpu_count() or 4
+    if detected_gpu_names:
+        print(f"[Hardware] Detected {len(detected_gpu_names)} GPU(s): {', '.join(detected_gpu_names)}")
+        print(f"           Optimal GPU Mask: {detected_mask} (Enables all {len(detected_gpu_names)} GPU(s))")
+    else:
+        print("[Hardware] No discrete GPUs detected (running in CPU-only compute mode).")
+    print(f"[Hardware] Detected {cpu_cores} CPU threads.\n")
+
+    # 2. Host IP
     detected_ip = cu.get_primary_lan_ip()
     suggested_host = default_host or (detected_ip if detected_ip != "127.0.0.1" else "")
     prompt_host = f"[{suggested_host}]" if suggested_host else ""
@@ -81,10 +98,12 @@ def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tu
     if not target_host:
         target_host = "127.0.0.1"
 
-    prompt_port = "[5840]"
+    # 3. Port
+    prompt_port = f"[{default_port}]" if default_port else "[5840]"
     port_input = input(f"[?] Enter Cluster Server Port {prompt_port}: ").strip()
-    target_port = port_input or "5840"
+    target_port = port_input or default_port or "5840"
 
+    # 4. Storage Root
     target_root = ""
     while not target_root:
         prompt_root = f"[{default_root}]" if default_root else ""
@@ -93,11 +112,25 @@ def run_interactive_wizard(default_host: str = "", default_root: str = "") -> tu
         if not target_root:
             print("[!] Shared storage UNC path is required for cluster network processing. Please provide a valid path.")
 
-    save_input = input("[?] Save settings to worker_config.json for 1-click launch? [Y/n]: ").strip().lower()
+    # 5. GPU Mask
+    suggested_gpu = default_gpu if default_gpu is not None else (str(detected_mask) if detected_mask > 0 else "0")
+    gpu_input = input(f"[?] Enter GPU Device Bitmask (e.g. 1=GPU0, 3=GPU0+1, 0=CPU-only) [{suggested_gpu}]: ").strip()
+    target_gpu_mask = gpu_input or suggested_gpu
+
+    # 6. CPU Enable
+    suggested_cpu = str(default_cpu)
+    cpu_input = input(f"[?] Enable CPU compute cores? (1=yes, 0=no) [{suggested_cpu}]: ").strip()
+    try:
+        target_cpu_enable = int(cpu_input) if cpu_input in ("0", "1") else default_cpu
+    except Exception:
+        target_cpu_enable = default_cpu
+
+    # 7. Save Option
+    save_input = input("\n[?] Save settings to worker_config.json for 1-click launch? [Y/n]: ").strip().lower()
     save_config = save_input in ("", "y", "yes")
 
     print("=" * 72)
-    return target_host, target_port, target_root, save_config
+    return target_host, target_port, target_root, target_cpu_enable, target_gpu_mask, save_config
 
 
 def main() -> int:
@@ -109,23 +142,43 @@ def main() -> int:
         if cleaned:
             print(f"[NOTICE] Ignoring unrecognized worker arguments: {' '.join(cleaned)}")
 
-    # 1. Resolve configuration (CLI args -> Config File -> Interactive Wizard)
+    # 1. Resolve configuration (CLI args -> Config File -> Dynamic Discovery -> Interactive Wizard)
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME)
     saved_config = cu.load_cluster_config(config_path)
+
+    detected_mask, detected_gpu_names = cu.calculate_optimal_gpu_mask()
+    default_gpu_mask = str(detected_mask) if detected_mask > 0 else "0"
 
     host = args.host or saved_config.get("host", "")
     port = args.port or saved_config.get("port", "5840")
     root_path = args.root or saved_config.get("root", "")
-    cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+    # CPU Enable Resolution
+    if args.cpu_enable is not None:
+        cpu_enable = args.cpu_enable
+    elif "cpu_enable" in saved_config:
+        cpu_enable = int(saved_config["cpu_enable"])
+    else:
+        cpu_enable = 1
 
-    # Resolve GPU mask: CLI flag -> Config file -> None (auto-detect by Metashape)
+    # GPU Mask Resolution: CLI arg -> saved config -> dynamically detected optimal mask
     raw_gpu_mask = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", None)
-    gpu_mask = str(raw_gpu_mask).strip() if raw_gpu_mask is not None else None
-    if gpu_mask and gpu_mask.lower() in ("auto", "none", "", "default"):
-        gpu_mask = None
+    if raw_gpu_mask is not None:
+        gpu_str = str(raw_gpu_mask).strip()
+        if gpu_str.lower() in ("auto", "none", "", "default"):
+            gpu_mask = default_gpu_mask
+        else:
+            gpu_mask = gpu_str
+    else:
+        gpu_mask = default_gpu_mask
 
     if args.interactive or not host or not root_path:
-        host, port, root_path, should_save = run_interactive_wizard(default_host=host, default_root=root_path)
+        host, port, root_path, cpu_enable, gpu_mask, should_save = run_interactive_wizard(
+            default_host=host,
+            default_port=port,
+            default_root=root_path,
+            default_cpu=cpu_enable,
+            default_gpu=gpu_mask,
+        )
         if should_save:
             conf_data = {
                 "host": host,
@@ -149,12 +202,13 @@ def main() -> int:
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
     print(f"  Cluster Server  : {host}:{port}")
     print(f"  Shared Storage  : {root_path}")
-    print(f"  CPU Processing  : {'Enabled (1)' if cpu_enable else 'Disabled (0)'}")
-    if gpu_mask:
-        print(f"  GPU Device Mask : {gpu_mask} (Manual Override)")
-    else:
-        print(f"  GPU Device Mask : Auto (Metashape native hardware auto-discovery)")
     print(f"  Metashape Binary: {ms_exe}")
+    if gpu_mask and str(gpu_mask).strip() not in ("0", ""):
+        gpu_count_label = f" ({len(detected_gpu_names)} GPU(s) active)" if detected_gpu_names else ""
+        print(f"  GPU Device Mask : {gpu_mask}{gpu_count_label}")
+    else:
+        print("  Compute Mode    : CPU Only (All CPU threads)")
+    print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
     print("=" * 72)
 
     # 3. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
@@ -190,8 +244,8 @@ def main() -> int:
         "--cpu-enable",
         str(cpu_enable),
     ]
-    if gpu_mask:
-        worker_cmd.extend(["--gpu-mask", str(gpu_mask)])
+    if gpu_mask and str(gpu_mask).strip() not in ("0", ""):
+        worker_cmd.extend(["--gpu-mask", str(gpu_mask).strip()])
 
     print("\n[READY] Launching Metashape Worker daemon...")
     print(f"Command: {' '.join(worker_cmd)}")

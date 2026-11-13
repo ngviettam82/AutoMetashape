@@ -149,6 +149,58 @@ class TestClusterUtils(unittest.TestCase):
         ip = cu.get_primary_lan_ip()
         self.assertEqual(ip, "127.0.0.1")
 
+    def test_calculate_optimal_gpu_mask(self) -> None:
+        """Verify dynamic calculation of optimal GPU bitmask across multi-GPU and CPU setups."""
+        # 0 GPUs (CPU only)
+        mask0, names0 = cu.calculate_optimal_gpu_mask([])
+        self.assertEqual(mask0, 0)
+        self.assertEqual(names0, [])
+
+        # 1 GPU
+        gpus1 = [{"index": 0, "name": "RTX 4090", "mem_mb": 24576}]
+        mask1, names1 = cu.calculate_optimal_gpu_mask(gpus1)
+        self.assertEqual(mask1, 1)
+        self.assertEqual(len(names1), 1)
+
+        # 2 GPUs (Dual GPU worker)
+        gpus2 = [
+            {"index": 0, "name": "RTX 4090", "mem_mb": 24576},
+            {"index": 1, "name": "RTX 4090", "mem_mb": 24576},
+        ]
+        mask2, names2 = cu.calculate_optimal_gpu_mask(gpus2)
+        self.assertEqual(mask2, 3)  # Binary 11 = GPU 0 and GPU 1
+        self.assertEqual(len(names2), 2)
+
+        # 4 GPUs (Quad GPU cluster workstation)
+        gpus4 = [{"index": i, "name": f"RTX A6000", "mem_mb": 49152} for i in range(4)]
+        mask4, names4 = cu.calculate_optimal_gpu_mask(gpus4)
+        self.assertEqual(mask4, 15)  # Binary 1111 = GPUs 0, 1, 2, 3
+        self.assertEqual(len(names4), 4)
+
+    def test_generate_worker_bat_with_gpu_mask(self) -> None:
+        """Verify generate_worker_bat_content configures custom and multi-GPU masks."""
+        # Multi-GPU mask
+        bat_dual = cu.generate_worker_bat_content(
+            host="192.168.1.100",
+            port="5840",
+            root_path=r"\\SERVER\SharedMetashape",
+            cpu_enable=0,
+            gpu_mask="3",
+        )
+        self.assertIn("--cpu-enable 0", bat_dual)
+        self.assertIn("--gpu-mask 3", bat_dual)
+
+        # CPU only mode (gpu_mask = 0)
+        bat_cpu = cu.generate_worker_bat_content(
+            host="192.168.1.100",
+            port="5840",
+            root_path=r"\\SERVER\SharedMetashape",
+            cpu_enable=1,
+            gpu_mask="0",
+        )
+        self.assertIn("--cpu-enable 1", bat_cpu)
+        self.assertNotIn("--gpu-mask", bat_cpu)
+
 
 if __name__ == "__main__":
     unittest.main()

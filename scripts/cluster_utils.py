@@ -274,7 +274,116 @@ def get_primary_lan_ip() -> str:
     return "127.0.0.1"
 
 
-def generate_worker_bat_content(host: str | None = None, port: str = "5840", root_path: str = "") -> str:
+# ---------------------------------------------------------------------------
+# Hardware & GPU Device Discovery
+# ---------------------------------------------------------------------------
+def detect_gpu_devices() -> list[dict[str, Any]]:
+    """Detect available GPU devices on the system using Metashape API, nvidia-smi, or system WMI.
+
+    Returns:
+        List of dicts: [{"index": int, "name": str, "mem_mb": int}]
+    """
+    # 1. Metashape Python API (when running inside embedded Metashape runtime)
+    try:
+        import Metashape
+        if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices"):
+            gpus = Metashape.app.enumGPUDevices()
+            if gpus:
+                return [
+                    {
+                        "index": i,
+                        "name": g.get("name", f"GPU {i}"),
+                        "mem_mb": int(g.get("mem_size", 0) // (1024 * 1024)),
+                    }
+                    for i, g in enumerate(gpus)
+                ]
+    except Exception:
+        pass
+
+    # 2. nvidia-smi CLI (standard NVIDIA driver tool on Windows & Linux)
+    nvidia_smi = shutil.which("nvidia-smi")
+    if not nvidia_smi and sys.platform == "win32":
+        for cand in (
+            os.path.join(os.environ.get("SystemRoot", r"C:\Windows"), "System32", "nvidia-smi.exe"),
+            os.path.join(os.environ.get("ProgramFiles", r"C:\Program Files"), "NVIDIA Corporation", "NVSMI", "nvidia-smi.exe"),
+        ):
+            if os.path.isfile(cand):
+                nvidia_smi = cand
+                break
+
+    if nvidia_smi:
+        try:
+            res = subprocess.run(
+                [nvidia_smi, "--query-gpu=index,name,memory.total", "--format=csv,noheader,nounits"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+            )
+            if res.returncode == 0 and res.stdout.strip():
+                devices = []
+                for line in res.stdout.strip().splitlines():
+                    parts = [p.strip() for p in line.split(",")]
+                    if len(parts) >= 2:
+                        idx = int(parts[0]) if parts[0].isdigit() else len(devices)
+                        name = parts[1]
+                        mem_mb = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
+                        devices.append({"index": idx, "name": name, "mem_mb": mem_mb})
+                if devices:
+                    return devices
+        except Exception:
+            pass
+
+    # 3. Windows WMI CIM query (supports AMD Radeon, Intel Arc, and NVIDIA)
+    if sys.platform == "win32":
+        try:
+            cmd = ["powershell", "-NoProfile", "-Command", "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            if res.returncode == 0 and res.stdout.strip():
+                devices = []
+                for name in res.stdout.strip().splitlines():
+                    clean_name = name.strip()
+                    if not clean_name:
+                        continue
+                    lower = clean_name.lower()
+                    if any(k in lower for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc")):
+                        devices.append({"index": len(devices), "name": clean_name, "mem_mb": 0})
+                if devices:
+                    return devices
+        except Exception:
+            pass
+
+    return []
+
+
+def calculate_optimal_gpu_mask(gpu_devices: list[dict[str, Any]] | None = None) -> tuple[int, list[str]]:
+    """Calculates optimal GPU bitmask enabling all detected high-performance GPUs.
+
+    Returns:
+        Tuple of (bitmask: int, device_labels: list[str])
+    """
+    if gpu_devices is None:
+        gpu_devices = detect_gpu_devices()
+
+    if not gpu_devices:
+        return 0, []
+
+    mask = 0
+    names = []
+    for i, dev in enumerate(gpu_devices):
+        mask |= (1 << i)
+        mem_str = f" ({dev['mem_mb'] / 1024:.1f} GB)" if dev.get("mem_mb") else ""
+        names.append(f"{dev.get('name', f'GPU {i}')}{mem_str}")
+
+    return mask, names
+
+
+def generate_worker_bat_content(
+    host: str | None = None,
+    port: str = "5840",
+    root_path: str = "",
+    cpu_enable: int = 1,
+    gpu_mask: str | int | None = None,
+) -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
     target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
     target_port = port.strip() or "5840"
@@ -283,7 +392,13 @@ def generate_worker_bat_content(host: str | None = None, port: str = "5840", roo
     if target_root:
         root_init = f'set "TARGET_ROOT={target_root}"'
     else:
-        root_init = r'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT="Enter Shared Network Storage path (e.g. \\HOST_PC\SharedMetashape or Z:\): "'
+        root_init = r'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT="Enter Shared Network Storage path (e.g. \\\\HOST_PC\\SharedMetashape or Z:\\): "'
+
+    gpu_flag = ""
+    if gpu_mask is not None:
+        mask_str = str(gpu_mask).strip()
+        if mask_str and mask_str != "0":
+            gpu_flag = f" --gpu-mask {mask_str}"
 
     return f"""@echo off
 chcp 65001 > nul
@@ -344,7 +459,7 @@ echo [READY] Worker is online and waiting for jobs from the server.
 echo Press Ctrl+C in this window at any time to disconnect this worker node.
 echo.
 
-"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable 1
+"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_enable}{gpu_flag}
 
 if !errorlevel! neq 0 (
     echo.
