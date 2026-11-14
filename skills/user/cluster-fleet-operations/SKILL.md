@@ -109,7 +109,7 @@ For multi-hour cluster runs, execute the continuous monitoring cycle:
    import Metashape
 
    client = Metashape.NetworkClient()
-   client.connect("10.2.8.43:5840")
+   client.connect("127.0.0.1:5840")
    workers = client.workerList()
    batches = client.batchList()
    ```
@@ -190,7 +190,7 @@ python tools/skills/cli.py check
 python tools/check_licenses.py
 
 # Execute test suite covering cluster utilities and CLI arguments
-python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py
+python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py
 ```
 
 ---

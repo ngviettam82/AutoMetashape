@@ -35,7 +35,17 @@ log.append(f"Started worker update on {{node_name}} at {{time.ctime()}}")
 log.append(f"Python: {{sys.executable}}")
 
 user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
+candidates = [
+    os.environ.get("AUTOMETASHAPE_DIR", ""),
+    os.path.join(user_profile, "Documents", "AutoMetashape"),
+    os.path.join(user_profile, "AutoMetashape"),
+    os.getcwd(),
+]
 target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+for cand in candidates:
+    if cand and os.path.isdir(cand) and os.path.exists(os.path.join(cand, "launch_worker.bat")):
+        target_dir = cand
+        break
 temp_dir = os.environ.get("TEMP", r"C:\\Temp")
 zip_path = os.path.join(temp_dir, "AutoMetashape_remote_update.zip")
 extract_dir = os.path.join(temp_dir, "AutoMetashape_remote_extracted")

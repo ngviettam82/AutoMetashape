@@ -27,6 +27,7 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.config import load_cluster_config
 from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
 from autometashape.cluster.updater import (
     DEFAULT_REPO_ARCHIVE_URL,
@@ -134,9 +135,23 @@ def main() -> int:
         print("[NOTICE] No active cluster workers are currently connected to the server.")
         return 0
 
-    if not args.root:
-        print("[FATAL ERROR] --root shared storage path is required for remote fleet update.", file=sys.stderr)
+    root_val = args.root.strip()
+    if not root_val:
+        root_val = os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
+    if not root_val:
+        sc = load_cluster_config(filename="server_config.json")
+        root_val = str(sc.get("root", "") or sc.get("network_path", "")).strip()
+    if not root_val:
+        wc = load_cluster_config(filename="worker_config.json")
+        root_val = str(wc.get("root", "") or wc.get("network_path", "")).strip()
+
+    if not root_val:
+        print(
+            "[FATAL ERROR] Shared storage root path is required. Provide --root or configure via worker_config.json.",
+            file=sys.stderr,
+        )
         return 1
+    args.root = root_val
 
     # Resolve target nodes
     targets = []
