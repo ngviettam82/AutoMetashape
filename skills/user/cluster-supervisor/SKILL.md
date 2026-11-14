@@ -33,7 +33,7 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    subgraph Multi_Dataset_Queue["Multi-Dataset Queue (queue.json)"]
+    subgraph Multi_Dataset_Queue["Multi-Dataset Queue (queue.json / --scan-dir)"]
         Job1["Project A (CATP_0167)"]
         Job2["Project B (CATP_0204)"]
         Job3["Project C (CATP_0205)"]
@@ -44,7 +44,12 @@ flowchart TD
         Check{"Free Space >= 50 GB?"}
         Sample --> Check
         Check -->|No| PauseAlert["Pause Ingestion / Safe Quarantine\n(Defense against Win32 Error 112)"]
-        Check -->|Yes| Dispatch["Dispatch Next Job"]
+    end
+
+    subgraph Execution_Modes["Cluster Execution Modes"]
+        Check -->|Yes| RouteMode{"Mode Selection"}
+        RouteMode -->|Mode 1: Sequential / Centralized| SeqDispatch["Sequential Stage Dispatch\nAll workers collaborate on 1 project"]
+        RouteMode -->|Mode 2: Concurrent / Independent| ConcDispatch["Rapid Concurrent Batch Dispatch\nEach project locked to 1 dedicated worker\n(worker_limit=1)"]
     end
 
     subgraph Integrity_Gate["Deliverable Integrity Gate"]
@@ -55,12 +60,15 @@ flowchart TD
     end
 
     Job1 --> Sample
-    Dispatch --> Run["Execute Reconstruction Pipeline"]
-    Run --> Integrity_Gate
+    Job2 --> Sample
+    Job3 --> Sample
+    SeqDispatch --> RunSeq["Execute Stage-by-Stage"]
+    ConcDispatch --> RunConc["Parallel Worker Fleet Execution"]
+    RunSeq --> Integrity_Gate
+    RunConc --> Integrity_Gate
     Integrity_Gate --> Eval{"All Assets PASS?"}
     Eval -->|PASS| Purge["Purge Local NVMe Scratch Directory"]
-    Purge --> Advance["Advance to Next Queue Item (Project B)"]
-    Advance --> Sample
+    Purge --> Advance["Advance / Complete Queue Item"]
     Eval -->|FAIL| Quarantine["Log Errors & Quarantine Deliverables"]
 ```
 
@@ -117,10 +125,38 @@ Machine-readable JSON output can be requested using `--json`:
 }
 ```
 
-### 3. Multi-Dataset Queue Chaining
+### 3. Execution Modes: Centralized vs Independent Dispatch
+
+The supervisor supports two distinct cluster operational architectures:
+
+#### Mode 1: Centralized Task Mode (`--sequential` / `--no-concurrent`)
+- **Behavior**: Datasets in the queue are processed one project at a time. For each project, the supervisor breaks the reconstruction down into granular network tasks (MatchPhotos, BuildDepthMaps) where **all available cluster workers collaborate concurrently on the same project**.
+- **Best For**: Single massive surveys (e.g., 5,000+ images) requiring the aggregate compute and VRAM of the entire GPU fleet.
+- **Invocation**:
+  ```powershell
+  python scripts/cluster_supervisor.py --manifest queue.json --network-enable --network-host 10.5.10.202 --sequential
+  ```
+
+#### Mode 2: Independent Project Mode (`--concurrent` / `--parallel-dispatch`)
+- **Behavior**: All queued dataset projects are submitted to the Metashape Server scheduler simultaneously as atomic monolithic batches locked to 1 dedicated worker node (`worker_limit=1`). Each assigned worker stages project data into its local NVMe scratch volume and executes the complete pipeline independently with zero inter-worker network synchronization overhead.
+- **Default Behavior**: When `--network-independent-workers` is enabled, concurrent dispatch is active by default.
+- **Best For**: Daily drone batches consisting of multiple small-to-medium datasets (e.g., 500-1,500 photos each) where running $N$ projects simultaneously on $N$ GPUs yields maximum total throughput.
+- **Invocation**:
+  ```powershell
+  python scripts/cluster_supervisor.py --scan-dir "\\ctuav\catp\101126" --output-root "\\ctuav\catp\101126" `
+      --network-enable --network-host 10.5.10.202 --network-independent-workers --concurrent
+  ```
+
+### 4. Multi-Dataset Queue Chaining & Discovery
 To process a sequence of survey datasets without human intervention:
 
-1. **Construct a Queue Manifest (`queue.json`)**:
+1. **Auto-Discovery from Date/Survey Root Folder**:
+   ```powershell
+   python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\storage\101126" --output-root "\\CLUSTER_SHARE\storage\101126" `
+       --preset pro --min-headroom-gb 50.0 --concurrent
+   ```
+
+2. **Construct a Queue Manifest (`queue.json`)**:
    ```json
    [
      {
@@ -140,17 +176,12 @@ To process a sequence of survey datasets without human intervention:
    ]
    ```
 
-2. **Execute the Queue Supervisor**:
-   ```powershell
-   python scripts/cluster_supervisor.py --manifest queue.json --min-headroom-gb 50.0
-   ```
-
-3. **Supervision Lifecycle per Queue Item**:
-   - **Pre-flight**: Checks storage headroom.
-   - **Execute**: Dispatches reconstruction with local NVMe scratch staging.
-   - **Verify**: Evaluates deliverable integrity gate.
-   - **Cleanup**: If verified, purges `{project_name}_local_stage` on local NVMe SSD to free space for the next item.
-   - **Advance**: Chains immediately into the subsequent queue item.
+3. **Supervision Lifecycle**:
+   - **Pre-flight Headroom Watchdog**: Inspects free storage capacity across target output share before queue dispatch.
+   - **Dispatch**: Submits batches to Metashape scheduler (sequentially for Mode 1 or concurrently with `worker_limit=1` for Mode 2).
+   - **Telemetry Monitoring**: Non-blocking polling loop checks `batchInfo()` and worker sidecar `_autometashape_status.json` every 2.0s.
+   - **Quality Gate**: Upon batch completion, runs structural verification on Wavefront OBJ, textures, GeoTIFFs, point clouds, and PDF reports.
+   - **Scratch Purge**: Clears temporary local NVMe staging caches upon verified deliverable pass.
 
 ---
 

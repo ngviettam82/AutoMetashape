@@ -218,6 +218,156 @@ class TestClusterSupervisor(unittest.TestCase):
         self.assertEqual(jobs[0].extra_args.get("network_host"), "192.168.1.100")
         self.assertTrue(jobs[0].extra_args.get("network_independent_workers"))
 
+    def test_concurrent_mock_queue_successful_execution(self) -> None:
+        """Verify concurrent multi-project dispatch with deliverable verification."""
+        scratch_dir = os.path.join(self.test_dir, "concurrent_scratch")
+        os.makedirs(scratch_dir, exist_ok=True)
+
+        supervisor = ClusterSupervisor(
+            min_headroom_gb=20.0,
+            stop_on_failure=False,
+            scratch_dir=scratch_dir,
+            concurrent=True,
+        )
+
+        job1 = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_c1"),
+            output_dir=os.path.join(self.test_dir, "out_c1"),
+            project_name="Survey_C1",
+            expected_assets=["glb"],
+        )
+        job2 = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_c2"),
+            output_dir=os.path.join(self.test_dir, "out_c2"),
+            project_name="Survey_C2",
+            expected_assets=["glb"],
+        )
+        job3 = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_c3"),
+            output_dir=os.path.join(self.test_dir, "out_c3"),
+            project_name="Survey_C3",
+            expected_assets=["glb"],
+        )
+
+        mock_usage = MagicMock()
+        mock_usage.free = 250 * (1024**3)  # 250 GB
+
+        def mock_execute(j: QueueJob):
+            os.makedirs(j.output_dir, exist_ok=True)
+            with open(os.path.join(j.output_dir, f"{j.project_name}.glb"), "wb") as f:
+                f.write(b"glTF" + b"\x00" * 2000)
+
+            staged_folder = os.path.join(scratch_dir, f"{j.project_name}_local_stage")
+            os.makedirs(staged_folder, exist_ok=True)
+            with open(os.path.join(staged_folder, "data.tmp"), "wb") as f:
+                f.write(b"concurrent_data")
+
+        with patch("shutil.disk_usage", return_value=mock_usage):
+            summary = supervisor.run_queue(execute_fn=mock_execute)
+
+        self.assertEqual(summary["total_jobs"], 3)
+        self.assertEqual(summary["completed_jobs"], 3)
+        self.assertEqual(summary["failed_jobs"], 0)
+        self.assertEqual(job1.status, "COMPLETED")
+        self.assertEqual(job2.status, "COMPLETED")
+        self.assertEqual(job3.status, "COMPLETED")
+
+        # Verify scratch staging directories were purged
+        for name in ["Survey_C1", "Survey_C2", "Survey_C3"]:
+            staged_p = os.path.join(scratch_dir, f"{name}_local_stage")
+            self.assertFalse(os.path.exists(staged_p), f"Scratch for {name} should be purged after verification.")
+
+    def test_concurrent_mock_queue_low_disk_pauses(self) -> None:
+        """Verify storage headroom watchdog pauses affected job during concurrent dispatch."""
+        supervisor = ClusterSupervisor(
+            min_headroom_gb=50.0,
+            stop_on_failure=False,
+            concurrent=True,
+        )
+
+        out_low = os.path.join(self.test_dir, "out_low")
+        out_good = os.path.join(self.test_dir, "out_good")
+        os.makedirs(out_low, exist_ok=True)
+        os.makedirs(out_good, exist_ok=True)
+
+        job_low = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_low"),
+            output_dir=out_low,
+            project_name="Job_LowSpace",
+            expected_assets=["glb"],
+        )
+        job_good = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_good"),
+            output_dir=out_good,
+            project_name="Job_GoodSpace",
+            expected_assets=["glb"],
+        )
+
+        def mock_disk_usage(path: str):
+            res = MagicMock()
+            if "out_low" in path:
+                res.free = 10 * (1024**3)  # 10 GB < 50 GB
+            else:
+                res.free = 200 * (1024**3)  # 200 GB >= 50 GB
+            return res
+
+        def mock_execute(j: QueueJob):
+            os.makedirs(j.output_dir, exist_ok=True)
+            with open(os.path.join(j.output_dir, f"{j.project_name}.glb"), "wb") as f:
+                f.write(b"glTF" + b"\x00" * 2000)
+
+        with patch("shutil.disk_usage", side_effect=mock_disk_usage):
+            summary = supervisor.run_queue(execute_fn=mock_execute)
+
+        self.assertEqual(job_low.status, "PAUSED_LOW_DISK")
+        self.assertIn("Storage exhaustion hazard", job_low.error_message)
+        self.assertEqual(job_good.status, "COMPLETED")
+        self.assertEqual(summary["completed_jobs"], 1)
+
+    def test_concurrent_mock_queue_stop_on_failure(self) -> None:
+        """Verify that concurrent supervisor halts remaining queue if stop_on_failure=True."""
+        supervisor = ClusterSupervisor(
+            min_headroom_gb=10.0,
+            stop_on_failure=True,
+            concurrent=True,
+        )
+
+        job_fail = supervisor.add_job(
+            images_dir=os.path.join(self.test_dir, "photos_cfail"),
+            output_dir=os.path.join(self.test_dir, "out_cfail"),
+            project_name="Survey_CFail",
+            expected_assets=["glb"],
+        )
+
+        mock_usage = MagicMock()
+        mock_usage.free = 150 * (1024**3)
+
+        def mock_bad_execute(j: QueueJob):
+            os.makedirs(j.output_dir, exist_ok=True)
+            # Do not create the expected GLB file
+
+        with patch("shutil.disk_usage", return_value=mock_usage):
+            summary = supervisor.run_queue(execute_fn=mock_bad_execute)
+
+        self.assertEqual(job_fail.status, "VERIFICATION_FAILED")
+        self.assertEqual(summary["completed_jobs"], 0)
+
+    def test_run_queue_routing_concurrent_and_sequential(self) -> None:
+        """Verify run_queue routing between concurrent and sequential modes."""
+        supervisor_seq = ClusterSupervisor(concurrent=False)
+        with patch.object(supervisor_seq, "run_concurrent_queue", return_value={"routed": "concurrent"}) as mock_c:
+            with patch.object(ClusterSupervisor, "run_queue", wraps=supervisor_seq.run_queue):
+                # When concurrent=True override passed
+                res = supervisor_seq.run_queue(concurrent=True)
+                self.assertEqual(res, {"routed": "concurrent"})
+                mock_c.assert_called_once()
+
+        supervisor_conc = ClusterSupervisor(concurrent=True)
+        with patch.object(supervisor_conc, "run_concurrent_queue", return_value={"routed": "concurrent"}) as mock_c2:
+            res2 = supervisor_conc.run_queue()
+            self.assertEqual(res2, {"routed": "concurrent"})
+            mock_c2.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

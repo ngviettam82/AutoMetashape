@@ -15,6 +15,7 @@ import shutil
 import sys
 import threading
 import time
+from typing import Any
 
 try:
     import Metashape

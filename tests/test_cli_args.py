@@ -854,6 +854,32 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(args.network_path, r"\\ctuav\catp")
         self.assertTrue(args.network_enable)
 
+    def test_supervisor_concurrency_cli_flags(self) -> None:
+        """Verify cluster_supervisor parser supports --concurrent, --parallel-dispatch, and --sequential."""
+        from autometashape.cluster.supervisor import build_arg_parser
+
+        parser = build_arg_parser()
+
+        # Default: None
+        args_default = parser.parse_args(["--manifest", "dummy.json"])
+        self.assertIsNone(args_default.concurrent)
+
+        # Explicit concurrent opt-in
+        args_concurrent = parser.parse_args(["--manifest", "dummy.json", "--concurrent"])
+        self.assertTrue(args_concurrent.concurrent)
+
+        # Alias: parallel-dispatch
+        args_parallel = parser.parse_args(["--manifest", "dummy.json", "--parallel-dispatch"])
+        self.assertTrue(args_parallel.concurrent)
+
+        # Explicit sequential opt-out
+        args_no_concurrent = parser.parse_args(["--manifest", "dummy.json", "--no-concurrent"])
+        self.assertFalse(args_no_concurrent.concurrent)
+
+        # Alias: sequential
+        args_sequential = parser.parse_args(["--manifest", "dummy.json", "--sequential"])
+        self.assertFalse(args_sequential.concurrent)
+
     def test_extract_unc_root_various_formats(self) -> None:
         """Verify extract_unc_root correctly resolves UNC roots and ignores local paths."""
         from autometashape.cluster.hardware import extract_unc_root

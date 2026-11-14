@@ -12,6 +12,8 @@ post-reconstruction deliverable verification, and autonomous multi-dataset queue
 from __future__ import annotations
 
 import argparse
+import concurrent.futures
+import inspect
 import json
 import os
 import shutil
@@ -19,7 +21,17 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    import Metashape
+except ImportError:
+    Metashape = None
+
 from autometashape.cluster.hardware import extract_unc_root
+from autometashape.cluster.orchestrator import (
+    build_monolithic_runscript_task,
+    evaluate_cluster_batch_info,
+    safe_create_cluster_batch,
+)
 from autometashape.cluster.staging import get_optimal_local_scratch_dir
 from autometashape.core.verification import verify_project_deliverables
 
@@ -97,10 +109,12 @@ class ClusterSupervisor:
         min_headroom_gb: float = 50.0,
         stop_on_failure: bool = False,
         scratch_dir: Optional[str] = None,
+        concurrent: bool = False,
     ) -> None:
         self.min_headroom_gb = min_headroom_gb
         self.stop_on_failure = stop_on_failure
         self.scratch_dir = scratch_dir or get_optimal_local_scratch_dir()
+        self.concurrent = concurrent
         self.queue: List[QueueJob] = []
 
     def add_job(
@@ -124,16 +138,26 @@ class ClusterSupervisor:
         self.queue.append(job)
         return job
 
-    def run_queue(self, execute_fn: Optional[Any] = None) -> Dict[str, Any]:
+    def run_queue(
+        self,
+        execute_fn: Optional[Any] = None,
+        concurrent: Optional[bool] = None,
+    ) -> Dict[str, Any]:
         """Processes all queued dataset jobs sequentially with storage watchdogs and verification gates.
 
         Args:
             execute_fn: Optional callable(job: QueueJob) -> None to execute reconstruction.
                         If None, imports and delegates to autometashape.core.pipeline.run_reconstruction.
+            concurrent: Optional bool to override instance-level self.concurrent mode.
+                        If True, delegates to self.run_concurrent_queue(execute_fn=execute_fn).
 
         Returns:
             Summary dictionary with execution statistics and per-job verification reports.
         """
+        is_concurrent = self.concurrent if concurrent is None else concurrent
+        if is_concurrent:
+            return self.run_concurrent_queue(execute_fn=execute_fn)
+
         print("=========================================================================")
         print("  AUTOMETASHAPE: AUTONOMOUS CLUSTER SUPERVISOR & QUEUE MANAGER")
         print(f"  Queued Datasets     : {len(self.queue)}")
@@ -254,6 +278,377 @@ class ClusterSupervisor:
             "total_jobs": len(self.queue),
             "completed_jobs": passed_count,
             "jobs": results,
+        }
+
+    def _run_concurrent_mock_queue(
+        self,
+        execute_fn: Any,
+        max_workers: int = 8,
+    ) -> Dict[str, Any]:
+        """Executes queued jobs concurrently via thread pool with pre-flight watchdogs and verification gates."""
+        print("=========================================================================")
+        print("  AUTOMETASHAPE: CONCURRENT MULTI-PROJECT MOCK QUEUE DISPATCH")
+        print(f"  Queued Datasets     : {len(self.queue)}")
+        print(f"  Headroom Threshold  : {self.min_headroom_gb:.1f} GB")
+        print(f"  Max Concurrent Slots: {max_workers}")
+        print("=========================================================================", flush=True)
+
+        results: List[Dict[str, Any]] = []
+        eligible_jobs: List[QueueJob] = []
+
+        # Phase 1: Pre-flight Storage Headroom Watchdog
+        for job in self.queue:
+            has_headroom, free_gb = check_storage_headroom(job.output_dir, self.min_headroom_gb)
+            if not has_headroom:
+                err = (
+                    f"Storage exhaustion hazard (Win32 Error 112 defense): "
+                    f"Volume has only {free_gb:.1f} GB free (threshold: {self.min_headroom_gb:.1f} GB). "
+                    f"Pausing job to prevent data corruption."
+                )
+                print(f"  [STORAGE ALERT] [{job.project_name}] {err}", file=sys.stderr, flush=True)
+                job.status = "PAUSED_LOW_DISK"
+                job.error_message = err
+                results.append(job.to_dict())
+                if self.stop_on_failure:
+                    print("  [SUPERVISOR] Stopping queue dispatch as stop_on_failure=True.", flush=True)
+                    break
+            else:
+                eligible_jobs.append(job)
+
+        if eligible_jobs and not (self.stop_on_failure and any(j.status == "PAUSED_LOW_DISK" for j in self.queue)):
+
+            def _worker_wrapper(job: QueueJob) -> QueueJob:
+                job.status = "RUNNING"
+                t_start = time.time()
+                try:
+                    execute_fn(job)
+                except Exception as exc:
+                    job.status = "FAILED"
+                    job.error_message = f"Execution failed: {exc}"
+                    return job
+
+                elapsed_min = (time.time() - t_start) / 60.0
+                report = verify_project_deliverables(
+                    deliverables_dir=job.output_dir,
+                    project_name=job.project_name,
+                    expected_assets=job.expected_assets,
+                )
+                job.verification_report = report
+                if report["status"] == "PASS":
+                    job.status = "COMPLETED"
+                    print(
+                        f"  [QUALITY GATE] [OK] [{job.project_name}] Deliverables verified "
+                        f"successfully ({elapsed_min:.2f} min).",
+                        flush=True,
+                    )
+                else:
+                    job.status = "VERIFICATION_FAILED"
+                    job.error_message = "; ".join(report.get("errors", []))
+                    print(
+                        f"  [QUALITY GATE] [FAIL] [{job.project_name}] Deliverable verification failed: "
+                        f"{job.error_message}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+
+                if job.status == "COMPLETED" and self.scratch_dir and os.path.isdir(self.scratch_dir):
+                    staged_sub = os.path.join(self.scratch_dir, f"{job.project_name}_local_stage")
+                    if os.path.isdir(staged_sub):
+                        try:
+                            shutil.rmtree(staged_sub, ignore_errors=True)
+                        except Exception:
+                            pass
+
+                return job
+
+            pool_size = max(1, min(len(eligible_jobs), max_workers))
+            with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
+                future_to_job = {executor.submit(_worker_wrapper, job): job for job in eligible_jobs}
+                for future in concurrent.futures.as_completed(future_to_job):
+                    res_job = future.result()
+                    results.append(res_job.to_dict())
+                    if res_job.status != "COMPLETED" and self.stop_on_failure:
+                        print(
+                            "  [SUPERVISOR] Halting queue execution due to job failure (stop_on_failure=True).",
+                            flush=True,
+                        )
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        break
+
+        # Collect any unexecuted pending jobs
+        executed_job_names = {r["project_name"] for r in results}
+        for job in self.queue:
+            if job.project_name not in executed_job_names:
+                results.append(job.to_dict())
+
+        passed_count = sum(1 for r in results if r["status"] == "COMPLETED")
+        print("\n=========================================================================")
+        print("  AUTOMETASHAPE: CONCURRENT QUEUE RUN SUMMARY")
+        print(
+            f"  Total Queued: {len(self.queue)} | Completed & Verified: {passed_count} | "
+            f"Failed/Paused: {len(results) - passed_count}"
+        )
+        print("=========================================================================", flush=True)
+
+        return {
+            "total_jobs": len(self.queue),
+            "completed_jobs": passed_count,
+            "failed_jobs": len(results) - passed_count,
+            "jobs": results,
+            "results": results,
+        }
+
+    def run_concurrent_queue(
+        self,
+        execute_fn: Optional[Any] = None,
+        poll_interval: float = 2.0,
+    ) -> Dict[str, Any]:
+        """Dispatches all independent project jobs concurrently to the cluster and supervises in parallel.
+
+        Args:
+            execute_fn: Optional callable(job: QueueJob) -> None for testing or mock execution.
+                        If provided, delegates to _run_concurrent_mock_queue using thread pools.
+            poll_interval: Frequency in seconds to poll cluster server batch status and sidecar telemetry.
+
+        Returns:
+            Summary dictionary with execution statistics and per-job verification reports.
+        """
+        if execute_fn is not None:
+            return self._run_concurrent_mock_queue(execute_fn)
+
+        if Metashape is None:
+            raise RuntimeError("Metashape module is not available for real cluster execution.")
+
+        net_client = Metashape.NetworkClient()
+        first_job_extra = self.queue[0].extra_args if self.queue else {}
+        net_host = first_job_extra.get("network_host", "127.0.0.1")
+        net_port = int(first_job_extra.get("network_port", 5840))
+
+        try:
+            net_client.connect(f"{net_host}:{net_port}")
+            print(f"  [Cluster Supervisor] Connected to coordinator at {net_host}:{net_port}", flush=True)
+        except Exception as exc:
+            raise RuntimeError(f"Failed to connect to cluster coordinator at {net_host}:{net_port}: {exc}") from exc
+
+        active_batches: Dict[int, QueueJob] = {}
+        batch_status_files: Dict[int, str] = {}
+        completed_results: List[Dict[str, Any]] = []
+
+        print("=========================================================================")
+        print("  AUTOMETASHAPE: CONCURRENT MULTI-PROJECT CLUSTER DISPATCH (MODE 2)")
+        print(f"  Total Queued Projects: {len(self.queue)}")
+        print(f"  Coordinator Host     : {net_host}:{net_port}")
+        print(f"  Headroom Threshold   : {self.min_headroom_gb:.1f} GB")
+        print("=========================================================================", flush=True)
+
+        # Phase 1: Rapid Pre-flight & Monolithic Batch Dispatch
+        for job in self.queue:
+            has_headroom, free_gb = check_storage_headroom(job.output_dir, self.min_headroom_gb)
+            if not has_headroom:
+                err = (
+                    f"Storage exhaustion hazard (Win32 Error 112 defense): "
+                    f"Volume has only {free_gb:.1f} GB free (threshold: {self.min_headroom_gb:.1f} GB). "
+                    f"Pausing job to prevent data corruption."
+                )
+                print(f"  [STORAGE ALERT] [{job.project_name}] {err}", file=sys.stderr, flush=True)
+                job.status = "PAUSED_LOW_DISK"
+                job.error_message = err
+                completed_results.append(job.to_dict())
+                if self.stop_on_failure:
+                    print("  [SUPERVISOR] Stopping queue dispatch as stop_on_failure=True.", flush=True)
+                    break
+                continue
+
+            os.makedirs(job.output_dir, exist_ok=True)
+            psx_path = os.path.join(job.output_dir, f"{job.project_name}.psx")
+            if not os.path.exists(psx_path):
+                if hasattr(Metashape, "Document"):
+                    doc = Metashape.Document()
+                    doc.save(psx_path)
+
+            net_path = (
+                job.extra_args.get("network_path")
+                or extract_unc_root(job.output_dir)
+                or extract_unc_root(job.images_dir)
+            )
+            if net_path:
+                job.extra_args["network_path"] = net_path
+
+            if net_path:
+                rel_psx = os.path.relpath(psx_path, net_path).replace("\\", "/")
+            else:
+                rel_psx = psx_path.replace("\\", "/")
+
+            # Filter extra_args to only arguments supported by build_monolithic_runscript_task
+            sig = inspect.signature(build_monolithic_runscript_task)
+            forward_kwargs = {k: v for k, v in job.extra_args.items() if k in sig.parameters and k != "network_path"}
+
+            net_task, rel_script, status_file = build_monolithic_runscript_task(
+                images_dir=job.images_dir,
+                output_dir=job.output_dir,
+                project_name=job.project_name,
+                preset=job.preset,
+                network_path=net_path,
+                **forward_kwargs,
+            )
+
+            try:
+                batch_id, was_attached = safe_create_cluster_batch(
+                    net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
+                )
+                job.status = "RUNNING"
+                active_batches[batch_id] = job
+                batch_status_files[batch_id] = status_file
+                attach_str = "attached to existing" if was_attached else "created new"
+                print(
+                    f"  [Dispatched] Project '{job.project_name}' -> Batch #{batch_id} ({attach_str}, worker_limit=1)",
+                    flush=True,
+                )
+            except Exception as exc:
+                err_msg = f"Failed to dispatch cluster batch for {job.project_name}: {exc}"
+                print(f"  [DISPATCH ERROR] {err_msg}", file=sys.stderr, flush=True)
+                job.status = "FAILED"
+                job.error_message = err_msg
+                completed_results.append(job.to_dict())
+                if self.stop_on_failure:
+                    break
+
+        # Phase 2: Parallel Telemetry & Verification Supervision Loop
+        print("\n[SUPERVISOR] All eligible projects dispatched. Entering parallel supervision loop...\n", flush=True)
+        last_stage_keys: Dict[int, str] = {}
+
+        while active_batches:
+            time.sleep(poll_interval)
+            for batch_id in list(active_batches.keys()):
+                job = active_batches[batch_id]
+                try:
+                    b_info = net_client.batchInfo(batch_id)
+                except Exception as e_poll:
+                    print(
+                        f"  [Cluster Warning] Failed to poll batch #{batch_id}: {e_poll}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    continue
+
+                # Check sidecar telemetry
+                st_file = batch_status_files.get(batch_id)
+                if st_file and os.path.exists(st_file):
+                    try:
+                        with open(st_file, "r", encoding="utf-8") as sf:
+                            s_data = json.load(sf)
+                        stage_k = s_data.get("stage_key")
+                        if stage_k and stage_k != last_stage_keys.get(batch_id):
+                            w_node = s_data.get("worker_node", "worker")
+                            st_desc = s_data.get("stage_desc", stage_k)
+                            print(
+                                f"  [{job.project_name} | Batch #{batch_id}] Stage: {st_desc} ({w_node})",
+                                flush=True,
+                            )
+                            last_stage_keys[batch_id] = stage_k
+                    except Exception:
+                        pass
+
+                b_status, b_success, b_err = evaluate_cluster_batch_info(b_info)
+                if b_success:
+                    print(
+                        f"\n  [{job.project_name} | Batch #{batch_id}] Reconstruction Complete! Running Quality Gate...",
+                        flush=True,
+                    )
+                    report = verify_project_deliverables(
+                        deliverables_dir=job.output_dir,
+                        project_name=job.project_name,
+                        expected_assets=job.expected_assets,
+                    )
+                    job.verification_report = report
+                    if report["status"] == "PASS":
+                        job.status = "COMPLETED"
+                        print(
+                            f"  [QUALITY GATE] [OK] [{job.project_name}] Deliverables verified successfully.",
+                            flush=True,
+                        )
+                    else:
+                        job.status = "VERIFICATION_FAILED"
+                        job.error_message = "; ".join(report.get("errors", []))
+                        print(
+                            f"  [QUALITY GATE] [FAIL] [{job.project_name}] Deliverable verification failed: "
+                            f"{job.error_message}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+                    if self.scratch_dir and os.path.isdir(self.scratch_dir):
+                        staged_sub = os.path.join(self.scratch_dir, f"{job.project_name}_local_stage")
+                        if os.path.isdir(staged_sub):
+                            try:
+                                shutil.rmtree(staged_sub, ignore_errors=True)
+                            except Exception:
+                                pass
+
+                    completed_results.append(job.to_dict())
+                    del active_batches[batch_id]
+
+                    if job.status != "COMPLETED" and self.stop_on_failure:
+                        print("  [SUPERVISOR] Halting remaining batches due to verification failure.", flush=True)
+                        for rem_b_id in list(active_batches.keys()):
+                            try:
+                                net_client.abortBatch(rem_b_id)
+                            except Exception:
+                                pass
+                            rem_j = active_batches[rem_b_id]
+                            rem_j.status = "ABORTED"
+                            completed_results.append(rem_j.to_dict())
+                        active_batches.clear()
+                        break
+
+                elif b_status in ("failed", "aborted"):
+                    print(
+                        f"\n  [ERROR] [{job.project_name} | Batch #{batch_id}] Batch failed: {b_err}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    job.status = "FAILED"
+                    job.error_message = b_err
+                    completed_results.append(job.to_dict())
+                    del active_batches[batch_id]
+
+                    if self.stop_on_failure:
+                        print(
+                            "  [SUPERVISOR] Halting remaining batches due to batch failure (stop_on_failure=True).",
+                            flush=True,
+                        )
+                        for rem_b_id in list(active_batches.keys()):
+                            try:
+                                net_client.abortBatch(rem_b_id)
+                            except Exception:
+                                pass
+                            rem_j = active_batches[rem_b_id]
+                            rem_j.status = "ABORTED"
+                            completed_results.append(rem_j.to_dict())
+                        active_batches.clear()
+                        break
+
+        # Collect any unexecuted pending jobs if stopped on failure
+        executed_job_names = {r["project_name"] for r in completed_results}
+        for job in self.queue:
+            if job.project_name not in executed_job_names:
+                completed_results.append(job.to_dict())
+
+        passed_count = sum(1 for r in completed_results if r["status"] == "COMPLETED")
+        print("\n=========================================================================")
+        print("  AUTOMETASHAPE: CONCURRENT MULTI-PROJECT RUN SUMMARY")
+        print(
+            f"  Total Queued: {len(self.queue)} | Completed & Verified: {passed_count} | "
+            f"Failed/Paused: {len(completed_results) - passed_count}"
+        )
+        print("=========================================================================", flush=True)
+
+        return {
+            "total_jobs": len(self.queue),
+            "completed_jobs": passed_count,
+            "failed_jobs": len(completed_results) - passed_count,
+            "jobs": completed_results,
+            "results": completed_results,
         }
 
 
@@ -401,6 +796,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Halt entire queue execution immediately if any dataset fails verification",
     )
+    # Concurrency Control Flags
+    parser.add_argument(
+        "--concurrent",
+        "--parallel-dispatch",
+        action="store_true",
+        dest="concurrent",
+        default=None,
+        help="Enable concurrent multi-project dispatch across dedicated cluster workers (Mode 2)",
+    )
+    parser.add_argument(
+        "--no-concurrent",
+        "--sequential",
+        action="store_false",
+        dest="concurrent",
+        help="Force sequential single-project queue execution (Mode 1)",
+    )
     # Distributed Cluster Passthrough Flags
     parser.add_argument(
         "--network-enable",
@@ -438,9 +849,20 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    # Determine concurrency mode:
+    # 1. Explicit --concurrent / --parallel-dispatch -> True
+    # 2. Explicit --no-concurrent / --sequential -> False
+    # 3. Default: True if --network-independent-workers is active, otherwise False
+    is_concurrent = False
+    if args.concurrent is not None:
+        is_concurrent = args.concurrent
+    elif args.network_independent_workers:
+        is_concurrent = True
+
     supervisor = ClusterSupervisor(
         min_headroom_gb=args.min_headroom_gb,
         stop_on_failure=args.stop_on_failure,
+        concurrent=is_concurrent,
     )
 
     extra_args: Dict[str, Any] = {}
