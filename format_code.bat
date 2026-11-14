@@ -53,8 +53,15 @@ if !ERRORLEVEL! neq 0 (
 )
 where ruff >nul 2>nul
 if !ERRORLEVEL! equ 0 (
-    ruff format scripts/ tools/ skills/
-    ruff check --fix scripts/ tools/ skills/
+    set "TARGETS="
+    if exist "source\" set "TARGETS=!TARGETS! source/"
+    if exist "scripts\" set "TARGETS=!TARGETS! scripts/"
+    if exist "tools\" set "TARGETS=!TARGETS! tools/"
+    if exist "skills\" set "TARGETS=!TARGETS! skills/"
+    if defined TARGETS (
+        ruff format !TARGETS!
+        ruff check --fix !TARGETS!
+    )
 )
 echo [FORMAT] Validating agent skills...
 "!PYTHON_CMD!" tools/skills/cli.py check

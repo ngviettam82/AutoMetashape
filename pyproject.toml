@@ -15,6 +15,9 @@ authors = [{ name = "AutoMetashape Contributors" }]
 license = { text = "Apache-2.0" }
 requires-python = ">=3.10"
 
+[tool.setuptools.packages.find]
+where = ["source"]
+
 [tool.pytest.ini_options]
 minversion = "7.0"
 testpaths = ["tests"]

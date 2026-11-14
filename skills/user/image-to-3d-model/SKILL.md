@@ -191,6 +191,9 @@ Host CPU:                                     [Export Project 1 (CPU)]      â”€â
 
 ### 5. Distributed LAN Cluster Processing Protocol
 
+> [!NOTE]
+> For dedicated cluster fleet management, unattended worker provisioning, canary updates, and local NVMe scratch operations, see the specialized skill: [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md).
+
 For multi-PC local area networks (LAN), Metashape Network Processing divides large computational stages (feature matching, depth maps, dense point clouds) into parallel subtasks across multiple worker machines.
 
 #### 5.1 Architecture & Network Prerequisites

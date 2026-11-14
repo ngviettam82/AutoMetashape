@@ -1,0 +1,36 @@
+# Copyright (c) 2026, AutoMetashape Contributors.
+# All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+version: "3.8"
+
+services:
+  coordinator:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.base
+    container_name: autometashape-coordinator
+    ports:
+      - "5840:5840"
+    environment:
+      - METASHAPE_SERVER_PORT=5840
+    volumes:
+      - shared-data:/shared_metashape
+    command: ["python3", "tools/skills/cli.py", "check"]
+
+  worker-1:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.base
+    container_name: autometashape-worker-1
+    depends_on:
+      - coordinator
+    environment:
+      - COORDINATOR_HOST=coordinator
+      - COORDINATOR_PORT=5840
+    volumes:
+      - shared-data:/shared_metashape
+    command: ["python3", "-m", "unittest", "discover", "-s", "tests"]
+
+volumes:
+  shared-data:
