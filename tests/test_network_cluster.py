@@ -1218,6 +1218,28 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertTrue(os.path.isdir(shared_source))
             self.assertEqual(rel_script, ".autometashape/scripts/metashape_reconstruction.py")
 
+    def test_build_monolithic_runscript_task_case_insensitive_unc_resolution(self) -> None:
+        """Verify build_monolithic_runscript_task correctly relativizes paths despite UNC case differences."""
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_net:
+            lower_net = tmp_net.lower()
+            img_dir = os.path.join(tmp_net, "101126", "CATP_0205")
+            out_dir = os.path.join(tmp_net, "101126", "Result", "CATP_0205")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+
+            task, rel_script, status_file = mr.build_monolithic_runscript_task(
+                images_dir=img_dir,
+                output_dir=out_dir,
+                project_name="CATP_0205",
+                network_path=lower_net,
+            )
+
+            args_str = getattr(task, "args", "")
+            self.assertIn("--images 101126/CATP_0205", args_str.replace("\\", "/"))
+            self.assertIn("--output 101126/Result/CATP_0205", args_str.replace("\\", "/"))
+
 
 if __name__ == "__main__":
     unittest.main()

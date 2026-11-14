@@ -409,14 +409,10 @@ def run_reconstruction(
     # Normalize paths and resolve relative paths against network_path if running on worker node
     if network_path:
         network_path = os.path.normpath(network_path.strip())
-        if not os.path.isabs(images_dir) or not os.path.exists(images_dir):
-            cand = os.path.normpath(os.path.join(network_path, images_dir))
-            if os.path.exists(cand):
-                images_dir = cand
-        if output_dir and (not os.path.isabs(output_dir) or not os.path.exists(output_dir)):
-            cand = os.path.normpath(os.path.join(network_path, output_dir))
-            if os.path.exists(cand) or os.path.exists(os.path.dirname(cand)):
-                output_dir = cand
+        if images_dir and not os.path.isabs(images_dir):
+            images_dir = os.path.normpath(os.path.join(network_path, images_dir))
+        if output_dir and not os.path.isabs(output_dir):
+            output_dir = os.path.normpath(os.path.join(network_path, output_dir))
         if status_file and not os.path.isabs(status_file):
             status_file = os.path.normpath(os.path.join(network_path, status_file))
 
@@ -921,7 +917,7 @@ def run_reconstruction(
             if is_unc:
                 clean_net = "//" + clean_net.lstrip("/")
             rel = get_cluster_rel_path(target_file)
-            if rel and rel != norm_tgt and not rel.startswith(clean_net):
+            if rel and rel.lower() != norm_tgt.lower() and not rel.lower().startswith(clean_net.lower()):
                 return f"{clean_net}/{rel}"
         return norm_tgt
 

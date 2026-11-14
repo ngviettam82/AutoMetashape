@@ -362,28 +362,29 @@ def build_monolithic_runscript_task(
         except Exception:
             shared_script = None
 
+    norm_net_lower = os.path.abspath(norm_net).lower() if norm_net else ""
     if shared_script and os.path.exists(shared_script):
         try:
             rel_script = os.path.relpath(shared_script, norm_net).replace("\\", "/")
         except Exception:
             rel_script = shared_script.replace("\\", "/")
     else:
-        if norm_net and os.path.abspath(current_script).startswith(os.path.abspath(norm_net)):
+        if norm_net and os.path.abspath(current_script).lower().startswith(norm_net_lower):
             rel_script = os.path.relpath(current_script, norm_net).replace("\\", "/")
         else:
             rel_script = current_script.replace("\\", "/")
 
-    if norm_net and os.path.abspath(images_dir).startswith(os.path.abspath(norm_net)):
+    if norm_net and os.path.abspath(images_dir).lower().startswith(norm_net_lower):
         rel_images = os.path.relpath(images_dir, norm_net).replace("\\", "/")
     else:
         rel_images = images_dir.replace("\\", "/")
 
-    if norm_net and os.path.abspath(output_dir).startswith(os.path.abspath(norm_net)):
+    if norm_net and os.path.abspath(output_dir).lower().startswith(norm_net_lower):
         rel_output = os.path.relpath(output_dir, norm_net).replace("\\", "/")
     else:
         rel_output = output_dir.replace("\\", "/")
 
-    if norm_net and os.path.abspath(status_file).startswith(os.path.abspath(norm_net)):
+    if norm_net and os.path.abspath(status_file).lower().startswith(norm_net_lower):
         rel_status = os.path.relpath(status_file, norm_net).replace("\\", "/")
     else:
         rel_status = status_file.replace("\\", "/")
