@@ -417,8 +417,8 @@ def build_monolithic_runscript_task(
     else:
         worker_args.append("--no-resume")
 
-    if local_scratch_staging:
-        worker_args.append("--local-scratch-staging")
+    # Independent worker monolithic task unconditionally executes via offline local scratch staging
+    worker_args.append("--local-scratch-staging")
 
     if not align_photos:
         worker_args.append("--no-align-photos")

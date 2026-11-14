@@ -1600,7 +1600,6 @@ def run_reconstruction(
                         export_report=export_report,
                         resume=resume,
                         network_path=network_path,
-                        local_scratch_staging=local_scratch_staging,
                     )
 
                     batch_id, was_attached = safe_create_cluster_batch(
@@ -1761,7 +1760,6 @@ def run_reconstruction(
                                         export_report=export_report,
                                         resume=True,
                                         network_path=network_path,
-                                        local_scratch_staging=local_scratch_staging,
                                     )
                                     handoff_batch_id, _ = safe_create_cluster_batch(
                                         net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True
@@ -1918,7 +1916,6 @@ def run_reconstruction(
                                                 export_report=export_report,
                                                 resume=False,
                                                 network_path=network_path,
-                                                local_scratch_staging=local_scratch_staging,
                                             )
                                             scratch_batch_id, _ = safe_create_cluster_batch(
                                                 net_client,
