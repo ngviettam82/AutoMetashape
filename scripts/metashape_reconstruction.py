@@ -29,6 +29,11 @@ import sys
 import threading
 import time
 
+try:
+    import cluster_utils as cu
+except ImportError:
+    cu = None
+
 # Configure Windows console streams for Vietnamese and international Unicode paths
 if sys.platform == "win32":
     for _stream_name in ("stdout", "stderr", "stdin"):
@@ -1315,7 +1320,11 @@ def execute_usgs_gradual_selection(
         print("  [Gradual Selection] No tie points present to filter; skipping.", flush=True)
         return {}
 
-    initial_pts = sum(1 for p in chunk.tie_points.points if p.valid)
+    has_pts = bool(chunk.tie_points and getattr(chunk.tie_points, "points", None))
+    initial_pts = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True)) if has_pts else 0
+    if initial_pts == 0:
+        print("  [Gradual Selection] No valid tie points present to filter; skipping.", flush=True)
+        return {}
     f = Metashape.TiePoints.Filter()
 
     # Calculate initial RMS Reprojection Error
@@ -1420,7 +1429,13 @@ def execute_usgs_gradual_selection(
         final_rms = 0.0
 
     rms_improvement = ((initial_rms - final_rms) / initial_rms * 100.0) if initial_rms > 0 else 0.0
-    print(f"  [Tie-Point Summary] Reprojection RMS: {initial_rms:.3f} px -> {final_rms:.3f} px ({rms_improvement:.1f}% reduction). Inliers: {final_pts:,}/{initial_pts:,} tie points retained ({final_pts/initial_pts*100.0:.1f}%).\n", flush=True)
+    retention_pct = (final_pts / initial_pts * 100.0) if initial_pts > 0 else 0.0
+    print(
+        f"  [Tie-Point Summary] Reprojection RMS: {initial_rms:.3f} px -> {final_rms:.3f} px "
+        f"({rms_improvement:.1f}% reduction). Inliers: {final_pts:,}/{initial_pts:,} tie points "
+        f"retained ({retention_pct:.1f}%).\n",
+        flush=True,
+    )
 
     return {
         "initial_points": initial_pts,
@@ -1659,6 +1674,7 @@ def build_monolithic_runscript_task(
     resume: bool = True,
     network_path: str = "",
     status_file: str | None = None,
+    local_scratch_staging: bool = True,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask.
 
@@ -1734,6 +1750,9 @@ def build_monolithic_runscript_task(
         worker_args.append("--resume")
     else:
         worker_args.append("--no-resume")
+
+    if local_scratch_staging:
+        worker_args.append("--local-scratch-staging")
 
     if not align_photos:
         worker_args.append("--no-align-photos")
@@ -2619,6 +2638,9 @@ def run_reconstruction(
     network_independent_workers: bool = False,
     project_name: str | None = None,
     status_file: str | None = None,
+    local_scratch_staging: bool = False,
+    scratch_dir: str = "",
+    min_scratch_free_gb: float = 100.0,
 ):
     """Executes the complete AutoMetashape photogrammetry reconstruction pipeline.
 
@@ -2737,6 +2759,38 @@ def run_reconstruction(
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
     if not output_dir:
         output_dir = os.path.join(images_dir, project_name)
+
+    # Resolve Local Scratch Staging (Mechanism B)
+    local_staging_dir = None
+    target_network_output = None
+    if local_scratch_staging:
+        is_net = (
+            output_dir.startswith("\\")
+            or bool(network_path and os.path.abspath(output_dir).startswith(os.path.abspath(network_path)))
+        )
+        resolved_scratch = scratch_dir or (cu.get_optimal_local_scratch_dir(min_scratch_free_gb) if cu else "")
+        has_space, free_gb = (
+            cu.check_scratch_disk_headroom(resolved_scratch, min_scratch_free_gb) if cu else (True, 999.0)
+        )
+
+        if has_space and resolved_scratch:
+            target_network_output = os.path.abspath(output_dir)
+            local_staging_dir = os.path.join(resolved_scratch, f"{project_name}_local_stage")
+            os.makedirs(local_staging_dir, exist_ok=True)
+            output_dir = local_staging_dir
+            print("=========================================================================", flush=True)
+            print("  AUTOMETASHAPE: LOCAL HIGH-SPEED NVMe SCRATCH STAGING ENGAGED", flush=True)
+            print(f"  Local Staging   : {local_staging_dir} ({free_gb:.1f} GB free)", flush=True)
+            print(f"  Central Target  : {target_network_output}", flush=True)
+            print("=========================================================================", flush=True)
+        else:
+            print(
+                f"[Local Scratch Staging] Insufficient local disk headroom "
+                f"({free_gb:.1f} GB < {min_scratch_free_gb} GB). "
+                f"Falling back to direct storage output: {output_dir}",
+                flush=True,
+            )
+
     os.makedirs(output_dir, exist_ok=True)
     psx_out = os.path.join(output_dir, f"{project_name}.psx")
     legacy_psx = os.path.join(output_dir, "building_reconstruction.psx")
@@ -4124,7 +4178,11 @@ def run_reconstruction(
                     points_spacing=points_spacing,
                     keep_depth=True,
                 )
-            pc_count = chunk.point_cloud.point_count if chunk.point_cloud else 0
+            pc_count = (
+                chunk.point_cloud.point_count
+                if (chunk.point_cloud and isinstance(getattr(chunk.point_cloud, "point_count", None), int))
+                else 0
+            )
             print(f"  Point cloud completed in {(time.time() - t_pc)/60:.2f} min! Density: {pc_count:,} 3D points.", flush=True)
 
             if filter_point_confidence and chunk.point_cloud:
@@ -4859,6 +4917,30 @@ def run_reconstruction(
     if survey_physics and pro_plan:
         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
 
+    # Synchronize staged project and deliverables from local NVMe scratch to central network share
+    if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
+        print(
+            f"\n[Local Scratch Staging] Synchronizing finalized project and deliverables to central share: "
+            f"{target_network_output}...",
+            flush=True,
+        )
+        sync_ok = cu.sync_staged_project_to_network(local_staging_dir, target_network_output) if cu else False
+        if sync_ok:
+            if status_file and local_staging_dir in status_file:
+                set_active_status_file(status_file.replace(local_staging_dir, target_network_output))
+            else:
+                set_active_status_file(None)
+            print(
+                f"  [Local Scratch Staging] [OK] Successfully synchronized all deliverables to "
+                f"{target_network_output}!",
+                flush=True,
+            )
+        else:
+            print(
+                f"  [Local Scratch Staging] [WARNING] Issue occurred during sync to {target_network_output}.",
+                file=sys.stderr,
+            )
+
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build and return the comprehensive command-line argument parser for AutoMetashape."""
@@ -5034,6 +5116,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="Lock each project to an independent worker node (worker_limit=1) to eliminate cross-network synchronization pauses",
     )
+    parser.add_argument(
+        "--local-scratch-staging",
+        "--stage-local",
+        dest="local_scratch_staging",
+        action="store_true",
+        default=False,
+        help=(
+            "Stage intermediate project files on local fast NVMe scratch volume "
+            "and sync deliverables to central share upon completion"
+        ),
+    )
+    parser.add_argument(
+        "--scratch-dir",
+        "--tmp",
+        dest="scratch_dir",
+        type=str,
+        default="",
+        help="Custom local NVMe scratch directory for staging",
+    )
+    parser.add_argument(
+        "--min-scratch-free-gb",
+        dest="min_scratch_free_gb",
+        type=float,
+        default=100.0,
+        help=(
+            "Minimum free disk space threshold (GB) required on local drive "
+            "before engaging local staging (default: 100.0)"
+        ),
+    )
     parser.add_argument("--network-path", default="", help="Shared network root directory (UNC path, e.g. \\\\SERVER\\RealityScan)")
     # Multi-chunk options
     parser.add_argument(
@@ -5178,6 +5289,9 @@ if __name__ == "__main__":
         network_port=args.network_port,
         network_path=args.network_path,
         network_independent_workers=args.network_independent_workers,
+        local_scratch_staging=args.local_scratch_staging,
+        scratch_dir=args.scratch_dir,
+        min_scratch_free_gb=args.min_scratch_free_gb,
         project_name=args.project_name,
         status_file=getattr(args, "status_file", None),
     )
