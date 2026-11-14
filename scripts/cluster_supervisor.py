@@ -22,6 +22,7 @@ from autometashape.cluster.supervisor import (
     QueueJob,
     build_arg_parser,
     check_storage_headroom,
+    discover_dataset_projects,
     main,
 )
 

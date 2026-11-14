@@ -51,6 +51,7 @@ from autometashape.cluster.supervisor import (
     ClusterSupervisor,
     QueueJob,
     check_storage_headroom,
+    discover_dataset_projects,
 )
 
 __all__ = [
@@ -74,6 +75,7 @@ __all__ = [
     "check_scratch_disk_headroom",
     "check_storage_headroom",
     "detect_gpu_devices",
+    "discover_dataset_projects",
     "find_metashape_monitor_path",
     "find_metashape_path",
     "find_metashape_server_path",

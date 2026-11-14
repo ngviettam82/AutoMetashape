@@ -26,6 +26,7 @@ All skills must conform to:
 
 ### User Skills
 
+- `user/autonomous-photogrammetry/`: Master coordinator for end-to-end autonomous photogrammetry operations across single or multi-dataset directories. Discovers project datasets, structures execution queues, coordinates cluster fleets or standalone GPUs, enforces storage headroom watchdogs, executes full 3D reconstructions, verifies deliverable integrity, and reports executive engineering summaries.
 - `user/cluster-fleet-operations/`: Orchestrates Agisoft Metashape Pro distributed processing clusters, worker node provisioning, dynamic multi-GPU discovery, local NVMe scratch staging, hourly health monitoring, and canary fleet updates.
 - `user/cluster-supervisor/`: Supervises unattended cluster batch execution, storage headroom exhaustion watchdog (Win32 Error 112 defense), automated deliverable integrity verification, and multi-dataset queue chaining.
 - `user/image-to-3d-model/`: Reconstructs high-precision 3D textured models (`.obj`, `.mtl`, `.glb`), dense point clouds (`.laz`, `.las`), 3D tiles (Cesium, TLS), elevation models (DEM), topographic contours, GeoTIFF orthomosaics, and native Agisoft Metashape projects (`.psx`). Features distributed LAN cluster processing with dynamic work-stealing, pipelined compute-export overlap engine (decoupled CPU export while GPU workers process subsequent projects), and real-time Web Studio telemetry synchronization.
