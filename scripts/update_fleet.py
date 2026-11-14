@@ -144,7 +144,9 @@ def main() -> int:
     if not target_arg or target_arg.lower() == "canary":
         # Default to single canary node
         targets = [online_workers[0]]
-        print(f"[Canary Protocol] Selected single canary node: {targets[0].get('hostname')} (ID={targets[0].get('worker_id')})")
+        print(
+            f"[Canary Protocol] Selected single canary node: {targets[0].get('hostname')} (ID={targets[0].get('worker_id')})"
+        )
     elif target_arg.lower() == "all":
         targets = online_workers
         print(f"[Fleet Update] Updating all {len(targets)} connected worker node(s) in sequence...")
@@ -185,9 +187,11 @@ def main() -> int:
             success_count += 1
             print(f"  [OK] Codebase mirrored successfully on {nname} (Batch #{res.get('batch_id')})!")
             if res.get("relaunched"):
-                print(f"  [OK] Node successfully restarted into fresh worker (New ID={res.get('new_worker_id')}, Addr={res.get('new_hostaddr')})!")
+                print(
+                    f"  [OK] Node successfully restarted into fresh worker (New ID={res.get('new_worker_id')}, Addr={res.get('new_hostaddr')})!"
+                )
             elif not args.no_restart:
-                print(f"  [WARNING] Codebase updated, but restart confirmation timed out.")
+                print("  [WARNING] Codebase updated, but restart confirmation timed out.")
         else:
             fail_count += 1
             print(f"  [FAILED] Worker update failed on {nname}: {res.get('error')}", file=sys.stderr)

@@ -29,6 +29,7 @@ from autometashape.cluster.updater import (
     list_online_workers,
     update_remote_worker,
 )
+
 from scripts.update_fleet import build_arg_parser
 
 
@@ -102,9 +103,7 @@ class TestFleetUpdater(unittest.TestCase):
             },
         ]
         mock_client.createBatch.return_value = 10
-        mock_client.batchList.return_value = {
-            "batches": [{"batch_id": 10, "state": "completed"}]
-        }
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 10, "state": "completed"}]}
 
         mock_metashape = MagicMock()
         mock_task = MagicMock()

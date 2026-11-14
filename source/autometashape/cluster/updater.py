@@ -7,10 +7,7 @@
 
 from __future__ import annotations
 
-import argparse
 import os
-import shutil
-import sys
 import time
 
 try:
@@ -18,11 +15,6 @@ try:
 except ImportError:
     Metashape = None
 
-from autometashape.cluster.hardware import (
-    find_metashape_path,
-    get_primary_lan_ip,
-    test_tcp_connection,
-)
 
 DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 CLUSTER_MAINTENANCE_REL_PATH = ".cluster/maintenance.psx"
@@ -124,7 +116,9 @@ def ensure_cluster_maintenance_project(shared_root: str) -> str:
             except Exception:
                 pass
         # Fallback to standard Metashape XML project structure
-        xml_content = '<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="maintenance.files/project.zip"/>\n'
+        xml_content = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="maintenance.files/project.zip"/>\n'
+        )
         with open(psx_path, "w", encoding="utf-8") as f:
             f.write(xml_content)
         files_dir = os.path.join(cluster_dir, "maintenance.files")
