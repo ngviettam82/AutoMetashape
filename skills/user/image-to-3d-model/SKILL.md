@@ -317,7 +317,20 @@ For massive multi-flight photogrammetry reconstructions running on the cluster (
 > * **STRICTLY PROHIBITED**: The agent must **NEVER** autonomously rewrite, mutate, refactor, or modify core reconstruction code, pipeline scripts, or algorithm presets during monitoring runs.
 > * **User Intent Invariant**: All code modifications and pipeline rewrites strictly require explicit user instructions and authorization.
 
-#### 5.8 Submitting Distributed Reconstructions & Pipelined Export Overlap
+#### 5.8 Local NVMe Scratch Staging Architecture (Default Mode)
+During large-scale reconstructions, Metashape Pro generates massive out-of-core scratch data (depth maps,
+point clouds, and octree meshing leaves reaching 75–150+ GB). To eliminate SMB network congestion:
+- **Default Staging**: Local scratch staging (`--stage-local` / `--local-scratch-staging`) is **enabled by default**.
+- **Dynamic NVMe Discovery**: The worker daemon automatically discovers the fastest non-system NVMe SSD with the
+  highest free capacity (e.g. `D:\AutoMetashape_Scratch`).
+- **Resilient Headroom Fallback**: If local SSD headroom is below the threshold (default 100 GB via
+  `--min-scratch-free-gb`), execution safely falls back to direct network storage output.
+- **Atomic Deliverable Sync**: Upon task completion, consolidated deliverables, models, textures, and project files
+  are synchronized atomically to the central network share, and local scratch is cleanly purged.
+- **Opt-Out Override**: To bypass local staging and write directly to network storage, pass `--no-stage-local`
+  (or `--no-local-scratch-staging`).
+
+#### 5.9 Submitting Distributed Reconstructions & Pipelined Export Overlap
 Dispatch autonomous reconstruction to the active cluster:
 ```powershell
 & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py \
@@ -326,7 +339,7 @@ Dispatch autonomous reconstruction to the active cluster:
     --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\SharedMetashape"
 ```
 
-#### 5.9 Host-Initiated Autonomous Worker Fleet Update Protocol
+#### 5.10 Host-Initiated Autonomous Worker Fleet Update Protocol
 When maintaining or upgrading remote cluster worker nodes from the Host/Coordinator workstation (`CTUAV`), strictly execute the **Autonomous Worker Fleet Update Protocol**:
 
 1. **Zero Fleet-Wide Blind Kills**:

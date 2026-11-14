@@ -595,6 +595,27 @@ class TestCliArgs(unittest.TestCase):
                                 idx = cmd.index("--gpu-mask")
                                 self.assertEqual(cmd[idx + 1], "2")
 
+    def test_local_scratch_staging_cli_defaults_and_opt_out(self) -> None:
+        """Verify local_scratch_staging is enabled by default and supports explicit opt-out."""
+        from metashape_reconstruction import build_arg_parser
+
+        parser = build_arg_parser()
+
+        # Invariant 1: Default is True
+        args_default = parser.parse_args(["--images", "dummy_images"])
+        self.assertTrue(args_default.local_scratch_staging)
+
+        # Invariant 2: Explicit opt-out flags set it to False
+        args_opt_out1 = parser.parse_args(["--images", "dummy_images", "--no-local-scratch-staging"])
+        self.assertFalse(args_opt_out1.local_scratch_staging)
+
+        args_opt_out2 = parser.parse_args(["--images", "dummy_images", "--no-stage-local"])
+        self.assertFalse(args_opt_out2.local_scratch_staging)
+
+        # Invariant 3: Explicit opt-in flags preserve True
+        args_opt_in = parser.parse_args(["--images", "dummy_images", "--stage-local"])
+        self.assertTrue(args_opt_in.local_scratch_staging)
+
 
 if __name__ == "__main__":
     unittest.main()

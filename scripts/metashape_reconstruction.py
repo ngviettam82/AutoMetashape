@@ -2639,7 +2639,7 @@ def run_reconstruction(
     network_independent_workers: bool = False,
     project_name: str | None = None,
     status_file: str | None = None,
-    local_scratch_staging: bool = False,
+    local_scratch_staging: bool = True,
     scratch_dir: str = "",
     min_scratch_free_gb: float = 100.0,
 ):
@@ -2774,7 +2774,14 @@ def run_reconstruction(
             cu.check_scratch_disk_headroom(resolved_scratch, min_scratch_free_gb) if cu else (True, 999.0)
         )
 
-        if has_space and resolved_scratch:
+        is_already_in_scratch = bool(
+            resolved_scratch
+            and (
+                os.path.abspath(output_dir) == os.path.abspath(resolved_scratch)
+                or os.path.abspath(output_dir).startswith(os.path.abspath(resolved_scratch) + os.sep)
+            )
+        )
+        if has_space and resolved_scratch and not is_already_in_scratch:
             target_network_output = os.path.abspath(output_dir)
             local_staging_dir = os.path.join(resolved_scratch, f"{project_name}_local_stage")
             os.makedirs(local_staging_dir, exist_ok=True)
@@ -2816,6 +2823,22 @@ def run_reconstruction(
                             dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("lock", "model.tmp", "*.tmp"),
                         )
+            elif not resume and target_network_output:
+                for old_p in (
+                    os.path.join(target_network_output, f"{project_name}.psx"),
+                    os.path.join(target_network_output, "building_reconstruction.psx"),
+                ):
+                    old_f = get_psx_files_dir(old_p)
+                    if os.path.isdir(old_f):
+                        try:
+                            shutil.rmtree(old_f, ignore_errors=True)
+                        except Exception:
+                            pass
+                    if os.path.isfile(old_p):
+                        try:
+                            os.remove(old_p)
+                        except Exception:
+                            pass
         else:
             print(
                 f"[Local Scratch Staging] Insufficient local disk headroom "
@@ -3360,6 +3383,19 @@ def run_reconstruction(
                         os.remove(target_psx)
                     except Exception:
                         pass
+                if target_network_output and target_network_output != output_dir:
+                    net_f = get_psx_files_dir(os.path.join(target_network_output, f"{project_name}.psx"))
+                    if os.path.isdir(net_f):
+                        try:
+                            shutil.rmtree(net_f, ignore_errors=True)
+                        except Exception:
+                            pass
+                    net_p = os.path.join(target_network_output, f"{project_name}.psx")
+                    if os.path.isfile(net_p):
+                        try:
+                            os.remove(net_p)
+                        except Exception:
+                            pass
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
@@ -5174,10 +5210,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--stage-local",
         dest="local_scratch_staging",
         action="store_true",
-        default=False,
+        default=True,
         help=(
             "Stage intermediate project files on local fast NVMe scratch volume "
-            "and sync deliverables to central share upon completion"
+            "and sync deliverables to central share upon completion (default: True)"
         ),
     )
     parser.add_argument(
