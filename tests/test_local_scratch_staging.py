@@ -211,7 +211,6 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
                             images_dir=nas_images,
                             output_dir=nas_output,
                             project_name="Bridge_Recon",
-                            local_scratch_staging=True,
                         )
                         self.assertEqual(getattr(net_task, "name", "RunScript"), "RunScript")
                         self.assertIn("--local-scratch-staging", net_task.args)

@@ -1480,9 +1480,8 @@ def run_reconstruction(
                     "Manual cropping and pause_after_crop cannot be used when --network-independent-workers is active."
                 )
 
-        can_use_unified_batch = cluster_enabled and network_independent_workers and net_client is not None
         unified_succeeded = False
-        if can_use_unified_batch:
+        if cluster_enabled and network_independent_workers:
             try:
                 print("\n=========================================================================", flush=True)
                 print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
@@ -1571,7 +1570,7 @@ def run_reconstruction(
                 else:
                     net_task, rel_script, status_file = build_monolithic_runscript_task(
                         images_dir=images_dir,
-                        output_dir=output_dir,
+                        output_dir=target_network_output or output_dir,
                         project_name=project_name,
                         preset=preset,
                         align_quality=align_quality,
@@ -1731,7 +1730,7 @@ def run_reconstruction(
                                 if other_workers:
                                     handoff_net_task, _, _ = build_monolithic_runscript_task(
                                         images_dir=images_dir,
-                                        output_dir=output_dir,
+                                        output_dir=target_network_output or output_dir,
                                         project_name=project_name,
                                         preset=preset,
                                         align_quality=align_quality,
@@ -1887,7 +1886,7 @@ def run_reconstruction(
 
                                             scratch_net_task, _, _ = build_monolithic_runscript_task(
                                                 images_dir=images_dir,
-                                                output_dir=output_dir,
+                                                output_dir=target_network_output or output_dir,
                                                 project_name=project_name,
                                                 preset=preset,
                                                 align_quality=align_quality,

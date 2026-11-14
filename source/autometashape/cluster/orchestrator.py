@@ -337,7 +337,6 @@ def build_monolithic_runscript_task(
     resume: bool = True,
     network_path: str = "",
     status_file: str | None = None,
-    local_scratch_staging: bool = True,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
