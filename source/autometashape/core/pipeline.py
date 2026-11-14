@@ -238,6 +238,7 @@ def run_reconstruction(
     depth_quality: str = "high",
     depth_filtering: str = "moderate",
     custom_faces: int = None,
+    faces: int | None = None,
     texture_pages: int = None,
     points_spacing: float = 0.02,
     ortho_resolution: float = 0.02,
@@ -248,6 +249,9 @@ def run_reconstruction(
     crop_method: str = None,
     crop_padding: float = 0.05,
     min_quality: float = 0.5,
+    disable_quality_filter: bool = False,
+    no_crop: bool = False,
+    pro_mode: bool | None = None,
     rolling_shutter: bool = True,
     close_holes: bool = False,
     pause_after_crop: bool = False,
@@ -305,6 +309,7 @@ def run_reconstruction(
     local_scratch_staging: bool = True,
     scratch_dir: str = "",
     min_scratch_free_gb: float = 100.0,
+    **kwargs: Any,
 ):
     """Executes the complete AutoMetashape photogrammetry reconstruction pipeline.
 
@@ -420,6 +425,15 @@ def run_reconstruction(
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
     if not output_dir:
         output_dir = os.path.join(images_dir, project_name)
+
+    if faces is not None and custom_faces is None:
+        custom_faces = faces
+    if no_crop and not crop_method:
+        crop_method = "none"
+    if disable_quality_filter:
+        min_quality = 0.0
+    if pro_mode and not preset:
+        preset = "pro"
 
     # Auto-detect shared storage UNC root when cluster mode is enabled and network_path is empty
     if not network_path and network_enable:
@@ -764,14 +778,7 @@ def run_reconstruction(
                     else:
                         workers = []
 
-                    for w in workers:
-                        w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
-                        w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
-                        if w_paused and w_id is not None:
-                            try:
-                                client.setWorkerPaused(w_id, False)
-                            except Exception:
-                                pass
+                    # Do not blindly unpause workers that were intentionally paused
 
                     raw_workers = client.workerList()
                     if isinstance(raw_workers, dict):
@@ -1706,6 +1713,10 @@ def run_reconstruction(
                                     break
                             if failed_worker_id is None and tasks_info:
                                 failed_worker_id = tasks_info[0].get("worker_id")
+                            if failed_worker_id is None:
+                                last_err = b_info.get("last_error")
+                                if isinstance(last_err, dict) and last_err.get("worker_id") is not None:
+                                    failed_worker_id = last_err.get("worker_id")
 
                             emit_ipc_event(f"@@AUTOMETASHAPE_UNIFIED_FAIL:{batch_id}:{failed_worker_id or 'unknown'}@@")
 
@@ -3500,7 +3511,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Generate dense point cloud from depth maps (default: True)",
     )
     parser.add_argument(
-        "--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation"
+        "--no-point-cloud",
+        "--no-build-point-cloud",
+        dest="build_point_cloud",
+        action="store_false",
+        help="Disable dense point cloud generation",
     )
     parser.add_argument(
         "--export-point-cloud",
@@ -3543,7 +3558,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Build Digital Elevation Model (DEM/DSM) (default: False)",
     )
-    parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
+    parser.add_argument(
+        "--no-dem",
+        "--no-build-dem",
+        dest="build_dem",
+        action="store_false",
+        help="Disable DEM building and export",
+    )
     parser.add_argument(
         "--export-dem",
         dest="export_dem",

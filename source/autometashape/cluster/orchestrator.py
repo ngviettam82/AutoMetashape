@@ -434,11 +434,11 @@ def build_monolithic_runscript_task(
     if not build_texture:
         worker_args.append("--no-build-texture")
     if not build_dem:
-        worker_args.append("--no-build-dem")
+        worker_args.append("--no-dem")
     if not build_orthomosaic:
-        worker_args.append("--no-build-orthomosaic")
+        worker_args.append("--no-ortho")
     if not build_point_cloud:
-        worker_args.append("--no-build-point-cloud")
+        worker_args.append("--no-point-cloud")
 
     if export_obj:
         worker_args.append("--export-obj")
@@ -463,9 +463,17 @@ def build_monolithic_runscript_task(
     cmd_args = subprocess.list2cmdline(worker_args)
     if Metashape is not None:
         rs = Metashape.Tasks.RunScript()
-        rs.path = rel_script
+        if shared_script and os.path.exists(shared_script):
+            rs.path = shared_script.replace("/", "\\")
+        else:
+            rs.path = rel_script
         rs.args = cmd_args
         net_task = rs.toNetworkTask()
+        try:
+            if hasattr(net_task, "params") and isinstance(net_task.params, dict):
+                net_task.params["path"] = rel_script
+        except Exception:
+            pass
         try:
             net_task.gpu_support = True
         except Exception:

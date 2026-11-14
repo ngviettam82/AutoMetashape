@@ -235,6 +235,7 @@ if __name__ == "__main__":
             align_quality=args.align_quality,
             depth_quality=args.depth_quality,
             depth_filtering=args.depth_filtering,
+            custom_faces=args.faces,
             faces=args.faces,
             texture_pages=args.texture_pages,
             align_photos=args.align_photos,
