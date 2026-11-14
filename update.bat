@@ -40,22 +40,6 @@ if "%SCRIPT_DIR:~0,2%"=="\\" (
 )
 
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
-set "LAN_ZIP=%AUTOMETASHAPE_LAN_ZIP%"
-if "%LAN_ZIP%"=="" if exist "%SCRIPT_DIR%\AutoMetashape_main.zip" set "LAN_ZIP=%SCRIPT_DIR%\AutoMetashape_main.zip"
-if "%LAN_ZIP%"=="" if defined AUTOMETASHAPE_CLUSTER_ROOT (
-    if exist "%AUTOMETASHAPE_CLUSTER_ROOT%\AutoMetashape_main.zip" set "LAN_ZIP=%AUTOMETASHAPE_CLUSTER_ROOT%\AutoMetashape_main.zip"
-)
-if "%LAN_ZIP%"=="" (
-    for %%C in ("%SCRIPT_DIR%\worker_config.json" "%TARGET_DIR%\worker_config.json" "%USERPROFILE%\Documents\AutoMetashape\worker_config.json") do (
-        if "%LAN_ZIP%"=="" if exist "%%~C" (
-            for /f "tokens=2 delims=:, " %%R in ('findstr /i "\"root\"" "%%~C" 2^>nul') do (
-                set "CONF_ROOT=%%~R"
-                set "CONF_ROOT=!CONF_ROOT:\\=\!"
-                if exist "!CONF_ROOT!\AutoMetashape_main.zip" set "LAN_ZIP=!CONF_ROOT!\AutoMetashape_main.zip"
-            )
-        )
-    )
-)
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
@@ -108,17 +92,18 @@ timeout /t 1 /nobreak >nul
 echo [2/4] Downloading latest AutoMetashape source code from GitHub (main)...
 if exist "%TEMP_ZIP%" del /f /q "%TEMP_ZIP%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; (New-Object System.Net.WebClient).DownloadFile('%REPO_ZIP_URL%', '%TEMP_ZIP%')" >nul 2>&1
+    "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; try { $wc = New-Object System.Net.WebClient; $wc.DownloadFile('%REPO_ZIP_URL%', '%TEMP_ZIP%') } catch { Write-Host '[ERROR] Download exception:' $_.Exception.Message; exit 1 }"
 
-if not exist "%TEMP_ZIP%" (
-    if not "%LAN_ZIP%"=="" (
-        echo [NOTICE] GitHub download unavailable. Checking LAN cache fallback from %LAN_ZIP%...
-        if exist "%LAN_ZIP%" copy /y "%LAN_ZIP%" "%TEMP_ZIP%" >nul 2>&1
-    )
+if %ERRORLEVEL% neq 0 (
+    echo [ERROR] Failed to download latest AutoMetashape release from upstream: %REPO_ZIP_URL%
+    echo [ERROR] Silent fallback is disabled. Please verify internet access and proxy settings.
+    pause
+    exit /b 1
 )
 
 if not exist "%TEMP_ZIP%" (
-    echo [ERROR] Could not retrieve AutoMetashape package from GitHub or LAN share.
+    echo [ERROR] Downloaded package file missing: %TEMP_ZIP%
+    echo [ERROR] Silent fallback is disabled.
     pause
     exit /b 1
 )
