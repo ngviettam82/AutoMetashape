@@ -93,7 +93,7 @@ class TestNetworkCluster(unittest.TestCase):
                         rel = "/".join(psx_parts[idx + 1 :])
                         if rel:
                             return rel
-            return os.path.basename(psx_out)
+            return os.path.basename(psx_out.replace("\\", "/"))
 
         # Case 1: When network_path is empty, returns file basename
         self.assertEqual(calc_rel(r"C:\Projects\Scan1\project.psx", ""), "project.psx")
@@ -133,7 +133,7 @@ class TestNetworkCluster(unittest.TestCase):
                     rel = "/".join(tgt_parts[idx + 1 :])
                     if rel:
                         return rel
-            return os.path.basename(tgt)
+            return os.path.basename(tgt.replace("\\", "/"))
 
         def calc_exp(target_file: str, network_path: str) -> str:
             norm_tgt = os.path.abspath(target_file).replace("\\", "/")

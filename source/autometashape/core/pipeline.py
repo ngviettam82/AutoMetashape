@@ -889,7 +889,7 @@ def run_reconstruction(
                     if rel:
                         return rel
 
-        return os.path.basename(tgt)
+        return os.path.basename(tgt.replace("\\", "/"))
 
     def get_cluster_export_path(target_file: str) -> str:
         """Returns an absolute network-accessible path (UNC or local absolute) for cluster export tasks."""

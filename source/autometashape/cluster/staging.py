@@ -110,6 +110,8 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
 
     # Verify directory creation and write access
     try:
+        if sys.platform != "win32" and len(candidate_dir) >= 2 and candidate_dir[1] == ":":
+            return candidate_dir
         os.makedirs(candidate_dir, exist_ok=True)
         probe_file = os.path.join(candidate_dir, f".write_probe_{os.getpid()}.tmp")
         with open(probe_file, "w", encoding="utf-8") as f:
