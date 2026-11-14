@@ -42,6 +42,20 @@ if "%SCRIPT_DIR:~0,2%"=="\\" (
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 set "LAN_ZIP=%AUTOMETASHAPE_LAN_ZIP%"
 if "%LAN_ZIP%"=="" if exist "%SCRIPT_DIR%\AutoMetashape_main.zip" set "LAN_ZIP=%SCRIPT_DIR%\AutoMetashape_main.zip"
+if "%LAN_ZIP%"=="" if defined AUTOMETASHAPE_CLUSTER_ROOT (
+    if exist "%AUTOMETASHAPE_CLUSTER_ROOT%\AutoMetashape_main.zip" set "LAN_ZIP=%AUTOMETASHAPE_CLUSTER_ROOT%\AutoMetashape_main.zip"
+)
+if "%LAN_ZIP%"=="" (
+    for %%C in ("%SCRIPT_DIR%\worker_config.json" "%TARGET_DIR%\worker_config.json" "%USERPROFILE%\Documents\AutoMetashape\worker_config.json") do (
+        if "%LAN_ZIP%"=="" if exist "%%~C" (
+            for /f "tokens=2 delims=:, " %%R in ('findstr /i "\"root\"" "%%~C" 2^>nul') do (
+                set "CONF_ROOT=%%~R"
+                set "CONF_ROOT=!CONF_ROOT:\\=\!"
+                if exist "!CONF_ROOT!\AutoMetashape_main.zip" set "LAN_ZIP=!CONF_ROOT!\AutoMetashape_main.zip"
+            )
+        )
+    )
+)
 if "%LAN_ZIP%"=="" if exist "\\ctuav\catp\AutoMetashape_main.zip" set "LAN_ZIP=\\ctuav\catp\AutoMetashape_main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"

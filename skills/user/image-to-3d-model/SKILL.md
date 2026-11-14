@@ -339,10 +339,10 @@ When maintaining or upgrading remote cluster worker nodes from the Host/Coordina
    - Confirm the canary worker node completes self-update, auto-discovers GPUs, and re-registers cleanly as `ready` within **60–90 seconds**.
    - Only after the canary node passes the verification gate may update batches proceed across remaining worker nodes in staggered waves.
 3. **Preserve Host / Coordinator Exemption**:
-   - The coordinator workstation (`CTUAV` / `10.5.10.202`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
-   - Remote worker update probes must only target designated remote worker hosts (`host != "CTUAV"`).
+   - The coordinator workstation (e.g. `CTUAV` / `10.5.10.202`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
+   - Remote worker update probes must only target designated remote worker hosts (`host != coordinator_host`).
 4. **Zero-Touch Headless Invariants**:
-   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (`\\ctuav\catp`).
+   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (e.g. `\\ctuav\catp` or configured cluster storage).
    - Remote worker updates must never block on interactive console prompts (`input()`) or unmanaged binary fallbacks.
    - Dynamic multi-GPU detection is preserved without injecting hardcoded `gpu_mask` values into `worker_config.json`.
 
