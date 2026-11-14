@@ -6,7 +6,7 @@ Evaluation test scenarios for validating unattended cluster supervision, storage
 
 ### Scenario 1: Storage Headroom Exhaustion & Win32 Error 112 Defense
 **Query:**
-The network share `\\ctuav\catp` has dropped to 28 GB free space. Run the cluster supervisor on `queue.json` with a 50 GB headroom safety threshold.
+The network share `\\CLUSTER_SHARE\storage` has dropped to 28 GB free space. Run the cluster supervisor on `queue.json` with a 50 GB headroom safety threshold.
 
 **Expected behavior:**
 1. The supervisor calls `check_storage_headroom` against the target output volume.

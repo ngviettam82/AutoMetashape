@@ -17,7 +17,7 @@ Top-level meta-workflow and master orchestrator for end-to-end autonomous photog
 
 Use this skill as the **primary entry point** when:
 - Starting, planning, or executing any photogrammetry request end-to-end from a folder of survey photos.
-- Pointing the agent to a directory containing one or multiple survey project folders (e.g. `D:\Surveys` or `\\ctuav\catp\Captures`) without manually writing JSON queue manifests.
+- Pointing the agent to a directory containing one or multiple survey project folders (e.g. `D:\Surveys` or `\\CLUSTER_SHARE\Captures`) without manually writing JSON queue manifests.
 - Running lights-out, unattended overnight batch reconstructions across multiple projects.
 - The user provides requirements (folder path, target outputs, mode: cluster vs. standalone, preset: `pro` vs. `building`) and expects complete autonomous execution.
 
@@ -64,7 +64,7 @@ You provide the master coordinator with an input root directory. The coordinator
 
 ```powershell
 # Auto-discover all datasets in a folder and preview queue without executing
-python scripts/cluster_supervisor.py --scan-dir "\\ctuav\catp\Surveys_Nov2026" --output-root "\\ctuav\catp\Deliverables" --min-headroom-gb 50.0
+python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\Surveys" --output-root "\\CLUSTER_SHARE\Deliverables" --min-headroom-gb 50.0
 ```
 
 - **Single Dataset Root**: If the root folder directly contains survey photos, it is queued as a single project.
@@ -80,10 +80,10 @@ Resolve the operational mode based on user constraints:
    - Command pattern:
      ```powershell
      python scripts/cluster_supervisor.py `
-       --scan-dir "\\ctuav\catp\Surveys" `
-       --output-root "\\ctuav\catp\Deliverables" `
+       --scan-dir "\\CLUSTER_SHARE\Surveys" `
+       --output-root "\\CLUSTER_SHARE\Deliverables" `
        --network-enable `
-       --network-host 10.5.10.202 `
+       --network-host 192.168.1.100 `
        --network-independent-workers `
        --min-headroom-gb 50.0
      ```
@@ -116,7 +116,7 @@ Each project executes using the standardized **Production Geomatics (`pro`)** pr
 ### Phase 4: Automated Deliverable Integrity Gate
 Upon pipeline completion, the coordinator verifies generated deliverables before marking success:
 ```powershell
-python scripts/verify_deliverables.py --dir "\\ctuav\catp\Deliverables\CATP_0167" --expect obj dem ortho point_cloud report
+python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\Deliverables\CATP_0167" --expect obj dem ortho point_cloud report
 ```
 - **OBJ & MTL**: Non-zero bytes, valid vertex/face polygons, and valid texture links.
 - **GeoTIFF**: Valid TIFF/BigTIFF headers and CRS spatial tags.
@@ -133,7 +133,7 @@ python scripts/verify_deliverables.py --dir "\\ctuav\catp\Deliverables\CATP_0167
 ========================================================================================
   Datasets Processed  : 3 / 3 Completed & Verified
   Total Duration      : 3.42 hours
-  Storage Headroom    : 342.5 GB free on \\ctuav\catp
+  Storage Headroom    : 342.5 GB free on \\CLUSTER_SHARE\Storage
 
   PROJECT            PHOTOS   VERTICES / FACES     ORTHO RES    STATUS   DELIVERABLES
   --------------------------------------------------------------------------------------

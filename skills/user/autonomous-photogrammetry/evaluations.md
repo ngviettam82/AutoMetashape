@@ -27,14 +27,14 @@ The operator points to `D:\Surveys` which contains 3 project subfolders: `Site_A
 
 ### Scenario 2: Distributed Network Cluster Fleet Orchestration
 **Query:**
-Execute a batch of 2 datasets (`\\ctuav\catp\Flight_A`, `\\ctuav\catp\Flight_B`) across the distributed Metashape cluster server at `10.5.10.202:5840` with local NVMe scratch staging and independent worker locking.
+Execute a batch of 2 datasets (`\\CLUSTER_SHARE\Flight_A`, `\\CLUSTER_SHARE\Flight_B`) across the distributed Metashape cluster server at `192.168.1.100:5840` with local NVMe scratch staging and independent worker locking.
 
 **Expected behavior:**
 1. Master coordinator delegates node and port reachability check to `cluster-fleet-operations`.
-2. Invokes `cluster_supervisor.py` with `--network-enable --network-host 10.5.10.202 --network-independent-workers`.
+2. Invokes `cluster_supervisor.py` with `--network-enable --network-host 192.168.1.100 --network-independent-workers`.
 3. Coordinates each project to run as a dedicated monolithic batch locked to 1 worker node (`worker_limit=1`).
 4. Intermediate temporary octrees remain local to each worker's NVMe scratch drive.
-5. On completion, synchronizes finalized `.psx` and assets to `\\ctuav\catp\Deliverables`.
+5. On completion, synchronizes finalized `.psx` and assets to `\\CLUSTER_SHARE\Deliverables`.
 6. Audits deliverable integrity and outputs final geomatics report.
 
 **Pass/fail criteria:**

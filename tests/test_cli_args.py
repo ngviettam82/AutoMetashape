@@ -410,8 +410,8 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         env_vars = {
-            "AUTOMETASHAPE_CLUSTER_HOST": "10.5.10.202",
-            "AUTOMETASHAPE_CLUSTER_ROOT": r"\\ctuav\catp",
+            "AUTOMETASHAPE_CLUSTER_HOST": "192.168.1.100",
+            "AUTOMETASHAPE_CLUSTER_ROOT": r"\\SERVER\ClusterStorage",
         }
         with patch.dict(os.environ, env_vars):
             with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
@@ -429,8 +429,8 @@ class TestCliArgs(unittest.TestCase):
                                     self.assertEqual(ret, 0)
                                     # Verify command built uses the env-resolved values
                                     cmd = mock_popen.call_args[0][0]
-                                    self.assertIn("10.5.10.202:5840", cmd)
-                                    self.assertIn(r"\\ctuav\catp", cmd)
+                                    self.assertIn("192.168.1.100:5840", cmd)
+                                    self.assertIn(r"\\SERVER\ClusterStorage", cmd)
                                     # STRICT INVARIANT: Do not pass --gpu-mask when omitted by user
                                     self.assertNotIn("--gpu-mask", cmd)
 
@@ -457,8 +457,8 @@ class TestCliArgs(unittest.TestCase):
                                     "launch_worker.py",
                                     "--headless",
                                     "--no-reconnect",
-                                    "--host", "10.5.10.202",
-                                    "--root", r"\\ctuav\catp",
+                                    "--host", "192.168.1.100",
+                                    "--root", r"\\SERVER\ClusterStorage",
                                     "--config", cfg_file,
                                 ]):
                                     ret = lw._run_worker_lifecycle()
@@ -468,8 +468,8 @@ class TestCliArgs(unittest.TestCase):
             self.assertTrue(os.path.isfile(cfg_file))
             with open(cfg_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
-            self.assertEqual(saved["host"], "10.5.10.202")
-            self.assertEqual(saved["root"], r"\\ctuav\catp")
+            self.assertEqual(saved["host"], "192.168.1.100")
+            self.assertEqual(saved["root"], r"\\SERVER\ClusterStorage")
             # STRICT INVARIANT: gpu_mask MUST NOT be in saved config when not explicitly requested
             self.assertNotIn("gpu_mask", saved)
 
@@ -486,9 +486,9 @@ class TestCliArgs(unittest.TestCase):
             # Write a legacy config with hardcoded gpu_mask 1
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump({
-                    "host": "10.5.10.202",
+                    "host": "192.168.1.100",
                     "port": "5840",
-                    "root": r"\\ctuav\catp",
+                    "root": r"\\SERVER\ClusterStorage",
                     "cpu_enable": 1,
                     "gpu_mask": "1",
                 }, f)
@@ -530,9 +530,9 @@ class TestCliArgs(unittest.TestCase):
             # Write a custom config with explicit non-legacy gpu_mask 2
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump({
-                    "host": "10.5.10.202",
+                    "host": "192.168.1.100",
                     "port": "5840",
-                    "root": r"\\ctuav\catp",
+                    "root": r"\\SERVER\ClusterStorage",
                     "cpu_enable": 1,
                     "gpu_mask": "2",
                 }, f)
@@ -584,8 +584,8 @@ class TestCliArgs(unittest.TestCase):
                                 "launch_worker.py",
                                 "--headless",
                                 "--no-reconnect",
-                                "--host", "10.5.10.202",
-                                "--root", r"\\ctuav\catp",
+                                "--host", "192.168.1.100",
+                                "--root", r"\\SERVER\ClusterStorage",
                                 "--gpu-mask", "2",
                             ]):
                                 ret = lw._run_worker_lifecycle()

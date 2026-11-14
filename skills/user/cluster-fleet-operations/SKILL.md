@@ -35,7 +35,7 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    subgraph Host_Coordinator["Cluster Coordinator Host (e.g. CTUAV / 10.5.10.202)"]
+    subgraph Host_Coordinator["Cluster Coordinator Host (e.g. SERVER / 192.168.1.100)"]
         ServerProc["metashape-server.exe\n(TCP 5840 Control Daemon)"]
         SharedStorage["Shared UNC Root (\\\\HOST\\SharedMetashape)"]
         StatusSidecar["_autometashape_status.json\n(Milestone IPC Telemetry)"]

@@ -6,7 +6,7 @@ This evaluation suite defines benchmark scenarios to verify that autonomous agen
 
 ### Scenario 1: Cluster Fleet Startup & Diagnostic Verification
 
-- **User Query**: *"Deploy the Metashape cluster coordinator server on port 5840 with root '\\\\ctuav\\catp', and launch a worker daemon with pre-flight network diagnostics."*
+- **User Query**: *"Deploy the Metashape cluster coordinator server on port 5840 with root '\\\\CLUSTER_SERVER\\SharedStorage', and launch a worker daemon with pre-flight network diagnostics."*
 - **Expected Agent Action**:
   1. Inspect network topology, verify UNC storage path reachability and port availability.
   2. Start the cluster coordinator daemon via `launch_server.py` (or `launch_server.bat`).

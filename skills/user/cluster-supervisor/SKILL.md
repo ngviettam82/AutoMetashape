@@ -70,7 +70,7 @@ Metashape MVS depth maps and octree leave partitions peak heavily during dense r
 1. **Pre-Flight Disk Sampling**:
    Before launching any queued reconstruction, inspect disk space on both target network output and local NVMe scratch:
    ```powershell
-   python -c "from autometashape.cluster.supervisor import check_storage_headroom; ok, free = check_storage_headroom('\\\\ctuav\\catp', 50.0); print(f'Headroom OK: {ok} ({free} GB free)')"
+   python -c "from autometashape.cluster.supervisor import check_storage_headroom; ok, free = check_storage_headroom('\\\\CLUSTER_SHARE\\storage', 50.0); print(f'Headroom OK: {ok} ({free} GB free)')"
    ```
 2. **Watchdog Protocol**:
    - Minimum safe threshold: **50.0 GB** free space.
@@ -80,7 +80,7 @@ Metashape MVS depth maps and octree leave partitions peak heavily during dense r
 Never mark a reconstruction finished simply because `metashape.exe` exited code `0`. Run the deterministic deliverable verification gate:
 
 ```powershell
-python scripts/verify_deliverables.py --dir "\\ctuav\catp\Khảo sát Địa hình Đà Nẵng" --expect obj dem ortho point_cloud report
+python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\Khảo sát Địa hình Đà Nẵng" --expect obj dem ortho point_cloud report
 ```
 
 The verification gate executes 5 structural integrity checks:
@@ -124,15 +124,15 @@ To process a sequence of survey datasets without human intervention:
    ```json
    [
      {
-       "images_dir": "\\\\ctuav\\catp\\Survey_0167",
-       "output_dir": "\\\\ctuav\\catp\\Deliverables_0167",
+       "images_dir": "\\\\CLUSTER_SHARE\\storage\\Survey_0167",
+       "output_dir": "\\\\CLUSTER_SHARE\\storage\\Deliverables_0167",
        "project_name": "Survey_0167",
        "preset": "pro",
        "expected_assets": ["obj", "dem", "ortho", "report"]
      },
      {
-       "images_dir": "\\\\ctuav\\catp\\Survey_0204",
-       "output_dir": "\\\\ctuav\\catp\\Deliverables_0204",
+       "images_dir": "\\\\CLUSTER_SHARE\\storage\\Survey_0204",
+       "output_dir": "\\\\CLUSTER_SHARE\\storage\\Deliverables_0204",
        "project_name": "Survey_0204",
        "preset": "pro",
        "expected_assets": ["obj", "dem", "ortho", "report"]

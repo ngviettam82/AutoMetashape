@@ -201,15 +201,13 @@ def _run_worker_lifecycle() -> int:
         mem_str = f" ({d['mem_mb'] / 1024:.1f} GB)" if d.get("mem_mb") else ""
         detected_gpu_names.append(f"{d['name']}{mem_str}")
 
-    host = args.host or saved_config.get("host", "")
-    port = args.port or saved_config.get("port", "5840")
-    root_path = args.root or saved_config.get("root", "")
-
-    # Fallback to standard environment variables if parameters remain unresolved
-    if not host:
-        host = os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip()
-    if not root_path:
-        root_path = os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
+    host = args.host or os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip() or saved_config.get("host", "")
+    port = args.port or os.environ.get("AUTOMETASHAPE_CLUSTER_PORT", "").strip() or saved_config.get("port", "5840")
+    root_path = (
+        args.root
+        or os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
+        or saved_config.get("root", "")
+    )
 
     # CPU Enable Resolution
     if args.cpu_enable is not None:

@@ -56,7 +56,6 @@ if "%LAN_ZIP%"=="" (
         )
     )
 )
-if "%LAN_ZIP%"=="" if exist "\\ctuav\catp\AutoMetashape_main.zip" set "LAN_ZIP=\\ctuav\catp\AutoMetashape_main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"

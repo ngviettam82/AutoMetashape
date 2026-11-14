@@ -208,14 +208,14 @@ class TestClusterSupervisor(unittest.TestCase):
 
         extra = {
             "network_enable": True,
-            "network_host": "10.5.10.202",
+            "network_host": "192.168.1.100",
             "network_port": 5840,
             "network_independent_workers": True,
         }
         jobs = discover_dataset_projects(scan_dir, extra_args=extra)
         self.assertEqual(len(jobs), 1)
         self.assertTrue(jobs[0].extra_args.get("network_enable"))
-        self.assertEqual(jobs[0].extra_args.get("network_host"), "10.5.10.202")
+        self.assertEqual(jobs[0].extra_args.get("network_host"), "192.168.1.100")
         self.assertTrue(jobs[0].extra_args.get("network_independent_workers"))
 
 

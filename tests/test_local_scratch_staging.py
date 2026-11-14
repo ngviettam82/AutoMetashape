@@ -192,7 +192,7 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             # 4. Mock Metashape Network Client on Server coordinator
             mock_net_client = MagicMock()
             mock_net_client.workerList.return_value = [
-                {"worker_id": 1, "host": "10.5.10.202", "gpu_mask": "Auto", "paused": False}
+                {"worker_id": 1, "host": "192.168.1.100", "gpu_mask": "Auto", "paused": False}
             ]
             mock_net_client.createBatch.return_value = 777
             mock_net_client.batchInfo.return_value = {

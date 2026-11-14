@@ -343,7 +343,7 @@ Dispatch autonomous reconstruction to the active cluster:
 ```
 
 #### 5.10 Host-Initiated Autonomous Worker Fleet Update Protocol
-When maintaining or upgrading remote cluster worker nodes from the Host/Coordinator workstation (`CTUAV`), strictly execute the **Autonomous Worker Fleet Update Protocol**:
+When maintaining or upgrading remote cluster worker nodes from the Host/Coordinator workstation, strictly execute the **Autonomous Worker Fleet Update Protocol**:
 
 1. **Zero Fleet-Wide Blind Kills**:
    - Never kill, trigger, or push fleet-wide updates across all remote cluster worker nodes simultaneously.
@@ -355,10 +355,10 @@ When maintaining or upgrading remote cluster worker nodes from the Host/Coordina
    - Confirm the canary worker node completes self-update, auto-discovers GPUs, and re-registers cleanly as `ready` within **60–90 seconds**.
    - Only after the canary node passes the verification gate may update batches proceed across remaining worker nodes in staggered waves.
 3. **Preserve Host / Coordinator Exemption**:
-   - The coordinator workstation (e.g. `CTUAV` / `10.5.10.202`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
+   - The coordinator workstation (e.g. `SERVER` / `192.168.1.100`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
    - Remote worker update probes must only target designated remote worker hosts (`host != coordinator_host`).
 4. **Zero-Touch Headless Invariants**:
-   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (e.g. `\\ctuav\catp` or configured cluster storage).
+   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (e.g. `\\SERVER\SharedStorage` or configured cluster storage).
    - Remote worker updates must never block on interactive console prompts (`input()`) or unmanaged binary fallbacks.
    - Dynamic multi-GPU detection is preserved without injecting hardcoded `gpu_mask` values into `worker_config.json`.
 
