@@ -47,15 +47,22 @@ from autometashape.cluster.staging import (
     get_psx_files_dir,
     sync_staged_project_to_network,
 )
+from autometashape.cluster.supervisor import (
+    ClusterSupervisor,
+    QueueJob,
+    check_storage_headroom,
+)
 
 __all__ = [
     "ALIGN_DOWNSCALE_MAP",
+    "ClusterSupervisor",
     "DEFAULT_SERVER_CONFIG_FILENAME",
     "DEFAULT_WORKER_CONFIG_FILENAME",
     "DEPTH_DOWNSCALE_MAP",
     "DEPTH_FILTER_MAP",
     "POINT_CLOUD_FORMAT_MAP",
     "PRESEL_MODE_MAP",
+    "QueueJob",
     "SURFACE_TYPE_MAP",
     "TILED_MODEL_FORMAT_MAP",
     "_has_dense_points",
@@ -65,6 +72,7 @@ __all__ = [
     "build_monolithic_runscript_task",
     "build_unified_cluster_pipeline_tasks",
     "check_scratch_disk_headroom",
+    "check_storage_headroom",
     "detect_gpu_devices",
     "find_metashape_monitor_path",
     "find_metashape_path",

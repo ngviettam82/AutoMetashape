@@ -39,6 +39,14 @@ from autometashape.core.telemetry import (
     parse_xmp_telemetry,
     print_pro_engineering_report,
 )
+from autometashape.core.verification import (
+    verify_geotiff,
+    verify_glb_model,
+    verify_obj_model,
+    verify_pdf_report,
+    verify_point_cloud,
+    verify_project_deliverables,
+)
 
 __all__ = [
     "CAMERA_HARDWARE_DB",
@@ -66,5 +74,11 @@ __all__ = [
     "run_reconstruction",
     "save_checkpoint",
     "solve_ray_convergence_irls",
+    "verify_geotiff",
+    "verify_glb_model",
+    "verify_obj_model",
+    "verify_pdf_report",
+    "verify_point_cloud",
+    "verify_project_deliverables",
     "wait_for_user_resume",
 ]
