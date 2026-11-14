@@ -949,6 +949,112 @@ class TestNetworkCluster(unittest.TestCase):
                     )
                 self.assertIn("Manual cropping and pause_after_crop cannot be used", str(ctx.exception))
 
+    def test_centralized_task_mode_multi_worker_collaborative_dispatch(self) -> None:
+        """Verify centralized task mode dispatches fine-grained tasks with worker_limit=None."""
+        from unittest.mock import MagicMock, patch
+
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            with open(os.path.join(img_dir, "img_001.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [
+                {"worker_id": 1, "host": "192.168.1.101", "paused": False},
+                {"worker_id": 2, "host": "192.168.1.102", "paused": False},
+            ]
+            mock_net_client.createBatch.return_value = 888
+            mock_net_client.batchInfo.return_value = {
+                "state": "completed",
+                "tasks": [{"name": "MatchPhotos", "state": "completed", "progress": 100.0}],
+            }
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                mr.run_reconstruction(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    network_enable=True,
+                    network_independent_workers=False,
+                    align_photos=True,
+                    build_depth_maps=False,
+                    build_mesh=False,
+                    build_texture=False,
+                    build_orthomosaic=False,
+                    build_point_cloud=False,
+                )
+
+            # In centralized task mode, createBatch is called with worker_limit=None
+            self.assertTrue(mock_net_client.createBatch.called)
+            # Defend that setBatchWorkerLimit(..., 1) was NOT called
+            mock_net_client.setBatchWorkerLimit.assert_not_called()
+
+    def test_independent_worker_target_network_output_sanitization(self) -> None:
+        """Verify build_monolithic_runscript_task receives target_network_output rather than coordinator local scratch."""
+        from unittest.mock import MagicMock, patch
+
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            net_out_dir = os.path.join(tmp_dir, "central_share", "Deliverables")
+            scratch_vol = os.path.join(tmp_dir, "local_nvme_scratch")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(net_out_dir, exist_ok=True)
+            os.makedirs(scratch_vol, exist_ok=True)
+            with open(os.path.join(img_dir, "img_001.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [{"worker_id": 1, "host": "192.168.1.100", "paused": False}]
+            mock_net_client.createBatch.return_value = 999
+            mock_net_client.batchInfo.return_value = {
+                "state": "completed",
+                "tasks": [{"name": "RunScript", "state": "completed", "progress": 100.0}],
+            }
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                with patch("cluster_utils.get_optimal_local_scratch_dir", return_value=scratch_vol):
+                    with patch("cluster_utils.check_scratch_disk_headroom", return_value=(True, 500.0)):
+                        with patch(
+                            "autometashape.core.pipeline.build_monolithic_runscript_task",
+                            wraps=mr.build_monolithic_runscript_task,
+                        ) as mock_builder:
+                            mr.run_reconstruction(
+                                images_dir=img_dir,
+                                output_dir=net_out_dir,
+                                network_enable=True,
+                                network_independent_workers=True,
+                                local_scratch_staging=True,
+                            )
+                            # Verify that build_monolithic_runscript_task was called with the central network output dir
+                            self.assertTrue(mock_builder.called)
+                            passed_out = mock_builder.call_args[1].get("output_dir")
+                            self.assertEqual(passed_out, os.path.abspath(net_out_dir))
+
 
 if __name__ == "__main__":
     unittest.main()

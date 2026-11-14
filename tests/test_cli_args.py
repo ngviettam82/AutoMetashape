@@ -398,6 +398,97 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.server)
         self.assertEqual(args.port, "5840")
 
+    def test_server_launcher_missing_binary_returns_code_1(self) -> None:
+        """Verify launch_server returns exit code 1 when no Metashape binary is found."""
+        from unittest.mock import patch
+
+        import launch_server as ls
+
+        with patch("sys.argv", ["launch_server.py"]):
+            with patch("cluster_utils.find_metashape_path", return_value=None):
+                with patch("cluster_utils.find_metashape_server_path", return_value=None):
+                    code = ls._run_server_lifecycle()
+                    self.assertEqual(code, 1)
+
+    def test_server_launcher_embedded_mode_command_structure(self) -> None:
+        """Verify launch_server uses embedded --server syntax when metashape-server.exe is absent."""
+        from unittest.mock import MagicMock, patch
+
+        import launch_server as ls
+
+        dummy_ms = os.path.abspath("dummy_metashape.exe")
+        with open(dummy_ms, "w") as f:
+            f.write("mock")
+
+        try:
+            with patch("sys.argv", ["launch_server.py", "--host", "127.0.0.1", "--port", "5840"]):
+                with patch("cluster_utils.find_metashape_path", return_value=dummy_ms):
+                    with patch("cluster_utils.find_metashape_server_path", return_value=None):
+                        with patch("cluster_utils.test_tcp_connection", return_value=False):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = MagicMock()
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_popen.return_value = mock_proc
+
+                                code = ls._run_server_lifecycle()
+                                self.assertEqual(code, 0)
+                                cmd = mock_popen.call_args[0][0]
+                                self.assertEqual(cmd[0], dummy_ms)
+                                self.assertIn("--server", cmd)
+                                self.assertIn("--control", cmd)
+                                self.assertIn("127.0.0.1:5840", cmd)
+                                self.assertIn("--dispatch", cmd)
+                                self.assertIn("127.0.0.1:5841", cmd)
+        finally:
+            if os.path.exists(dummy_ms):
+                os.remove(dummy_ms)
+
+    def test_server_launcher_standalone_mode_command_structure(self) -> None:
+        """Verify launch_server uses standalone syntax when metashape-server.exe is found."""
+        from unittest.mock import MagicMock, patch
+
+        import launch_server as ls
+
+        dummy_srv = os.path.abspath("dummy_metashape_server.exe")
+        with open(dummy_srv, "w") as f:
+            f.write("mock")
+
+        try:
+            with patch("sys.argv", ["launch_server.py", "--host", "0.0.0.0", "--port", "5840"]):
+                with patch("cluster_utils.find_metashape_server_path", return_value=dummy_srv):
+                    with patch("cluster_utils.test_tcp_connection", return_value=False):
+                        with patch("subprocess.Popen") as mock_popen:
+                            mock_proc = MagicMock()
+                            mock_proc.wait.return_value = 0
+                            mock_proc.returncode = 0
+                            mock_popen.return_value = mock_proc
+
+                            code = ls._run_server_lifecycle()
+                            self.assertEqual(code, 0)
+                            cmd = mock_popen.call_args[0][0]
+                            self.assertEqual(cmd[0], dummy_srv)
+                            self.assertIn("--host", cmd)
+                            self.assertIn("0.0.0.0:5840", cmd)
+                            self.assertIn("--no-database", cmd)
+                            self.assertIn("--resume-workers", cmd)
+        finally:
+            if os.path.exists(dummy_srv):
+                os.remove(dummy_srv)
+
+    def test_server_launcher_pid_recording_and_cleanup(self) -> None:
+        """Verify server launcher correctly records and purges PID tracking file."""
+        import launch_server as ls
+
+        ls.record_server_pid()
+        self.assertTrue(os.path.isfile(ls.PID_FILE_PATH))
+        with open(ls.PID_FILE_PATH, "r", encoding="utf-8") as f:
+            pid = int(f.read().strip())
+        self.assertEqual(pid, os.getpid())
+
+        ls.clear_server_pid()
+        self.assertFalse(os.path.isfile(ls.PID_FILE_PATH))
+
     def test_worker_launcher_loads_and_prioritizes_worker_config(self) -> None:
         """Verify launch_worker resolves parameters from worker_config.json with CLI override."""
         import json
