@@ -18,6 +18,7 @@ Configured with production-grade defaults:
 
 from __future__ import annotations
 import argparse
+import atexit
 import json
 import math
 import os
@@ -2783,6 +2784,38 @@ def run_reconstruction(
             print(f"  Local Staging   : {local_staging_dir} ({free_gb:.1f} GB free)", flush=True)
             print(f"  Central Target  : {target_network_output}", flush=True)
             print("=========================================================================", flush=True)
+
+            # Stage existing project checkpoint from central share if resume is requested
+            if resume and target_network_output:
+                cand_psx = os.path.join(target_network_output, f"{project_name}.psx")
+                cand_legacy = os.path.join(target_network_output, "building_reconstruction.psx")
+                net_psx = (
+                    cand_psx
+                    if os.path.isfile(cand_psx)
+                    else (cand_legacy if os.path.isfile(cand_legacy) else None)
+                )
+                if net_psx:
+                    local_psx = os.path.join(local_staging_dir, os.path.basename(net_psx))
+                    print(
+                        f"  [Local Scratch Staging] Staging existing project checkpoint from central share: "
+                        f"{os.path.basename(net_psx)}...",
+                        flush=True,
+                    )
+                    shutil.copy2(net_psx, local_psx)
+                    net_files = get_psx_files_dir(net_psx)
+                    local_files = os.path.join(local_staging_dir, os.path.basename(net_files))
+                    if os.path.isdir(net_files):
+                        print(
+                            f"  [Local Scratch Staging] Staging project .files directory to local NVMe SSD: "
+                            f"{os.path.basename(net_files)}...",
+                            flush=True,
+                        )
+                        shutil.copytree(
+                            net_files,
+                            local_files,
+                            dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("lock", "model.tmp", "*.tmp"),
+                        )
         else:
             print(
                 f"[Local Scratch Staging] Insufficient local disk headroom "
@@ -2799,6 +2832,39 @@ def run_reconstruction(
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
     set_active_status_file(status_file)
+
+    def _sync_staging_to_central_share():
+        if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
+            print(
+                f"\n[Local Scratch Staging] Synchronizing staged project to central share: "
+                f"{target_network_output}...",
+                flush=True,
+            )
+            local_lock = os.path.join(local_staging_dir, f"{project_name}.files", "lock")
+            if os.path.isfile(local_lock):
+                try:
+                    os.remove(local_lock)
+                except Exception:
+                    pass
+            sync_ok = cu.sync_staged_project_to_network(local_staging_dir, target_network_output) if cu else False
+            if sync_ok:
+                if status_file and local_staging_dir in status_file:
+                    set_active_status_file(status_file.replace(local_staging_dir, target_network_output))
+                else:
+                    set_active_status_file(None)
+                print(
+                    f"  [Local Scratch Staging] [OK] Successfully synchronized all deliverables to "
+                    f"{target_network_output}!",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"  [Local Scratch Staging] [WARNING] Issue occurred during sync to {target_network_output}.",
+                    file=sys.stderr,
+                )
+
+    if local_staging_dir:
+        atexit.register(_sync_staging_to_central_share)
 
     # -----------------------------------------------------------------------
     # Pro Photogrammetry Survey Physics & Telemetry Resolution
@@ -3637,6 +3703,7 @@ def run_reconstruction(
                         export_report=export_report,
                         resume=resume,
                         network_path=network_path,
+                        local_scratch_staging=local_scratch_staging,
                     )
 
                     batch_id, was_attached = safe_create_cluster_batch(
@@ -3764,6 +3831,7 @@ def run_reconstruction(
                                         export_report=export_report,
                                         resume=True,
                                         network_path=network_path,
+                                        local_scratch_staging=local_scratch_staging,
                                     )
                                     handoff_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True)
                                     print(f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.", flush=True)
@@ -3880,6 +3948,7 @@ def run_reconstruction(
                                                 export_report=export_report,
                                                 resume=False,
                                                 network_path=network_path,
+                                                local_scratch_staging=local_scratch_staging,
                                             )
                                             scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [scratch_net_task], worker_limit=1, force_fresh=True)
                                             print(f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.", flush=True)
@@ -4918,28 +4987,12 @@ def run_reconstruction(
         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
 
     # Synchronize staged project and deliverables from local NVMe scratch to central network share
-    if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
-        print(
-            f"\n[Local Scratch Staging] Synchronizing finalized project and deliverables to central share: "
-            f"{target_network_output}...",
-            flush=True,
-        )
-        sync_ok = cu.sync_staged_project_to_network(local_staging_dir, target_network_output) if cu else False
-        if sync_ok:
-            if status_file and local_staging_dir in status_file:
-                set_active_status_file(status_file.replace(local_staging_dir, target_network_output))
-            else:
-                set_active_status_file(None)
-            print(
-                f"  [Local Scratch Staging] [OK] Successfully synchronized all deliverables to "
-                f"{target_network_output}!",
-                flush=True,
-            )
-        else:
-            print(
-                f"  [Local Scratch Staging] [WARNING] Issue occurred during sync to {target_network_output}.",
-                file=sys.stderr,
-            )
+    if local_staging_dir:
+        try:
+            atexit.unregister(_sync_staging_to_central_share)
+        except Exception:
+            pass
+        _sync_staging_to_central_share()
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -5126,6 +5179,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "Stage intermediate project files on local fast NVMe scratch volume "
             "and sync deliverables to central share upon completion"
         ),
+    )
+    parser.add_argument(
+        "--no-local-scratch-staging",
+        "--no-stage-local",
+        dest="local_scratch_staging",
+        action="store_false",
+        help="Disable local NVMe scratch staging and process directly on the network share",
     )
     parser.add_argument(
         "--scratch-dir",

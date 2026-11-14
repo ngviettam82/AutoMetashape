@@ -607,11 +607,19 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
             return os.path.abspath(tempfile.gettempdir())
 
 
+def get_psx_files_dir(psx_path: str) -> str:
+    """Returns the associated .files directory for a .psx project path."""
+    if psx_path.lower().endswith(".psx"):
+        return psx_path[:-4] + ".files"
+    return psx_path + ".files"
+
+
 def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str) -> bool:
     """Synchronizes finalized project and deliverables from local NVMe scratch to central network storage.
 
     Transfers all deliverables, models, textures, reports, and the consolidated .psx project
     file and .files directory back to the shared storage root, then cleans up local scratch.
+    Filters out transient out-of-core octree leaves and lock files to avoid wasting bandwidth.
 
     Args:
         local_stage_dir: Local staging directory on worker node.
@@ -626,16 +634,24 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
     os.makedirs(target_network_dir, exist_ok=True)
 
     try:
+        # Pre-clean any lingering local lock files before network transfer
+        for root, _, files in os.walk(local_stage_dir):
+            if "lock" in files:
+                try:
+                    os.remove(os.path.join(root, "lock"))
+                except Exception:
+                    pass
+
+        ignore_transient = shutil.ignore_patterns("lock", "model.tmp", "*.tmp")
         for item in os.listdir(local_stage_dir):
             s_path = os.path.join(local_stage_dir, item)
             d_path = os.path.join(target_network_dir, item)
 
             if os.path.isdir(s_path):
-                if os.path.exists(d_path):
-                    shutil.rmtree(d_path, ignore_errors=True)
-                shutil.copytree(s_path, d_path)
+                shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
             else:
-                shutil.copy2(s_path, d_path)
+                if not item.endswith(".tmp") and item != "lock":
+                    shutil.copy2(s_path, d_path)
 
         # Cleanup local staging directory upon verified completion
         try:

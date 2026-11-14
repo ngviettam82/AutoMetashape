@@ -279,6 +279,74 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             expected_psx = os.path.join(nas_output, "Low_Disk_Job.psx")
             self.assertTrue(os.path.exists(expected_psx) or mock_doc.save.called)
 
+    def test_resume_existing_project_with_local_staging(self) -> None:
+        """Verify existing central network project is staged to local NVMe SSD and resumes seamlessly."""
+        with tempfile.TemporaryDirectory() as sys_root:
+            nas_share = os.path.join(sys_root, "nas_share")
+            nas_images = os.path.join(nas_share, "images")
+            nas_output = os.path.join(nas_share, "output")
+            os.makedirs(nas_images, exist_ok=True)
+            os.makedirs(nas_output, exist_ok=True)
+
+            with open(os.path.join(nas_images, "P01.JPG"), "wb") as f:
+                f.write(b"RAW_PHOTO_1")
+
+            # Seed an existing project checkpoint on central network share
+            central_psx = os.path.join(nas_output, "Existing_Survey.psx")
+            with open(central_psx, "w", encoding="utf-8") as f:
+                f.write("<psx>CENTRAL_PROJECT_CHECKPOINT</psx>")
+
+            central_files = os.path.join(nas_output, "Existing_Survey.files", "0", "0")
+            os.makedirs(central_files, exist_ok=True)
+            with open(os.path.join(central_files, "alignment.data"), "wb") as f:
+                f.write(b"ALIGNMENT_DATA")
+
+            worker_nvme = os.path.join(sys_root, "worker_nvme")
+            os.makedirs(worker_nvme, exist_ok=True)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 5090", "mem_size": 32 * (1024**3)}]
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [
+                MagicMock(transform=True, enabled=True),
+                MagicMock(transform=True, enabled=True),
+            ]
+            mock_chunk.model = MagicMock()
+            mock_chunk.model.textures = [MagicMock()]
+            mock_doc = MagicMock()
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            with patch.object(mr, "Metashape", mock_meta):
+                with patch("cluster_utils.get_optimal_local_scratch_dir", return_value=worker_nvme):
+                    with patch("cluster_utils.check_scratch_disk_headroom", return_value=(True, 500.0)):
+                        mr.run_reconstruction(
+                            images_dir=nas_images,
+                            output_dir=nas_output,
+                            project_name="Existing_Survey",
+                            local_scratch_staging=True,
+                            scratch_dir=worker_nvme,
+                            resume=True,
+                            align_photos=False,
+                            build_depth_maps=False,
+                            build_mesh=False,
+                            build_texture=False,
+                        )
+
+            # Invariant 1: Document.open was called with the staged local .psx path
+            staged_psx = os.path.join(worker_nvme, "Existing_Survey_local_stage", "Existing_Survey.psx")
+            opened_paths = [call.args[0] for call in mock_doc.open.call_args_list if call.args]
+            self.assertTrue(any(staged_psx in p for p in opened_paths))
+
+            # Invariant 2: Central share retains the synchronized project checkpoint
+            self.assertTrue(os.path.isfile(central_psx))
+            self.assertTrue(os.path.isfile(os.path.join(central_files, "alignment.data")))
+
+            # Invariant 3: Worker staging directory is cleanly purged after sync
+            staged_folder = os.path.join(worker_nvme, "Existing_Survey_local_stage")
+            self.assertFalse(os.path.exists(staged_folder))
+
 
 if __name__ == "__main__":
     unittest.main()
