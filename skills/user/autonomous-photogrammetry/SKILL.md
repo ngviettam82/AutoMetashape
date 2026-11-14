@@ -76,7 +76,7 @@ Resolve the operational mode based on user constraints:
 
 1. **Distributed Network Cluster Mode** (Recommended for multi-workstation environments):
    - Delegates node health and GPU discovery to [cluster-fleet-operations](../cluster-fleet-operations/SKILL.md).
-   - Engages independent worker locking (`--network-independent-workers`) to eliminate intermediate LAN sync pauses.
+   - Engages independent worker locking (`--network-independent-workers`) enforcing the offline monolithic local scratch process as the exclusive method (strictly zero stage-by-stage network fallback).
    - Command pattern:
      ```powershell
      python scripts/cluster_supervisor.py `

@@ -143,8 +143,9 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
   - First-run interactive setup wizard with LAN auto-discovery.
   - Built-in pre-flight health diagnostics (Metashape executable discovery, TCP port 5840 reachability test, and Shared UNC storage access check).
   - Resilient auto-reconnect loop: automatically reconnects if the coordinator restarts or network drops temporarily.
-- **Atomic Monolithic `RunScript` Delegation**:
-  - Independent project workflows are bundled into single-node network tasks (`workitem_count = 1`), eliminating worker hopping and LAN latency between stages.
+- **Atomic Monolithic `RunScript` Delegation & Exclusive Offline Execution**:
+  - Independent project workflows (`--network-independent-workers`) are bundled into single-node network tasks (`workitem_count = 1`), eliminating worker hopping and LAN latency between stages.
+  - The offline local scratch process is the **exclusive, mandatory execution method** for independent workers (zero stage-by-stage fallback to the network share).
   - Intermediate checkpoints saved to `.files` for instant resumption (`--resume`).
 - **Autonomous AI Agent Skill Protocol**:
   - Managed via [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md) for 1-hour automated progress audits and self-healing dropped network workers.

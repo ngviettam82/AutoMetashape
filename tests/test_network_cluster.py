@@ -871,6 +871,84 @@ class TestNetworkCluster(unittest.TestCase):
                 idx = called_args.index("--network-path")
                 self.assertEqual(called_args[idx + 1], net_path)
 
+    def test_independent_worker_strict_offline_zero_fallback(self) -> None:
+        """Verify that when independent worker offline batch fails, RuntimeError is raised without fallback."""
+        from unittest.mock import MagicMock, patch
+
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            with open(os.path.join(img_dir, "img_001.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [{"worker_id": 1, "host": "192.168.1.100", "paused": False}]
+            mock_net_client.createBatch.return_value = 777
+            mock_net_client.batchInfo.return_value = {
+                "state": "failed",
+                "tasks": [{"name": "RunScript", "state": "failed", "errors": ["Out of memory"]}],
+            }
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                with self.assertRaises(RuntimeError) as ctx:
+                    mr.run_reconstruction(
+                        images_dir=img_dir,
+                        output_dir=out_dir,
+                        network_enable=True,
+                        network_independent_workers=True,
+                        multi_chunk="disable",
+                    )
+                self.assertIn("fallback to stage-by-stage network processing is strictly disabled", str(ctx.exception))
+
+    def test_independent_worker_rejects_manual_crop_or_pause(self) -> None:
+        """Verify independent worker mode rejects pause_after_crop and manual cropping with ValueError."""
+        from unittest.mock import MagicMock, patch
+
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            with open(os.path.join(img_dir, "img_001.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [{"worker_id": 1, "host": "192.168.1.100", "paused": False}]
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                with self.assertRaises(ValueError) as ctx:
+                    mr.run_reconstruction(
+                        images_dir=img_dir,
+                        output_dir=out_dir,
+                        network_enable=True,
+                        network_independent_workers=True,
+                        pause_after_crop=True,
+                    )
+                self.assertIn("Manual cropping and pause_after_crop cannot be used", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

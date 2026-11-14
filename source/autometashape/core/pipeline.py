@@ -399,7 +399,8 @@ def run_reconstruction(
         network_host: IP address or hostname of the cluster server.
         network_port: Port number of the cluster server (default: 5840).
         network_path: Network root path prefix for shared storage translation.
-        network_independent_workers: Enable 1 worker per project independent cluster mode.
+        network_independent_workers: Lock each project to an independent worker node executing
+            strictly via the offline monolithic local scratch process (zero stage-by-stage fallback).
         project_name: Custom base name for project files and deliverables.
     """
     t_start = time.time()
@@ -423,6 +424,8 @@ def run_reconstruction(
         output_dir = os.path.join(images_dir, project_name)
 
     # Resolve Local Scratch Staging (Mechanism B)
+    if network_independent_workers:
+        local_scratch_staging = True
     local_staging_dir = None
     target_network_output = None
     if local_scratch_staging:
@@ -926,15 +929,18 @@ def run_reconstruction(
             if chunk_target is None:
                 print(f"  [Cluster] [ERROR] Document has no active chunk for '{task_desc}'", flush=True)
                 return False
+            if network_independent_workers:
+                raise RuntimeError(
+                    f"[Cluster] Illegal stage-by-stage network task dispatch attempted for '{task_desc}'. "
+                    "The offline monolithic process is the exclusive execution method for independent workers."
+                )
             net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
-            w_limit = 1 if network_independent_workers else None
+            w_limit = None
             batch_id, was_attached = safe_create_cluster_batch(
                 net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False
             )
             if was_attached:
                 print(f"  [Cluster] Attached to existing batch #{batch_id} for '{task_desc}'", flush=True)
-            elif network_independent_workers:
-                print("  [Cluster] Mode: Independent Worker (worker_limit=1 locked to 1 node)", flush=True)
 
             t_task_start = time.time()
             last_progress = -1.0
@@ -1039,7 +1045,7 @@ def run_reconstruction(
                                     net_client,
                                     rel_psx,
                                     net_tasks,
-                                    worker_limit=1 if network_independent_workers else None,
+                                    worker_limit=None,
                                     force_fresh=True,
                                 )
 
@@ -1467,13 +1473,14 @@ def run_reconstruction(
         # -------------------------------------------------------------
         # Autonomous Unified Project Batch (Independent Project Mode)
         # -------------------------------------------------------------
-        can_use_unified_batch = (
-            cluster_enabled
-            and network_independent_workers
-            and net_client is not None
-            and (not pause_after_crop)
-            and crop_method != "manual"
-        )
+        if cluster_enabled and network_independent_workers:
+            if pause_after_crop or crop_method == "manual":
+                raise ValueError(
+                    "[Cluster] Independent worker mode strictly enforces unattended offline execution. "
+                    "Manual cropping and pause_after_crop cannot be used when --network-independent-workers is active."
+                )
+
+        can_use_unified_batch = cluster_enabled and network_independent_workers and net_client is not None
         unified_succeeded = False
         if can_use_unified_batch:
             try:
@@ -2022,10 +2029,17 @@ def run_reconstruction(
                     return
             except Exception as e_unified:
                 print(
-                    f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...",
+                    f"  [Cluster] [ERROR] Unified offline batch failed: {e_unified}",
                     flush=True,
                 )
                 unified_succeeded = False
+
+        if cluster_enabled and network_independent_workers:
+            raise RuntimeError(
+                f"[Cluster] Independent worker offline batch execution failed for project '{project_name}'. "
+                "The offline monolithic process is the only method permitted for independent workers; "
+                "fallback to stage-by-stage network processing is strictly disabled."
+            )
 
         # Fallback Stage-by-Stage Feature Matching & Camera Alignment (Single-Chunk Mode)
         if not use_multi_chunk:
@@ -3688,7 +3702,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--network-independent-workers",
         action="store_true",
         default=False,
-        help="Lock each project to an independent worker node (worker_limit=1) to eliminate cross-network synchronization pauses",
+        help=(
+            "Lock each project to an independent worker executing exclusively via the offline monolithic "
+            "local scratch process (worker_limit=1, zero stage-by-stage network fallback)"
+        ),
     )
     parser.add_argument(
         "--local-scratch-staging",

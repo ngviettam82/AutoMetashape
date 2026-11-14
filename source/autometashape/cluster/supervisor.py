@@ -412,7 +412,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--network-independent-workers",
         action="store_true",
         default=False,
-        help="Lock each project to an independent worker node (worker_limit=1)",
+        help="Lock each project to an independent worker executing exclusively via offline local scratch process",
     )
     return parser
 
