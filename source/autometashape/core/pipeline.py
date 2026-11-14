@@ -21,6 +21,7 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.hardware import extract_unc_root
 from autometashape.cluster.orchestrator import (
     ALIGN_DOWNSCALE_MAP,
     DEPTH_DOWNSCALE_MAP,
@@ -35,6 +36,7 @@ from autometashape.cluster.orchestrator import (
     build_cluster_crop_task,
     build_cluster_gradual_selection_tasks,
     build_monolithic_runscript_task,
+    evaluate_cluster_batch_info,
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import (
@@ -423,8 +425,20 @@ def run_reconstruction(
     if not output_dir:
         output_dir = os.path.join(images_dir, project_name)
 
+    # Auto-detect shared storage UNC root when cluster mode is enabled and network_path is empty
+    if not network_path and network_enable:
+        detected_unc = extract_unc_root(output_dir) or extract_unc_root(images_dir)
+        if detected_unc:
+            network_path = detected_unc
+            print(f"  [Network Cluster] Auto-detected shared storage UNC root: {network_path}", flush=True)
+
     # Resolve Local Scratch Staging (Mechanism B)
-    if network_independent_workers:
+    if network_enable:
+        # On cluster coordinator, tasks are dispatched to remote cluster workers.
+        # Coordinator must save directly to shared network storage (output_dir) so all
+        # worker nodes can access the project checkpoint over UNC.
+        local_scratch_staging = False
+    elif network_independent_workers:
         local_scratch_staging = True
     local_staging_dir = None
     target_network_output = None
@@ -864,8 +878,12 @@ def run_reconstruction(
             try:
                 abs_tgt = os.path.abspath(tgt)
                 abs_net = os.path.abspath(network_path)
-                if os.path.commonpath([abs_tgt, abs_net]).lower() == abs_net.lower():
-                    return os.path.relpath(abs_tgt, abs_net).replace("\\", "/")
+                if abs_net.startswith(r"\\") and abs_net.count("\\") == 3 and not abs_net.endswith("\\"):
+                    abs_net_norm = abs_net + "\\"
+                else:
+                    abs_net_norm = abs_net
+                if os.path.commonpath([abs_tgt, abs_net_norm]).lower().rstrip("\\") == abs_net.lower().rstrip("\\"):
+                    return os.path.relpath(abs_tgt, abs_net_norm).replace("\\", "/")
             except Exception:
                 pass
 
@@ -948,7 +966,6 @@ def run_reconstruction(
             while True:
                 time.sleep(1.0)
                 b_info = net_client.batchInfo(batch_id)
-                state = b_info.get("state")
                 tasks_info = b_info.get("tasks", [])
                 if tasks_info:
                     total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
@@ -975,19 +992,16 @@ def run_reconstruction(
                         last_progress = total_prog
                         last_log_time = now_t
 
-                if state == "completed":
+                b_status, b_success, b_err = evaluate_cluster_batch_info(b_info)
+                if b_success:
                     elapsed_min = (time.time() - t_task_start) / 60.0
                     print(
                         f"  [Cluster] [OK] Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True
                     )
                     break
-                elif state in ("failed", "aborted"):
-                    err_msgs = []
-                    for t in tasks_info:
-                        for err in t.get("errors", []):
-                            err_msgs.append(str(err))
-                    err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
-                    print(f"  [Cluster] [ERROR] Task '{task_desc}' {state}: {err_str}", flush=True)
+                elif b_status in ("failed", "aborted"):
+                    err_str = b_err or "unknown cluster error"
+                    print(f"  [Cluster] [ERROR] Task '{task_desc}' {b_status}: {err_str}", flush=True)
 
                     is_bad_alloc = any(
                         any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
@@ -1053,15 +1067,15 @@ def run_reconstruction(
                                 while True:
                                     time.sleep(1.0)
                                     rb_info = net_client.batchInfo(retry_batch_id)
-                                    rb_state = rb_info.get("state")
-                                    if rb_state == "completed":
+                                    rb_status, rb_success, rb_err = evaluate_cluster_batch_info(rb_info)
+                                    if rb_success:
                                         print(
                                             f"  [Cluster] [OK] Task '{task_desc}' successfully finished on another cluster worker!",
                                             flush=True,
                                         )
                                         retry_ok = True
                                         break
-                                    elif rb_state in ("failed", "aborted"):
+                                    elif rb_status in ("failed", "aborted"):
                                         break
 
                                 if retry_ok:
@@ -1623,7 +1637,6 @@ def run_reconstruction(
                     while True:
                         time.sleep(1.0)
                         b_info = net_client.batchInfo(batch_id)
-                        state = b_info.get("state")
                         tasks_info = b_info.get("tasks", [])
 
                         # Real-time sidecar status file telemetry from dedicated worker
@@ -1677,7 +1690,8 @@ def run_reconstruction(
                                 last_progress = sub_prog
                                 last_log_time = now_t
 
-                        if state == "completed":
+                        b_status, b_success, b_err = evaluate_cluster_batch_info(b_info)
+                        if b_success:
                             elapsed_min = (time.time() - t_u_start) / 60.0
                             print(
                                 f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!",
@@ -1685,13 +1699,9 @@ def run_reconstruction(
                             )
                             unified_succeeded = True
                             break
-                        elif state in ("failed", "aborted"):
-                            err_msgs = []
-                            for t in tasks_info:
-                                for err in t.get("errors", []):
-                                    err_msgs.append(str(err))
-                            err_str = "; ".join(err_msgs) if err_msgs else "unknown cluster error"
-                            print(f"  [Cluster] [ERROR] Unified batch {state}: {err_str}", flush=True)
+                        elif b_status in ("failed", "aborted"):
+                            err_str = b_err or "unknown cluster error"
+                            print(f"  [Cluster] [ERROR] Unified batch {b_status}: {err_str}", flush=True)
 
                             failed_worker_id = None
                             for t in tasks_info:
@@ -1787,7 +1797,6 @@ def run_reconstruction(
                                     while True:
                                         time.sleep(1.0)
                                         hb_info = net_client.batchInfo(handoff_batch_id)
-                                        hb_state = hb_info.get("state")
                                         hb_tasks = hb_info.get("tasks", [])
 
                                         if status_file and os.path.exists(status_file):
@@ -1842,7 +1851,8 @@ def run_reconstruction(
                                                 h_last_prog = h_prog
                                                 h_last_log = h_now
 
-                                        if hb_state == "completed":
+                                        hb_status, hb_success, hb_err = evaluate_cluster_batch_info(hb_info)
+                                        if hb_success:
                                             h_elapsed = (time.time() - h_start) / 60.0
                                             print(
                                                 f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!",
@@ -1851,9 +1861,9 @@ def run_reconstruction(
                                             handoff_ok = True
                                             unified_succeeded = True
                                             break
-                                        elif hb_state in ("failed", "aborted"):
+                                        elif hb_status in ("failed", "aborted"):
                                             print(
-                                                f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.",
+                                                f"  [Cluster] [ERROR] Handoff batch {hb_status} on second worker: {hb_err}",
                                                 flush=True,
                                             )
                                             break
@@ -1936,7 +1946,6 @@ def run_reconstruction(
                                             while True:
                                                 time.sleep(1.0)
                                                 sc_info = net_client.batchInfo(scratch_batch_id)
-                                                sc_state = sc_info.get("state")
                                                 sc_tasks = sc_info.get("tasks", [])
 
                                                 if status_file and os.path.exists(status_file):
@@ -1991,7 +2000,8 @@ def run_reconstruction(
                                                         sc_last_prog = sc_prog
                                                         sc_last_log = sc_now
 
-                                                if sc_state == "completed":
+                                                sc_status, sc_success, sc_err = evaluate_cluster_batch_info(sc_info)
+                                                if sc_success:
                                                     sc_elapsed = (time.time() - sc_start) / 60.0
                                                     print(
                                                         f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!",
@@ -1999,9 +2009,9 @@ def run_reconstruction(
                                                     )
                                                     unified_succeeded = True
                                                     break
-                                                elif sc_state in ("failed", "aborted"):
+                                                elif sc_status in ("failed", "aborted"):
                                                     print(
-                                                        f"  [Cluster] [ERROR] Fresh scratch batch {sc_state}.",
+                                                        f"  [Cluster] [ERROR] Fresh scratch batch {sc_status}: {sc_err}",
                                                         flush=True,
                                                     )
                                                     break

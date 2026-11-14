@@ -14,6 +14,7 @@ from autometashape.cluster.config import (
 )
 from autometashape.cluster.hardware import (
     detect_gpu_devices,
+    extract_unc_root,
     find_metashape_monitor_path,
     find_metashape_path,
     find_metashape_server_path,
@@ -41,6 +42,7 @@ from autometashape.cluster.orchestrator import (
     build_cluster_gradual_selection_tasks,
     build_monolithic_runscript_task,
     build_unified_cluster_pipeline_tasks,
+    evaluate_cluster_batch_info,
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import (
@@ -80,6 +82,8 @@ __all__ = [
     "check_storage_headroom",
     "detect_gpu_devices",
     "discover_dataset_projects",
+    "evaluate_cluster_batch_info",
+    "extract_unc_root",
     "find_metashape_monitor_path",
     "find_metashape_path",
     "find_metashape_server_path",

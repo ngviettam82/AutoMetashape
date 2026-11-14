@@ -837,6 +837,34 @@ class TestCliArgs(unittest.TestCase):
         args_opt_in = parser.parse_args(["--images", "dummy_images", "--stage-local"])
         self.assertTrue(args_opt_in.local_scratch_staging)
 
+    def test_supervisor_accepts_network_path_arg(self) -> None:
+        """Verify cluster_supervisor parser accepts --network-path and main forwards it."""
+        from autometashape.cluster.supervisor import build_arg_parser
+
+        parser = build_arg_parser()
+        args = parser.parse_args(
+            [
+                "--manifest",
+                "dummy_manifest.json",
+                "--network-enable",
+                "--network-path",
+                r"\\ctuav\catp",
+            ]
+        )
+        self.assertEqual(args.network_path, r"\\ctuav\catp")
+        self.assertTrue(args.network_enable)
+
+    def test_extract_unc_root_various_formats(self) -> None:
+        """Verify extract_unc_root correctly resolves UNC roots and ignores local paths."""
+        from autometashape.cluster.hardware import extract_unc_root
+
+        self.assertEqual(extract_unc_root(r"\\ctuav\catp\101126\CATP_0205"), r"\\ctuav\catp")
+        self.assertEqual(extract_unc_root("//ctuav/catp/101126/CATP_0205"), r"\\ctuav\catp")
+        self.assertEqual(extract_unc_root(r"\\ctuav\catp"), r"\\ctuav\catp")
+        self.assertEqual(extract_unc_root("C:\\images\\CATP_0205"), "")
+        self.assertEqual(extract_unc_root("/var/data/images"), "")
+        self.assertEqual(extract_unc_root(""), "")
+
 
 if __name__ == "__main__":
     unittest.main()

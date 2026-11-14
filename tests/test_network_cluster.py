@@ -12,7 +12,7 @@ import os
 import sys
 import tempfile
 import unittest
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
@@ -285,7 +285,7 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_cluster_independent_worker_mode_batch_limit(self) -> None:
         """Verify Independent Project Mode applies setBatchWorkerLimit(batch_id, 1)."""
-        from unittest.mock import MagicMock
+        from unittest.mock import MagicMock, patch
 
         mock_client = MagicMock()
         mock_client.createBatch.return_value = 101
@@ -1054,6 +1054,169 @@ class TestNetworkCluster(unittest.TestCase):
                             self.assertTrue(mock_builder.called)
                             passed_out = mock_builder.call_args[1].get("output_dir")
                             self.assertEqual(passed_out, os.path.abspath(net_out_dir))
+
+    def test_evaluate_cluster_batch_info_success_and_traps(self) -> None:
+        """Verify evaluate_cluster_batch_info catches false-positive completed state traps."""
+        from autometashape.cluster.orchestrator import evaluate_cluster_batch_info
+
+        # Case 1: Genuine success
+        b1 = {
+            "state": "completed",
+            "tasks": [{"name": "RunScript", "state": "completed", "progress": 100.0, "errors": []}],
+        }
+        st1, ok1, err1 = evaluate_cluster_batch_info(b1)
+        self.assertEqual(st1, "completed")
+        self.assertTrue(ok1)
+        self.assertEqual(err1, "")
+
+        # Case 2: Trap - state=completed but error_count > 0 with last_error
+        b2 = {
+            "state": "completed",
+            "error_count": 87,
+            "last_error": {
+                "message": "RunScript: Can't open file: The system cannot find the file specified (2): //ctuav/catp/CATP_0205.psx"
+            },
+            "tasks": [{"name": "RunScript", "state": "completed", "progress": 0.0}],
+        }
+        st2, ok2, err2 = evaluate_cluster_batch_info(b2)
+        self.assertEqual(st2, "failed")
+        self.assertFalse(ok2)
+        self.assertIn("The system cannot find the file specified (2)", err2)
+
+        # Case 3: Trap - state=completed but aborted=True
+        b3 = {
+            "state": "completed",
+            "aborted": True,
+            "tasks": [{"name": "RunScript", "errors": ["aborted by coordinator"]}],
+        }
+        st3, ok3, err3 = evaluate_cluster_batch_info(b3)
+        self.assertEqual(st3, "aborted")
+        self.assertFalse(ok3)
+        self.assertIn("aborted by coordinator", err3)
+
+        # Case 4: Task-level failure
+        b4 = {
+            "state": "completed",
+            "tasks": [{"name": "RunScript", "state": "failed", "errors": ["GPU Bad Allocation"]}],
+        }
+        st4, ok4, err4 = evaluate_cluster_batch_info(b4)
+        self.assertEqual(st4, "failed")
+        self.assertFalse(ok4)
+        self.assertIn("GPU Bad Allocation", err4)
+
+        # Case 5: Normal in-progress
+        b5 = {
+            "state": "running",
+            "tasks": [{"name": "RunScript", "state": "running", "progress": 55.0}],
+        }
+        st5, ok5, err5 = evaluate_cluster_batch_info(b5)
+        self.assertEqual(st5, "running")
+        self.assertFalse(ok5)
+        self.assertEqual(err5, "")
+
+    def test_supervisor_auto_detects_unc_network_path(self) -> None:
+        """Verify ClusterSupervisor auto-detects network_path from UNC output_dir or images_dir."""
+        from autometashape.cluster.supervisor import ClusterSupervisor
+
+        supervisor = ClusterSupervisor()
+        executed_jobs = []
+
+        def mock_exec(job):
+            executed_jobs.append(job)
+
+        supervisor.add_job(
+            images_dir="//ctuav/catp/101126/CATP_0205",
+            output_dir="//ctuav/catp/101126/Result/CATP_0205",
+            project_name="CATP_0205",
+            extra_args={"network_enable": True, "network_independent_workers": True},
+        )
+
+        with patch("autometashape.cluster.supervisor.check_storage_headroom", return_value=(True, 500.0)):
+            with patch(
+                "autometashape.cluster.supervisor.verify_project_deliverables",
+                return_value={"status": "PASS", "errors": []},
+            ):
+                summary = supervisor.run_queue(execute_fn=mock_exec)
+
+        self.assertEqual(summary["total_jobs"], 1)
+        self.assertEqual(len(executed_jobs), 1)
+        # Verify network_path was auto-populated from UNC path
+        self.assertEqual(executed_jobs[0].extra_args.get("network_path"), r"\\ctuav\catp")
+
+    def test_coordinator_suppresses_local_scratch_staging_when_network_enabled(self) -> None:
+        """Verify that when network_enable=True, coordinator does not divert output_dir to local scratch."""
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            img_dir = os.path.join(tmp_dir, "images")
+            out_dir = os.path.join(tmp_dir, "central_share", "CATP_0205")
+            scratch_vol = os.path.join(tmp_dir, "local_nvme_scratch")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(scratch_vol, exist_ok=True)
+            with open(os.path.join(img_dir, "img_001.jpg"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xe0" + b"\x00" * 100)
+
+            mock_meta = MagicMock()
+            mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
+            mock_doc = MagicMock()
+            mock_chunk = MagicMock()
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_doc.chunk = mock_chunk
+            mock_doc.chunks = [mock_chunk]
+            mock_meta.Document.return_value = mock_doc
+
+            mock_net_client = MagicMock()
+            mock_net_client.workerList.return_value = [{"worker_id": 1, "host": "192.168.1.100", "paused": False}]
+            mock_net_client.createBatch.return_value = 999
+            mock_net_client.batchInfo.return_value = {
+                "state": "completed",
+                "tasks": [{"name": "RunScript", "state": "completed", "progress": 100.0}],
+            }
+            mock_meta.NetworkClient.return_value = mock_net_client
+
+            with patch.object(mr, "Metashape", mock_meta):
+                with patch("cluster_utils.get_optimal_local_scratch_dir", return_value=scratch_vol):
+                    with patch("cluster_utils.check_scratch_disk_headroom", return_value=(True, 500.0)):
+                        with patch(
+                            "autometashape.core.pipeline.build_monolithic_runscript_task",
+                            wraps=mr.build_monolithic_runscript_task,
+                        ) as mock_builder:
+                            mr.run_reconstruction(
+                                images_dir=img_dir,
+                                output_dir=out_dir,
+                                network_enable=True,
+                                network_independent_workers=True,
+                                local_scratch_staging=True,
+                            )
+                            self.assertTrue(mock_builder.called)
+                            # On coordinator, local_scratch_staging is suppressed; doc.save must target central out_dir
+                            saved_doc_path = mock_doc.save.call_args[0][0]
+                            self.assertEqual(os.path.dirname(os.path.abspath(saved_doc_path)), os.path.abspath(out_dir))
+
+    def test_build_monolithic_runscript_task_mirrors_scripts_and_source(self) -> None:
+        """Verify build_monolithic_runscript_task mirrors both scripts/ and source/ to .autometashape."""
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_net:
+            img_dir = os.path.join(tmp_net, "101126", "CATP_0205")
+            out_dir = os.path.join(tmp_net, "101126", "Result", "CATP_0205")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+
+            task, rel_script, status_file = mr.build_monolithic_runscript_task(
+                images_dir=img_dir,
+                output_dir=out_dir,
+                project_name="CATP_0205",
+                network_path=tmp_net,
+            )
+
+            shared_script = os.path.join(tmp_net, ".autometashape", "scripts", "metashape_reconstruction.py")
+            shared_source = os.path.join(tmp_net, ".autometashape", "source")
+
+            self.assertTrue(os.path.isfile(shared_script))
+            self.assertTrue(os.path.isdir(shared_source))
+            self.assertEqual(rel_script, ".autometashape/scripts/metashape_reconstruction.py")
 
 
 if __name__ == "__main__":

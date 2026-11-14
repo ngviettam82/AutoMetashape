@@ -342,44 +342,49 @@ def build_monolithic_runscript_task(
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
 
-    # Resolve runner script
-    current_script = os.path.abspath(
-        os.path.join(os.path.dirname(__file__), "..", "..", "..", "scripts", "metashape_reconstruction.py")
-    )
+    # Resolve runner script and source package
+    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
+    current_script = os.path.join(repo_root, "scripts", "metashape_reconstruction.py")
+    current_source = os.path.join(repo_root, "source")
     shared_script = None
-    if network_path and os.path.isdir(network_path):
-        shared_scripts_dir = os.path.join(network_path, ".autometashape", "scripts")
+    norm_net = os.path.normpath(network_path.strip()) if network_path and network_path.strip() else ""
+    if norm_net and os.path.isdir(norm_net):
+        shared_autometashape = os.path.join(norm_net, ".autometashape")
+        shared_scripts_dir = os.path.join(shared_autometashape, "scripts")
+        shared_source_dir = os.path.join(shared_autometashape, "source")
         try:
             os.makedirs(shared_scripts_dir, exist_ok=True)
             shared_script = os.path.join(shared_scripts_dir, "metashape_reconstruction.py")
             if os.path.exists(current_script):
                 shutil.copy2(current_script, shared_script)
+            if os.path.isdir(current_source):
+                shutil.copytree(current_source, shared_source_dir, dirs_exist_ok=True)
         except Exception:
             shared_script = None
 
     if shared_script and os.path.exists(shared_script):
         try:
-            rel_script = os.path.relpath(shared_script, network_path).replace("\\", "/")
+            rel_script = os.path.relpath(shared_script, norm_net).replace("\\", "/")
         except Exception:
             rel_script = shared_script.replace("\\", "/")
     else:
-        if network_path and os.path.abspath(current_script).startswith(os.path.abspath(network_path)):
-            rel_script = os.path.relpath(current_script, network_path).replace("\\", "/")
+        if norm_net and os.path.abspath(current_script).startswith(os.path.abspath(norm_net)):
+            rel_script = os.path.relpath(current_script, norm_net).replace("\\", "/")
         else:
             rel_script = current_script.replace("\\", "/")
 
-    if network_path and os.path.abspath(images_dir).startswith(os.path.abspath(network_path)):
-        rel_images = os.path.relpath(images_dir, network_path).replace("\\", "/")
+    if norm_net and os.path.abspath(images_dir).startswith(os.path.abspath(norm_net)):
+        rel_images = os.path.relpath(images_dir, norm_net).replace("\\", "/")
     else:
         rel_images = images_dir.replace("\\", "/")
 
-    if network_path and os.path.abspath(output_dir).startswith(os.path.abspath(network_path)):
-        rel_output = os.path.relpath(output_dir, network_path).replace("\\", "/")
+    if norm_net and os.path.abspath(output_dir).startswith(os.path.abspath(norm_net)):
+        rel_output = os.path.relpath(output_dir, norm_net).replace("\\", "/")
     else:
         rel_output = output_dir.replace("\\", "/")
 
-    if network_path and os.path.abspath(status_file).startswith(os.path.abspath(network_path)):
-        rel_status = os.path.relpath(status_file, network_path).replace("\\", "/")
+    if norm_net and os.path.abspath(status_file).startswith(os.path.abspath(norm_net)):
+        rel_status = os.path.relpath(status_file, norm_net).replace("\\", "/")
     else:
         rel_status = status_file.replace("\\", "/")
 
@@ -962,3 +967,52 @@ def safe_create_cluster_batch(
         pass
 
     return batch_id, False
+
+
+def evaluate_cluster_batch_info(b_info: dict) -> tuple[str, bool, str]:
+    """Evaluates Metashape batchInfo dict and determines status, success flag, and error message.
+
+    Metashape NetworkClient.batchInfo() can report state='completed' even when the batch
+    was aborted or encountered errors (e.g. workitems failed). This function inspects
+    all failure signals (failed, aborted, error_count, task errors) to prevent false-positive
+    completion traps.
+
+    Args:
+        b_info: Dictionary returned by Metashape.NetworkClient.batchInfo(batch_id).
+
+    Returns:
+        tuple (status_str, is_success, error_description):
+            status_str: 'completed', 'failed', 'aborted', or 'inprogress'
+            is_success: True if genuinely completed with 0 errors, False otherwise
+            error_description: Consolidated error message if failed/aborted, else empty string
+    """
+    if not isinstance(b_info, dict):
+        return "failed", False, "Invalid batchInfo structure received from cluster server"
+
+    state = str(b_info.get("state") or "").lower()
+    tasks_info = b_info.get("tasks", [])
+
+    has_failed = bool(
+        state in ("failed", "aborted")
+        or b_info.get("failed")
+        or b_info.get("aborted")
+        or b_info.get("error_count", 0) > 0
+        or any(t.get("state") in ("failed", "aborted") or t.get("failed") or t.get("aborted") for t in tasks_info)
+    )
+
+    if has_failed:
+        err_msgs = []
+        last_err = b_info.get("last_error")
+        if isinstance(last_err, dict) and last_err.get("message"):
+            err_msgs.append(str(last_err["message"]))
+        for t in tasks_info:
+            for err in t.get("errors", []):
+                err_msgs.append(str(err))
+        resolved_state = "aborted" if (state == "aborted" or b_info.get("aborted")) else "failed"
+        err_str = "; ".join(err_msgs) if err_msgs else f"Batch {resolved_state} on cluster node"
+        return resolved_state, False, err_str
+
+    if state == "completed":
+        return "completed", True, ""
+
+    return state or "inprogress", False, ""

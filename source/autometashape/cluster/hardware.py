@@ -408,3 +408,22 @@ def test_unc_path(root_path: str) -> tuple[bool, str]:
         return True, ""
     except Exception as e:
         return False, f"Access denied to shared storage path '{norm_path}': {e}"
+
+
+def extract_unc_root(path: str) -> str:
+    """Extracts UNC share root (\\\\server\\share) if path is a UNC path.
+
+    Args:
+        path: Path string to inspect.
+
+    Returns:
+        UNC root string with backslashes (e.g. '\\\\server\\share') or empty string if not UNC.
+    """
+    if not path or not isinstance(path, str):
+        return ""
+    norm = path.strip().replace("/", "\\")
+    if norm.startswith(r"\\"):
+        parts = [p for p in norm[2:].split("\\") if p]
+        if len(parts) >= 2:
+            return f"\\\\{parts[0]}\\{parts[1]}"
+    return ""

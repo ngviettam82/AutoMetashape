@@ -19,6 +19,7 @@ import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from autometashape.cluster.hardware import extract_unc_root
 from autometashape.cluster.staging import get_optimal_local_scratch_dir
 from autometashape.core.verification import verify_project_deliverables
 
@@ -168,6 +169,16 @@ class ClusterSupervisor:
             job.status = "RUNNING"
             t_start = time.time()
             try:
+                # Auto-detect network_path from UNC path if not provided
+                if job.extra_args.get("network_enable") and not job.extra_args.get("network_path"):
+                    detected_unc = extract_unc_root(job.output_dir or "") or extract_unc_root(job.images_dir or "")
+                    if detected_unc:
+                        job.extra_args["network_path"] = detected_unc
+                        print(
+                            f"  [Cluster Supervisor] Auto-detected cluster storage root from UNC: {detected_unc}",
+                            flush=True,
+                        )
+
                 if execute_fn is not None:
                     execute_fn(job)
                 else:
@@ -178,7 +189,7 @@ class ClusterSupervisor:
                         output_dir=job.output_dir,
                         project_name=job.project_name,
                         preset=job.preset,
-                        local_scratch_staging=True,
+                        local_scratch_staging=not bool(job.extra_args.get("network_enable")),
                         scratch_dir=self.scratch_dir,
                         **job.extra_args,
                     )
@@ -414,6 +425,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=False,
         help="Lock each project to an independent worker executing exclusively via offline local scratch process",
     )
+    parser.add_argument(
+        "--network-path",
+        default="",
+        help="Shared network root directory (UNC path, e.g. \\\\SERVER\\SharedMetashape)",
+    )
     return parser
 
 
@@ -433,6 +449,8 @@ def main() -> int:
         extra_args["network_host"] = args.network_host
         extra_args["network_port"] = args.network_port
         extra_args["network_independent_workers"] = args.network_independent_workers
+        if args.network_path:
+            extra_args["network_path"] = args.network_path
 
     if args.manifest:
         if not os.path.isfile(args.manifest):
