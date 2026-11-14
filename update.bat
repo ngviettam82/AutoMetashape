@@ -45,10 +45,12 @@ set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
 set "SERVER_PID_FILE=%TEMP%\autometashape_server.pid"
 
-echo [1/4] Terminating active Metashape worker processes and server connections...
+echo [1/4] Terminating active Metashape worker processes...
 :: Graceful close first allowing Metashape to send network disconnect packet
 taskkill /IM metashape.exe >nul 2>&1
-taskkill /IM metashape-server.exe >nul 2>&1
+if "%ACTION_FLAG%"=="--server" (
+    taskkill /IM metashape-server.exe >nul 2>&1
+)
 timeout /t 2 /nobreak >nul
 
 :: Terminate tracked worker Python process by PID
@@ -59,19 +61,25 @@ if exist "%WORKER_PID_FILE%" (
     del /f /q "%WORKER_PID_FILE%" >nul 2>&1
 )
 
-:: Terminate tracked server Python process by PID
-if exist "%SERVER_PID_FILE%" (
-    for /f "usebackq delims=" %%p in ("%SERVER_PID_FILE%") do (
-        if not "%%p"=="" taskkill /F /T /PID %%p >nul 2>&1
+:: Terminate tracked server Python process by PID only if updating server
+if "%ACTION_FLAG%"=="--server" (
+    if exist "%SERVER_PID_FILE%" (
+        for /f "usebackq delims=" %%p in ("%SERVER_PID_FILE%") do (
+            if not "%%p"=="" taskkill /F /T /PID %%p >nul 2>&1
+        )
+        del /f /q "%SERVER_PID_FILE%" >nul 2>&1
     )
-    del /f /q "%SERVER_PID_FILE%" >nul 2>&1
 )
 
 :: Force kill binaries and windows
 taskkill /F /IM metashape.exe >nul 2>&1
-taskkill /F /IM metashape-server.exe >nul 2>&1
+if "%ACTION_FLAG%"=="--server" (
+    taskkill /F /IM metashape-server.exe >nul 2>&1
+)
 taskkill /F /T /FI "WINDOWTITLE eq AutoMetashape Cluster Worker Node*" >nul 2>&1
-taskkill /F /T /FI "WINDOWTITLE eq AutoMetashape Cluster Server Daemon*" >nul 2>&1
+if "%ACTION_FLAG%"=="--server" (
+    taskkill /F /T /FI "WINDOWTITLE eq AutoMetashape Cluster Server Daemon*" >nul 2>&1
+)
 
 :: Terminate Python processes running from Metashape Pro or AutoMetashape (unprivileged path check)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -143,8 +151,8 @@ if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 set "CFG_BACKUP=%TEMP%\autometashape_worker_config_backup.json"
 if exist "%TARGET_DIR%\worker_config.json" copy /y "%TARGET_DIR%\worker_config.json" "%CFG_BACKUP%" >nul 2>&1
 
-:: Mirror directory: copies new files, removes obsolete old files, preserves worker/server configs
-robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XF worker_config.json server_config.json /W:1 /R:2 /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
+:: Mirror directory: copies new files, removes obsolete old files, preserves worker/server configs and git history
+robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git .agents /XF worker_config.json server_config.json /W:1 /R:2 /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
 
 :: Verify robocopy completed without fatal errors (codes 0-7 indicate success)
 if %ERRORLEVEL% GEQ 8 (

@@ -132,13 +132,49 @@ For multi-hour cluster runs, execute the continuous monitoring cycle:
 When maintaining or upgrading remote cluster worker nodes from the Coordinator host:
 1. **Zero Fleet-Wide Blind Kills**: Never kill or push updates across all nodes simultaneously.
 2. **Single Canary Node Verification Gate**:
-   - Dispatch update probe to exactly **ONE canary worker node** first (e.g. `tan`).
+   - Dispatch update probe to exactly **ONE canary worker node** first (e.g. canary or `Admin-pc`).
    - Monitor canary state transition:
      $$\text{inprogress (probe)} \longrightarrow \text{offline (releasing locks)} \longrightarrow \text{ready (online with fresh code)}$$
-   - Confirm canary node completes self-update and re-registers as `ready` within **60–90 seconds**.
+   - Confirm canary node completes self-update and re-registers as `ready` within **30–60 seconds**.
    - Only proceed across remaining worker nodes in staggered waves after canary passes.
-3. **Preserve Host / Coordinator Exemption**: Coordinator host must be explicitly excluded from worker update batches.
+3. **Preserve Host / Coordinator Exemption**: Coordinator host must be explicitly excluded from worker update batches. Never run worker kill/update commands against the server daemon.
 4. **Zero-Touch Headless Invariants**: Worker nodes execute non-interactively with automatic UNC path inference and dynamic GPU discovery.
+
+#### Automated Fleet Updater CLI & API
+The repository provides an end-to-end autonomous remote updater (`scripts/update_fleet.py` and `update_fleet.bat`):
+
+- **List Connected Fleet Workers**:
+  ```powershell
+  .\update_fleet.bat --list
+  ```
+- **Update Single Canary Node** (verifies self-healing before wider rollout):
+  ```powershell
+  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node canary
+  ```
+- **Update Specific Worker Node**:
+  ```powershell
+  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc
+  ```
+- **Update Entire Fleet in Sequential Waves**:
+  ```powershell
+  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node all
+  ```
+- **Update Codebase Without Daemon Restart** (in-place script mirror only):
+  ```powershell
+  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --no-restart
+  ```
+
+#### Underlying Remote Update & Auto-Relaunch Architecture
+1. **Maintenance Project Anchor**: The coordinator maintains `.cluster/maintenance.psx` on the shared root as an anchor project.
+2. **Task Dispatch**: Coordinator submits a `Metashape.Tasks.RunScript()` network batch locked to the target worker.
+3. **In-Process Worker Execution**:
+   - Worker downloads latest release archive (`main.zip`) directly via Python `urllib.request`.
+   - Extracts archive via `zipfile` and mirrors all updated files into `%USERPROFILE%\Documents\AutoMetashape`.
+   - Preserves `worker_config.json` and `server_config.json`.
+   - Writes timestamped node verification log to `.cluster/<node>_update_result.txt`.
+4. **Graceful Daemon Signal**: Coordinator calls `client.quitWorker(wid)` once the batch finishes.
+5. **Resilient Re-Launch Loop**: Remote `launch_worker.py` daemon intercepts the process exit, enters its 10s reconnect window, and relaunches `metashape.exe` with the updated codebase.
+6. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
 
 ---
 

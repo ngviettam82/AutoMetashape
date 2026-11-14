@@ -57,10 +57,20 @@ from autometashape.cluster.supervisor import (
     check_storage_headroom,
     discover_dataset_projects,
 )
+from autometashape.cluster.updater import (
+    CLUSTER_MAINTENANCE_REL_PATH,
+    DEFAULT_REPO_ARCHIVE_URL,
+    ensure_cluster_maintenance_project,
+    generate_worker_updater_code,
+    list_online_workers,
+    update_remote_worker,
+)
 
 __all__ = [
     "ALIGN_DOWNSCALE_MAP",
+    "CLUSTER_MAINTENANCE_REL_PATH",
     "ClusterSupervisor",
+    "DEFAULT_REPO_ARCHIVE_URL",
     "DEFAULT_SERVER_CONFIG_FILENAME",
     "DEFAULT_WORKER_CONFIG_FILENAME",
     "DEPTH_DOWNSCALE_MAP",
@@ -82,6 +92,7 @@ __all__ = [
     "check_storage_headroom",
     "detect_gpu_devices",
     "discover_dataset_projects",
+    "ensure_cluster_maintenance_project",
     "evaluate_cluster_batch_info",
     "extract_unc_root",
     "find_metashape_monitor_path",
@@ -89,11 +100,13 @@ __all__ = [
     "find_metashape_server_path",
     "format_file_size",
     "generate_worker_bat_content",
+    "generate_worker_updater_code",
     "get_default_config_path",
     "get_optimal_local_scratch_dir",
     "get_primary_lan_ip",
     "get_psx_files_dir",
     "is_integrated_gpu",
+    "list_online_workers",
     "load_cluster_config",
     "normalize_unicode_path",
     "safe_create_cluster_batch",
@@ -101,4 +114,5 @@ __all__ = [
     "sync_staged_project_to_network",
     "test_tcp_connection",
     "test_unc_path",
+    "update_remote_worker",
 ]
