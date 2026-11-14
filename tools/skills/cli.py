@@ -5,8 +5,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Agent Skills Toolchain CLI (AutoMetashape & Isaac Lab Architecture)
+"""Agent Skills Toolchain CLI (AutoMetashape & Isaac Lab Architecture)
 
 Supports:
 - check:  Comprehensive validation of frontmatter, 5 mandatory headings, link integrity,
@@ -124,15 +123,17 @@ class SkillValidator:
                 content = skill_file.read_text(encoding="utf-8")
                 metadata, _, err = parse_simple_yaml_frontmatter(content)
                 if metadata:
-                    skills.append({
-                        "slug": skill_dir.name,
-                        "category": category_dir.name,
-                        "name": metadata.get("name", skill_dir.name),
-                        "audience": metadata.get("audience", "unknown"),
-                        "status": metadata.get("status", "unknown"),
-                        "description": str(metadata.get("description", "")),
-                        "path": skill_file,
-                    })
+                    skills.append(
+                        {
+                            "slug": skill_dir.name,
+                            "category": category_dir.name,
+                            "name": metadata.get("name", skill_dir.name),
+                            "audience": metadata.get("audience", "unknown"),
+                            "status": metadata.get("status", "unknown"),
+                            "description": str(metadata.get("description", "")),
+                            "path": skill_file,
+                        }
+                    )
         return skills
 
     def validate_all(self) -> Tuple[bool, List[str]]:
@@ -185,7 +186,9 @@ class SkillValidator:
                 else:
                     paths = [e.get("path") for e in entries if isinstance(e, dict)]
                     if not any(p in paths for p in ["skills/developer", "skills/domain", "skills/user"]):
-                        errors.append("'.agents/skills.json' missing core category paths ('skills/developer', 'skills/domain', 'skills/user')")
+                        errors.append(
+                            "'.agents/skills.json' missing core category paths ('skills/developer', 'skills/domain', 'skills/user')"
+                        )
             except Exception as e:
                 errors.append(f"Invalid JSON in '.agents/skills.json': {e}")
 
@@ -365,7 +368,12 @@ class SkillValidator:
         # Plain text file shim (Git on Windows when symlinks disabled)
         elif link_target_path.is_file():
             text = link_target_path.read_text(encoding="utf-8").strip().replace("\\", "/")
-            if text != expected_rel and text != alt_expected_rel and not text.endswith(f"skills/{category}/{slug}") and not text.endswith(f"skills/domain/{slug}"):
+            if (
+                text != expected_rel
+                and text != alt_expected_rel
+                and not text.endswith(f"skills/{category}/{slug}")
+                and not text.endswith(f"skills/domain/{slug}")
+            ):
                 return f"Symlink text shim contains '{text}', expected '{expected_rel}'"
         else:
             return f"Alias at '.agents/skills/{slug}' is neither a symlink nor a 1-line text shim"
@@ -463,7 +471,7 @@ owners:
   - "@autometashape-maintainers"
 ---
 
-# {slug.replace('-', ' ').title()}
+# {slug.replace("-", " ").title()}
 
 Operational guidance and technical specification for {slug}.
 
@@ -511,7 +519,7 @@ python tools/skills/cli.py check
         (target_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")
 
         # evaluations.md template
-        eval_content = f"""# {slug.replace('-', ' ').title()} Benchmark Evaluations
+        eval_content = f"""# {slug.replace("-", " ").title()} Benchmark Evaluations
 
 This evaluation suite defines benchmark scenarios to verify that autonomous agents correctly execute {slug}.
 
@@ -587,7 +595,7 @@ def main():
         print(f"{'SLUG':<24} {'CATEGORY':<12} {'AUDIENCE':<12} {'STATUS':<12} {'DESCRIPTION'}")
         print("=" * 105)
         for s in skills:
-            desc = s['description'][:42] + "..." if len(s['description']) > 42 else s['description']
+            desc = s["description"][:42] + "..." if len(s["description"]) > 42 else s["description"]
             print(f"{s['slug']:<24} {s['category']:<12} {s['audience']:<12} {s['status']:<12} {desc}")
         sys.exit(0)
 

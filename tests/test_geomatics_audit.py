@@ -5,10 +5,10 @@
 
 """Unit tests verifying photogrammetry geomatics audit requirements."""
 
+import os
+import sys
 import unittest
 from unittest.mock import MagicMock, patch
-import sys
-import os
 
 # Ensure repository root and scripts directory are on sys.path
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -132,7 +132,9 @@ class TestGeomaticsAudit(unittest.TestCase):
                 export_tie_points=True,
                 crop_method="manual",
             )
-            t_tp = next(t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportPointCloud" and "Tie Points" in desc)
+            t_tp = next(
+                t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportPointCloud" and "Tie Points" in desc
+            )
             self.assertEqual(t_tp.source_data, self.mock_meta.DataSource.TiePointsData)
             self.assertEqual(t_tp.format, self.mock_meta.PointCloudFormat.PointCloudFormatPLY)
 
@@ -179,7 +181,9 @@ class TestGeomaticsAudit(unittest.TestCase):
             self.assertIsNotNone(t_dem.image_compression)
             self.assertNotEqual(getattr(t_dem, "format", None), self.mock_meta.RasterFormat.RasterFormatNone)
 
-            t_ortho = next(t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportRaster" and "Orthomosaic" in desc)
+            t_ortho = next(
+                t for t, (name, key, desc) in zip(tasks, stages) if name == "ExportRaster" and "Orthomosaic" in desc
+            )
             self.assertTrue(t_ortho.save_world)
             self.assertTrue(t_ortho.save_alpha)
             self.assertIsNotNone(t_ortho.image_compression)

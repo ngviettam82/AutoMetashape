@@ -51,9 +51,11 @@ class TestExportOnDemand(unittest.TestCase):
             mock_meta.ModelFormat.ModelFormatGLTF = 2
             mock_meta.ImageCompression.TiffCompression.TiffCompressionLZW = 1
 
-            with patch("os.path.exists", return_value=True), \
-                 patch("os.path.getsize", return_value=1024), \
-                 patch("os.makedirs"):
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.path.getsize", return_value=1024),
+                patch("os.makedirs"),
+            ):
                 metashape_export.export_project_assets(
                     project_path="dummy.psx",
                     output_dir="dummy_out",
@@ -91,9 +93,11 @@ class TestExportOnDemand(unittest.TestCase):
             mock_meta.ModelFormat.ModelFormatGLTF = 2
             mock_meta.ImageCompression.TiffCompression.TiffCompressionLZW = 1
 
-            with patch("os.path.exists", return_value=True), \
-                 patch("os.path.getsize", return_value=1024), \
-                 patch("os.makedirs"):
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.path.getsize", return_value=1024),
+                patch("os.makedirs"),
+            ):
                 metashape_export.export_project_assets(
                     project_path="dummy.psx",
                     output_dir="dummy_out",

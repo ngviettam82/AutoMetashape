@@ -14,8 +14,8 @@ import unittest
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-from metashape_reconstruction import build_arg_parser as build_recon_parser
 from metashape_export import build_arg_parser as build_export_parser
+from metashape_reconstruction import build_arg_parser as build_recon_parser
 
 
 class TestCliArgs(unittest.TestCase):
@@ -24,22 +24,28 @@ class TestCliArgs(unittest.TestCase):
     def test_recon_parser_accepts_no_export_dem(self) -> None:
         """Defend against unrecognized --no-export-dem argument when exporting is decoupled."""
         parser = build_recon_parser()
-        args = parser.parse_args([
-            "--images", "dummy_images",
-            "--build-dem",
-            "--no-export-dem",
-        ])
+        args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--build-dem",
+                "--no-export-dem",
+            ]
+        )
         self.assertTrue(args.build_dem)
         self.assertFalse(args.export_dem)
 
     def test_recon_parser_accepts_export_dem(self) -> None:
         """Defend --export-dem flag activating GeoTIFF export."""
         parser = build_recon_parser()
-        args = parser.parse_args([
-            "--images", "dummy_images",
-            "--build-dem",
-            "--export-dem",
-        ])
+        args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--build-dem",
+                "--export-dem",
+            ]
+        )
         self.assertTrue(args.build_dem)
         self.assertTrue(args.export_dem)
 
@@ -52,20 +58,26 @@ class TestCliArgs(unittest.TestCase):
         self.assertFalse(default_args.export_ortho)
 
         # Explicitly enabled export
-        export_args = parser.parse_args([
-            "--images", "dummy_images",
-            "--ortho",
-            "--export-ortho",
-        ])
+        export_args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--ortho",
+                "--export-ortho",
+            ]
+        )
         self.assertTrue(export_args.build_orthomosaic)
         self.assertTrue(export_args.export_ortho)
 
         # Disabled export explicitly
-        no_export_args = parser.parse_args([
-            "--images", "dummy_images",
-            "--ortho",
-            "--no-export-ortho",
-        ])
+        no_export_args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--ortho",
+                "--no-export-ortho",
+            ]
+        )
         self.assertTrue(no_export_args.build_orthomosaic)
         self.assertFalse(no_export_args.export_ortho)
 
@@ -74,29 +86,38 @@ class TestCliArgs(unittest.TestCase):
         parser = build_recon_parser()
 
         # Case 1: Built natively into project, but not exported to disk file
-        args_no_export = parser.parse_args([
-            "--images", "dummy_images",
-            "--build-point-cloud",
-            "--no-export-point-cloud",
-        ])
+        args_no_export = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--build-point-cloud",
+                "--no-export-point-cloud",
+            ]
+        )
         self.assertTrue(args_no_export.build_point_cloud)
         self.assertFalse(args_no_export.export_point_cloud)
 
         # Case 2: Explicitly exported
-        args_export = parser.parse_args([
-            "--images", "dummy_images",
-            "--build-point-cloud",
-            "--export-point-cloud",
-        ])
+        args_export = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--build-point-cloud",
+                "--export-point-cloud",
+            ]
+        )
         self.assertTrue(args_export.build_point_cloud)
         self.assertTrue(args_export.export_point_cloud)
 
         # Case 3: Fully disabled
-        args_disabled = parser.parse_args([
-            "--images", "dummy_images",
-            "--no-point-cloud",
-            "--no-export-point-cloud",
-        ])
+        args_disabled = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--no-point-cloud",
+                "--no-export-point-cloud",
+            ]
+        )
         self.assertFalse(args_disabled.build_point_cloud)
         self.assertFalse(args_disabled.export_point_cloud)
 
@@ -109,10 +130,14 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(default_args.reference_preselection_mode, "estimated")
 
         for mode in ("estimated", "source", "sequential"):
-            args = parser.parse_args([
-                "--images", "dummy_images",
-                "--reference-preselection-mode", mode,
-            ])
+            args = parser.parse_args(
+                [
+                    "--images",
+                    "dummy_images",
+                    "--reference-preselection-mode",
+                    mode,
+                ]
+            )
             self.assertEqual(args.reference_preselection_mode, mode)
 
     def test_recon_parser_crop_choices(self) -> None:
@@ -122,26 +147,37 @@ class TestCliArgs(unittest.TestCase):
         self.assertIsNone(default_args.crop_method)
 
         for method in ("gps-square", "structure", "manual", "none"):
-            args = parser.parse_args([
-                "--images", "dummy_images",
-                "--crop-method", method,
-            ])
+            args = parser.parse_args(
+                [
+                    "--images",
+                    "dummy_images",
+                    "--crop-method",
+                    method,
+                ]
+            )
             self.assertEqual(args.crop_method, method)
 
-        no_crop_args = parser.parse_args([
-            "--images", "dummy_images",
-            "--no-crop",
-        ])
+        no_crop_args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--no-crop",
+            ]
+        )
         self.assertTrue(no_crop_args.no_crop)
 
     def test_recon_parser_presets(self) -> None:
         """Defend supported presets including building alias."""
         parser = build_recon_parser()
         for preset in ("pro", "custom", "building"):
-            args = parser.parse_args([
-                "--images", "dummy_images",
-                "--preset", preset,
-            ])
+            args = parser.parse_args(
+                [
+                    "--images",
+                    "dummy_images",
+                    "--preset",
+                    preset,
+                ]
+            )
             self.assertEqual(args.preset, preset)
 
     def test_recon_parser_network_cluster_args(self) -> None:
@@ -155,13 +191,19 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(default_args.network_path, "")
 
         # Explicit network configuration
-        net_args = parser.parse_args([
-            "--images", "dummy_images",
-            "--network-enable",
-            "--network-host", "192.168.1.150",
-            "--network-port", "5842",
-            "--network-path", r"\\SERVER\RealityScan",
-        ])
+        net_args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--network-enable",
+                "--network-host",
+                "192.168.1.150",
+                "--network-port",
+                "5842",
+                "--network-path",
+                r"\\SERVER\RealityScan",
+            ]
+        )
         self.assertTrue(net_args.network_enable)
         self.assertEqual(net_args.network_host, "192.168.1.150")
         self.assertEqual(net_args.network_port, 5842)
@@ -173,29 +215,36 @@ class TestCliArgs(unittest.TestCase):
         default_args = parser.parse_args(["--images", "dummy_images"])
         self.assertFalse(default_args.network_independent_workers)
 
-        indep_args = parser.parse_args([
-            "--images", "dummy_images",
-            "--network-enable",
-            "--network-independent-workers",
-        ])
+        indep_args = parser.parse_args(
+            [
+                "--images",
+                "dummy_images",
+                "--network-enable",
+                "--network-independent-workers",
+            ]
+        )
         self.assertTrue(indep_args.network_enable)
         self.assertTrue(indep_args.network_independent_workers)
 
     def test_export_parser_arguments(self) -> None:
         """Defend standalone export argument parser accepts required and optional flags."""
         parser = build_export_parser()
-        args = parser.parse_args([
-            "--project", "dummy.psx",
-            "--output", "dummy_out",
-            "--export-dem",
-            "--export-orthomosaic",
-            "--export-contours",
-            "--export-point-cloud",
-            "--export-fbx",
-            "--export-ply",
-            "--export-dxf",
-            "--export-tie-points",
-        ])
+        args = parser.parse_args(
+            [
+                "--project",
+                "dummy.psx",
+                "--output",
+                "dummy_out",
+                "--export-dem",
+                "--export-orthomosaic",
+                "--export-contours",
+                "--export-point-cloud",
+                "--export-fbx",
+                "--export-ply",
+                "--export-dxf",
+                "--export-tie-points",
+            ]
+        )
         self.assertEqual(args.project, "dummy.psx")
         self.assertEqual(args.output, "dummy_out")
         self.assertTrue(args.export_dem)
@@ -210,21 +259,29 @@ class TestCliArgs(unittest.TestCase):
         self.assertTrue(args.export_obj)
 
         # Defend PNG texture format and model export suppression
-        args_png = parser.parse_args([
-            "--project", "dummy.psx",
-            "--texture-format", "png",
-            "--no-export-glb",
-            "--no-export-obj",
-        ])
+        args_png = parser.parse_args(
+            [
+                "--project",
+                "dummy.psx",
+                "--texture-format",
+                "png",
+                "--no-export-glb",
+                "--no-export-obj",
+            ]
+        )
         self.assertEqual(args_png.texture_format, "png")
         self.assertFalse(args_png.export_glb)
         self.assertFalse(args_png.export_obj)
 
         for fmt in ("png", "tiff", "tif", "jpg", "jpeg"):
-            fmt_args = parser.parse_args([
-                "--project", "dummy.psx",
-                "--texture-format", fmt,
-            ])
+            fmt_args = parser.parse_args(
+                [
+                    "--project",
+                    "dummy.psx",
+                    "--texture-format",
+                    fmt,
+                ]
+            )
             self.assertEqual(fmt_args.texture_format, fmt)
 
     def test_metashape_cluster_binary_discovery(self) -> None:
@@ -265,10 +322,14 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(default_args.texture_format, "png")
 
         for fmt in ("png", "tiff", "tif", "jpg", "jpeg"):
-            args = parser.parse_args([
-                "--images", "dummy_images",
-                "--texture-format", fmt,
-            ])
+            args = parser.parse_args(
+                [
+                    "--images",
+                    "dummy_images",
+                    "--texture-format",
+                    fmt,
+                ]
+            )
             self.assertEqual(args.texture_format, fmt)
 
     def test_worker_launcher_parser(self) -> None:
@@ -276,14 +337,21 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         parser = lw.build_arg_parser()
-        args = parser.parse_args([
-            "--host", "192.168.1.100",
-            "--port", "5840",
-            "--root", r"\\SERVER\SharedMetashape",
-            "--cpu-enable", "1",
-            "--gpu-mask", "1",
-            "--no-reconnect",
-        ])
+        args = parser.parse_args(
+            [
+                "--host",
+                "192.168.1.100",
+                "--port",
+                "5840",
+                "--root",
+                r"\\SERVER\SharedMetashape",
+                "--cpu-enable",
+                "1",
+                "--gpu-mask",
+                "1",
+                "--no-reconnect",
+            ]
+        )
         self.assertEqual(args.host, "192.168.1.100")
         self.assertEqual(args.port, "5840")
         self.assertEqual(args.root, r"\\SERVER\SharedMetashape")
@@ -296,13 +364,19 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         parser = lw.build_arg_parser()
-        args = parser.parse_args([
-            "--worker",
-            "--host", "192.168.1.100",
-            "--root", r"\\SERVER\SharedMetashape",
-            "--cpu", "1",
-            "--gpu", "1",
-        ])
+        args = parser.parse_args(
+            [
+                "--worker",
+                "--host",
+                "192.168.1.100",
+                "--root",
+                r"\\SERVER\SharedMetashape",
+                "--cpu",
+                "1",
+                "--gpu",
+                "1",
+            ]
+        )
         self.assertTrue(args.worker)
         self.assertEqual(args.cpu_enable, 1)
         self.assertEqual(args.gpu_mask, "1")
@@ -312,30 +386,38 @@ class TestCliArgs(unittest.TestCase):
         import launch_server as ls
 
         parser = ls.build_arg_parser()
-        args = parser.parse_args([
-            "--server",
-            "--host", "0.0.0.0",
-            "--port", "5840",
-        ])
+        args = parser.parse_args(
+            [
+                "--server",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "5840",
+            ]
+        )
         self.assertTrue(args.server)
         self.assertEqual(args.port, "5840")
 
     def test_worker_launcher_loads_and_prioritizes_worker_config(self) -> None:
         """Verify launch_worker resolves parameters from worker_config.json with CLI override."""
-        import tempfile
         import json
+        import tempfile
+
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_file = os.path.join(tmpdir, "worker_config.json")
             with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "host": "10.0.0.5",
-                    "port": "5842",
-                    "root": r"\\NAS\MetashapeData",
-                    "cpu_enable": 0,
-                    "gpu_mask": "2",
-                }, f)
+                json.dump(
+                    {
+                        "host": "10.0.0.5",
+                        "port": "5842",
+                        "root": r"\\NAS\MetashapeData",
+                        "cpu_enable": 0,
+                        "gpu_mask": "2",
+                    },
+                    f,
+                )
 
             parser = lw.build_arg_parser()
 
@@ -359,8 +441,12 @@ class TestCliArgs(unittest.TestCase):
 
             # Case B: CLI args provided -> should override config file
             args_override = parser.parse_args(["--config", cfg_file, "--cpu", "1", "--gpu", "3"])
-            cpu_override = args_override.cpu_enable if args_override.cpu_enable is not None else saved_config.get("cpu_enable", 1)
-            raw_gpu_override = args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", None)
+            cpu_override = (
+                args_override.cpu_enable if args_override.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+            )
+            raw_gpu_override = (
+                args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", None)
+            )
             gpu_override = str(raw_gpu_override).strip() if raw_gpu_override is not None else None
 
             self.assertEqual(cpu_override, 1)
@@ -369,11 +455,14 @@ class TestCliArgs(unittest.TestCase):
             # Case C: Dynamic auto-detect when gpu_mask is omitted or auto
             cfg_auto = os.path.join(tmpdir, "worker_auto.json")
             with open(cfg_auto, "w", encoding="utf-8") as f:
-                json.dump({
-                    "host": "10.0.0.5",
-                    "root": r"\\NAS\MetashapeData",
-                    "gpu_mask": "auto",
-                }, f)
+                json.dump(
+                    {
+                        "host": "10.0.0.5",
+                        "root": r"\\NAS\MetashapeData",
+                        "gpu_mask": "auto",
+                    },
+                    f,
+                )
             args_auto = parser.parse_args(["--config", cfg_auto])
             saved_auto = lw.cu.load_cluster_config(args_auto.config)
             raw_gpu_auto = args_auto.gpu_mask if args_auto.gpu_mask is not None else saved_auto.get("gpu_mask", None)
@@ -396,6 +485,7 @@ class TestCliArgs(unittest.TestCase):
     def test_worker_launcher_headless_missing_params_exits_without_input(self) -> None:
         """Verify that launch_worker in headless mode exits with code 1 and never calls input()."""
         from unittest.mock import patch
+
         import launch_worker as lw
 
         # If input() were called, mock raises AssertionError
@@ -406,39 +496,47 @@ class TestCliArgs(unittest.TestCase):
 
     def test_worker_launcher_headless_resolves_env_vars(self) -> None:
         """Verify that launch_worker resolves AUTOMETASHAPE_CLUSTER_HOST and AUTOMETASHAPE_CLUSTER_ROOT."""
+        import tempfile
         from unittest.mock import patch
+
         import launch_worker as lw
 
         env_vars = {
             "AUTOMETASHAPE_CLUSTER_HOST": "192.168.1.100",
             "AUTOMETASHAPE_CLUSTER_ROOT": r"\\SERVER\ClusterStorage",
         }
-        with patch.dict(os.environ, env_vars):
-            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                with patch("os.path.isfile", return_value=True):
-                    with patch("cluster_utils.test_tcp_connection", return_value=True):
-                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = mock_popen.return_value
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_proc.poll.return_value = 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "empty_worker_config.json")
+            with patch.dict(os.environ, env_vars):
+                with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                    with patch("os.path.isfile", return_value=True):
+                        with patch("cluster_utils.test_tcp_connection", return_value=True):
+                            with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                                with patch("subprocess.Popen") as mock_popen:
+                                    mock_proc = mock_popen.return_value
+                                    mock_proc.wait.return_value = 0
+                                    mock_proc.returncode = 0
+                                    mock_proc.poll.return_value = 0
 
-                                with patch("sys.argv", ["launch_worker.py", "--headless", "--no-reconnect"]):
-                                    ret = lw._run_worker_lifecycle()
-                                    self.assertEqual(ret, 0)
-                                    # Verify command built uses the env-resolved values
-                                    cmd = mock_popen.call_args[0][0]
-                                    self.assertIn("192.168.1.100:5840", cmd)
-                                    self.assertIn(r"\\SERVER\ClusterStorage", cmd)
-                                    # STRICT INVARIANT: Do not pass --gpu-mask when omitted by user
-                                    self.assertNotIn("--gpu-mask", cmd)
+                                    with patch(
+                                        "sys.argv",
+                                        ["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_file],
+                                    ):
+                                        ret = lw._run_worker_lifecycle()
+                                        self.assertEqual(ret, 0)
+                                        # Verify command built uses the env-resolved values
+                                        cmd = mock_popen.call_args[0][0]
+                                        self.assertIn("192.168.1.100:5840", cmd)
+                                        self.assertIn(r"\\SERVER\ClusterStorage", cmd)
+                                        # STRICT INVARIANT: Do not pass --gpu-mask when omitted by user
+                                        self.assertNotIn("--gpu-mask", cmd)
 
     def test_worker_launcher_auto_persists_config_without_hardcoded_gpu(self) -> None:
         """Verify launch_worker auto-persists valid host/root without injecting hardcoded gpu_mask."""
-        import tempfile
         import json
+        import tempfile
         from unittest.mock import patch
+
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -453,14 +551,20 @@ class TestCliArgs(unittest.TestCase):
                                 mock_proc.returncode = 0
                                 mock_proc.poll.return_value = 0
 
-                                with patch("sys.argv", [
-                                    "launch_worker.py",
-                                    "--headless",
-                                    "--no-reconnect",
-                                    "--host", "192.168.1.100",
-                                    "--root", r"\\SERVER\ClusterStorage",
-                                    "--config", cfg_file,
-                                ]):
+                                with patch(
+                                    "sys.argv",
+                                    [
+                                        "launch_worker.py",
+                                        "--headless",
+                                        "--no-reconnect",
+                                        "--host",
+                                        "192.168.1.100",
+                                        "--root",
+                                        r"\\SERVER\ClusterStorage",
+                                        "--config",
+                                        cfg_file,
+                                    ],
+                                ):
                                     ret = lw._run_worker_lifecycle()
                                     self.assertEqual(ret, 0)
 
@@ -473,25 +577,28 @@ class TestCliArgs(unittest.TestCase):
             # STRICT INVARIANT: gpu_mask MUST NOT be in saved config when not explicitly requested
             self.assertNotIn("gpu_mask", saved)
 
-
     def test_worker_launcher_purges_legacy_hardcoded_gpu_from_config(self) -> None:
         """Verify launch_worker purges legacy hardcoded gpu_mask from pre-existing worker_config.json."""
-        import tempfile
         import json
+        import tempfile
         from unittest.mock import patch
+
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_file = os.path.join(tmpdir, "worker_config.json")
             # Write a legacy config with hardcoded gpu_mask 1
             with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "host": "192.168.1.100",
-                    "port": "5840",
-                    "root": r"\\SERVER\ClusterStorage",
-                    "cpu_enable": 1,
-                    "gpu_mask": "1",
-                }, f)
+                json.dump(
+                    {
+                        "host": "192.168.1.100",
+                        "port": "5840",
+                        "root": r"\\SERVER\ClusterStorage",
+                        "cpu_enable": 1,
+                        "gpu_mask": "1",
+                    },
+                    f,
+                )
 
             with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
                 with patch("os.path.isfile", return_value=True):
@@ -503,12 +610,16 @@ class TestCliArgs(unittest.TestCase):
                                 mock_proc.returncode = 0
                                 mock_proc.poll.return_value = 0
 
-                                with patch("sys.argv", [
-                                    "launch_worker.py",
-                                    "--headless",
-                                    "--no-reconnect",
-                                    "--config", cfg_file,
-                                ]):
+                                with patch(
+                                    "sys.argv",
+                                    [
+                                        "launch_worker.py",
+                                        "--headless",
+                                        "--no-reconnect",
+                                        "--config",
+                                        cfg_file,
+                                    ],
+                                ):
                                     ret = lw._run_worker_lifecycle()
                                     self.assertEqual(ret, 0)
 
@@ -517,25 +628,28 @@ class TestCliArgs(unittest.TestCase):
                 saved = json.load(f)
             self.assertNotIn("gpu_mask", saved)
 
-
     def test_worker_launcher_preserves_custom_gpu_mask_in_config(self) -> None:
         """Verify launch_worker preserves and respects custom non-legacy gpu_mask from worker_config.json."""
-        import tempfile
         import json
+        import tempfile
         from unittest.mock import patch
+
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg_file = os.path.join(tmpdir, "worker_config.json")
             # Write a custom config with explicit non-legacy gpu_mask 2
             with open(cfg_file, "w", encoding="utf-8") as f:
-                json.dump({
-                    "host": "192.168.1.100",
-                    "port": "5840",
-                    "root": r"\\SERVER\ClusterStorage",
-                    "cpu_enable": 1,
-                    "gpu_mask": "2",
-                }, f)
+                json.dump(
+                    {
+                        "host": "192.168.1.100",
+                        "port": "5840",
+                        "root": r"\\SERVER\ClusterStorage",
+                        "cpu_enable": 1,
+                        "gpu_mask": "2",
+                    },
+                    f,
+                )
 
             with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
                 with patch("os.path.isfile", return_value=True):
@@ -547,12 +661,16 @@ class TestCliArgs(unittest.TestCase):
                                 mock_proc.returncode = 0
                                 mock_proc.poll.return_value = 0
 
-                                with patch("sys.argv", [
-                                    "launch_worker.py",
-                                    "--headless",
-                                    "--no-reconnect",
-                                    "--config", cfg_file,
-                                ]):
+                                with patch(
+                                    "sys.argv",
+                                    [
+                                        "launch_worker.py",
+                                        "--headless",
+                                        "--no-reconnect",
+                                        "--config",
+                                        cfg_file,
+                                    ],
+                                ):
                                     ret = lw._run_worker_lifecycle()
                                     self.assertEqual(ret, 0)
                                     cmd = mock_popen.call_args[0][0]
@@ -567,33 +685,45 @@ class TestCliArgs(unittest.TestCase):
 
     def test_worker_launcher_explicit_gpu_mask_passed_to_metashape(self) -> None:
         """Verify launch_worker passes --gpu-mask when explicitly requested via CLI."""
+        import tempfile
         from unittest.mock import patch
+
         import launch_worker as lw
 
-        with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-            with patch("os.path.isfile", return_value=True):
-                with patch("cluster_utils.test_tcp_connection", return_value=True):
-                    with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                        with patch("subprocess.Popen") as mock_popen:
-                            mock_proc = mock_popen.return_value
-                            mock_proc.wait.return_value = 0
-                            mock_proc.returncode = 0
-                            mock_proc.poll.return_value = 0
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
+                with patch("os.path.isfile", return_value=True):
+                    with patch("cluster_utils.test_tcp_connection", return_value=True):
+                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
+                            with patch("subprocess.Popen") as mock_popen:
+                                mock_proc = mock_popen.return_value
+                                mock_proc.wait.return_value = 0
+                                mock_proc.returncode = 0
+                                mock_proc.poll.return_value = 0
 
-                            with patch("sys.argv", [
-                                "launch_worker.py",
-                                "--headless",
-                                "--no-reconnect",
-                                "--host", "192.168.1.100",
-                                "--root", r"\\SERVER\ClusterStorage",
-                                "--gpu-mask", "2",
-                            ]):
-                                ret = lw._run_worker_lifecycle()
-                                self.assertEqual(ret, 0)
-                                cmd = mock_popen.call_args[0][0]
-                                self.assertIn("--gpu-mask", cmd)
-                                idx = cmd.index("--gpu-mask")
-                                self.assertEqual(cmd[idx + 1], "2")
+                                with patch(
+                                    "sys.argv",
+                                    [
+                                        "launch_worker.py",
+                                        "--headless",
+                                        "--no-reconnect",
+                                        "--host",
+                                        "192.168.1.100",
+                                        "--root",
+                                        r"\\SERVER\ClusterStorage",
+                                        "--gpu-mask",
+                                        "2",
+                                        "--config",
+                                        cfg_file,
+                                    ],
+                                ):
+                                    ret = lw._run_worker_lifecycle()
+                                    self.assertEqual(ret, 0)
+                                    cmd = mock_popen.call_args[0][0]
+                                    self.assertIn("--gpu-mask", cmd)
+                                    idx = cmd.index("--gpu-mask")
+                                    self.assertEqual(cmd[idx + 1], "2")
 
     def test_local_scratch_staging_cli_defaults_and_opt_out(self) -> None:
         """Verify local_scratch_staging is enabled by default and supports explicit opt-out."""

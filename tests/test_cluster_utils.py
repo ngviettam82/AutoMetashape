@@ -217,5 +217,6 @@ class TestClusterUtils(unittest.TestCase):
         )
         self.assertNotIn("--gpu-mask", bat_auto)
 
+
 if __name__ == "__main__":
     unittest.main()

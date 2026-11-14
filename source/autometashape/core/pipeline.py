@@ -10,13 +10,9 @@ from __future__ import annotations
 import argparse
 import atexit
 import json
-import math
 import os
 import shutil
-import socket
-import subprocess
 import sys
-import tempfile
 import threading
 import time
 
@@ -31,14 +27,14 @@ from autometashape.cluster.orchestrator import (
     DEPTH_FILTER_MAP,
     POINT_CLOUD_FORMAT_MAP,
     PRESEL_MODE_MAP,
+    SHAPES_FORMAT_MAP,
     SURFACE_TYPE_MAP,
+    TARGET_TYPE_MAP,
     TILED_MODEL_FORMAT_MAP,
     _has_dense_points,
-    _norm_cluster_path,
     build_cluster_crop_task,
     build_cluster_gradual_selection_tasks,
     build_monolithic_runscript_task,
-    build_unified_cluster_pipeline_tasks,
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import (
@@ -51,36 +47,24 @@ from autometashape.core.export import infer_project_name
 from autometashape.core.filtering import (
     auto_crop_camera_gps_square,
     auto_crop_to_main_structure,
-    execute_usgs_gradual_selection,
     filter_image_quality,
     filter_tie_points,
-    robust_bounds,
-    solve_ray_convergence_irls,
 )
 from autometashape.core.telemetry import (
-    CAMERA_HARDWARE_DB,
-    SUPPORTED_IMAGE_EXTS,
-    analyze_radiometry,
     analyze_survey_physics,
-    calculate_haversine_meters,
     compute_utm_epsg,
     derive_pro_photogrammetry_plan,
     discover_image_subfolder_groups,
-    extract_image_telemetry,
-    parse_xmp_relative_altitude,
-    parse_xmp_telemetry,
     print_pro_engineering_report,
 )
 from autometashape.ipc.protocol import (
     IPC_COMPLETE,
     IPC_PAUSE_CROP,
-    IPC_SENTINEL_PREFIX,
-    IPC_SENTINEL_SUFFIX,
-    emit_ipc_error,
     emit_ipc_event,
     emit_ipc_stage,
     set_active_status_file,
 )
+
 
 def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     """Pauses pipeline execution to allow manual bounding box adjustment in Metashape GUI.
@@ -106,7 +90,9 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  1. Open this project in Agisoft Metashape Pro GUI.", flush=True)
     print("  2. Use 'Resize Region' and 'Rotate Region' tools to frame the target structure.", flush=True)
     print("  3. Save the project inside Metashape Pro (Ctrl+S) and CLOSE Metashape Pro.", flush=True)
-    print("  4. In AutoMetashape Studio, click [[>] Continue Reconstruction] (or press [Enter] in terminal).", flush=True)
+    print(
+        "  4. In AutoMetashape Studio, click [[>] Continue Reconstruction] (or press [Enter] in terminal).", flush=True
+    )
     print("=========================================================================", flush=True)
 
     # 1. Interactive terminal with Windows notification popup
@@ -114,12 +100,14 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
         if sys.platform == "win32":
             try:
                 import winsound
+
                 winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
             except Exception:
                 pass
             try:
                 import ctypes
                 import subprocess
+
                 # MB_YESNO = 4, MB_ICONQUESTION = 0x20, MB_SYSTEMMODAL = 0x1000, IDYES = 6
                 metashape_bin = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "metashape.exe"))
                 if not os.path.isfile(metashape_bin):
@@ -193,7 +181,6 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     print("  [PAUSE_CROP] Resume signal received! Reloading modified project from disk...", flush=True)
 
 
-
 def save_checkpoint(doc, target_path=None):
     """Safely saves Metashape document ensuring read_only is overridden and chunk is re-synchronized."""
     try:
@@ -228,7 +215,6 @@ def save_checkpoint(doc, target_path=None):
             raise OSError(f"Failed to save Metashape project: {retry_err}") from e
 
     return doc.chunk
-
 
 
 def run_reconstruction(
@@ -440,10 +426,6 @@ def run_reconstruction(
     local_staging_dir = None
     target_network_output = None
     if local_scratch_staging:
-        is_net = (
-            output_dir.startswith("\\")
-            or bool(network_path and os.path.abspath(output_dir).startswith(os.path.abspath(network_path)))
-        )
         resolved_scratch = scratch_dir or get_optimal_local_scratch_dir(min_scratch_free_gb)
         has_space, free_gb = check_scratch_disk_headroom(resolved_scratch, min_scratch_free_gb)
 
@@ -470,9 +452,7 @@ def run_reconstruction(
                 cand_psx = os.path.join(target_network_output, f"{project_name}.psx")
                 cand_legacy = os.path.join(target_network_output, "building_reconstruction.psx")
                 net_psx = (
-                    cand_psx
-                    if os.path.isfile(cand_psx)
-                    else (cand_legacy if os.path.isfile(cand_legacy) else None)
+                    cand_psx if os.path.isfile(cand_psx) else (cand_legacy if os.path.isfile(cand_legacy) else None)
                 )
                 if net_psx:
                     local_psx = os.path.join(local_staging_dir, os.path.basename(net_psx))
@@ -532,8 +512,7 @@ def run_reconstruction(
     def _sync_staging_to_central_share():
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
             print(
-                f"\n[Local Scratch Staging] Synchronizing staged project to central share: "
-                f"{target_network_output}...",
+                f"\n[Local Scratch Staging] Synchronizing staged project to central share: {target_network_output}...",
                 flush=True,
             )
             local_lock = os.path.join(local_staging_dir, f"{project_name}.files", "lock")
@@ -613,7 +592,10 @@ def run_reconstruction(
             if ground_max_distance is None:
                 ground_max_distance = pro_plan.get("ground_max_distance", 0.5)
         except Exception as e_prof:
-            print(f"  [Survey Physics] Note: Telemetry analysis ({e_prof}); using standard production geomatics defaults.", flush=True)
+            print(
+                f"  [Survey Physics] Note: Telemetry analysis ({e_prof}); using standard production geomatics defaults.",
+                flush=True,
+            )
 
     # Final safety fallbacks
     if crop_method is None:
@@ -622,7 +604,7 @@ def run_reconstruction(
         custom_faces = 2000000
     if texture_pages is None:
         texture_pages = 16
-    is_pro_preset = (preset == "pro" or is_auto)
+    is_pro_preset = preset == "pro" or is_auto
     if build_orthomosaic is None:
         build_orthomosaic = True if is_pro_preset else False
     if build_dem is None:
@@ -645,12 +627,18 @@ def run_reconstruction(
         preset_label = " [AUTONOMOUS INFERENCE]" if is_auto else ""
     print(f"  AUTONOMOUS METASHAPE PHOTOGRAMMETRY PIPELINE{preset_label}")
     print("=========================================================================", flush=True)
-    print(f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})")
+    print(
+        f"  Align Quality:      {align_quality.upper()} (Downscale: {ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)})"
+    )
     print(f"  Keypoints / Tie:    {keypoint_limit:,} / {tiepoint_limit:,}")
-    print(f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}")
+    print(
+        f"  Exclude Stationary: {filter_stationary_points} | Guided Matching: {guided_matching} | Adaptive Fitting: {adaptive_fitting}"
+    )
     align_meth_label = chunk_align_method.upper() if chunk_align_method else "CAMERA"
     print(f"  Filter Tie Points:  {filter_tiepoints} | Multi-Chunk: {multi_chunk.upper()} (Method: {align_meth_label})")
-    print(f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}")
+    print(
+        f"  Depth Maps Quality: {depth_quality.upper()} (Downscale: {DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)}) | Filtering: {depth_filtering.capitalize()}"
+    )
     if custom_faces >= 1_000_000:
         if custom_faces % 1_000_000 == 0:
             face_label = f"{custom_faces // 1_000_000}M"
@@ -661,38 +649,69 @@ def run_reconstruction(
     else:
         face_label = f"{custom_faces // 1000}K"
     print(f"  Target Mesh Faces:  {custom_faces:,} ({face_label})")
-    print(f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}")
-    print(f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}")
-    print(f"  Dense Point Cloud:  {'ENABLED' if build_point_cloud else 'DISABLED'} (Classify Ground: {classify_ground})")
-    print(f"  Elevation (DEM):    {'ENABLED' if build_dem else 'DISABLED'} | Orthomosaic: {'ENABLED' if build_orthomosaic else 'DISABLED'}")
+    print(
+        f"  Texture Atlas:      {texture_pages} pages @ 8192x8192 (8K) | Fill Holes: {fill_holes} | Ghosting Filter: {ghosting_filter}"
+    )
+    print(
+        f"  Bounding Box Crop:  {crop_method.upper()} | Rolling Shutter: {rolling_shutter} | Hole Closing: {close_holes}"
+    )
+    print(
+        f"  Dense Point Cloud:  {'ENABLED' if build_point_cloud else 'DISABLED'} (Classify Ground: {classify_ground})"
+    )
+    print(
+        f"  Elevation (DEM):    {'ENABLED' if build_dem else 'DISABLED'} | Orthomosaic: {'ENABLED' if build_orthomosaic else 'DISABLED'}"
+    )
     print(f"  Quality PDF Report: {'ENABLED' if export_report else 'DISABLED'}")
     print(f"  Execution Mode:     {'RESUME CHECKPOINT (DEFAULT)' if resume else 'RESTART FROM SCRATCH'}")
     print("=========================================================================", flush=True)
 
     # Enable all available discrete high-performance GPUs (NVIDIA, AMD Radeon, Intel Arc), excluding integrated graphics
-    gpus = Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
+    gpus = (
+        Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
+    )
     discrete_mask = 0
     active_gpu_names = []
     for i, g in enumerate(gpus):
         name = g.get("name", "").lower()
         vendor = g.get("vendor", "").lower()
         # Exclude integrated graphics (Intel UHD/HD, AMD APU Radeon)
-        is_igpu = any(ig in name for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "intel(r) iris", "radeon(tm) graphics", "radeon graphics"))
+        is_igpu = any(
+            ig in name
+            for ig in (
+                "intel(r) graphics",
+                "intel(r) hd",
+                "intel(r) uhd",
+                "intel(r) iris",
+                "radeon(tm) graphics",
+                "radeon graphics",
+            )
+        )
         if is_igpu:
             continue
         # Include discrete compute devices (NVIDIA, discrete AMD Radeon, discrete Intel Arc)
-        is_discrete = any(k in vendor or k in name for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc", "arc(tm)"))
+        is_discrete = any(
+            k in vendor or k in name
+            for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc", "arc(tm)")
+        )
         if is_discrete:
-            discrete_mask |= (1 << i)
+            discrete_mask |= 1 << i
             active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
 
     # When running in network worker mode, omit setting gpu_mask so the server dynamically orchestrates hardware
-    is_network_worker = any("--worker" in arg.lower() for arg in sys.argv) or (bool(network_path) and not network_enable)
+    is_network_worker = any("--worker" in arg.lower() for arg in sys.argv) or (
+        bool(network_path) and not network_enable
+    )
     if not is_network_worker:
         if discrete_mask:
             Metashape.app.gpu_mask = discrete_mask
             print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
-        elif gpus and not any(any(ig in g.get("name", "").lower() for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "radeon(tm) graphics")) for g in gpus):
+        elif gpus and not any(
+            any(
+                ig in g.get("name", "").lower()
+                for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "radeon(tm) graphics")
+            )
+            for g in gpus
+        ):
             Metashape.app.gpu_mask = (1 << len(gpus)) - 1
             print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
         else:
@@ -750,11 +769,15 @@ def run_reconstruction(
                         workers = []
 
                     active_cluster_workers = [
-                        w for w in workers
+                        w
+                        for w in workers
                         if not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
                     ]
-                    print(f"  [Network Cluster] Connected to server successfully!", flush=True)
-                    print(f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_cluster_workers)} active workers)", flush=True)
+                    print("  [Network Cluster] Connected to server successfully!", flush=True)
+                    print(
+                        f"  [Network Cluster] Cluster Nodes: {len(workers)} ({len(active_cluster_workers)} active workers)",
+                        flush=True,
+                    )
                     for idx, w in enumerate(workers, 1):
                         if isinstance(w, dict):
                             host_label = w.get("hostname", "Node")
@@ -766,17 +789,29 @@ def run_reconstruction(
                             g_mask = getattr(w, "gpu_mask", "Auto")
                             prio = getattr(w, "priority", 0)
                             cpu_en = getattr(w, "cpu_enabled", False)
-                        print(f"    * Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})", flush=True)
+                        print(
+                            f"    * Node {idx}: {host_label} (GPU Mask: {g_mask}, CPU: {'On' if cpu_en else 'Off'}, Priority: {prio})",
+                            flush=True,
+                        )
 
                     if len(active_cluster_workers) > 0:
                         net_client = client
                         cluster_enabled = True
                     else:
-                        print(f"  [Network Cluster] [NOTICE] 0 active worker nodes connected to server. Will execute tasks locally.", flush=True)
+                        print(
+                            "  [Network Cluster] [NOTICE] 0 active worker nodes connected to server. Will execute tasks locally.",
+                            flush=True,
+                        )
                 except Exception as e_net_conn:
-                    print(f"  [Network Cluster] [NOTICE] Server connection failed at {network_host}:{network_port} ({e_net_conn}). Processing locally.", flush=True)
+                    print(
+                        f"  [Network Cluster] [NOTICE] Server connection failed at {network_host}:{network_port} ({e_net_conn}). Processing locally.",
+                        flush=True,
+                    )
         except Exception as e_net_init:
-            print(f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}. Processing locally.", flush=True)
+            print(
+                f"  [Network Cluster] [WARNING] Error configuring network processing: {e_net_init}. Processing locally.",
+                flush=True,
+            )
     elif Metashape is not None and hasattr(Metashape, "app") and hasattr(Metashape.app, "settings"):
         try:
             Metashape.app.settings.network_enable = False
@@ -788,7 +823,11 @@ def run_reconstruction(
     target_psx = psx_out if os.path.exists(psx_out) else (legacy_psx if os.path.exists(legacy_psx) else None)
 
     def _safe_reopen():
-        load_path = psx_out if os.path.exists(psx_out) else (target_psx if target_psx and os.path.exists(target_psx) else psx_out)
+        load_path = (
+            psx_out
+            if os.path.exists(psx_out)
+            else (target_psx if target_psx and os.path.exists(target_psx) else psx_out)
+        )
         files_dir = get_psx_files_dir(load_path)
         lock_file = os.path.join(files_dir, "lock")
         if os.path.isfile(lock_file):
@@ -835,7 +874,7 @@ def run_reconstruction(
                 tgt_lower = [p.lower() for p in tgt_parts]
                 if share_name in tgt_lower:
                     idx = tgt_lower.index(share_name)
-                    rel = "/".join(tgt_parts[idx + 1:])
+                    rel = "/".join(tgt_parts[idx + 1 :])
                     if rel:
                         return rel
 
@@ -846,7 +885,7 @@ def run_reconstruction(
                 tgt_lower = [p.lower() for p in tgt_parts]
                 if sub in tgt_lower:
                     idx = tgt_lower.index(sub)
-                    rel = "/".join(tgt_parts[idx + 1:])
+                    rel = "/".join(tgt_parts[idx + 1 :])
                     if rel:
                         return rel
 
@@ -865,7 +904,9 @@ def run_reconstruction(
                 return f"{clean_net}/{rel}"
         return norm_tgt
 
-    def dispatch_cluster_task(tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = "") -> bool:
+    def dispatch_cluster_task(
+        tasks: Metashape.Task | list[Metashape.Task], task_desc: str, stage_key: str = ""
+    ) -> bool:
         """Dispatch photogrammetry task(s) to the network cluster with real-time progress monitoring."""
         if not cluster_enabled or net_client is None:
             return False
@@ -874,7 +915,10 @@ def run_reconstruction(
             rel_psx = get_cluster_rel_path()
             if stage_key:
                 emit_ipc_stage(stage_key, task_desc)
-            print(f"\n[Network Cluster] Dispatching '{task_desc}' to cluster ({network_host}:{network_port})...", flush=True)
+            print(
+                f"\n[Network Cluster] Dispatching '{task_desc}' to cluster ({network_host}:{network_port})...",
+                flush=True,
+            )
 
             doc.save(psx_out)
             task_list = tasks if isinstance(tasks, (list, tuple)) else [tasks]
@@ -884,7 +928,9 @@ def run_reconstruction(
                 return False
             net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
             w_limit = 1 if network_independent_workers else None
-            batch_id, was_attached = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False)
+            batch_id, was_attached = safe_create_cluster_batch(
+                net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False
+            )
             if was_attached:
                 print(f"  [Cluster] Attached to existing batch #{batch_id} for '{task_desc}'", flush=True)
             elif network_independent_workers:
@@ -900,22 +946,34 @@ def run_reconstruction(
                 tasks_info = b_info.get("tasks", [])
                 if tasks_info:
                     total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
-                    active_task = next((t for t in tasks_info if t.get("state") in ("running", "submitted")), tasks_info[-1])
+                    active_task = next(
+                        (t for t in tasks_info if t.get("state") in ("running", "submitted")), tasks_info[-1]
+                    )
                     t_sub_name = active_task.get("name", task_desc)
                     sub_prog = active_task.get("progress", 0.0)
                     now_t = time.time()
-                    if abs(total_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and total_prog != last_progress):
+                    if abs(total_prog - last_progress) >= 0.5 or (
+                        now_t - last_log_time >= 10.0 and total_prog != last_progress
+                    ):
                         elapsed_min = (now_t - t_task_start) / 60.0
                         if len(tasks_info) > 1:
-                            print(f"  [Cluster Progress] {task_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                            print(
+                                f"  [Cluster Progress] {task_desc} - {t_sub_name}: {sub_prog:.1f}% (Overall: {total_prog:.1f}%, Elapsed: {elapsed_min:.1f} min)",
+                                flush=True,
+                            )
                         else:
-                            print(f"  [Cluster Progress] {task_desc}: {total_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)", flush=True)
+                            print(
+                                f"  [Cluster Progress] {task_desc}: {total_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)",
+                                flush=True,
+                            )
                         last_progress = total_prog
                         last_log_time = now_t
 
                 if state == "completed":
                     elapsed_min = (time.time() - t_task_start) / 60.0
-                    print(f"  [Cluster] [OK] Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True)
+                    print(
+                        f"  [Cluster] [OK] Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True
+                    )
                     break
                 elif state in ("failed", "aborted"):
                     err_msgs = []
@@ -932,12 +990,26 @@ def run_reconstruction(
                     )
                     if is_bad_alloc:
                         failed_t = next(
-                            (t for t in tasks_info if any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory") for e in t.get("errors", []))),
+                            (
+                                t
+                                for t in tasks_info
+                                if any(
+                                    term in str(e).lower()
+                                    for term in ("bad allocation", "bad_alloc", "out of memory")
+                                    for e in t.get("errors", [])
+                                )
+                            ),
                             tasks_info[0] if tasks_info else None,
                         )
                         failed_w_id = failed_t.get("worker_id") if failed_t else None
-                        print(f"\n  [Cluster Memory Gate] Worker node {failed_w_id} encountered bad allocation (out of memory) on '{task_desc}'.", flush=True)
-                        print(f"  [Cluster] Terminating task on Worker {failed_w_id} and routing to another cluster machine...", flush=True)
+                        print(
+                            f"\n  [Cluster Memory Gate] Worker node {failed_w_id} encountered bad allocation (out of memory) on '{task_desc}'.",
+                            flush=True,
+                        )
+                        print(
+                            f"  [Cluster] Terminating task on Worker {failed_w_id} and routing to another cluster machine...",
+                            flush=True,
+                        )
                         emit_ipc_event(f"@@AUTOMETASHAPE_BAD_ALLOC:{stage_key or 'task'}:{failed_w_id}@@")
 
                         try:
@@ -945,16 +1017,31 @@ def run_reconstruction(
                                 net_client.setWorkerPaused(failed_w_id, True)
 
                             raw_w = net_client.workerList()
-                            w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                            w_list = (
+                                raw_w.get("workers", [])
+                                if isinstance(raw_w, dict)
+                                else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                            )
                             other_workers = [
-                                w for w in w_list
-                                if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_w_id
+                                w
+                                for w in w_list
+                                if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
+                                != failed_w_id
                                 and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
                             ]
 
                             if other_workers:
-                                print(f"  [Cluster] Found {len(other_workers)} other active cluster node(s). Re-dispatching '{task_desc}'...", flush=True)
-                                retry_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, net_tasks, worker_limit=1 if network_independent_workers else None, force_fresh=True)
+                                print(
+                                    f"  [Cluster] Found {len(other_workers)} other active cluster node(s). Re-dispatching '{task_desc}'...",
+                                    flush=True,
+                                )
+                                retry_batch_id, _ = safe_create_cluster_batch(
+                                    net_client,
+                                    rel_psx,
+                                    net_tasks,
+                                    worker_limit=1 if network_independent_workers else None,
+                                    force_fresh=True,
+                                )
 
                                 retry_ok = False
                                 while True:
@@ -962,7 +1049,10 @@ def run_reconstruction(
                                     rb_info = net_client.batchInfo(retry_batch_id)
                                     rb_state = rb_info.get("state")
                                     if rb_state == "completed":
-                                        print(f"  [Cluster] [OK] Task '{task_desc}' successfully finished on another cluster worker!", flush=True)
+                                        print(
+                                            f"  [Cluster] [OK] Task '{task_desc}' successfully finished on another cluster worker!",
+                                            flush=True,
+                                        )
                                         retry_ok = True
                                         break
                                     elif rb_state in ("failed", "aborted"):
@@ -971,7 +1061,9 @@ def run_reconstruction(
                                 if retry_ok:
                                     break
                         except Exception as e_handoff:
-                            print(f"  [Cluster] Note: could not hand off task to another worker: {e_handoff}", flush=True)
+                            print(
+                                f"  [Cluster] Note: could not hand off task to another worker: {e_handoff}", flush=True
+                            )
                         finally:
                             if failed_w_id is not None:
                                 try:
@@ -986,7 +1078,10 @@ def run_reconstruction(
             return True
 
         except Exception as e_dispatch:
-            print(f"  [Cluster] [WARNING] Cluster dispatch exception: {e_dispatch}. Falling back to local execution...", flush=True)
+            print(
+                f"  [Cluster] [WARNING] Cluster dispatch exception: {e_dispatch}. Falling back to local execution...",
+                flush=True,
+            )
             return False
 
     if resume and target_psx:
@@ -1023,11 +1118,17 @@ def run_reconstruction(
             chunk = doc.chunk
             aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
             if aligned_count >= 2:
-                print(f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).", flush=True)
-                print(f"  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).", flush=True)
+                print(
+                    f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).",
+                    flush=True,
+                )
+                print("  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).", flush=True)
                 resumed = True
             else:
-                print(f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.", flush=True)
+                print(
+                    f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.",
+                    flush=True,
+                )
                 doc = Metashape.Document()
                 chunk = doc.addChunk()
                 chunk.label = "Production_Reconstruction"
@@ -1040,7 +1141,10 @@ def run_reconstruction(
         files_dir = get_psx_files_dir(psx_out)
         if not resume:
             if os.path.isdir(files_dir) or os.path.exists(psx_out) or (target_psx and os.path.exists(target_psx)):
-                print(f"\n[Run Mode] Starting fresh reconstruction from scratch (--no-resume specified). Overwriting previous run in: {output_dir}", flush=True)
+                print(
+                    f"\n[Run Mode] Starting fresh reconstruction from scratch (--no-resume specified). Overwriting previous run in: {output_dir}",
+                    flush=True,
+                )
                 if os.path.isdir(files_dir):
                     try:
                         shutil.rmtree(files_dir, ignore_errors=True)
@@ -1094,8 +1198,14 @@ def run_reconstruction(
             use_multi_chunk = False
 
         if use_multi_chunk:
-            print(f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos total).", flush=True)
-            print("  Ingesting each subfolder into an independent chunk for drift-free camera alignment and point-based RANSAC ICP registration...", flush=True)
+            print(
+                f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos total).",
+                flush=True,
+            )
+            print(
+                "  Ingesting each subfolder into an independent chunk for drift-free camera alignment and point-based RANSAC ICP registration...",
+                flush=True,
+            )
 
             for c in list(doc.chunks):
                 if len(c.cameras) == 0:
@@ -1104,9 +1214,15 @@ def run_reconstruction(
             created_chunks = []
             for idx, (grp_name, filepaths) in enumerate(groups.items()):
                 sub_chunk = doc.addChunk()
-                sub_chunk.label = f"Flight_{idx+1}_{grp_name}"
-                emit_ipc_stage("ingest", f"Ingesting Chunk {idx+1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos")
-                print(f"\n[1/7] Ingesting Chunk {idx+1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos...", flush=True)
+                sub_chunk.label = f"Flight_{idx + 1}_{grp_name}"
+                emit_ipc_stage(
+                    "ingest",
+                    f"Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos",
+                )
+                print(
+                    f"\n[1/7] Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos...",
+                    flush=True,
+                )
                 sub_chunk.addPhotos(filepaths)
                 print(f"  Loaded {len(sub_chunk.cameras):,} cameras into '{sub_chunk.label}'.", flush=True)
 
@@ -1116,14 +1232,20 @@ def run_reconstruction(
                 if rolling_shutter:
                     for s in sub_chunk.sensors:
                         s.rolling_shutter = Metashape.Shutter.Model.Regularized
-                    print(f"  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation on '{sub_chunk.label}'.", flush=True)
+                    print(
+                        f"  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation on '{sub_chunk.label}'.",
+                        flush=True,
+                    )
 
                 created_chunks.append(sub_chunk)
 
             # Step 2: Feature Detection & Matching per chunk
             for idx, c in enumerate(created_chunks):
-                emit_ipc_stage("match", f"GPU Feature Matching for Chunk {idx+1}/{len(created_chunks)}")
-                print(f"\n[2/7] GPU Feature Matching for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', {len(c.cameras):,} cameras)...", flush=True)
+                emit_ipc_stage("match", f"GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)}")
+                print(
+                    f"\n[2/7] GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)} ('{c.label}', {len(c.cameras):,} cameras)...",
+                    flush=True,
+                )
                 t_match = time.time()
                 c.matchPhotos(
                     downscale=align_downscale,
@@ -1137,17 +1259,23 @@ def run_reconstruction(
                     filter_stationary_points=filter_stationary_points,
                     guided_matching=guided_matching,
                 )
-                print(f"  Matching finished for '{c.label}' in {(time.time() - t_match)/60:.2f} min.", flush=True)
+                print(f"  Matching finished for '{c.label}' in {(time.time() - t_match) / 60:.2f} min.", flush=True)
 
             # Step 3: Camera Alignment per chunk
             for idx, c in enumerate(created_chunks):
-                emit_ipc_stage("align", f"Aligning Cameras for Chunk {idx+1}/{len(created_chunks)}")
-                print(f"\n[3/7] Aligning Cameras for Chunk {idx+1}/{len(created_chunks)} ('{c.label}', Adaptive Fitting: {adaptive_fitting})...", flush=True)
+                emit_ipc_stage("align", f"Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)}")
+                print(
+                    f"\n[3/7] Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)} ('{c.label}', Adaptive Fitting: {adaptive_fitting})...",
+                    flush=True,
+                )
                 t_align = time.time()
                 c.alignCameras(adaptive_fitting=adaptive_fitting)
                 aligned_count = sum(1 for cam in c.cameras if cam.transform and cam.enabled)
                 enabled_count = sum(1 for cam in c.cameras if cam.enabled)
-                print(f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+                print(
+                    f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align) / 60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.",
+                    flush=True,
+                )
 
                 if filter_tiepoints:
                     usgs_stats = filter_tie_points(c)
@@ -1157,11 +1285,17 @@ def run_reconstruction(
                 except Exception:
                     pass
 
-            aligned_chunks = [c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2]
+            aligned_chunks = [
+                c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2
+            ]
             if len(aligned_chunks) == 0:
-                raise RuntimeError("No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap.")
+                raise RuntimeError(
+                    "No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap."
+                )
 
-            anchor_chunk = max(aligned_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
+            anchor_chunk = max(
+                aligned_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled)
+            )
             ref_key = anchor_chunk.key
             merge_chunk_keys = [c.key for c in created_chunks]
             align_chunk_keys = [c.key for c in aligned_chunks]
@@ -1169,7 +1303,10 @@ def run_reconstruction(
             if len(aligned_chunks) >= 2:
                 align_mode = chunk_align_method.lower() if chunk_align_method else "camera"
                 if align_mode == "point":
-                    print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...", flush=True)
+                    print(
+                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...",
+                        flush=True,
+                    )
                     try:
                         doc.alignChunks(
                             chunks=align_chunk_keys,
@@ -1181,7 +1318,10 @@ def run_reconstruction(
                         )
                         print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
                     except Exception as e_align:
-                        print(f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; falling back to Camera/GPS-based registration (method=2)...", flush=True)
+                        print(
+                            f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; falling back to Camera/GPS-based registration (method=2)...",
+                            flush=True,
+                        )
                         try:
                             doc.alignChunks(
                                 chunks=align_chunk_keys,
@@ -1189,11 +1329,19 @@ def run_reconstruction(
                                 method=2,
                                 fit_scale=False,
                             )
-                            print("  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True)
+                            print(
+                                "  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True
+                            )
                         except Exception as e_cam:
-                            print(f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.", flush=True)
+                            print(
+                                f"  [Chunk Alignment] Camera-based alignment raised '{e_cam}'; proceeding with native camera transforms.",
+                                flush=True,
+                            )
                 else:
-                    print(f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Camera/GPS-based registration (method=2)...", flush=True)
+                    print(
+                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor '{anchor_chunk.label}' using Camera/GPS-based registration (method=2)...",
+                        flush=True,
+                    )
                     try:
                         doc.alignChunks(
                             chunks=align_chunk_keys,
@@ -1203,7 +1351,10 @@ def run_reconstruction(
                         )
                         print("  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True)
                     except Exception as e_cam:
-                        print(f"  [Chunk Alignment] Camera-based registration raised '{e_cam}'; falling back to Point-Based RANSAC ICP (method=0)...", flush=True)
+                        print(
+                            f"  [Chunk Alignment] Camera-based registration raised '{e_cam}'; falling back to Point-Based RANSAC ICP (method=0)...",
+                            flush=True,
+                        )
                         try:
                             doc.alignChunks(
                                 chunks=align_chunk_keys,
@@ -1215,15 +1366,27 @@ def run_reconstruction(
                             )
                             print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
                         except Exception as e_align:
-                            print(f"  [Chunk Alignment] Point-based alignment raised '{e_align}'; proceeding with native camera transforms.", flush=True)
+                            print(
+                                f"  [Chunk Alignment] Point-based alignment raised '{e_align}'; proceeding with native camera transforms.",
+                                flush=True,
+                            )
             else:
-                print(f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned cameras; skipping chunk registration.", flush=True)
+                print(
+                    f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned cameras; skipping chunk registration.",
+                    flush=True,
+                )
 
-            print(f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks into unified production reconstruction chunk...", flush=True)
+            print(
+                f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks into unified production reconstruction chunk...",
+                flush=True,
+            )
             try:
                 doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=True)
             except Exception as e_merge:
-                print(f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging with camera transforms preserved...", flush=True)
+                print(
+                    f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging with camera transforms preserved...",
+                    flush=True,
+                )
                 doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=False)
 
             doc.chunk = doc.chunks[-1]
@@ -1235,7 +1398,10 @@ def run_reconstruction(
                 pass
             aligned_total = sum(1 for cam in chunk.cameras if cam.transform and cam.enabled)
             enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
-            print(f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).", flush=True)
+            print(
+                f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, {aligned_total}/{enabled_total} aligned).",
+                flush=True,
+            )
 
             if import_reference and os.path.isfile(import_reference):
                 print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
@@ -1247,14 +1413,16 @@ def run_reconstruction(
                     print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
 
             if detect_markers:
-                print(f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...", flush=True)
+                print(
+                    f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...",
+                    flush=True,
+                )
                 try:
                     tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
                     chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
                     print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
-
 
         else:
             all_imgs = []
@@ -1285,7 +1453,10 @@ def run_reconstruction(
                     print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
 
             if detect_markers:
-                print(f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...", flush=True)
+                print(
+                    f"\n[Target Detection] Detecting target markers (Type: {target_type}, Tolerance: {marker_tolerance})...",
+                    flush=True,
+                )
                 try:
                     tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
                     chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
@@ -1318,7 +1489,11 @@ def run_reconstruction(
                 has_depth = False
                 if chunk and chunk.depth_maps is not None:
                     try:
-                        has_depth = len(chunk.depth_maps.keys()) > 0 if hasattr(chunk.depth_maps, "keys") else bool(chunk.depth_maps)
+                        has_depth = (
+                            len(chunk.depth_maps.keys()) > 0
+                            if hasattr(chunk.depth_maps, "keys")
+                            else bool(chunk.depth_maps)
+                        )
                     except Exception:
                         has_depth = bool(chunk.depth_maps)
 
@@ -1342,7 +1517,7 @@ def run_reconstruction(
                         if hasattr(chunk.model, "textures"):
                             has_tex = len(chunk.model.textures) == (texture_pages or 16)
                         elif hasattr(chunk.model, "texture") and chunk.model.texture():
-                            has_tex = ((texture_pages or 16) == 1)
+                            has_tex = (texture_pages or 16) == 1
                     except Exception:
                         has_tex = False
 
@@ -1374,11 +1549,17 @@ def run_reconstruction(
                     if has_ortho_asset and not u_ortho:
                         reused_items.append("Orthomosaic")
                     if reused_items:
-                        print(f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}", flush=True)
+                        print(
+                            f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}",
+                            flush=True,
+                        )
 
                 # Check if all requested reconstruction stages are already satisfied in checkpoint
                 if not any([u_align, u_depth, u_mesh, u_tex, u_dem, u_ortho, u_pc]):
-                    print(f"  [Cluster Checkpoint] All reconstruction stages already complete in checkpoint. Skipping cluster dispatch.", flush=True)
+                    print(
+                        "  [Cluster Checkpoint] All reconstruction stages already complete in checkpoint. Skipping cluster dispatch.",
+                        flush=True,
+                    )
                     unified_succeeded = True
                 else:
                     net_task, rel_script, status_file = build_monolithic_runscript_task(
@@ -1419,9 +1600,15 @@ def run_reconstruction(
                         net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
                     )
                     if was_attached:
-                        print(f"  [Cluster] Attached to active Monolithic Batch ID={batch_id} on dedicated worker node.", flush=True)
+                        print(
+                            f"  [Cluster] Attached to active Monolithic Batch ID={batch_id} on dedicated worker node.",
+                            flush=True,
+                        )
                     else:
-                        print(f"  [Cluster] Created Monolithic RunScript Batch ID={batch_id} locked to 1 dedicated worker node.", flush=True)
+                        print(
+                            f"  [Cluster] Created Monolithic RunScript Batch ID={batch_id} locked to 1 dedicated worker node.",
+                            flush=True,
+                        )
 
                     t_u_start = time.time()
                     last_stage_key = None
@@ -1446,32 +1633,51 @@ def run_reconstruction(
 
                                 if stage_k != last_stage_key:
                                     emit_ipc_stage(stage_k, stage_desc)
-                                    print(f"\n>>> [Stage Transition] Active Stage: {stage_desc} (Node: {worker_node})", flush=True)
+                                    print(
+                                        f"\n>>> [Stage Transition] Active Stage: {stage_desc} (Node: {worker_node})",
+                                        flush=True,
+                                    )
                                     last_stage_key = stage_k
 
                                 now_t = time.time()
-                                if abs(sub_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and sub_prog != last_progress):
+                                if abs(sub_prog - last_progress) >= 0.5 or (
+                                    now_t - last_log_time >= 10.0 and sub_prog != last_progress
+                                ):
                                     elapsed_min = (now_t - t_u_start) / 60.0
-                                    print(f"  [Cluster Progress] {stage_desc}: {sub_prog:.1f}% (Worker: {worker_node}, Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                    print(
+                                        f"  [Cluster Progress] {stage_desc}: {sub_prog:.1f}% (Worker: {worker_node}, Elapsed: {elapsed_min:.1f} min)",
+                                        flush=True,
+                                    )
                                     last_progress = sub_prog
                                     last_log_time = now_t
                             except Exception:
                                 pass
                         elif tasks_info:
-                            active_task = next((t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")), tasks_info[-1])
+                            active_task = next(
+                                (t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")),
+                                tasks_info[-1],
+                            )
                             t_sub_name = active_task.get("name", "RunScript")
                             sub_prog = active_task.get("progress", 0.0)
 
                             now_t = time.time()
-                            if abs(sub_prog - last_progress) >= 0.5 or (now_t - last_log_time >= 10.0 and sub_prog != last_progress):
+                            if abs(sub_prog - last_progress) >= 0.5 or (
+                                now_t - last_log_time >= 10.0 and sub_prog != last_progress
+                            ):
                                 elapsed_min = (now_t - t_u_start) / 60.0
-                                print(f"  [Cluster Progress] Dedicated Worker Processing - {t_sub_name}: {sub_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)", flush=True)
+                                print(
+                                    f"  [Cluster Progress] Dedicated Worker Processing - {t_sub_name}: {sub_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)",
+                                    flush=True,
+                                )
                                 last_progress = sub_prog
                                 last_log_time = now_t
 
                         if state == "completed":
                             elapsed_min = (time.time() - t_u_start) / 60.0
-                            print(f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!", flush=True)
+                            print(
+                                f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!",
+                                flush=True,
+                            )
                             unified_succeeded = True
                             break
                         elif state in ("failed", "aborted"):
@@ -1501,11 +1707,19 @@ def run_reconstruction(
                                         pass
 
                                 raw_w = net_client.workerList()
-                                w_list = raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                                w_list = (
+                                    raw_w.get("workers", [])
+                                    if isinstance(raw_w, dict)
+                                    else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                                )
                                 other_workers = [
-                                    w for w in w_list
-                                    if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)) != failed_worker_id
-                                    and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                                    w
+                                    for w in w_list
+                                    if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
+                                    != failed_worker_id
+                                    and not (
+                                        w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
+                                    )
                                 ]
 
                                 if other_workers:
@@ -1542,13 +1756,21 @@ def run_reconstruction(
                                         network_path=network_path,
                                         local_scratch_staging=local_scratch_staging,
                                     )
-                                    handoff_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True)
-                                    print(f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.", flush=True)
+                                    handoff_batch_id, _ = safe_create_cluster_batch(
+                                        net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True
+                                    )
+                                    print(
+                                        f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.",
+                                        flush=True,
+                                    )
 
                                     if failed_worker_id is not None:
                                         try:
                                             net_client.setWorkerPaused(failed_worker_id, False)
-                                            print(f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.", flush=True)
+                                            print(
+                                                f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.",
+                                                flush=True,
+                                            )
                                         except Exception:
                                             pass
 
@@ -1574,44 +1796,76 @@ def run_reconstruction(
                                                 h_node = hs_data.get("worker_node", "Second Worker")
                                                 if hk_stage != h_last_stage:
                                                     emit_ipc_stage(hk_stage, hk_desc)
-                                                    print(f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} (Node: {h_node})", flush=True)
+                                                    print(
+                                                        f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} (Node: {h_node})",
+                                                        flush=True,
+                                                    )
                                                     h_last_stage = hk_stage
 
                                                 h_now = time.time()
-                                                if abs(h_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_prog != h_last_prog):
+                                                if abs(h_prog - h_last_prog) >= 0.5 or (
+                                                    h_now - h_last_log >= 10.0 and h_prog != h_last_prog
+                                                ):
                                                     h_elapsed = (h_now - h_start) / 60.0
-                                                    print(f"  [Handoff Progress] {hk_desc}: {h_prog:.1f}% (Worker: {h_node}, Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                    print(
+                                                        f"  [Handoff Progress] {hk_desc}: {h_prog:.1f}% (Worker: {h_node}, Elapsed: {h_elapsed:.1f} min)",
+                                                        flush=True,
+                                                    )
                                                     h_last_prog = h_prog
                                                     h_last_log = h_now
                                             except Exception:
                                                 pass
                                         elif hb_tasks:
-                                            h_active = next((t for t in hb_tasks if t.get("state") in ("running", "inprogress", "submitted")), hb_tasks[-1])
+                                            h_active = next(
+                                                (
+                                                    t
+                                                    for t in hb_tasks
+                                                    if t.get("state") in ("running", "inprogress", "submitted")
+                                                ),
+                                                hb_tasks[-1],
+                                            )
                                             h_name = h_active.get("name", "RunScript")
                                             h_prog = h_active.get("progress", 0.0)
                                             h_now = time.time()
-                                            if abs(h_prog - h_last_prog) >= 0.5 or (h_now - h_last_log >= 10.0 and h_prog != h_last_prog):
+                                            if abs(h_prog - h_last_prog) >= 0.5 or (
+                                                h_now - h_last_log >= 10.0 and h_prog != h_last_prog
+                                            ):
                                                 h_elapsed = (h_now - h_start) / 60.0
-                                                print(f"  [Handoff Progress] {h_name}: {h_prog:.1f}% (Elapsed: {h_elapsed:.1f} min)", flush=True)
+                                                print(
+                                                    f"  [Handoff Progress] {h_name}: {h_prog:.1f}% (Elapsed: {h_elapsed:.1f} min)",
+                                                    flush=True,
+                                                )
                                                 h_last_prog = h_prog
                                                 h_last_log = h_now
 
                                         if hb_state == "completed":
                                             h_elapsed = (time.time() - h_start) / 60.0
-                                            print(f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!", flush=True)
+                                            print(
+                                                f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!",
+                                                flush=True,
+                                            )
                                             handoff_ok = True
                                             unified_succeeded = True
                                             break
                                         elif hb_state in ("failed", "aborted"):
-                                            print(f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.", flush=True)
+                                            print(
+                                                f"  [Cluster] [ERROR] Handoff batch {hb_state} on second worker.",
+                                                flush=True,
+                                            )
                                             break
 
                                     if handoff_ok:
                                         break
                                     else:
                                         # Tier 2: Repeated failure! Try restarting from scratch on a clean worker node
-                                        print(f"\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.", flush=True)
-                                        print(f"  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...", flush=True)
+                                        print(
+                                            "\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.",
+                                            flush=True,
+                                        )
+                                        print(
+                                            "  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...",
+                                            flush=True,
+                                        )
                                         emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
                                         try:
                                             files_dir = get_psx_files_dir(psx_out)
@@ -1659,8 +1913,17 @@ def run_reconstruction(
                                                 network_path=network_path,
                                                 local_scratch_staging=local_scratch_staging,
                                             )
-                                            scratch_batch_id, _ = safe_create_cluster_batch(net_client, rel_psx, [scratch_net_task], worker_limit=1, force_fresh=True)
-                                            print(f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.", flush=True)
+                                            scratch_batch_id, _ = safe_create_cluster_batch(
+                                                net_client,
+                                                rel_psx,
+                                                [scratch_net_task],
+                                                worker_limit=1,
+                                                force_fresh=True,
+                                            )
+                                            print(
+                                                f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.",
+                                                flush=True,
+                                            )
 
                                             sc_start = time.time()
                                             sc_last_stage = None
@@ -1683,38 +1946,66 @@ def run_reconstruction(
                                                         sc_node = scs_data.get("worker_node", "Scratch Worker")
                                                         if sck_stage != sc_last_stage:
                                                             emit_ipc_stage(sck_stage, sck_desc)
-                                                            print(f"\n>>> [Scratch Stage] Active: {sck_desc} (Node: {sc_node})", flush=True)
+                                                            print(
+                                                                f"\n>>> [Scratch Stage] Active: {sck_desc} (Node: {sc_node})",
+                                                                flush=True,
+                                                            )
                                                             sc_last_stage = sck_stage
 
                                                         sc_now = time.time()
-                                                        if abs(sc_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog):
+                                                        if abs(sc_prog - sc_last_prog) >= 0.5 or (
+                                                            sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog
+                                                        ):
                                                             sc_elapsed = (sc_now - sc_start) / 60.0
-                                                            print(f"  [Scratch Progress] {sck_desc}: {sc_prog:.1f}% (Worker: {sc_node}, Elapsed: {sc_elapsed:.1f} min)", flush=True)
+                                                            print(
+                                                                f"  [Scratch Progress] {sck_desc}: {sc_prog:.1f}% (Worker: {sc_node}, Elapsed: {sc_elapsed:.1f} min)",
+                                                                flush=True,
+                                                            )
                                                             sc_last_prog = sc_prog
                                                             sc_last_log = sc_now
                                                     except Exception:
                                                         pass
                                                 elif sc_tasks:
-                                                    sc_active = next((t for t in sc_tasks if t.get("state") in ("running", "inprogress", "submitted")), sc_tasks[-1])
+                                                    sc_active = next(
+                                                        (
+                                                            t
+                                                            for t in sc_tasks
+                                                            if t.get("state") in ("running", "inprogress", "submitted")
+                                                        ),
+                                                        sc_tasks[-1],
+                                                    )
                                                     sc_name = sc_active.get("name", "RunScript")
                                                     sc_prog = sc_active.get("progress", 0.0)
                                                     sc_now = time.time()
-                                                    if abs(sc_prog - sc_last_prog) >= 0.5 or (sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog):
+                                                    if abs(sc_prog - sc_last_prog) >= 0.5 or (
+                                                        sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog
+                                                    ):
                                                         sc_elapsed = (sc_now - sc_start) / 60.0
-                                                        print(f"  [Scratch Progress] {sc_name}: {sc_prog:.1f}% (Elapsed: {sc_elapsed:.1f} min)", flush=True)
+                                                        print(
+                                                            f"  [Scratch Progress] {sc_name}: {sc_prog:.1f}% (Elapsed: {sc_elapsed:.1f} min)",
+                                                            flush=True,
+                                                        )
                                                         sc_last_prog = sc_prog
                                                         sc_last_log = sc_now
 
                                                 if sc_state == "completed":
                                                     sc_elapsed = (time.time() - sc_start) / 60.0
-                                                    print(f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!", flush=True)
+                                                    print(
+                                                        f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!",
+                                                        flush=True,
+                                                    )
                                                     unified_succeeded = True
                                                     break
                                                 elif sc_state in ("failed", "aborted"):
-                                                    print(f"  [Cluster] [ERROR] Fresh scratch batch {sc_state}.", flush=True)
+                                                    print(
+                                                        f"  [Cluster] [ERROR] Fresh scratch batch {sc_state}.",
+                                                        flush=True,
+                                                    )
                                                     break
                                         except Exception as e_scratch:
-                                            print(f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True)
+                                            print(
+                                                f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True
+                                            )
                                             break
                             except Exception as e_failover:
                                 print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
@@ -1730,9 +2021,11 @@ def run_reconstruction(
                         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
                     return
             except Exception as e_unified:
-                print(f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...", flush=True)
+                print(
+                    f"  [Cluster] [WARNING] Unified batch exception: {e_unified}. Falling back to stage-by-stage...",
+                    flush=True,
+                )
                 unified_succeeded = False
-
 
         # Fallback Stage-by-Stage Feature Matching & Camera Alignment (Single-Chunk Mode)
         if not use_multi_chunk:
@@ -1740,7 +2033,10 @@ def run_reconstruction(
                 print("\n[INFO] Photo feature matching and camera alignment skipped by workflow selection.", flush=True)
             else:
                 emit_ipc_stage("match", "Executing GPU Feature Matching")
-                print(f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...", flush=True)
+                print(
+                    f"\n[2/7] Executing GPU Feature Matching (Downscale: {align_downscale}, Keypoints: {keypoint_limit:,}, Tiepoints: {tiepoint_limit:,})...",
+                    flush=True,
+                )
                 t_match = time.time()
                 matched = False
                 if cluster_enabled:
@@ -1760,7 +2056,10 @@ def run_reconstruction(
                         if matched:
                             chunk = doc.chunk
                     except Exception as e_m_dispatch:
-                        print(f"  [Cluster] MatchPhotos dispatch exception: {e_m_dispatch}. Running locally...", flush=True)
+                        print(
+                            f"  [Cluster] MatchPhotos dispatch exception: {e_m_dispatch}. Running locally...",
+                            flush=True,
+                        )
                         matched = False
 
                 if not matched:
@@ -1776,10 +2075,13 @@ def run_reconstruction(
                         filter_stationary_points=filter_stationary_points,
                         guided_matching=guided_matching,
                     )
-                print(f"  Matching finished in {(time.time() - t_match)/60:.2f} min.", flush=True)
+                print(f"  Matching finished in {(time.time() - t_match) / 60:.2f} min.", flush=True)
 
                 emit_ipc_stage("align", "Camera Alignment & Bundle Adjustment")
-                print(f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...", flush=True)
+                print(
+                    f"\n[3/7] Aligning Cameras & Initial Bundle Adjustment (Adaptive Fitting: {adaptive_fitting})...",
+                    flush=True,
+                )
                 t_align = time.time()
                 aligned = False
                 if cluster_enabled:
@@ -1790,7 +2092,10 @@ def run_reconstruction(
                         if aligned:
                             chunk = doc.chunk
                     except Exception as e_a_dispatch:
-                        print(f"  [Cluster] AlignCameras dispatch exception: {e_a_dispatch}. Running locally...", flush=True)
+                        print(
+                            f"  [Cluster] AlignCameras dispatch exception: {e_a_dispatch}. Running locally...",
+                            flush=True,
+                        )
                         aligned = False
 
                 if not aligned:
@@ -1798,7 +2103,10 @@ def run_reconstruction(
 
                 aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
                 enabled_count = sum(1 for c in chunk.cameras if c.enabled)
-                print(f"  Alignment finished in {(time.time() - t_align)/60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.", flush=True)
+                print(
+                    f"  Alignment finished in {(time.time() - t_align) / 60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.",
+                    flush=True,
+                )
 
                 if rolling_shutter:
                     for s in chunk.sensors:
@@ -1818,13 +2126,19 @@ def run_reconstruction(
                             if cleaned_on_cluster:
                                 chunk = doc.chunk
                         except Exception as e_cl_clean:
-                            print(f"  [Cluster] Tie-point clean dispatch exception: {e_cl_clean}. Running locally...", flush=True)
+                            print(
+                                f"  [Cluster] Tie-point clean dispatch exception: {e_cl_clean}. Running locally...",
+                                flush=True,
+                            )
                             cleaned_on_cluster = False
 
                     if not cleaned_on_cluster:
                         usgs_stats = filter_tie_points(chunk)
                 else:
-                    print("  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).", flush=True)
+                    print(
+                        "  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).",
+                        flush=True,
+                    )
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
@@ -1894,7 +2208,10 @@ def run_reconstruction(
             depth_downscale = DEPTH_DOWNSCALE_MAP.get(depth_quality.lower(), 4)
             filter_mode_arg = DEPTH_FILTER_MAP.get(depth_filtering.lower(), Metashape.FilterMode.ModerateFiltering)
             emit_ipc_stage("depth", f"Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()})")
-            print(f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...", flush=True)
+            print(
+                f"\n[4/7] Computing GPU MVS Depth Maps (Quality: {depth_quality.capitalize()} [Downscale={depth_downscale}], Filtering: {depth_filtering.capitalize()})...",
+                flush=True,
+            )
             t_depth = time.time()
             depth_computed = False
             if cluster_enabled:
@@ -1903,11 +2220,15 @@ def run_reconstruction(
                     t_d.downscale = depth_downscale
                     t_d.filter_mode = filter_mode_arg
                     t_d.reuse_depth = False
-                    depth_computed = dispatch_cluster_task(t_d, f"Computing GPU MVS Depth Maps ({depth_quality.capitalize()})", "depth")
+                    depth_computed = dispatch_cluster_task(
+                        t_d, f"Computing GPU MVS Depth Maps ({depth_quality.capitalize()})", "depth"
+                    )
                     if depth_computed:
                         chunk = doc.chunk
                 except Exception as e_d_dispatch:
-                    print(f"  [Cluster] BuildDepthMaps dispatch exception: {e_d_dispatch}. Running locally...", flush=True)
+                    print(
+                        f"  [Cluster] BuildDepthMaps dispatch exception: {e_d_dispatch}. Running locally...", flush=True
+                    )
                     depth_computed = False
 
             if not depth_computed:
@@ -1916,7 +2237,7 @@ def run_reconstruction(
                     filter_mode=filter_mode_arg,
                     reuse_depth=False,
                 )
-            print(f"  Depth maps completed in {(time.time() - t_depth)/60:.2f} min.", flush=True)
+            print(f"  Depth maps completed in {(time.time() - t_depth) / 60:.2f} min.", flush=True)
             chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
@@ -1924,11 +2245,16 @@ def run_reconstruction(
     if build_point_cloud:
         has_point_cloud = _has_dense_points(chunk)
         if has_point_cloud:
-            emit_ipc_stage("point_cloud", f"Reusing existing Dense Point Cloud ({chunk.point_cloud.point_count:,} points)")
-            print(f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).", flush=True)
+            emit_ipc_stage(
+                "point_cloud", f"Reusing existing Dense Point Cloud ({chunk.point_cloud.point_count:,} points)"
+            )
+            print(
+                f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).",
+                flush=True,
+            )
         else:
             emit_ipc_stage("point_cloud", "Generating Dense Point Cloud from Depth Maps")
-            print(f"\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
+            print("\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
             t_pc = time.time()
             pc_computed = False
             if cluster_enabled:
@@ -1940,11 +2266,15 @@ def run_reconstruction(
                     t_p.uniform_sampling = True
                     t_p.points_spacing = points_spacing
                     t_p.keep_depth = True
-                    pc_computed = dispatch_cluster_task(t_p, "Generating Dense Point Cloud from Depth Maps", "point_cloud")
+                    pc_computed = dispatch_cluster_task(
+                        t_p, "Generating Dense Point Cloud from Depth Maps", "point_cloud"
+                    )
                     if pc_computed:
                         chunk = doc.chunk
                 except Exception as e_pc_disp:
-                    print(f"  [Cluster] BuildPointCloud dispatch exception: {e_pc_disp}. Running locally...", flush=True)
+                    print(
+                        f"  [Cluster] BuildPointCloud dispatch exception: {e_pc_disp}. Running locally...", flush=True
+                    )
                     pc_computed = False
 
             if not pc_computed:
@@ -1961,7 +2291,10 @@ def run_reconstruction(
                 if (chunk.point_cloud and isinstance(getattr(chunk.point_cloud, "point_count", None), int))
                 else 0
             )
-            print(f"  Point cloud completed in {(time.time() - t_pc)/60:.2f} min! Density: {pc_count:,} 3D points.", flush=True)
+            print(
+                f"  Point cloud completed in {(time.time() - t_pc) / 60:.2f} min! Density: {pc_count:,} 3D points.",
+                flush=True,
+            )
 
             if filter_point_confidence and chunk.point_cloud:
                 print(f"  Filtering low-confidence points (< {filter_point_confidence})...", flush=True)
@@ -1973,7 +2306,10 @@ def run_reconstruction(
                 c_size = ground_cell_size if ground_cell_size is not None else 50.0
                 m_ang = ground_max_angle if ground_max_angle is not None else 15.0
                 m_dist = ground_max_distance if ground_max_distance is not None else 1.0
-                print(f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f} deg, max_distance={m_dist:.2f}m)...", flush=True)
+                print(
+                    f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f} deg, max_distance={m_dist:.2f}m)...",
+                    flush=True,
+                )
                 chunk.point_cloud.classifyGroundPoints(cell_size=c_size, max_angle=m_ang, max_distance=m_dist)
                 print("  Ground classification completed.", flush=True)
 
@@ -1993,20 +2329,31 @@ def run_reconstruction(
         if chunk.model is None:
             cand_obj = os.path.join(output_dir, f"{project_name}.obj")
             cand_obj_legacy = os.path.join(output_dir, "model.obj")
-            target_obj = cand_obj if os.path.isfile(cand_obj) else (cand_obj_legacy if os.path.isfile(cand_obj_legacy) else None)
+            target_obj = (
+                cand_obj if os.path.isfile(cand_obj) else (cand_obj_legacy if os.path.isfile(cand_obj_legacy) else None)
+            )
             if target_obj:
                 print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {target_obj}. Re-linking...", flush=True)
                 chunk.importModel(path=target_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
                 chunk = save_checkpoint(doc, psx_out)
-                print(f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
+                print(
+                    f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).",
+                    flush=True,
+                )
 
         has_model = chunk.model is not None
         if has_model:
             emit_ipc_stage("mesh", f"Reusing existing Surface Mesh ({len(chunk.model.vertices):,} vertices)")
-            print(f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).", flush=True)
+            print(
+                f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).",
+                flush=True,
+            )
         else:
             emit_ipc_stage("mesh", f"Reconstructing Arbitrary Surface Mesh (Target: {custom_faces:,} faces)")
-            print(f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...", flush=True)
+            print(
+                f"\n[5/7] Reconstructing Arbitrary Surface Mesh from Depth Maps (Target: {custom_faces:,} faces)...",
+                flush=True,
+            )
             t_mesh = time.time()
             if custom_faces > 0:
                 face_count_arg = Metashape.FaceCount.CustomFaceCount
@@ -2015,7 +2362,7 @@ def run_reconstruction(
             else:
                 face_count_arg = Metashape.FaceCount.MediumFaceCount
                 face_count_custom_arg = 200000
-                print(f"  Target Polygon Count: MediumFaceCount preset", flush=True)
+                print("  Target Polygon Count: MediumFaceCount preset", flush=True)
 
             surf_enum = SURFACE_TYPE_MAP.get(surface_type.lower(), Metashape.SurfaceType.Arbitrary)
             mesh_computed = False
@@ -2078,7 +2425,10 @@ def run_reconstruction(
 
             mesh_verts = len(chunk.model.vertices)
             mesh_faces = len(chunk.model.faces)
-            print(f"  Mesh completed in {(time.time() - t_mesh)/60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.", flush=True)
+            print(
+                f"  Mesh completed in {(time.time() - t_mesh) / 60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.",
+                flush=True,
+            )
             chunk = save_checkpoint(doc, psx_out)
             print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
@@ -2100,13 +2450,19 @@ def run_reconstruction(
     else:
         if current_pages > 0 and current_pages != texture_pages:
             emit_ipc_stage("texture", f"Re-baking Texture Atlas to requested {texture_pages} pages")
-            print(f"\n[6/7] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...", flush=True)
+            print(
+                f"\n[6/7] Existing texture atlas has {current_pages} page(s), re-baking to requested {texture_pages} pages...",
+                flush=True,
+            )
         elif rebake_texture:
             emit_ipc_stage("texture", f"Force re-baking Texture Atlas ({texture_pages} pages)")
             print(f"\n[6/7] Force re-baking texture atlas as requested ({texture_pages} pages)...", flush=True)
         else:
             emit_ipc_stage("texture", f"Baking {texture_pages}x 8192x8192 (8K) Texture Atlas")
-            print(f"\n[6/7] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...", flush=True)
+            print(
+                f"\n[6/7] Baking {texture_pages}x 8192x8192 (8K) Photogrammetric Texture Atlas (Mosaic Blending, Hole Filling: {fill_holes}, Ghosting Filter: {ghosting_filter})...",
+                flush=True,
+            )
 
         if calibrate_colors:
             print("\n[Color Calibration] Executing radiometric color & white balance calibration...", flush=True)
@@ -2135,11 +2491,15 @@ def run_reconstruction(
                 t_t.fill_holes = fill_holes
                 t_t.ghosting_filter = ghosting_filter
 
-                tex_computed = dispatch_cluster_task([t_uv, t_t], f"Baking {eff_pages or 16}x 8K Texture Atlas", "texture")
+                tex_computed = dispatch_cluster_task(
+                    [t_uv, t_t], f"Baking {eff_pages or 16}x 8K Texture Atlas", "texture"
+                )
                 if tex_computed:
                     chunk = doc.chunk
             except Exception as e_tx_disp:
-                print(f"  [Cluster] BuildUV/BuildTexture dispatch exception: {e_tx_disp}. Running locally...", flush=True)
+                print(
+                    f"  [Cluster] BuildUV/BuildTexture dispatch exception: {e_tx_disp}. Running locally...", flush=True
+                )
                 tex_computed = False
 
         if not tex_computed:
@@ -2158,10 +2518,13 @@ def run_reconstruction(
             except Exception as e_tex_bake:
                 print(f"  [Texture] Texture baking exception: {e_tex_bake}", flush=True)
                 raise e_tex_bake
-        print(f"  Texture baking finished in {(time.time() - t_tex)/60:.2f} min.", flush=True)
+        print(f"  Texture baking finished in {(time.time() - t_tex) / 60:.2f} min.", flush=True)
 
         if remove_lighting and chunk.model:
-            print("\n[Delighting] Removing harsh ambient shadows and illumination to recover diffuse albedo...", flush=True)
+            print(
+                "\n[Delighting] Removing harsh ambient shadows and illumination to recover diffuse albedo...",
+                flush=True,
+            )
             try:
                 chunk.removeLighting(color_mode=delighting_color_mode)
                 print("  Texture delighting completed.", flush=True)
@@ -2185,11 +2548,16 @@ def run_reconstruction(
                         t_tl.tile_size = tile_size
                         t_tl.source_data = Metashape.DataSource.DepthMapsData
                         t_tl.replace_asset = True
-                        tiled_computed = dispatch_cluster_task(t_tl, f"Building 3D Tiled Model (Tile Size: {tile_size})", "tiled_model")
+                        tiled_computed = dispatch_cluster_task(
+                            t_tl, f"Building 3D Tiled Model (Tile Size: {tile_size})", "tiled_model"
+                        )
                         if tiled_computed:
                             chunk = doc.chunk
                     except Exception as e_tl_disp:
-                        print(f"  [Cluster] BuildTiledModel dispatch exception: {e_tl_disp}. Running locally...", flush=True)
+                        print(
+                            f"  [Cluster] BuildTiledModel dispatch exception: {e_tl_disp}. Running locally...",
+                            flush=True,
+                        )
                         tiled_computed = False
 
                 if not tiled_computed:
@@ -2197,12 +2565,14 @@ def run_reconstruction(
                         tile_size=tile_size,
                         source_data=Metashape.DataSource.DepthMapsData,
                     )
-                print(f"  3D Tiled model completed in {(time.time() - t_tile)/60:.2f} min.", flush=True)
+                print(f"  3D Tiled model completed in {(time.time() - t_tile) / 60:.2f} min.", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
             else:
                 print("\n[6b/7] Reusing existing 3D Tiled Model from checkpoint.", flush=True)
 
-            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json"))
+            tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(
+                tiled_model_format.lower(), (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json")
+            )
             tiled_fmt, tiled_ext = tiled_fmt_tuple
             if tiled_model_format.lower() == "cesium":
                 tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
@@ -2225,12 +2595,14 @@ def run_reconstruction(
             has_dem = getattr(chunk, "elevation", None) is not None
             if not has_dem:
                 emit_ipc_stage("dem", "Building Digital Elevation Model (DEM/DSM)")
-                print(f"\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
+                print("\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
                 t_dem = time.time()
                 proj = Metashape.OrthoProjection()
                 target_crs = chunk.crs
                 if chunk.crs and not getattr(chunk.crs, "projcs", None):
-                    aligned_gps = [c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled]
+                    aligned_gps = [
+                        c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
+                    ]
                     if aligned_gps:
                         avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
                         avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
@@ -2238,7 +2610,10 @@ def run_reconstruction(
                             utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
                             try:
                                 target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
-                                print(f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for DEM metric scale.", flush=True)
+                                print(
+                                    f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for DEM metric scale.",
+                                    flush=True,
+                                )
                             except Exception:
                                 target_crs = chunk.crs
                 if target_crs:
@@ -2246,7 +2621,11 @@ def run_reconstruction(
                         proj.crs = target_crs
                     except Exception:
                         pass
-                dem_source = Metashape.DataSource.PointCloudData if _has_dense_points(chunk) else Metashape.DataSource.DepthMapsData
+                dem_source = (
+                    Metashape.DataSource.PointCloudData
+                    if _has_dense_points(chunk)
+                    else Metashape.DataSource.DepthMapsData
+                )
                 dem_computed = False
                 if cluster_enabled:
                     try:
@@ -2269,12 +2648,12 @@ def run_reconstruction(
                         interpolation=Metashape.Interpolation.EnabledInterpolation,
                         projection=proj,
                     )
-                print(f"  [7b/7] DEM generation completed in {(time.time() - t_dem)/60:.2f} min.", flush=True)
+                print(f"  [7b/7] DEM generation completed in {(time.time() - t_dem) / 60:.2f} min.", flush=True)
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7b/7] [CHECKPOINT] Saved DEM inside project: {psx_out}", flush=True)
             else:
                 emit_ipc_stage("dem", "Reusing existing Digital Elevation Model from checkpoint")
-                print(f"\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
+                print("\n[7b/7] Reusing existing Digital Elevation Model from checkpoint.", flush=True)
 
             if (not cluster_enabled) and export_dem:
                 dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
@@ -2289,9 +2668,15 @@ def run_reconstruction(
                     image_compression=comp,
                     save_world=True,
                 )
-                print(f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+                print(
+                    f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out) / (1024 * 1024):.2f} MB)",
+                    flush=True,
+                )
             else:
-                print("  [7b/7] [INFO] DEM saved in project checkpoint. GeoTIFF file export skipped as requested.", flush=True)
+                print(
+                    "  [7b/7] [INFO] DEM saved in project checkpoint. GeoTIFF file export skipped as requested.",
+                    flush=True,
+                )
         except Exception as e_dem:
             print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
 
@@ -2305,9 +2690,11 @@ def run_reconstruction(
                 interval=contour_interval,
                 prevent_intersections=True,
             )
-            print(f"  Contour lines generated in {(time.time() - t_cnt)/60:.2f} min.", flush=True)
+            print(f"  Contour lines generated in {(time.time() - t_cnt) / 60:.2f} min.", flush=True)
 
-            sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"))
+            sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(
+                contours_format.lower(), (Metashape.ShapesFormat.ShapesFormatSHP, ".shp")
+            )
             cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
             print(f"  [7b2/7] [EXPORT] Exporting Contour Shapes to: {cnt_out}...", flush=True)
             chunk.exportShapes(
@@ -2327,12 +2714,14 @@ def run_reconstruction(
             has_ortho = chunk.orthomosaic is not None
             if not has_ortho:
                 emit_ipc_stage("ortho", "Generating Orthomosaic from Reconstructed Surface Mesh")
-                print(f"\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
+                print("\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
                 t_ortho = time.time()
                 proj = Metashape.OrthoProjection()
                 target_crs = chunk.crs
                 if chunk.crs and not getattr(chunk.crs, "projcs", None):
-                    aligned_gps = [c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled]
+                    aligned_gps = [
+                        c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
+                    ]
                     if aligned_gps:
                         avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
                         avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
@@ -2340,7 +2729,10 @@ def run_reconstruction(
                             utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
                             try:
                                 target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
-                                print(f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for Orthomosaic metric scale.", flush=True)
+                                print(
+                                    f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for Orthomosaic metric scale.",
+                                    flush=True,
+                                )
                             except Exception:
                                 target_crs = chunk.crs
                 if target_crs:
@@ -2349,7 +2741,11 @@ def run_reconstruction(
                     except Exception:
                         pass
                 ortho_computed = False
-                surf_data = Metashape.DataSource.ElevationData if (build_dem or (chunk and getattr(chunk, "elevation", None) is not None)) else Metashape.DataSource.ModelData
+                surf_data = (
+                    Metashape.DataSource.ElevationData
+                    if (build_dem or (chunk and getattr(chunk, "elevation", None) is not None))
+                    else Metashape.DataSource.ModelData
+                )
                 if cluster_enabled:
                     try:
                         t_om = Metashape.Tasks.BuildOrthomosaic()
@@ -2362,12 +2758,19 @@ def run_reconstruction(
                         t_om.projection = proj
                         if getattr(proj.crs, "projcs", None) and ortho_resolution > 0:
                             t_om.resolution = ortho_resolution
-                        ortho_desc = "Generating True Orthomosaic from Elevation Surface (DEM)" if surf_data == Metashape.DataSource.ElevationData else "Generating Orthomosaic from Reconstructed Surface Mesh"
+                        ortho_desc = (
+                            "Generating True Orthomosaic from Elevation Surface (DEM)"
+                            if surf_data == Metashape.DataSource.ElevationData
+                            else "Generating Orthomosaic from Reconstructed Surface Mesh"
+                        )
                         ortho_computed = dispatch_cluster_task(t_om, ortho_desc, "ortho")
                         if ortho_computed:
                             chunk = doc.chunk
                     except Exception as e_om_disp:
-                        print(f"  [Cluster] BuildOrthomosaic dispatch exception: {e_om_disp}. Running locally...", flush=True)
+                        print(
+                            f"  [Cluster] BuildOrthomosaic dispatch exception: {e_om_disp}. Running locally...",
+                            flush=True,
+                        )
                         ortho_computed = False
 
                 if not ortho_computed:
@@ -2380,12 +2783,21 @@ def run_reconstruction(
                         projection=proj,
                         resolution=ortho_resolution if getattr(proj.crs, "projcs", None) else 0,
                     )
-                print(f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho)/60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+                print(
+                    f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho) / 60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).",
+                    flush=True,
+                )
                 chunk = save_checkpoint(doc, psx_out)
                 print(f"  [7c/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
             else:
-                emit_ipc_stage("ortho", f"Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px)")
-                print(f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).", flush=True)
+                emit_ipc_stage(
+                    "ortho",
+                    f"Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px)",
+                )
+                print(
+                    f"\n[7c/7] Reusing existing Orthomosaic from checkpoint ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).",
+                    flush=True,
+                )
 
             if (not cluster_enabled) and export_ortho:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
@@ -2401,11 +2813,20 @@ def run_reconstruction(
                     save_world=True,
                     save_alpha=True,
                 )
-                print(f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+                print(
+                    f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)",
+                    flush=True,
+                )
             else:
-                print("  [7c/7] [INFO] Orthomosaic saved in project checkpoint. GeoTIFF file export skipped as requested.", flush=True)
+                print(
+                    "  [7c/7] [INFO] Orthomosaic saved in project checkpoint. GeoTIFF file export skipped as requested.",
+                    flush=True,
+                )
         except Exception as e_ortho:
-            print(f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...", flush=True)
+            print(
+                f"  [7c/7] [WARNING] Orthomosaic generation/export encountered an issue: {e_ortho}. Continuing...",
+                flush=True,
+            )
 
     # Production Asset Export
     emit_ipc_stage("export", "Exporting Production Assets (GLB, OBJ, TIFF, LAZ, DEM & PSX)")
@@ -2503,7 +2924,12 @@ def run_reconstruction(
 
             if export_point_cloud and (chunk.point_cloud is not None or build_point_cloud):
                 pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-                pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
+                pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
+                    pc_format_ext,
+                    (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz")
+                    if Metashape is not None
+                    else (None, ".laz"),
+                )
                 pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
                 t_pc = Metashape.Tasks.ExportPointCloud()
                 t_pc.format = pc_fmt
@@ -2523,11 +2949,19 @@ def run_reconstruction(
                 export_tasks.append(t_rep)
 
             if export_tasks:
-                cluster_exported = dispatch_cluster_task(export_tasks, f"Cluster Exporting Deliverables ({len(export_tasks)} formats)", "export")
+                cluster_exported = dispatch_cluster_task(
+                    export_tasks, f"Cluster Exporting Deliverables ({len(export_tasks)} formats)", "export"
+                )
                 if cluster_exported:
-                    print(f"  [Cluster] [OK] All {len(export_tasks)} production deliverables exported directly by cluster worker!", flush=True)
+                    print(
+                        f"  [Cluster] [OK] All {len(export_tasks)} production deliverables exported directly by cluster worker!",
+                        flush=True,
+                    )
         except Exception as e_cl_exp:
-            print(f"  [Cluster] Note: cluster export delegation exception: {e_cl_exp}. Falling back to local export.", flush=True)
+            print(
+                f"  [Cluster] Note: cluster export delegation exception: {e_cl_exp}. Falling back to local export.",
+                flush=True,
+            )
             cluster_exported = False
 
     if (not cluster_exported) and export_glb and chunk.model:
@@ -2539,7 +2973,10 @@ def run_reconstruction(
                 save_normals=True,
                 save_colors=True,
             )
-            print(f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_glb:
             print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
 
@@ -2560,7 +2997,10 @@ def run_reconstruction(
                 save_normals=True,
                 save_colors=True,
             )
-            print(f"  [7/7] [EXPORT] Saved Wavefront OBJ ({fmt_lower.upper()} textures): {obj_out} ({os.path.getsize(obj_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved Wavefront OBJ ({fmt_lower.upper()} textures): {obj_out} ({os.path.getsize(obj_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_obj:
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 
@@ -2577,7 +3017,10 @@ def run_reconstruction(
                 image_compression=comp,
                 save_world=True,
             )
-            print(f"  [7/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_dem:
             print(f"  [7/7] [WARNING] DEM fallback export issue: {e_dem}", flush=True)
 
@@ -2595,24 +3038,49 @@ def run_reconstruction(
                 save_world=True,
                 save_alpha=True,
             )
-            print(f"  [7/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_ortho:
             print(f"  [7/7] [WARNING] Orthomosaic fallback export issue: {e_ortho}", flush=True)
 
-    has_any_export = any([
-        export_glb, export_obj, export_fbx, export_ply, export_dxf,
-        export_tie_points, export_dem, export_ortho,
-        export_point_cloud, export_report, build_contours, build_tiled_model
-    ])
+    has_any_export = any(
+        [
+            export_glb,
+            export_obj,
+            export_fbx,
+            export_ply,
+            export_dxf,
+            export_tie_points,
+            export_dem,
+            export_ortho,
+            export_point_cloud,
+            export_report,
+            build_contours,
+            build_tiled_model,
+        ]
+    )
     if not has_any_export:
-        print("  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.", flush=True)
+        print(
+            "  [7/7] [INFO] Deliverable file export skipped as requested: Metashape native project (.psx) saved only.",
+            flush=True,
+        )
 
     if (not cluster_exported) and export_fbx and chunk.model:
         fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
         print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
         try:
-            chunk.exportModel(fbx_out, format=Metashape.ModelFormat.ModelFormatFBX, save_texture=True, save_normals=True, save_colors=True)
-            print(f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out)/(1024*1024):.2f} MB)", flush=True)
+            chunk.exportModel(
+                fbx_out,
+                format=Metashape.ModelFormat.ModelFormatFBX,
+                save_texture=True,
+                save_normals=True,
+                save_colors=True,
+            )
+            print(
+                f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out) / (1024 * 1024):.2f} MB)", flush=True
+            )
         except Exception as e_fbx:
             print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
 
@@ -2621,7 +3089,9 @@ def run_reconstruction(
         print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
             chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
-            print(f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out) / (1024 * 1024):.2f} MB)", flush=True
+            )
         except Exception as e_ply:
             print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
 
@@ -2630,7 +3100,9 @@ def run_reconstruction(
         print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
         try:
             chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
-            print(f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out) / (1024 * 1024):.2f} MB)", flush=True
+            )
         except Exception as e_dxf:
             print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
 
@@ -2638,8 +3110,15 @@ def run_reconstruction(
         tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
-            chunk.exportPointCloud(path=tp_out, format=Metashape.PointCloudFormat.PointCloudFormatPLY, source_data=Metashape.DataSource.TiePointsData)
-            print(f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out)/(1024*1024):.2f} MB)", flush=True)
+            chunk.exportPointCloud(
+                path=tp_out,
+                format=Metashape.PointCloudFormat.PointCloudFormatPLY,
+                source_data=Metashape.DataSource.TiePointsData,
+            )
+            print(
+                f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_tp:
             print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
@@ -2647,7 +3126,10 @@ def run_reconstruction(
     if (not cluster_exported) and export_point_cloud:
         if _has_dense_points(chunk):
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
-            pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(pc_format_ext, (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"))
+            pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
+                pc_format_ext,
+                (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"),
+            )
             pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
             print(f"\n[7d/7] [EXPORT] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
             chunk.exportPointCloud(
@@ -2659,22 +3141,33 @@ def run_reconstruction(
                 save_point_confidence=True,
                 save_point_classification=True,
             )
-            print(f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} ({os.path.getsize(pc_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} ({os.path.getsize(pc_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
     elif build_point_cloud and (not cluster_exported):
-        print(f"  [7d/7] [INFO] Dense point cloud preserved in project checkpoint. {point_cloud_format.upper() if point_cloud_format else 'LAZ'} file export skipped as requested.", flush=True)
+        print(
+            f"  [7d/7] [INFO] Dense point cloud preserved in project checkpoint. {point_cloud_format.upper() if point_cloud_format else 'LAZ'} file export skipped as requested.",
+            flush=True,
+        )
 
     # Step 7e: Executive PDF Quality & Calibration Report
     if (not cluster_exported) and export_report:
         try:
             report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
-            print(f"\n[7e/7] [EXPORT] Exporting Official Calibration & Quality PDF Report to: {report_out}...", flush=True)
+            print(
+                f"\n[7e/7] [EXPORT] Exporting Official Calibration & Quality PDF Report to: {report_out}...", flush=True
+            )
             rep_title = report_title or "AutoMetashape Processing & Calibration Report"
             chunk.exportReport(
                 path=report_out,
                 title=rep_title,
                 description="AutoMetashape Autonomous Photogrammetry Pipeline",
             )
-            print(f"  [7e/7] [EXPORT] Saved Quality Report: {report_out} ({os.path.getsize(report_out)/(1024*1024):.2f} MB)", flush=True)
+            print(
+                f"  [7e/7] [EXPORT] Saved Quality Report: {report_out} ({os.path.getsize(report_out) / (1024 * 1024):.2f} MB)",
+                flush=True,
+            )
         except Exception as e_rep:
             print(f"  [7e/7] [WARNING] PDF Report export encountered an issue: {e_rep}. Continuing...", flush=True)
 
@@ -2704,17 +3197,34 @@ def run_reconstruction(
         _sync_staging_to_central_share()
 
 
-
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build and return the comprehensive command-line argument parser for AutoMetashape."""
     parser = argparse.ArgumentParser(
         description="AutoMetashape: Autonomous High-Precision Photogrammetry Pipeline (Survey Profiling, Point Cloud, Mesh & Orthomosaic)"
     )
-    parser.add_argument("--images", "--photos-dir", dest="images", required=True, help="Input directory containing raw images (scanned recursively across all subfolders)")
-    parser.add_argument("--output", default=None, help="Output directory for 3D assets (default: <images_dir>/<project_name>)")
-    parser.add_argument("--project-name", default=None, help="Base name for the project file, 3D model, textures, point cloud, and reports (default: folder name of the project)")
-    parser.add_argument("--profile", action="store_true", help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing")
-    parser.add_argument("--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)")
+    parser.add_argument(
+        "--images",
+        "--photos-dir",
+        dest="images",
+        required=True,
+        help="Input directory containing raw images (scanned recursively across all subfolders)",
+    )
+    parser.add_argument(
+        "--output", default=None, help="Output directory for 3D assets (default: <images_dir>/<project_name>)"
+    )
+    parser.add_argument(
+        "--project-name",
+        default=None,
+        help="Base name for the project file, 3D model, textures, point cloud, and reports (default: folder name of the project)",
+    )
+    parser.add_argument(
+        "--profile",
+        action="store_true",
+        help="Profile dataset telemetry, print inferred optimal parameters, and exit without reconstructing",
+    )
+    parser.add_argument(
+        "--auto", action="store_true", help="Automatically profile dataset and infer optimal parameters (default mode)"
+    )
     parser.add_argument(
         "--preset",
         choices=["pro", "custom", "building"],
@@ -2722,21 +3232,77 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Reconstruction preset: 'pro' (default: Production Geomatics Standard with gentle tie-point filtering, 2M Arbitrary 3D Mesh, 16-page 8K texture atlas, Orthomosaic & DEM) or 'custom' (manual configuration)",
     )
     # Granular Workflow Steps (Metashape Process Stages)
-    parser.add_argument("--align-photos", dest="align_photos", action="store_true", default=True, help="Execute camera matching and alignment (default: True)")
-    parser.add_argument("--no-align-photos", dest="align_photos", action="store_false", help="Skip camera matching and alignment")
-    parser.add_argument("--build-depth-maps", dest="build_depth_maps", action="store_true", default=True, help="Execute GPU MVS dense depth maps calculation (default: True)")
-    parser.add_argument("--no-build-depth-maps", dest="build_depth_maps", action="store_false", help="Skip GPU MVS dense depth maps calculation")
-    parser.add_argument("--build-mesh", dest="build_mesh", action="store_true", default=True, help="Execute arbitrary 3D surface mesh reconstruction (default: True)")
-    parser.add_argument("--no-build-mesh", dest="build_mesh", action="store_false", help="Skip arbitrary 3D surface mesh reconstruction")
-    parser.add_argument("--build-texture", dest="build_texture", action="store_true", default=True, help="Execute multi-page 8K texture atlas baking (default: True)")
-    parser.add_argument("--no-build-texture", dest="build_texture", action="store_false", help="Skip multi-page 8K texture atlas baking")
-    parser.add_argument("--pro", action="store_true", default=False, help="Execute the Pro Photogrammetry & Geomatics Engine")
-    parser.add_argument("--ground-cell-size", type=float, default=None, help="Cell size in meters for slope-adaptive ground point classification")
-    parser.add_argument("--ground-max-angle", type=float, default=None, help="Max terrain slope angle in degrees for ground point classification")
-    parser.add_argument("--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification")
-    parser.add_argument("--align-quality", choices=["highest", "high", "medium", "low"], default="high", help="Image alignment accuracy/quality (default: high)")
+    parser.add_argument(
+        "--align-photos",
+        dest="align_photos",
+        action="store_true",
+        default=True,
+        help="Execute camera matching and alignment (default: True)",
+    )
+    parser.add_argument(
+        "--no-align-photos", dest="align_photos", action="store_false", help="Skip camera matching and alignment"
+    )
+    parser.add_argument(
+        "--build-depth-maps",
+        dest="build_depth_maps",
+        action="store_true",
+        default=True,
+        help="Execute GPU MVS dense depth maps calculation (default: True)",
+    )
+    parser.add_argument(
+        "--no-build-depth-maps",
+        dest="build_depth_maps",
+        action="store_false",
+        help="Skip GPU MVS dense depth maps calculation",
+    )
+    parser.add_argument(
+        "--build-mesh",
+        dest="build_mesh",
+        action="store_true",
+        default=True,
+        help="Execute arbitrary 3D surface mesh reconstruction (default: True)",
+    )
+    parser.add_argument(
+        "--no-build-mesh", dest="build_mesh", action="store_false", help="Skip arbitrary 3D surface mesh reconstruction"
+    )
+    parser.add_argument(
+        "--build-texture",
+        dest="build_texture",
+        action="store_true",
+        default=True,
+        help="Execute multi-page 8K texture atlas baking (default: True)",
+    )
+    parser.add_argument(
+        "--no-build-texture", dest="build_texture", action="store_false", help="Skip multi-page 8K texture atlas baking"
+    )
+    parser.add_argument(
+        "--pro", action="store_true", default=False, help="Execute the Pro Photogrammetry & Geomatics Engine"
+    )
+    parser.add_argument(
+        "--ground-cell-size",
+        type=float,
+        default=None,
+        help="Cell size in meters for slope-adaptive ground point classification",
+    )
+    parser.add_argument(
+        "--ground-max-angle",
+        type=float,
+        default=None,
+        help="Max terrain slope angle in degrees for ground point classification",
+    )
+    parser.add_argument(
+        "--ground-max-distance", type=float, default=None, help="Max distance in meters for ground point classification"
+    )
+    parser.add_argument(
+        "--align-quality",
+        choices=["highest", "high", "medium", "low"],
+        default="high",
+        help="Image alignment accuracy/quality (default: high)",
+    )
     parser.add_argument("--keypoint-limit", type=int, default=200000, help="Max keypoints per image (default: 200000)")
-    parser.add_argument("--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)")
+    parser.add_argument(
+        "--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)"
+    )
     parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
     parser.add_argument(
         "--reference-preselection-mode",
@@ -2745,9 +3311,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="estimated",
         help="Reference preselection mode for photo matching: 'estimated' (default: robust for multi-drone/oblique flights), 'source' (raw EXIF GPS), or 'sequential'",
     )
-    parser.add_argument("--depth-quality", choices=["ultra", "high", "medium", "low"], default="high", help="Depth map quality (default: high)")
-    parser.add_argument("--depth-filtering", choices=["mild", "moderate", "aggressive"], default=None, help="Depth map filtering mode (default: inferred or moderate)")
-    parser.add_argument("--faces", type=int, default=None, help="Target polygon face count (default: 2,000,000 in 'pro' preset)")
+    parser.add_argument(
+        "--depth-quality",
+        choices=["ultra", "high", "medium", "low"],
+        default="high",
+        help="Depth map quality (default: high)",
+    )
+    parser.add_argument(
+        "--depth-filtering",
+        choices=["mild", "moderate", "aggressive"],
+        default=None,
+        help="Depth map filtering mode (default: inferred or moderate)",
+    )
+    parser.add_argument(
+        "--faces", type=int, default=None, help="Target polygon face count (default: 2,000,000 in 'pro' preset)"
+    )
     parser.add_argument(
         "--guided-matching",
         dest="guided_matching",
@@ -2761,8 +3339,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable guided image matching",
     )
-    parser.add_argument("--no-filter-stationary", dest="filter_stationary_points", action="store_false", default=True, help="Disable stationary tie point exclusion (default: stationary points are excluded)")
-    parser.add_argument("--no-adaptive-fitting", dest="adaptive_fitting", action="store_false", default=True, help="Disable adaptive camera model fitting (default: enabled)")
+    parser.add_argument(
+        "--no-filter-stationary",
+        dest="filter_stationary_points",
+        action="store_false",
+        default=True,
+        help="Disable stationary tie point exclusion (default: stationary points are excluded)",
+    )
+    parser.add_argument(
+        "--no-adaptive-fitting",
+        dest="adaptive_fitting",
+        action="store_false",
+        default=True,
+        help="Disable adaptive camera model fitting (default: enabled)",
+    )
     parser.add_argument(
         "--filter-tiepoints",
         dest="filter_tiepoints",
@@ -2776,22 +3366,73 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_false",
         help="Disable gentle gradual selection tie-point filtering (keeps all aligned tie points intact)",
     )
-    parser.add_argument("--rolling-shutter", dest="rolling_shutter", action="store_true", default=None, help="Force enable CMOS rolling shutter compensation")
-    parser.add_argument("--no-rolling-shutter", dest="rolling_shutter", action="store_false", help="Disable CMOS rolling shutter compensation")
-    parser.add_argument("--close-holes", dest="close_holes", action="store_true", default=None, help="Enable mesh hole closing (bridges voids up to level 30)")
-    parser.add_argument("--no-close-holes", dest="close_holes", action="store_false", help="Disable mesh hole closing (default: disabled to prevent planar webbing artifacts)")
-    parser.add_argument("--texture-pages", type=int, default=None, help="Number of 8K texture atlas pages (default: 16 in 'pro' preset, or custom specified)")
-    parser.add_argument("--no-fill-holes", dest="fill_holes", action="store_false", default=True, help="Disable texture hole filling (default: enabled)")
-    parser.add_argument("--no-ghosting-filter", dest="ghosting_filter", action="store_false", default=True, help="Disable ghosting filter in texture blending (default: enabled)")
-    parser.add_argument("--rebake-texture", action="store_true", default=False, help="Force re-baking texture atlas even if one already exists in checkpoint")
+    parser.add_argument(
+        "--rolling-shutter",
+        dest="rolling_shutter",
+        action="store_true",
+        default=None,
+        help="Force enable CMOS rolling shutter compensation",
+    )
+    parser.add_argument(
+        "--no-rolling-shutter",
+        dest="rolling_shutter",
+        action="store_false",
+        help="Disable CMOS rolling shutter compensation",
+    )
+    parser.add_argument(
+        "--close-holes",
+        dest="close_holes",
+        action="store_true",
+        default=None,
+        help="Enable mesh hole closing (bridges voids up to level 30)",
+    )
+    parser.add_argument(
+        "--no-close-holes",
+        dest="close_holes",
+        action="store_false",
+        help="Disable mesh hole closing (default: disabled to prevent planar webbing artifacts)",
+    )
+    parser.add_argument(
+        "--texture-pages",
+        type=int,
+        default=None,
+        help="Number of 8K texture atlas pages (default: 16 in 'pro' preset, or custom specified)",
+    )
+    parser.add_argument(
+        "--no-fill-holes",
+        dest="fill_holes",
+        action="store_false",
+        default=True,
+        help="Disable texture hole filling (default: enabled)",
+    )
+    parser.add_argument(
+        "--no-ghosting-filter",
+        dest="ghosting_filter",
+        action="store_false",
+        default=True,
+        help="Disable ghosting filter in texture blending (default: enabled)",
+    )
+    parser.add_argument(
+        "--rebake-texture",
+        action="store_true",
+        default=False,
+        help="Force re-baking texture atlas even if one already exists in checkpoint",
+    )
     parser.add_argument(
         "--crop-method",
         choices=["gps-square", "structure", "manual", "none"],
         default=None,
         help="Bounding box crop method: 'gps-square', 'structure', 'manual', or 'none' (default: inferred)",
     )
-    parser.add_argument("--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop")
-    parser.add_argument("--crop-padding", type=float, default=0.05, help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)")
+    parser.add_argument(
+        "--no-crop-structure", dest="no_crop", action="store_true", help="Disable automatic bounding box crop"
+    )
+    parser.add_argument(
+        "--crop-padding",
+        type=float,
+        default=0.05,
+        help="Safety margin padding factor around bounding box (default: 0.05 / 5%%)",
+    )
     parser.add_argument(
         "--min-quality",
         type=float,
@@ -2804,7 +3445,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Disable automatic blurry image quality estimation and filtering",
     )
-    parser.add_argument("--pause-after-crop", action="store_true", help="Pause after alignment and crop for manual bounding box adjustment in GUI")
+    parser.add_argument(
+        "--pause-after-crop",
+        action="store_true",
+        help="Pause after alignment and crop for manual bounding box adjustment in GUI",
+    )
     parser.add_argument(
         "--no-crop",
         dest="no_crop",
@@ -2812,25 +3457,90 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable bounding box cropping (reconstruct full uncropped scene)",
     )
     # 3D Model Export Options (Default: False · Metashape project only)
-    parser.add_argument("--export-glb", dest="export_glb", action="store_true", default=False, help="Export binary glTF 3D model (.glb)")
+    parser.add_argument(
+        "--export-glb", dest="export_glb", action="store_true", default=False, help="Export binary glTF 3D model (.glb)"
+    )
     parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary GLB export")
-    parser.add_argument("--export-obj", dest="export_obj", action="store_true", default=False, help="Export Wavefront OBJ model + texture atlas (.obj)")
+    parser.add_argument(
+        "--export-obj",
+        dest="export_obj",
+        action="store_true",
+        default=False,
+        help="Export Wavefront OBJ model + texture atlas (.obj)",
+    )
     parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ export")
-    parser.add_argument("--texture-format", choices=["png", "tiff", "tif", "jpg", "jpeg"], default="png", help="Format for exported texture atlas files (default: png)")
+    parser.add_argument(
+        "--texture-format",
+        choices=["png", "tiff", "tif", "jpg", "jpeg"],
+        default="png",
+        help="Format for exported texture atlas files (default: png)",
+    )
     # Point Cloud Options
-    parser.add_argument("--build-point-cloud", dest="build_point_cloud", action="store_true", default=True, help="Generate dense point cloud from depth maps (default: True)")
-    parser.add_argument("--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation")
-    parser.add_argument("--export-point-cloud", dest="export_point_cloud", action="store_true", default=False, help="Export dense point cloud file (default: False)")
-    parser.add_argument("--no-export-point-cloud", dest="export_point_cloud", action="store_false", help="Disable dense point cloud export")
-    parser.add_argument("--point-cloud-format", choices=["laz", "las", "ply", "e57", "xyz"], default="laz", help="Format for exported dense point cloud (default: laz)")
-    parser.add_argument("--classify-ground", action="store_true", default=None, help="Classify ground vs non-ground points in dense point cloud")
-    parser.add_argument("--classify-points", action="store_true", default=False, help="Perform multiclass AI semantic point cloud classification")
-    parser.add_argument("--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold")
+    parser.add_argument(
+        "--build-point-cloud",
+        dest="build_point_cloud",
+        action="store_true",
+        default=True,
+        help="Generate dense point cloud from depth maps (default: True)",
+    )
+    parser.add_argument(
+        "--no-point-cloud", dest="build_point_cloud", action="store_false", help="Disable dense point cloud generation"
+    )
+    parser.add_argument(
+        "--export-point-cloud",
+        dest="export_point_cloud",
+        action="store_true",
+        default=False,
+        help="Export dense point cloud file (default: False)",
+    )
+    parser.add_argument(
+        "--no-export-point-cloud",
+        dest="export_point_cloud",
+        action="store_false",
+        help="Disable dense point cloud export",
+    )
+    parser.add_argument(
+        "--point-cloud-format",
+        choices=["laz", "las", "ply", "e57", "xyz"],
+        default="laz",
+        help="Format for exported dense point cloud (default: laz)",
+    )
+    parser.add_argument(
+        "--classify-ground",
+        action="store_true",
+        default=None,
+        help="Classify ground vs non-ground points in dense point cloud",
+    )
+    parser.add_argument(
+        "--classify-points",
+        action="store_true",
+        default=False,
+        help="Perform multiclass AI semantic point cloud classification",
+    )
+    parser.add_argument(
+        "--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold"
+    )
     # DEM / Elevation Options
-    parser.add_argument("--build-dem", action="store_true", default=None, help="Build Digital Elevation Model (DEM/DSM) (default: False)")
+    parser.add_argument(
+        "--build-dem",
+        action="store_true",
+        default=None,
+        help="Build Digital Elevation Model (DEM/DSM) (default: False)",
+    )
     parser.add_argument("--no-dem", dest="build_dem", action="store_false", help="Disable DEM building and export")
-    parser.add_argument("--export-dem", dest="export_dem", action="store_true", default=False, help="Export GeoTIFF Digital Elevation Model (dem.tif)")
-    parser.add_argument("--no-export-dem", dest="export_dem", action="store_false", help="Disable GeoTIFF Digital Elevation Model export")
+    parser.add_argument(
+        "--export-dem",
+        dest="export_dem",
+        action="store_true",
+        default=False,
+        help="Export GeoTIFF Digital Elevation Model (dem.tif)",
+    )
+    parser.add_argument(
+        "--no-export-dem",
+        dest="export_dem",
+        action="store_false",
+        help="Disable GeoTIFF Digital Elevation Model export",
+    )
     # Orthomosaic Options
     parser.add_argument(
         "--ortho",
@@ -2840,38 +3550,139 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Build orthomosaic from reconstructed mesh and save in project (default: True in 'pro' preset)",
     )
-    parser.add_argument("--no-ortho", "--no-build-orthomosaic", dest="build_orthomosaic", action="store_false", help="Disable orthomosaic building")
-    parser.add_argument("--export-ortho", dest="export_ortho", action="store_true", default=False, help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)")
-    parser.add_argument("--no-export-ortho", dest="export_ortho", action="store_false", help="Disable GeoTIFF True Orthomosaic file export")
+    parser.add_argument(
+        "--no-ortho",
+        "--no-build-orthomosaic",
+        dest="build_orthomosaic",
+        action="store_false",
+        help="Disable orthomosaic building",
+    )
+    parser.add_argument(
+        "--export-ortho",
+        dest="export_ortho",
+        action="store_true",
+        default=False,
+        help="Export GeoTIFF True Orthomosaic (orthomosaic.tif)",
+    )
+    parser.add_argument(
+        "--no-export-ortho",
+        dest="export_ortho",
+        action="store_false",
+        help="Disable GeoTIFF True Orthomosaic file export",
+    )
     # Quality Report Options
-    parser.add_argument("--export-report", dest="export_report", action="store_true", default=False, help="Export official Metashape PDF calibration & quality report (default: False)")
-    parser.add_argument("--no-report", "--no-export-report", dest="export_report", action="store_false", help="Disable PDF quality report export")
+    parser.add_argument(
+        "--export-report",
+        dest="export_report",
+        action="store_true",
+        default=False,
+        help="Export official Metashape PDF calibration & quality report (default: False)",
+    )
+    parser.add_argument(
+        "--no-report",
+        "--no-export-report",
+        dest="export_report",
+        action="store_false",
+        help="Disable PDF quality report export",
+    )
     parser.add_argument("--report-title", default=None, help="Custom title for PDF quality report")
     # Extended Metashape Functions: Targets, GCPs, Colors, Tiled Model, Contours & Delighting
-    parser.add_argument("--detect-markers", action="store_true", default=False, help="Detect coded target markers or AprilTags")
-    parser.add_argument("--target-type", choices=["circular12", "circular14", "circular16", "circular20", "cross", "apriltag16h5", "apriltag25h9", "apriltag36h11"], default="circular12", help="Coded target type (default: circular12)")
-    parser.add_argument("--marker-tolerance", type=int, default=50, help="Marker detector tolerance 0-100 (default: 50)")
-    parser.add_argument("--import-reference", default=None, help="Path to ground control points (GCP) reference CSV/TXT file")
-    parser.add_argument("--calibrate-colors", action="store_true", default=False, help="Perform radiometric color & white balance calibration")
-    parser.add_argument("--surface-type", choices=["arbitrary", "heightfield"], default="arbitrary", help="Mesh surface type (default: arbitrary)")
-    parser.add_argument("--smooth-mesh", action="store_true", default=False, help="Apply Laplacian smoothing to surface mesh")
-    parser.add_argument("--smooth-strength", type=float, default=3.0, help="Laplacian smoothing strength (default: 3.0)")
+    parser.add_argument(
+        "--detect-markers", action="store_true", default=False, help="Detect coded target markers or AprilTags"
+    )
+    parser.add_argument(
+        "--target-type",
+        choices=[
+            "circular12",
+            "circular14",
+            "circular16",
+            "circular20",
+            "cross",
+            "apriltag16h5",
+            "apriltag25h9",
+            "apriltag36h11",
+        ],
+        default="circular12",
+        help="Coded target type (default: circular12)",
+    )
+    parser.add_argument(
+        "--marker-tolerance", type=int, default=50, help="Marker detector tolerance 0-100 (default: 50)"
+    )
+    parser.add_argument(
+        "--import-reference", default=None, help="Path to ground control points (GCP) reference CSV/TXT file"
+    )
+    parser.add_argument(
+        "--calibrate-colors",
+        action="store_true",
+        default=False,
+        help="Perform radiometric color & white balance calibration",
+    )
+    parser.add_argument(
+        "--surface-type",
+        choices=["arbitrary", "heightfield"],
+        default="arbitrary",
+        help="Mesh surface type (default: arbitrary)",
+    )
+    parser.add_argument(
+        "--smooth-mesh", action="store_true", default=False, help="Apply Laplacian smoothing to surface mesh"
+    )
+    parser.add_argument(
+        "--smooth-strength", type=float, default=3.0, help="Laplacian smoothing strength (default: 3.0)"
+    )
     parser.add_argument("--decimate-mesh", type=int, default=None, help="Decimate mesh to target face count")
-    parser.add_argument("--remove-lighting", action="store_true", default=False, help="Remove shadows and ambient lighting from texture (delighting)")
-    parser.add_argument("--delighting-color-mode", action="store_true", default=False, help="Enable multi-color delighting mode")
-    parser.add_argument("--build-tiled-model", action="store_true", default=False, help="Build hierarchical 3D tiled model (LOD)")
-    parser.add_argument("--tiled-model-format", choices=["cesium", "tls", "slpk", "osgb"], default="cesium", help="Format for 3D tiled model (default: cesium)")
+    parser.add_argument(
+        "--remove-lighting",
+        action="store_true",
+        default=False,
+        help="Remove shadows and ambient lighting from texture (delighting)",
+    )
+    parser.add_argument(
+        "--delighting-color-mode", action="store_true", default=False, help="Enable multi-color delighting mode"
+    )
+    parser.add_argument(
+        "--build-tiled-model", action="store_true", default=False, help="Build hierarchical 3D tiled model (LOD)"
+    )
+    parser.add_argument(
+        "--tiled-model-format",
+        choices=["cesium", "tls", "slpk", "osgb"],
+        default="cesium",
+        help="Format for 3D tiled model (default: cesium)",
+    )
     parser.add_argument("--tile-size", type=int, default=256, help="Tile size in pixels (default: 256)")
-    parser.add_argument("--build-contours", action="store_true", default=False, help="Generate topographic contour lines from DEM")
-    parser.add_argument("--contour-interval", type=float, default=1.0, help="Contour elevation interval in meters (default: 1.0)")
-    parser.add_argument("--contours-format", choices=["shp", "dxf", "geojson", "kml"], default="shp", help="Format for topographic contours (default: shp)")
-    parser.add_argument("--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format")
-    parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
-    parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
-    parser.add_argument("--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format")
+    parser.add_argument(
+        "--build-contours", action="store_true", default=False, help="Generate topographic contour lines from DEM"
+    )
+    parser.add_argument(
+        "--contour-interval", type=float, default=1.0, help="Contour elevation interval in meters (default: 1.0)"
+    )
+    parser.add_argument(
+        "--contours-format",
+        choices=["shp", "dxf", "geojson", "kml"],
+        default="shp",
+        help="Format for topographic contours (default: shp)",
+    )
+    parser.add_argument(
+        "--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format"
+    )
+    parser.add_argument(
+        "--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format"
+    )
+    parser.add_argument(
+        "--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format"
+    )
+    parser.add_argument(
+        "--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format"
+    )
     # Distributed Network Processing Cluster Options
-    parser.add_argument("--network-enable", action="store_true", default=False, help="Enable distributed network processing across worker nodes")
-    parser.add_argument("--network-host", default="127.0.0.1", help="Metashape server hostname or IP address (default: 127.0.0.1)")
+    parser.add_argument(
+        "--network-enable",
+        action="store_true",
+        default=False,
+        help="Enable distributed network processing across worker nodes",
+    )
+    parser.add_argument(
+        "--network-host", default="127.0.0.1", help="Metashape server hostname or IP address (default: 127.0.0.1)"
+    )
     parser.add_argument("--network-port", type=int, default=5840, help="Metashape server port (default: 5840)")
     parser.add_argument(
         "--network-independent-workers",
@@ -2915,7 +3726,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
             "before engaging local staging (default: 100.0)"
         ),
     )
-    parser.add_argument("--network-path", default="", help="Shared network root directory (UNC path, e.g. \\\\SERVER\\RealityScan)")
+    parser.add_argument(
+        "--network-path", default="", help="Shared network root directory (UNC path, e.g. \\\\SERVER\\RealityScan)"
+    )
     # Multi-chunk options
     parser.add_argument(
         "--multi-chunk",

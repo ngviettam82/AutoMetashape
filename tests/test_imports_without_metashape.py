@@ -22,9 +22,9 @@ class TestImportsWithoutMetashape(unittest.TestCase):
         """Defend that reconstruction utilities can be imported without Metashape C++ binary."""
         from metashape_reconstruction import (
             analyze_survey_physics,
+            compute_utm_epsg,
             derive_pro_photogrammetry_plan,
             infer_project_name,
-            compute_utm_epsg,
         )
 
         self.assertTrue(callable(analyze_survey_physics))
@@ -41,7 +41,7 @@ class TestImportsWithoutMetashape(unittest.TestCase):
 
     def test_import_export_subsystem(self) -> None:
         """Defend that export module can be imported without Metashape C++ binary."""
-        from metashape_export import infer_project_name, build_arg_parser
+        from metashape_export import build_arg_parser, infer_project_name
 
         self.assertTrue(callable(infer_project_name))
         self.assertTrue(callable(build_arg_parser))

@@ -68,10 +68,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="AutoMetashape Distributed Cluster Worker Launcher",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)")
+    parser.add_argument(
+        "--host", type=str, default="", help="Cluster Server IP or hostname (e.g. 192.168.1.100 or server-host)"
+    )
     parser.add_argument("--port", type=str, default=None, help="Cluster Server control port (default: 5840)")
-    parser.add_argument("--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)")
-    parser.add_argument("--cpu-enable", "--cpu", dest="cpu_enable", type=int, default=None, choices=[0, 1], help="Enable CPU compute cores (1=yes, 0=no)")
+    parser.add_argument(
+        "--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)"
+    )
+    parser.add_argument(
+        "--cpu-enable",
+        "--cpu",
+        dest="cpu_enable",
+        type=int,
+        default=None,
+        choices=[0, 1],
+        help="Enable CPU compute cores (1=yes, 0=no)",
+    )
     parser.add_argument(
         "--gpu-mask",
         "--gpu",
@@ -140,14 +152,20 @@ def run_interactive_wizard(
     target_root = ""
     while not target_root:
         prompt_root = f"[{default_root}]" if default_root else ""
-        root_input = input(f"[?] Enter Shared Storage UNC Path (e.g. \\\\HOST_PC\\SharedMetashape) {prompt_root}: ").strip()
+        root_input = input(
+            f"[?] Enter Shared Storage UNC Path (e.g. \\\\HOST_PC\\SharedMetashape) {prompt_root}: "
+        ).strip()
         target_root = root_input or default_root
         if not target_root:
-            print("[!] Shared storage UNC path is required for cluster network processing. Please provide a valid path.")
+            print(
+                "[!] Shared storage UNC path is required for cluster network processing. Please provide a valid path."
+            )
 
     # 5. GPU Mask
     suggested_gpu = default_gpu or "Auto"
-    gpu_input = input(f"[?] Enter GPU Device Bitmask (e.g. 1=GPU0, 3=GPU0+1, 0=CPU-only, Auto=Native) [{suggested_gpu}]: ").strip()
+    gpu_input = input(
+        f"[?] Enter GPU Device Bitmask (e.g. 1=GPU0, 3=GPU0+1, 0=CPU-only, Auto=Native) [{suggested_gpu}]: "
+    ).strip()
     target_gpu_mask = gpu_input or suggested_gpu
     if target_gpu_mask.lower() in ("auto", "default", "none", ""):
         target_gpu_mask = ""
@@ -203,11 +221,7 @@ def _run_worker_lifecycle() -> int:
 
     host = args.host or os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip() or saved_config.get("host", "")
     port = args.port or os.environ.get("AUTOMETASHAPE_CLUSTER_PORT", "").strip() or saved_config.get("port", "5840")
-    root_path = (
-        args.root
-        or os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
-        or saved_config.get("root", "")
-    )
+    root_path = args.root or os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip() or saved_config.get("root", "")
 
     # CPU Enable Resolution
     if args.cpu_enable is not None:
@@ -323,7 +337,7 @@ def _run_worker_lifecycle() -> int:
     # 5. Pre-Flight Diagnostic 1: Metashape Pro Binary Locator
     ms_exe = cu.find_metashape_path()
     if not ms_exe or not os.path.isfile(ms_exe):
-        print(f"[FATAL ERROR] Agisoft Metashape Pro executable was not found on this system.", file=sys.stderr)
+        print("[FATAL ERROR] Agisoft Metashape Pro executable was not found on this system.", file=sys.stderr)
         print("Please verify Metashape Professional is installed and accessible.", file=sys.stderr)
         return 1
 
@@ -366,7 +380,7 @@ def _run_worker_lifecycle() -> int:
     print(f"[PRE-FLIGHT] Validating shared network storage access: {root_path}...")
     valid_unc, unc_err = cu.test_unc_path(root_path)
     if valid_unc:
-        print(f"  [OK] Shared storage root is accessible and verified.")
+        print("  [OK] Shared storage root is accessible and verified.")
     else:
         print(f"  [WARNING] Storage verification issue: {unc_err}", file=sys.stderr)
         print("  Ensure network credentials and file sharing permissions are granted.", file=sys.stderr)

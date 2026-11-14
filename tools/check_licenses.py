@@ -4,8 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Automated License & SPDX Compliance Validator
+"""Automated License & SPDX Compliance Validator
 Modeled after NVIDIA Isaac Lab's license compliance gate.
 
 Validates:

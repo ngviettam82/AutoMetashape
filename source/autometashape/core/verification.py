@@ -341,9 +341,7 @@ def verify_project_deliverables(
 
 def build_arg_parser() -> argparse.ArgumentParser:
     """CLI argument parser for deliverable verification."""
-    parser = argparse.ArgumentParser(
-        description="AutoMetashape Deliverable Quality and Integrity Verification Gate"
-    )
+    parser = argparse.ArgumentParser(description="AutoMetashape Deliverable Quality and Integrity Verification Gate")
     parser.add_argument(
         "--dir",
         "--deliverables-dir",

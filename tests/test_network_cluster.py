@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import json
 import os
-import tempfile
 import sys
+import tempfile
 import unittest
 from unittest.mock import MagicMock
 
@@ -60,6 +60,7 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_cluster_relative_path_resolution(self) -> None:
         """Verify project path conversion to shared storage relative path across local and UNC paths."""
+
         def calc_rel(psx_out: str, network_path: str) -> str:
             if network_path:
                 norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
@@ -79,7 +80,7 @@ class TestNetworkCluster(unittest.TestCase):
                     psx_lower = [p.lower() for p in psx_parts]
                     if share_name in psx_lower:
                         idx = psx_lower.index(share_name)
-                        rel = "/".join(psx_parts[idx + 1:])
+                        rel = "/".join(psx_parts[idx + 1 :])
                         if rel:
                             return rel
 
@@ -89,7 +90,7 @@ class TestNetworkCluster(unittest.TestCase):
                     psx_lower = [p.lower() for p in psx_parts]
                     if sub in psx_lower:
                         idx = psx_lower.index(sub)
-                        rel = "/".join(psx_parts[idx + 1:])
+                        rel = "/".join(psx_parts[idx + 1 :])
                         if rel:
                             return rel
             return os.path.basename(psx_out)
@@ -104,11 +105,14 @@ class TestNetworkCluster(unittest.TestCase):
         self.assertEqual(rel, "sub/project.psx")
 
         # Case 3: UNC network path matching local drive psx file
-        unc_rel = calc_rel(r"C:\Projects\SharedSurveys\061126\218\metashape\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys")
+        unc_rel = calc_rel(
+            r"C:\Projects\SharedSurveys\061126\218\metashape\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys"
+        )
         self.assertEqual(unc_rel, "061126/218/metashape/218.psx")
 
     def test_cluster_export_path_resolution(self) -> None:
         """Verify export task path resolution generates valid absolute UNC or local paths."""
+
         def calc_rel(tgt: str, network_path: str) -> str:
             norm_tgt = os.path.abspath(tgt).replace(r"\\", "/").replace("\\", "/")
             norm_net = network_path.strip().replace(r"\\", "/").replace("\\", "/").rstrip("/")
@@ -126,7 +130,7 @@ class TestNetworkCluster(unittest.TestCase):
                 tgt_lower = [p.lower() for p in tgt_parts]
                 if share_name in tgt_lower:
                     idx = tgt_lower.index(share_name)
-                    rel = "/".join(tgt_parts[idx + 1:])
+                    rel = "/".join(tgt_parts[idx + 1 :])
                     if rel:
                         return rel
             return os.path.basename(tgt)
@@ -208,7 +212,9 @@ class TestNetworkCluster(unittest.TestCase):
         b_info_failed = {
             "id": 12,
             "state": "failed",
-            "tasks": [{"id": 1, "name": "MatchPhotos", "progress": 12.0, "state": "failed", "errors": ["Out of memory"]}],
+            "tasks": [
+                {"id": 1, "name": "MatchPhotos", "progress": 12.0, "state": "failed", "errors": ["Out of memory"]}
+            ],
         }
         self.assertEqual(b_info_failed["state"], "failed")
         errors = b_info_failed["tasks"][0]["errors"]
@@ -229,7 +235,13 @@ class TestNetworkCluster(unittest.TestCase):
             {"id": 1, "name": "MatchPhotos", "state": "completed", "errors": []},
             {"id": 2, "name": "BuildDepthMaps", "state": "completed", "errors": []},
             {"id": 3, "name": "BuildModel", "state": "completed", "errors": []},
-            {"id": 4, "name": "BuildTexture", "state": "failed", "worker_id": 1, "errors": ["std::bad_alloc: out of memory"]},
+            {
+                "id": 4,
+                "name": "BuildTexture",
+                "state": "failed",
+                "worker_id": 1,
+                "errors": ["std::bad_alloc: out of memory"],
+            },
             {"id": 5, "name": "ExportModel", "state": "unassigned", "errors": []},
         ]
 
@@ -251,10 +263,7 @@ class TestNetworkCluster(unittest.TestCase):
 
         # 2. Host discovers remaining other workers
         raw_w = client_mock.workerList()
-        other_workers = [
-            w for w in raw_w["workers"]
-            if w["worker_id"] != failed_worker and not w["paused"]
-        ]
+        other_workers = [w for w in raw_w["workers"] if w["worker_id"] != failed_worker and not w["paused"]]
         self.assertEqual(len(other_workers), 1)
         self.assertEqual(other_workers[0]["worker_id"], 2)
 
@@ -277,6 +286,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_cluster_independent_worker_mode_batch_limit(self) -> None:
         """Verify Independent Project Mode applies setBatchWorkerLimit(batch_id, 1)."""
         from unittest.mock import MagicMock
+
         mock_client = MagicMock()
         mock_client.createBatch.return_value = 101
 
@@ -304,6 +314,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_build_cluster_gradual_selection_tasks(self) -> None:
         """Verify build_cluster_gradual_selection_tasks returns 8 CleanTiePoints and OptimizeCameras tasks."""
         from unittest.mock import MagicMock, patch
+
         import metashape_reconstruction as mr
 
         mock_meta = MagicMock()
@@ -321,6 +332,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_build_cluster_crop_task(self) -> None:
         """Verify build_cluster_crop_task creates valid RunScript network tasks for worker bounding box auto-crop."""
         from unittest.mock import MagicMock, patch
+
         import metashape_reconstruction as mr
 
         mock_meta = MagicMock()
@@ -339,10 +351,10 @@ class TestNetworkCluster(unittest.TestCase):
             t_none = mr.build_cluster_crop_task("manual")
             self.assertIsNone(t_none)
 
-
     def test_build_unified_cluster_pipeline_tasks_full(self) -> None:
         """Verify build_unified_cluster_pipeline_tasks bundles all pipeline stages into a unified batch with correct stage mapping and deterministic texture pages."""
         from unittest.mock import MagicMock, patch
+
         import metashape_reconstruction as mr
 
         mock_meta = MagicMock()
@@ -438,11 +450,11 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIn("depth", stage_keys_no_align)
             self.assertIn("mesh", stage_keys_no_align)
 
-
     def test_single_chunk_autonomous_unified_batch_delegation(self) -> None:
         """Verify single-chunk project delegates full pipeline into 1 dedicated batch with worker_limit=1."""
         import tempfile
         from unittest.mock import MagicMock, patch
+
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -513,10 +525,10 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertEqual(getattr(batch_tasks[0], "name", "RunScript"), "RunScript")
             self.assertTrue(getattr(batch_tasks[0], "gpu_support", True))
 
-
     def test_safe_create_cluster_batch_aborts_stale_when_force_fresh(self) -> None:
         """Verify safe_create_cluster_batch aborts stale batches on server before creating fresh batch."""
         import metashape_reconstruction as mr
+
         mock_net = MagicMock()
         mock_net.batchList.return_value = {
             "batches": [
@@ -540,6 +552,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_safe_create_cluster_batch_attaches_when_not_force_fresh(self) -> None:
         """Verify safe_create_cluster_batch re-attaches to active batch when force_fresh=False."""
         import metashape_reconstruction as mr
+
         mock_net = MagicMock()
         mock_net.batchList.return_value = {
             "batches": [
@@ -559,6 +572,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_safe_create_cluster_batch_catches_duplicate_batch_and_retries(self) -> None:
         """Verify safe_create_cluster_batch catches Duplicate Batch error, aborts stale ID, and retries."""
         import metashape_reconstruction as mr
+
         mock_net = MagicMock()
         mock_net.batchList.side_effect = [
             {"batches": []},
@@ -581,6 +595,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_replace_asset_configured_on_reconstruction_tasks(self) -> None:
         """Verify replace_asset=True is configured across Model, DEM, Ortho, and Tiled Model tasks."""
         from unittest.mock import patch
+
         import metashape_reconstruction as mr
 
         mock_meta = MagicMock()
@@ -626,6 +641,7 @@ class TestNetworkCluster(unittest.TestCase):
         """Verify running reconstruction from scratch (resume=False) cleanly purges old files directory and psx."""
         import tempfile
         from unittest.mock import MagicMock, patch
+
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -684,7 +700,6 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertFalse(os.path.exists(old_model_dir))
             self.assertFalse(os.path.exists(os.path.join(files_dir, "lock")))
 
-
     def test_cli_argparse_resume_boolean_optional_action(self) -> None:
         """Verify argparse default is resume=True and accepts both --resume and --no-resume flags."""
         from metashape_reconstruction import build_arg_parser
@@ -713,6 +728,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_safe_create_cluster_batch_find_batch_attachment(self) -> None:
         """Verify safe_create_cluster_batch attaches to active batch found via findBatch."""
         import metashape_reconstruction as mr
+
         mock_net = MagicMock()
         mock_net.findBatch.return_value = 888
         mock_net.batchInfo.return_value = {"state": "inprogress"}
@@ -728,6 +744,7 @@ class TestNetworkCluster(unittest.TestCase):
     def test_unified_pipeline_skips_crop_when_align_photos_false(self) -> None:
         """Verify build_unified_cluster_pipeline_tasks omits auto-crop when align_photos is False."""
         import metashape_reconstruction as mr
+
         mock_chunk = MagicMock()
 
         tasks, stages = mr.build_unified_cluster_pipeline_tasks(
@@ -746,12 +763,11 @@ class TestNetworkCluster(unittest.TestCase):
         task_names = [name for name, _, _ in stages]
         self.assertNotIn("RunScript", task_names)
 
-
-
     def test_build_monolithic_runscript_task_structure(self) -> None:
         """Verify build_monolithic_runscript_task creates a valid RunScript NetworkTask with GPU support."""
-        import metashape_reconstruction as mr
         import tempfile
+
+        import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
             out_dir = os.path.join(tmp_dir, "output")
@@ -776,8 +792,8 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_status_file_sidecar_ipc_tracking(self) -> None:
         """Verify emit_ipc_stage writes real-time JSON milestone updates to active status sidecar."""
-        import json
         import tempfile
+
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -811,8 +827,8 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_status_file_sidecar_parent_dir_auto_creation(self) -> None:
         """Verify emit_ipc_stage automatically creates parent directory if it does not exist yet."""
-        import json
         import tempfile
+
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -831,8 +847,8 @@ class TestNetworkCluster(unittest.TestCase):
 
     def test_monolithic_runscript_passes_network_path_arg(self) -> None:
         """Verify build_monolithic_runscript_task appends --network-path to worker args."""
-        import subprocess
         from unittest.mock import patch
+
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -856,5 +872,5 @@ class TestNetworkCluster(unittest.TestCase):
                 self.assertEqual(called_args[idx + 1], net_path)
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()

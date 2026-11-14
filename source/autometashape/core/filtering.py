@@ -200,7 +200,9 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         valid_count += 1
 
     if valid_count < 100:
-        print(f"  [Auto-Crop] Insufficient structure tie points ({valid_count}); preserving default region.", flush=True)
+        print(
+            f"  [Auto-Crop] Insufficient structure tie points ({valid_count}); preserving default region.", flush=True
+        )
         return False
 
     local_x.sort()
@@ -314,18 +316,13 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
 
     pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []
     if pts:
-        coords = [
-            Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w])
-            for p in pts
-        ]
+        coords = [Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w]) for p in pts]
         pt_zs = sorted([(rot_t * v).z for v in coords])
         med_pz = pt_zs[len(pt_zs) // 2]
         devs_pz = sorted([abs(z - med_pz) for z in pt_zs])
         mad_pz = devs_pz[len(devs_pz) // 2]
         sigma_pz = 1.4826 * mad_pz
-        filtered_pt_zs = (
-            [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] if sigma_pz > 1e-3 else pt_zs
-        )
+        filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] if sigma_pz > 1e-3 else pt_zs
         all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)
         med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
         flight_height = abs(med_cam_z - med_pz)

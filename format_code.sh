@@ -25,16 +25,16 @@ if ! "$PYTHON_CMD" tools/check_licenses.py; then
     "$PYTHON_CMD" tools/add_license_headers.py
 fi
 
+RUFF_CMD=""
 if command -v ruff >/dev/null 2>&1; then
-    TARGET_DIRS=()
-    [ -d "source" ] && TARGET_DIRS+=("source/")
-    [ -d "scripts" ] && TARGET_DIRS+=("scripts/")
-    [ -d "tools" ] && TARGET_DIRS+=("tools/")
-    [ -d "skills" ] && TARGET_DIRS+=("skills/")
-    if [ ${#TARGET_DIRS[@]} -gt 0 ]; then
-        ruff format "${TARGET_DIRS[@]}"
-        ruff check --fix "${TARGET_DIRS[@]}"
-    fi
+    RUFF_CMD="ruff"
+elif "$PYTHON_CMD" -m ruff --version >/dev/null 2>&1; then
+    RUFF_CMD="$PYTHON_CMD -m ruff"
+fi
+
+if [ -n "$RUFF_CMD" ]; then
+    $RUFF_CMD format .
+    $RUFF_CMD check .
 fi
 
 echo "[FORMAT] Validating agent skills..."

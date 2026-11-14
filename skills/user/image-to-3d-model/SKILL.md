@@ -282,6 +282,7 @@ When `launch_worker.bat` runs interactively, it automatically creates `worker_co
 Inspect connected cluster nodes via Python or CLI:
 ```python
 import Metashape
+
 client = Metashape.NetworkClient()
 client.connect("<SERVER_IP>:5840")
 workers = client.workerList()
@@ -289,7 +290,7 @@ active_workers = workers.get("workers", []) if isinstance(workers, dict) else wo
 print(f"Connected Workers ({len(active_workers)}):")
 for w in active_workers:
     host = w.get("hostname", "Worker")
-    ram_gb = w.get("memory_size", 0) / (1024 ** 3)
+    ram_gb = w.get("memory_size", 0) / (1024**3)
     print(f"  • Host: {host} | State: {w.get('state')} | RAM: {ram_gb:.1f} GB")
 ```
 

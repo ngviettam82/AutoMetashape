@@ -88,7 +88,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Export binary glTF (.glb) model (default: True)",
     )
-    parser.add_argument("--no-export-glb", dest="export_glb", action="store_false", help="Disable binary glTF (.glb) export")
+    parser.add_argument(
+        "--no-export-glb", dest="export_glb", action="store_false", help="Disable binary glTF (.glb) export"
+    )
     parser.add_argument(
         "--export-obj",
         dest="export_obj",
@@ -96,7 +98,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=True,
         help="Export Wavefront OBJ (.obj) model (default: True)",
     )
-    parser.add_argument("--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ (.obj) export")
+    parser.add_argument(
+        "--no-export-obj", dest="export_obj", action="store_false", help="Disable Wavefront OBJ (.obj) export"
+    )
     parser.add_argument(
         "--rebake-texture",
         action="store_true",
@@ -121,13 +125,22 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable ghosting filter if re-baking (default: enabled)",
     )
     parser.add_argument(
-        "--import-model", default=None, help="Optional path to external 3D model (.obj) to import/re-link into the project"
+        "--import-model",
+        default=None,
+        help="Optional path to external 3D model (.obj) to import/re-link into the project",
     )
     parser.add_argument(
-        "--export-point-cloud", dest="export_point_cloud", action="store_true", default=False, help="Export dense point cloud file"
+        "--export-point-cloud",
+        dest="export_point_cloud",
+        action="store_true",
+        default=False,
+        help="Export dense point cloud file",
     )
     parser.add_argument(
-        "--no-export-point-cloud", dest="export_point_cloud", action="store_false", help="Disable dense point cloud file export"
+        "--no-export-point-cloud",
+        dest="export_point_cloud",
+        action="store_false",
+        help="Disable dense point cloud file export",
     )
     parser.add_argument(
         "--point-cloud-format",
@@ -143,7 +156,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Export GeoTIFF Digital Elevation Model (dem.tif)",
     )
     parser.add_argument(
-        "--no-export-dem", dest="export_dem", action="store_false", help="Disable GeoTIFF Digital Elevation Model export"
+        "--no-export-dem",
+        dest="export_dem",
+        action="store_false",
+        help="Disable GeoTIFF Digital Elevation Model export",
     )
     parser.add_argument(
         "--export-orthomosaic",
@@ -153,7 +169,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Export GeoTIFF Orthomosaic (orthomosaic.tif)",
     )
     parser.add_argument(
-        "--no-export-orthomosaic", dest="export_orthomosaic", action="store_false", help="Disable GeoTIFF Orthomosaic export"
+        "--no-export-orthomosaic",
+        dest="export_orthomosaic",
+        action="store_false",
+        help="Disable GeoTIFF Orthomosaic export",
     )
     parser.add_argument(
         "--export-report",
@@ -181,7 +200,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--tile-size", type=int, default=256, help="Tile size in pixels (default: 256)")
     parser.add_argument(
-        "--export-contours", action="store_true", default=False, help="Generate and export topographic contour lines from DEM"
+        "--export-contours",
+        action="store_true",
+        default=False,
+        help="Generate and export topographic contour lines from DEM",
     )
     parser.add_argument(
         "--contour-interval", type=float, default=1.0, help="Contour elevation interval in meters (default: 1.0)"
@@ -202,7 +224,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--delighting-color-mode", action="store_true", default=False, help="Enable multi-color delighting mode"
     )
     parser.add_argument(
-        "--calibrate-colors", action="store_true", default=False, help="Perform radiometric color & white balance calibration"
+        "--calibrate-colors",
+        action="store_true",
+        default=False,
+        help="Perform radiometric color & white balance calibration",
     )
     parser.add_argument(
         "--smooth-mesh", action="store_true", default=False, help="Apply Laplacian smoothing to surface mesh"
@@ -211,9 +236,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--smooth-strength", type=float, default=3.0, help="Laplacian smoothing strength (default: 3.0)"
     )
     parser.add_argument("--decimate-mesh", type=int, default=None, help="Decimate mesh to target face count")
-    parser.add_argument("--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format")
-    parser.add_argument("--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format")
-    parser.add_argument("--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format")
+    parser.add_argument(
+        "--export-fbx", action="store_true", default=False, help="Export 3D model in Autodesk FBX format"
+    )
+    parser.add_argument(
+        "--export-ply", action="store_true", default=False, help="Export 3D model in Stanford PLY format"
+    )
+    parser.add_argument(
+        "--export-dxf", action="store_true", default=False, help="Export 3D model in AutoCAD DXF format"
+    )
     parser.add_argument(
         "--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format"
     )
@@ -246,7 +277,7 @@ if __name__ == "__main__":
             )
             print("Please ensure Agisoft Metashape Professional is installed, or execute via:", file=sys.stderr)
             print(
-                f"  & \"<path_to_metashape.exe>\" -r scripts/metashape_export.py {' '.join(sys.argv[1:])}",
+                f'  & "<path_to_metashape.exe>" -r scripts/metashape_export.py {" ".join(sys.argv[1:])}',
                 file=sys.stderr,
             )
             sys.exit(1)

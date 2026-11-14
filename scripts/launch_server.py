@@ -66,8 +66,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--host", type=str, default="0.0.0.0", help="Binding host IP for control server")
-    parser.add_argument("--port", type=str, default=None, help="Control port for client and worker connections (default: 5840)")
-    parser.add_argument("--dispatch-port", type=str, default=None, help="Dispatch port for task distribution (default: 5841)")
+    parser.add_argument(
+        "--port", type=str, default=None, help="Control port for client and worker connections (default: 5840)"
+    )
+    parser.add_argument(
+        "--dispatch-port", type=str, default=None, help="Dispatch port for task distribution (default: 5841)"
+    )
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON server configuration file")
     parser.add_argument("--server", action="store_true", help=argparse.SUPPRESS)
     return parser
@@ -152,7 +156,7 @@ def _run_server_lifecycle() -> int:
         ]
 
     print("\n[INSTRUCTIONS FOR REMOTE WORKERS]")
-    print(f"Run on each worker PC:  .\\launch_worker.bat --host {lan_ip} --root \"\\\\{lan_ip}\\<share>\"")
+    print(f'Run on each worker PC:  .\\launch_worker.bat --host {lan_ip} --root "\\\\{lan_ip}\\<share>"')
     print("\n[READY] Starting Metashape Server daemon...")
     print(f"Command: {' '.join(server_cmd)}")
     print("Press Ctrl+C in this terminal to stop the cluster server.\n")

@@ -7,7 +7,6 @@
 
 from __future__ import annotations
 
-import math
 import os
 import shutil
 import subprocess
@@ -71,6 +70,22 @@ if Metashape is not None:
         "source": Metashape.ReferencePreselectionMode.ReferencePreselectionSource,
         "sequential": Metashape.ReferencePreselectionMode.ReferencePreselectionSequential,
     }
+    SHAPES_FORMAT_MAP = {
+        "shp": (Metashape.ShapesFormat.ShapesFormatSHP, ".shp"),
+        "dxf": (Metashape.ShapesFormat.ShapesFormatDXF, ".dxf"),
+        "geojson": (Metashape.ShapesFormat.ShapesFormatGeoJSON, ".geojson"),
+        "kml": (Metashape.ShapesFormat.ShapesFormatKML, ".kml"),
+    }
+    TARGET_TYPE_MAP = {
+        "circular12": Metashape.TargetType.CircularTarget12bit,
+        "circular14": Metashape.TargetType.CircularTarget14bit,
+        "circular16": Metashape.TargetType.CircularTarget16bit,
+        "circular20": Metashape.TargetType.CircularTarget20bit,
+        "cross": Metashape.TargetType.CrossTarget,
+        "apriltag16h5": Metashape.TargetType.AprilTag16h5,
+        "apriltag25h9": Metashape.TargetType.AprilTag25h9,
+        "apriltag36h11": Metashape.TargetType.AprilTag36h11,
+    }
 else:
     DEPTH_FILTER_MAP = {"mild": 1, "moderate": 2, "aggressive": 3}
     POINT_CLOUD_FORMAT_MAP = {
@@ -86,6 +101,13 @@ else:
         "slpk": (None, ".slpk"),
         "osgb": (None, ".zip"),
     }
+    SHAPES_FORMAT_MAP = {
+        "shp": (None, ".shp"),
+        "dxf": (None, ".dxf"),
+        "geojson": (None, ".geojson"),
+        "kml": (None, ".kml"),
+    }
+    TARGET_TYPE_MAP = {}
     SURFACE_TYPE_MAP = {"arbitrary": 0, "heightfield": 1}
     PRESEL_MODE_MAP = {"estimated": 1, "source": 0, "sequential": 2}
 
@@ -812,9 +834,7 @@ def build_unified_cluster_pipeline_tasks(
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
         pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
             pc_format_ext,
-            (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz")
-            if Metashape is not None
-            else (None, ".laz"),
+            (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"),
         )
         pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         t_pc = Metashape.Tasks.ExportPointCloud()
@@ -877,9 +897,7 @@ def safe_create_cluster_batch(
     try:
         raw_b = net_client.batchList()
         batches = (
-            raw_b.get("batches", [])
-            if isinstance(raw_b, dict)
-            else (raw_b if isinstance(raw_b, (list, tuple)) else [])
+            raw_b.get("batches", []) if isinstance(raw_b, dict) else (raw_b if isinstance(raw_b, (list, tuple)) else [])
         )
         for b in batches:
             b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)

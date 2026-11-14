@@ -107,9 +107,9 @@ def infer_project_name(
     if output_dir:
         abs_out = os.path.abspath(output_dir)
         base = os.path.basename(abs_out)
-        if (base.lower().startswith("model") or base.lower() in ("export", "exports", "output", "outputs")) and os.path.dirname(
-            abs_out
-        ):
+        if (
+            base.lower().startswith("model") or base.lower() in ("export", "exports", "output", "outputs")
+        ) and os.path.dirname(abs_out):
             base = os.path.basename(os.path.dirname(abs_out))
         if base and base not in (".", "/", "\\"):
             return base
@@ -190,7 +190,9 @@ def export_project_assets(
     except Exception:
         pass
 
-    gpus = Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
+    gpus = (
+        Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
+    )
     discrete_mask = 0
     active_gpu_names = []
     for i, g in enumerate(gpus):
@@ -370,9 +372,7 @@ def export_project_assets(
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
         pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
             pc_format_ext,
-            (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz")
-            if Metashape is not None
-            else (None, ".laz"),
+            (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz") if Metashape is not None else (None, ".laz"),
         )
         pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         print(f"\n[Point Cloud] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
@@ -391,7 +391,10 @@ def export_project_assets(
     if export_dem:
         has_dem = getattr(chunk, "elevation", None) is not None
         if not has_dem:
-            print("\n[DEM] Project contains no pre-built elevation model. Generating on-demand before export...", flush=True)
+            print(
+                "\n[DEM] Project contains no pre-built elevation model. Generating on-demand before export...",
+                flush=True,
+            )
             try:
                 src_data = Metashape.DataSource.DepthMapsData
                 if getattr(chunk, "point_cloud", None) is not None:
@@ -485,9 +488,7 @@ def export_project_assets(
         ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
         print(f"\n[PLY] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
-            chunk.exportModel(
-                ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True
-            )
+            chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
             print(f"  Saved PLY: {ply_out} ({os.path.getsize(ply_out) / (1024 * 1024):.2f} MB)", flush=True)
         except Exception as e_ply:
             print(f"  [WARNING] PLY export issue: {e_ply}", flush=True)
@@ -548,7 +549,9 @@ def export_project_assets(
     if export_contours:
         has_dem = getattr(chunk, "elevation", None) is not None
         if not has_dem:
-            print("\n[Contours] Topographic contours require an elevation model. Generating DEM on-demand...", flush=True)
+            print(
+                "\n[Contours] Topographic contours require an elevation model. Generating DEM on-demand...", flush=True
+            )
             try:
                 src_data = Metashape.DataSource.DepthMapsData
                 if getattr(chunk, "point_cloud", None) is not None:
@@ -573,9 +576,7 @@ def export_project_assets(
                 )
                 sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(
                     contours_format.lower(),
-                    (Metashape.ShapesFormat.ShapesFormatSHP, ".shp")
-                    if Metashape is not None
-                    else (None, ".shp"),
+                    (Metashape.ShapesFormat.ShapesFormatSHP, ".shp") if Metashape is not None else (None, ".shp"),
                 )
                 cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
                 print(f"  Exporting Contour Shapes to: {cnt_out}...", flush=True)

@@ -107,6 +107,7 @@ For multi-hour cluster runs, execute the continuous monitoring cycle:
 1. **Telemetry & Milestone Inspection**:
    ```python
    import Metashape
+
    client = Metashape.NetworkClient()
    client.connect("10.2.8.43:5840")
    workers = client.workerList()

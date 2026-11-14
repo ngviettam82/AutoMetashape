@@ -278,9 +278,7 @@ def generate_worker_bat_content(
     if target_root:
         root_init = f'set "TARGET_ROOT={target_root}"'
     else:
-        root_init = (
-            r'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT="Enter Shared Network Storage path (e.g. \\HOST_PC\SharedMetashape or Z:\): "'
-        )
+        root_init = r'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT="Enter Shared Network Storage path (e.g. \\HOST_PC\SharedMetashape or Z:\): "'
 
     gpu_flag = ""
     if gpu_mask is not None:

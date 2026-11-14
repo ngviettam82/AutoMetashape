@@ -17,8 +17,8 @@ from unittest.mock import MagicMock, patch
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-import metashape_reconstruction as mr
 import metashape_export as me
+import metashape_reconstruction as mr
 from cluster_utils import (
     generate_worker_bat_content,
     parse_ipc_line,
@@ -91,6 +91,7 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
 
     def test_calc_rel_cluster_vietnamese_paths(self) -> None:
         """Verify cluster relative path calculation handles Vietnamese paths across drives and UNC shares."""
+
         def calc_rel(psx_out: str, network_path: str) -> str:
             norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
             norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
@@ -108,7 +109,7 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
                 psx_lower = [p.lower() for p in psx_parts]
                 if share_name in psx_lower:
                     idx = psx_lower.index(share_name)
-                    rel = "/".join(psx_parts[idx + 1:])
+                    rel = "/".join(psx_parts[idx + 1 :])
                     if rel:
                         return rel
             return os.path.basename(psx_out)
@@ -136,13 +137,15 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
 
     def test_dashboard_telemetry_vietnamese_preservation(self) -> None:
         """Verify dynamic dashboard JSON telemetry preserves literal Vietnamese text with ensure_ascii=False."""
-        profiled = [{
-            "id": "proj-01",
-            "name": "Khảo sát Cầu Rồng - Đà Nẵng",
-            "photos": 250,
-            "status": "Ready",
-            "gsd": 1.25,
-        }]
+        profiled = [
+            {
+                "id": "proj-01",
+                "name": "Khảo sát Cầu Rồng - Đà Nẵng",
+                "photos": 250,
+                "status": "Ready",
+                "gsd": 1.25,
+            }
+        ]
         dumped = json.dumps(profiled, indent=2, ensure_ascii=False)
         self.assertIn("Khảo sát Cầu Rồng - Đà Nẵng", dumped)
         self.assertNotIn("\\u", dumped)

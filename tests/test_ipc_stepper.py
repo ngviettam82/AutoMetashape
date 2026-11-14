@@ -14,7 +14,7 @@ import unittest
 # Ensure scripts directory is importable
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
 
-from cluster_utils import parse_ipc_line, IPC_SENTINEL_PREFIX, IPC_SENTINEL_SUFFIX
+from cluster_utils import IPC_SENTINEL_PREFIX, IPC_SENTINEL_SUFFIX, parse_ipc_line
 
 
 class TestIpcStepper(unittest.TestCase):
@@ -23,16 +23,48 @@ class TestIpcStepper(unittest.TestCase):
     def test_ipc_sentinel_parsing(self) -> None:
         """Defend that explicit machine-readable sentinels are parsed with 100% accuracy."""
         cases = [
-            (f"{IPC_SENTINEL_PREFIX}ingest:Ingesting photos & blur filter{IPC_SENTINEL_SUFFIX}", "ingest", "Ingesting photos & blur filter"),
+            (
+                f"{IPC_SENTINEL_PREFIX}ingest:Ingesting photos & blur filter{IPC_SENTINEL_SUFFIX}",
+                "ingest",
+                "Ingesting photos & blur filter",
+            ),
             (f"{IPC_SENTINEL_PREFIX}match:GPU Feature Matching{IPC_SENTINEL_SUFFIX}", "match", "GPU Feature Matching"),
-            (f"{IPC_SENTINEL_PREFIX}align:Camera Alignment & Tie Points{IPC_SENTINEL_SUFFIX}", "align", "Camera Alignment & Tie Points"),
+            (
+                f"{IPC_SENTINEL_PREFIX}align:Camera Alignment & Tie Points{IPC_SENTINEL_SUFFIX}",
+                "align",
+                "Camera Alignment & Tie Points",
+            ),
             (f"{IPC_SENTINEL_PREFIX}depth:MVS Dense Stereopsis{IPC_SENTINEL_SUFFIX}", "depth", "MVS Dense Stereopsis"),
-            (f"{IPC_SENTINEL_PREFIX}point_cloud:Generating Dense Point Cloud{IPC_SENTINEL_SUFFIX}", "point_cloud", "Generating Dense Point Cloud"),
-            (f"{IPC_SENTINEL_PREFIX}mesh:Fusing Surface Mesh Geometry{IPC_SENTINEL_SUFFIX}", "mesh", "Fusing Surface Mesh Geometry"),
-            (f"{IPC_SENTINEL_PREFIX}texture:Baking 8K Texture Atlas{IPC_SENTINEL_SUFFIX}", "texture", "Baking 8K Texture Atlas"),
-            (f"{IPC_SENTINEL_PREFIX}dem:Building Digital Elevation Model{IPC_SENTINEL_SUFFIX}", "dem", "Building Digital Elevation Model"),
-            (f"{IPC_SENTINEL_PREFIX}ortho:Generating Orthomosaic{IPC_SENTINEL_SUFFIX}", "ortho", "Generating Orthomosaic"),
-            (f"{IPC_SENTINEL_PREFIX}export:Exporting Production Assets{IPC_SENTINEL_SUFFIX}", "export", "Exporting Production Assets"),
+            (
+                f"{IPC_SENTINEL_PREFIX}point_cloud:Generating Dense Point Cloud{IPC_SENTINEL_SUFFIX}",
+                "point_cloud",
+                "Generating Dense Point Cloud",
+            ),
+            (
+                f"{IPC_SENTINEL_PREFIX}mesh:Fusing Surface Mesh Geometry{IPC_SENTINEL_SUFFIX}",
+                "mesh",
+                "Fusing Surface Mesh Geometry",
+            ),
+            (
+                f"{IPC_SENTINEL_PREFIX}texture:Baking 8K Texture Atlas{IPC_SENTINEL_SUFFIX}",
+                "texture",
+                "Baking 8K Texture Atlas",
+            ),
+            (
+                f"{IPC_SENTINEL_PREFIX}dem:Building Digital Elevation Model{IPC_SENTINEL_SUFFIX}",
+                "dem",
+                "Building Digital Elevation Model",
+            ),
+            (
+                f"{IPC_SENTINEL_PREFIX}ortho:Generating Orthomosaic{IPC_SENTINEL_SUFFIX}",
+                "ortho",
+                "Generating Orthomosaic",
+            ),
+            (
+                f"{IPC_SENTINEL_PREFIX}export:Exporting Production Assets{IPC_SENTINEL_SUFFIX}",
+                "export",
+                "Exporting Production Assets",
+            ),
         ]
         for line, expected_key, expected_desc in cases:
             res = parse_ipc_line(line, mode="recon")
@@ -59,10 +91,7 @@ class TestIpcStepper(unittest.TestCase):
         ]
         for line in forbidden_lines:
             res = parse_ipc_line(line, mode="recon")
-            self.assertIsNone(
-                res,
-                f"Loose substring falsely triggered milestone on line: '{line}' -> {res}"
-            )
+            self.assertIsNone(res, f"Loose substring falsely triggered milestone on line: '{line}' -> {res}")
 
     def test_anchored_bracket_tag_parsing(self) -> None:
         """Defend that lines beginning with anchored [X/7] bracket tags parse accurately."""
@@ -114,12 +143,14 @@ class TestIpcStepper(unittest.TestCase):
         for line, expected_key in export_tags:
             res = parse_ipc_line(line, mode="export")
             self.assertIsNotNone(res, f"Failed to match export tag: '{line}'")
-            self.assertEqual(res[0], expected_key, f"Export tag mismatch for '{line}': expected {expected_key}, got {res[0]}")
+            self.assertEqual(
+                res[0], expected_key, f"Export tag mismatch for '{line}': expected {expected_key}, got {res[0]}"
+            )
 
     def test_engine_ipc_sentinel_cross_engine_compatibility(self) -> None:
         """Defend that recon and export engine sentinels are completely unified with GUI parser."""
-        import metashape_reconstruction as mr
         import metashape_export as me
+        import metashape_reconstruction as mr
 
         self.assertEqual(mr.IPC_SENTINEL_PREFIX, IPC_SENTINEL_PREFIX)
         self.assertEqual(mr.IPC_SENTINEL_SUFFIX, IPC_SENTINEL_SUFFIX)
@@ -131,6 +162,7 @@ class TestIpcStepper(unittest.TestCase):
         old_print = print
         try:
             import builtins
+
             builtins.print = lambda *args, **kwargs: captured.append(" ".join(str(a) for a in args))
             mr.emit_ipc_stage("mesh", "Fusing Surface Mesh")
             mr.emit_ipc_event(mr.IPC_COMPLETE)
@@ -138,6 +170,7 @@ class TestIpcStepper(unittest.TestCase):
             me.emit_ipc_event(me.IPC_COMPLETE)
         finally:
             import builtins
+
             builtins.print = old_print
 
         self.assertEqual(len(captured), 4)

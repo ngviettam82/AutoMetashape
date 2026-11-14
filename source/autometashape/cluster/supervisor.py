@@ -65,7 +65,9 @@ class QueueJob:
     ) -> None:
         self.images_dir = os.path.abspath(images_dir)
         self.project_name = project_name or os.path.basename(self.images_dir.rstrip("\\/"))
-        self.output_dir = os.path.abspath(output_dir) if output_dir else os.path.join(self.images_dir, self.project_name)
+        self.output_dir = (
+            os.path.abspath(output_dir) if output_dir else os.path.join(self.images_dir, self.project_name)
+        )
         self.preset = preset
         self.expected_assets = expected_assets or ["obj", "dem", "ortho"]
         self.extra_args = extra_args or {}
@@ -207,7 +209,11 @@ class ClusterSupervisor:
             else:
                 job.status = "VERIFICATION_FAILED"
                 job.error_message = "; ".join(report["errors"])
-                print(f"  [QUALITY GATE] [FAIL] Deliverable verification failed: {job.error_message}", file=sys.stderr, flush=True)
+                print(
+                    f"  [QUALITY GATE] [FAIL] Deliverable verification failed: {job.error_message}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
             results.append(job.to_dict())
 
@@ -228,7 +234,9 @@ class ClusterSupervisor:
         passed_count = sum(1 for r in results if r["status"] == "COMPLETED")
         print("\n=========================================================================")
         print("  AUTOMETASHAPE: QUEUE SUPERVISION RUN SUMMARY")
-        print(f"  Total Queued: {len(self.queue)} | Completed & Verified: {passed_count} | Failed/Paused: {len(results) - passed_count}")
+        print(
+            f"  Total Queued: {len(self.queue)} | Completed & Verified: {passed_count} | Failed/Paused: {len(results) - passed_count}"
+        )
         print("=========================================================================", flush=True)
 
         return {
@@ -273,7 +281,7 @@ def discover_dataset_projects(
     def count_images_in_dir(d: str) -> int:
         count = 0
         try:
-            for root, _, files in os.walk(d):
+            for _root, _, files in os.walk(d):
                 for f in files:
                     if f.lower().endswith(SUPPORTED_IMAGE_EXTS):
                         count += 1
@@ -294,7 +302,7 @@ def discover_dataset_projects(
                 if entry.lower() not in excluded_names and not entry.lower().startswith("model"):
                     subdirs.append((entry, full_p))
     except Exception as exc:
-        raise ValueError(f"Failed to list scan directory '{scan_dir}': {exc}")
+        raise ValueError(f"Failed to list scan directory '{scan_dir}': {exc}") from exc
 
     for folder_name, folder_path in subdirs:
         img_count = count_images_in_dir(folder_path)

@@ -27,7 +27,9 @@ def get_default_config_path(filename: str = DEFAULT_WORKER_CONFIG_FILENAME) -> s
     return os.path.join(user_dir, filename)
 
 
-def load_cluster_config(config_path: str | None = None, filename: str = DEFAULT_WORKER_CONFIG_FILENAME) -> dict[str, Any]:
+def load_cluster_config(
+    config_path: str | None = None, filename: str = DEFAULT_WORKER_CONFIG_FILENAME
+) -> dict[str, Any]:
     """Load JSON cluster configuration from disk."""
     path = config_path or get_default_config_path(filename)
     if os.path.isfile(path):

@@ -524,7 +524,7 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
     try:
         entries = sorted(os.listdir(images_dir))
     except Exception as e:
-        raise ValueError(f"Cannot access images directory '{images_dir}': {e}")
+        raise ValueError(f"Cannot access images directory '{images_dir}': {e}") from e
 
     for entry in entries:
         full_path = os.path.join(images_dir, entry)
@@ -911,9 +911,7 @@ def print_pro_engineering_report(physics: dict, plan: dict, usgs_stats: dict = N
     sh_clip = physics.get("shadow_clip_ratio", 0) * 100.0
     hi_clip = physics.get("highlight_clip_ratio", 0) * 100.0
     delight_str = (
-        "ACTIVATED (Diffuse Albedo Recovery)"
-        if plan.get("remove_lighting")
-        else "Not required (Balanced Radiometry)"
+        "ACTIVATED (Diffuse Albedo Recovery)" if plan.get("remove_lighting") else "Not required (Balanced Radiometry)"
     )
     print(
         f"  Dynamic Range:       Shadow Clipping: {sh_clip:.1f}%  |  Highlight: {hi_clip:.1f}%  |  Delighting: {delight_str}"

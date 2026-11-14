@@ -4,9 +4,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Adds or updates standardized SPDX Apache-2.0 license headers to all repository source files.
-"""
+"""Adds or updates standardized SPDX Apache-2.0 license headers to all repository source files."""
 
 from __future__ import annotations
 
@@ -42,6 +40,7 @@ CPP_HEADER = """// Copyright (c) 2026, AutoMetashape Contributors.
 // SPDX-License-Identifier: Apache-2.0
 
 """
+
 
 def update_headers():
     count = 0
@@ -79,6 +78,7 @@ def update_headers():
             print(f"Added SPDX header: {path.relative_to(REPO_ROOT)}")
 
     print(f"\n[OK] Updated {count} files.")
+
 
 if __name__ == "__main__":
     update_headers()

@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 import tempfile
 import unittest
@@ -27,8 +26,8 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
     def test_optimal_scratch_drive_discovery_priority(self) -> None:
         """Verify get_optimal_local_scratch_dir prioritizes high-capacity non-system drives over system drive."""
         mock_usages = {
-            "C:\\": (100 * (1024**3), 20 * (1024**3), 80 * (1024**3)),    # System drive: 80 GB free (< 100 GB)
-            "D:\\": (1000 * (1024**3), 500 * (1024**3), 500 * (1024**3)), # Non-system NVMe: 500 GB free (Winner!)
+            "C:\\": (100 * (1024**3), 20 * (1024**3), 80 * (1024**3)),  # System drive: 80 GB free (< 100 GB)
+            "D:\\": (1000 * (1024**3), 500 * (1024**3), 500 * (1024**3)),  # Non-system NVMe: 500 GB free (Winner!)
             "E:\\": (500 * (1024**3), 200 * (1024**3), 300 * (1024**3)),  # Non-system SSD: 300 GB free
         }
 
@@ -63,7 +62,7 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
         """Verify get_optimal_local_scratch_dir falls back to system drive if secondary drives lack headroom."""
         mock_usages = {
             "C:\\": (500 * (1024**3), 100 * (1024**3), 400 * (1024**3)),  # System drive: 400 GB free (Meets threshold)
-            "D:\\": (100 * (1024**3), 85 * (1024**3), 15 * (1024**3)),   # Secondary: only 15 GB free (< 100 GB)
+            "D:\\": (100 * (1024**3), 85 * (1024**3), 15 * (1024**3)),  # Secondary: only 15 GB free (< 100 GB)
         }
 
         def mock_disk_usage(path: str):
@@ -170,10 +169,12 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             mock_net_task = MagicMock()
             mock_net_task.name = "RunScript"
             mock_net_task.gpu_support = True
+
             def to_network_task():
                 mock_net_task.args = mock_rs.args
                 mock_net_task.path = mock_rs.path
                 return mock_net_task
+
             mock_rs.toNetworkTask.side_effect = to_network_task
             mock_meta.Tasks.RunScript.return_value = mock_rs
 

@@ -82,10 +82,7 @@ class MockMatrix:
             rz = self.rows[2][0] * ox + self.rows[2][1] * oy + self.rows[2][2] * oz
             return MockVector([rx, ry, rz])
         elif isinstance(other, MockMatrix):
-            res = [
-                [sum(self.rows[i][k] * other.rows[k][j] for k in range(3)) for j in range(3)]
-                for i in range(3)
-            ]
+            res = [[sum(self.rows[i][k] * other.rows[k][j] for k in range(3)) for j in range(3)] for i in range(3)]
             return MockMatrix(res)
         return NotImplemented
 
@@ -110,11 +107,13 @@ class TestCropSquare(unittest.TestCase):
     def test_minimum_area_square_detection_and_outlier_filtering(self) -> None:
         """Defend that minimum area horizontal enclosing square rotates correctly and prunes (0,0) GPS."""
         chunk = MagicMock()
-        identity_rot = MockMatrix([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        identity_rot = MockMatrix(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         chunk.region = MagicMock()
         chunk.region.rot = identity_rot
         chunk.region.size = MockVector([500.0, 500.0, 100.0])
@@ -157,11 +156,13 @@ class TestCropSquare(unittest.TestCase):
     def test_minimum_area_square_finds_optimal_rotation(self) -> None:
         """Defend that the algorithm finds the rotated square rather than a larger axis-aligned box."""
         chunk = MagicMock()
-        identity_rot = MockMatrix([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        identity_rot = MockMatrix(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         chunk.region = MagicMock()
         chunk.region.rot = identity_rot
         chunk.region.size = MockVector([500.0, 500.0, 100.0])
@@ -200,11 +201,13 @@ class TestCropSquare(unittest.TestCase):
     def test_minimum_area_rectangle_arbitrary_shape(self) -> None:
         """Defend Option A minimum-area rectangle with independent width and length for arbitrary survey shapes."""
         chunk = MagicMock()
-        identity_rot = MockMatrix([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        identity_rot = MockMatrix(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         chunk.region = MagicMock()
         chunk.region.rot = identity_rot
         chunk.region.size = MockVector([500.0, 500.0, 100.0])
@@ -246,11 +249,13 @@ class TestCropSquare(unittest.TestCase):
     def test_drone_flight_altitude_fov_safety_margin(self) -> None:
         """Defend that drone flight altitude expands horizontal box by FOV margin so photo frustums are framed."""
         chunk = MagicMock()
-        identity_rot = MockMatrix([
-            [1.0, 0.0, 0.0],
-            [0.0, 1.0, 0.0],
-            [0.0, 0.0, 1.0],
-        ])
+        identity_rot = MockMatrix(
+            [
+                [1.0, 0.0, 0.0],
+                [0.0, 1.0, 0.0],
+                [0.0, 0.0, 1.0],
+            ]
+        )
         chunk.region = MagicMock()
         chunk.region.rot = identity_rot
         chunk.region.size = MockVector([500.0, 500.0, 100.0])

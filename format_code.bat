@@ -51,17 +51,26 @@ if !ERRORLEVEL! neq 0 (
     echo [FORMAT] Inserting missing license headers...
     "!PYTHON_CMD!" tools/add_license_headers.py
 )
+set "RUFF_CMD="
 where ruff >nul 2>nul
 if !ERRORLEVEL! equ 0 (
-    set "TARGETS="
-    if exist "source\" set "TARGETS=!TARGETS! source/"
-    if exist "scripts\" set "TARGETS=!TARGETS! scripts/"
-    if exist "tools\" set "TARGETS=!TARGETS! tools/"
-    if exist "skills\" set "TARGETS=!TARGETS! skills/"
-    if defined TARGETS (
-        ruff format !TARGETS!
-        ruff check --fix !TARGETS!
+    set "RUFF_CMD=ruff"
+) else (
+    python -m ruff --version >nul 2>nul
+    if !ERRORLEVEL! equ 0 (
+        set "RUFF_CMD=python -m ruff"
+    ) else (
+        "!PYTHON_CMD!" -m ruff --version >nul 2>nul
+        if !ERRORLEVEL! equ 0 (
+            set "RUFF_CMD=!PYTHON_CMD! -m ruff"
+        )
     )
+)
+if defined RUFF_CMD (
+    echo [FORMAT] Running ruff format...
+    !RUFF_CMD! format .
+    echo [FORMAT] Running ruff check...
+    !RUFF_CMD! check .
 )
 echo [FORMAT] Validating agent skills...
 "!PYTHON_CMD!" tools/skills/cli.py check
