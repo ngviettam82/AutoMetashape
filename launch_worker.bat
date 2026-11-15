@@ -7,6 +7,8 @@ setlocal enabledelayedexpansion
 title AutoMetashape Cluster Worker Node
 
 set "SCRIPT_DIR=%~dp0"
+set "AUTOMETASHAPE_DIR=%~dp0"
+if "%AUTOMETASHAPE_DIR:~-1%"=="\" set "AUTOMETASHAPE_DIR=%AUTOMETASHAPE_DIR:~0,-1%"
 set "LAUNCHER_PY=%SCRIPT_DIR%scripts\launch_worker.py"
 
 :: 1. Locate Python executable (prioritize Metashape Pro bundled Python)

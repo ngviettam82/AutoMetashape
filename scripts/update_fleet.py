@@ -198,14 +198,27 @@ def main() -> int:
     success_count = 0
     fail_count = 0
     for node in targets:
-        nid = node.get("worker_id")
-        nname = node.get("hostname")
-        naddr = node.get("hostaddr")
+        target_name = node.get("hostname") or str(node.get("worker_id"))
+        # Re-query current online workers to resolve fresh worker_id in case IDs shifted from earlier node restarts
+        fresh_workers = list_online_workers(client)
+        matched = None
+        for fw in fresh_workers:
+            if str(fw.get("hostname", "")).lower() == str(target_name).lower() or str(fw.get("worker_id")) == str(
+                node.get("worker_id")
+            ):
+                matched = fw
+                break
+
+        active_node = matched if matched else node
+        nid = active_node.get("worker_id")
+        nname = active_node.get("hostname") or target_name
+        naddr = active_node.get("hostaddr")
+        target_key = nname or nid
         print(f"\n>>> Dispatching / updating node: {nname} (ID={nid}, Addr={naddr})...")
 
         res = update_remote_worker(
             client=client,
-            worker_id_or_name=nid,
+            worker_id_or_name=target_key,
             shared_root=args.root,
             repo_url=args.repo_url,
             timeout=args.timeout,

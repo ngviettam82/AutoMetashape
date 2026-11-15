@@ -25,6 +25,7 @@ import time
 
 # Ensure scripts directory is importable
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPTS_DIR, ".."))
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
@@ -408,11 +409,13 @@ def _run_worker_lifecycle() -> int:
 
     # 9. Resilient Execution & Auto-Reconnect Loop
     reconnect_delay = 10.0
+    worker_env = os.environ.copy()
+    worker_env["AUTOMETASHAPE_DIR"] = _REPO_ROOT
     while True:
         proc = None
         try:
             start_t = time.time()
-            proc = subprocess.Popen(worker_cmd)
+            proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=_REPO_ROOT)
             proc.wait()
             ret_code = proc.returncode
 

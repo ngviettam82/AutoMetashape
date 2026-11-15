@@ -20,9 +20,14 @@ DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive
 CLUSTER_MAINTENANCE_REL_PATH = ".cluster/maintenance.psx"
 
 
-def generate_worker_updater_code(repo_url: str = DEFAULT_REPO_ARCHIVE_URL, expected_hostname: str = "") -> str:
+def generate_worker_updater_code(
+    repo_url: str = DEFAULT_REPO_ARCHIVE_URL,
+    expected_hostname: str = "",
+    shared_cluster_dir: str = "",
+) -> str:
     """Generate self-contained Python code executed on the remote worker node via RunScript."""
     clean_expected = expected_hostname.strip().lower()
+    clean_cluster_dir = shared_cluster_dir.replace("\\", "\\\\")
     return f'''import os
 import shutil
 import sys
@@ -45,86 +50,197 @@ log.append(f"Python: {{sys.executable}}")
 user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
 candidates = [
     os.environ.get("AUTOMETASHAPE_DIR", ""),
+    os.getcwd(),
+    os.path.dirname(os.getcwd()),
     os.path.join(user_profile, "Documents", "AutoMetashape"),
     os.path.join(user_profile, "AutoMetashape"),
-    os.getcwd(),
+    r"C:\\AutoMetashape",
+    r"D:\\AutoMetashape",
+    r"E:\\AutoMetashape",
 ]
-target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+target_dir = None
 for cand in candidates:
     if cand and os.path.isdir(cand) and os.path.exists(os.path.join(cand, "launch_worker.bat")):
-        target_dir = cand
+        target_dir = os.path.abspath(cand)
         break
+
+if not target_dir:
+    curr = os.path.abspath(os.getcwd())
+    for _ in range(4):
+        if os.path.exists(os.path.join(curr, "launch_worker.bat")):
+            target_dir = curr
+            break
+        curr = os.path.dirname(curr)
+
+if not target_dir:
+    target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+
+log.append(f"Resolved target AutoMetashape directory: {{target_dir}}")
+
 temp_dir = os.environ.get("TEMP", r"C:\\Temp")
-zip_path = os.path.join(temp_dir, "AutoMetashape_remote_update.zip")
-extract_dir = os.path.join(temp_dir, "AutoMetashape_remote_extracted")
+os.makedirs(temp_dir, exist_ok=True)
+zip_path = os.path.join(temp_dir, f"AutoMetashape_remote_update_{{int(time.time())}}.zip")
+extract_dir = os.path.join(temp_dir, f"AutoMetashape_remote_extracted_{{int(time.time())}}")
 
-url = "{repo_url}"
-try:
-    log.append(f"Downloading codebase from {{url}}...")
-    req = urllib.request.Request(url, headers={{"User-Agent": "AutoMetashape-FleetUpdater/1.0"}})
-    with urllib.request.urlopen(req, timeout=45) as resp, open(zip_path, "wb") as out_f:
-        shutil.copyfileobj(resp, out_f)
-    log.append(f"Downloaded zip ({{os.path.getsize(zip_path)}} bytes).")
-except Exception as e:
-    log.append(f"ERROR downloading: {{e}}")
+# 1. Fetch update payload: prefer fast shared LAN staging if accessible, fallback to repo_url
+shared_dir = r"{clean_cluster_dir}"
+shared_zip = os.path.join(shared_dir, "update_payload.zip") if shared_dir else ""
+acquired = False
 
-if os.path.exists(zip_path):
+if shared_zip and os.path.isfile(shared_zip) and os.path.getsize(shared_zip) > 1024:
     try:
-        if os.path.exists(extract_dir):
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(extract_dir)
-        log.append("Extracted archive successfully.")
+        log.append(f"Copying codebase archive from shared LAN cache: {{shared_zip}}...")
+        shutil.copy2(shared_zip, zip_path)
+        log.append(f"Copied archive via LAN ({{os.path.getsize(zip_path)}} bytes).")
+        acquired = True
+    except Exception as e_lan:
+        log.append(f"Notice: LAN cache copy skipped ({{e_lan}}), attempting direct download...")
 
-        src_dir = os.path.join(extract_dir, "AutoMetashape-main")
-        if not os.path.exists(src_dir):
-            for d in os.listdir(extract_dir):
-                cand = os.path.join(extract_dir, d)
-                if os.path.isdir(cand) and os.path.exists(os.path.join(cand, "launch_worker.bat")):
-                    src_dir = cand
-                    break
-        log.append(f"Extracted root: {{src_dir}}")
+if not acquired:
+    url = "{repo_url}"
+    try:
+        log.append(f"Downloading codebase from {{url}}...")
+        req = urllib.request.Request(url, headers={{"User-Agent": "AutoMetashape-FleetUpdater/1.0"}})
+        with urllib.request.urlopen(req, timeout=45) as resp, open(zip_path, "wb") as out_f:
+            shutil.copyfileobj(resp, out_f)
+        log.append(f"Downloaded zip ({{os.path.getsize(zip_path)}} bytes).")
+        acquired = True
+    except Exception as e_dl:
+        err_msg = f"ERROR: Failed to download update payload: {{e_dl}}"
+        log.append(err_msg)
+        raise RuntimeError(err_msg)
 
-        os.makedirs(target_dir, exist_ok=True)
-        copied = 0
-        for root, dirs, files in os.walk(src_dir):
-            rel = os.path.relpath(root, src_dir)
-            dest = os.path.join(target_dir, rel)
-            os.makedirs(dest, exist_ok=True)
-            for file in files:
-                if file in ("worker_config.json", "server_config.json"):
-                    continue
+if not os.path.isfile(zip_path) or os.path.getsize(zip_path) < 1024:
+    raise RuntimeError(f"Update payload missing or invalid on {{node_name}}")
+
+try:
+    if os.path.exists(extract_dir):
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        zf.extractall(extract_dir)
+    log.append("Extracted archive successfully.")
+
+    src_dir = os.path.join(extract_dir, "AutoMetashape-main")
+    if not os.path.exists(src_dir):
+        for d in os.listdir(extract_dir):
+            cand = os.path.join(extract_dir, d)
+            if os.path.isdir(cand) and os.path.exists(os.path.join(cand, "launch_worker.bat")):
+                src_dir = cand
+                break
+    log.append(f"Extracted root: {{src_dir}}")
+
+    os.makedirs(target_dir, exist_ok=True)
+    copied = 0
+    copy_errors = []
+    for root, dirs, files in os.walk(src_dir):
+        rel = os.path.relpath(root, src_dir)
+        dest = os.path.join(target_dir, rel)
+        os.makedirs(dest, exist_ok=True)
+        for file in files:
+            if file in ("worker_config.json", "server_config.json"):
+                continue
+            try:
                 shutil.copy2(os.path.join(root, file), os.path.join(dest, file))
                 copied += 1
-        log.append(f"Successfully mirrored {{copied}} files into {{target_dir}}")
+            except Exception as e_cp:
+                copy_errors.append(f"{{file}}: {{e_cp}}")
 
-        try:
-            os.remove(zip_path)
-            shutil.rmtree(extract_dir, ignore_errors=True)
-        except Exception:
-            pass
-    except Exception as e:
-        log.append(f"ERROR during extraction/copy: {{e}}")
+    if copy_errors:
+        err_msg = f"Failed to mirror {{len(copy_errors)}} files on {{node_name}}: {{'; '.join(copy_errors[:3])}}"
+        log.append(f"ERROR: {{err_msg}}")
+        raise RuntimeError(err_msg)
+
+    log.append(f"Successfully mirrored {{copied}} files into {{target_dir}}")
+
+    try:
+        os.remove(zip_path)
+        shutil.rmtree(extract_dir, ignore_errors=True)
+    except Exception:
+        pass
+except Exception as e:
+    err_str = f"Update execution failed on {{node_name}}: {{e}}"
+    log.append(err_str)
+    raise RuntimeError(err_str)
 
 log.append(f"Completed worker update on {{node_name}} at {{time.ctime()}}")
 
-try:
-    doc = getattr(getattr(sys.modules.get("Metashape"), "app", None), "document", None)
-    if doc and getattr(doc, "path", None):
-        out_dir = os.path.dirname(doc.path)
-        res_file = os.path.join(out_dir, f"{{node_name}}_update_result.txt")
+# Write node verification result to shared storage
+written = False
+if shared_dir and os.path.isdir(shared_dir):
+    try:
+        res_file = os.path.join(shared_dir, f"{{node_name}}_update_result.txt")
         with open(res_file, "w", encoding="utf-8") as rf:
             rf.write("\\n".join(log) + "\\n")
-except Exception:
-    pass
+        written = True
+    except Exception:
+        pass
+
+if not written:
+    try:
+        doc = getattr(getattr(sys.modules.get("Metashape"), "app", None), "document", None)
+        if doc and getattr(doc, "path", None):
+            out_dir = os.path.dirname(doc.path)
+            res_file = os.path.join(out_dir, f"{{node_name}}_update_result.txt")
+            with open(res_file, "w", encoding="utf-8") as rf:
+                rf.write("\\n".join(log) + "\\n")
+    except Exception:
+        pass
 '''
 
 
+def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_ARCHIVE_URL) -> str:
+    """Stages or caches the repository update archive zip on shared storage so workers can update over LAN.
+
+    Returns:
+        Absolute path to update_payload.zip on shared network storage, or empty string on failure.
+    """
+    if not shared_root:
+        return ""
+    cluster_dir = os.path.join(shared_root, ".cluster")
+    os.makedirs(cluster_dir, exist_ok=True)
+    payload_zip = os.path.join(cluster_dir, "update_payload.zip")
+
+    # If payload is older than 5 minutes or missing, download fresh copy from repo_url
+    needs_download = True
+    if os.path.isfile(payload_zip):
+        try:
+            age = time.time() - os.path.getmtime(payload_zip)
+            if age < 300.0 and os.path.getsize(payload_zip) > 1024:
+                needs_download = False
+        except Exception:
+            pass
+
+    if needs_download:
+        import urllib.request
+
+        try:
+            req = urllib.request.Request(repo_url, headers={"User-Agent": "AutoMetashape-Coordinator/1.0"})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(payload_zip, "wb") as out_f:
+                import shutil
+
+                shutil.copyfileobj(resp, out_f)
+        except Exception:
+            pass
+
+    return payload_zip if os.path.isfile(payload_zip) else ""
+
+
 def ensure_cluster_maintenance_project(shared_root: str) -> str:
-    """Ensure .cluster/maintenance.psx exists on the shared network storage."""
+    """Ensure .cluster/maintenance.psx exists on the shared network storage and clean stale locks."""
     cluster_dir = os.path.join(shared_root, ".cluster")
     os.makedirs(cluster_dir, exist_ok=True)
     psx_path = os.path.join(cluster_dir, "maintenance.psx")
+    files_dir = os.path.join(cluster_dir, "maintenance.files")
+    os.makedirs(files_dir, exist_ok=True)
+
+    # Pre-clean any lingering local/network lock files from previous interrupted runs
+    lock_file = os.path.join(files_dir, "lock")
+    if os.path.isfile(lock_file):
+        try:
+            os.remove(lock_file)
+        except Exception:
+            pass
+
     if not os.path.isfile(psx_path):
         if Metashape is not None:
             try:
@@ -139,8 +255,6 @@ def ensure_cluster_maintenance_project(shared_root: str) -> str:
         )
         with open(psx_path, "w", encoding="utf-8") as f:
             f.write(xml_content)
-        files_dir = os.path.join(cluster_dir, "maintenance.files")
-        os.makedirs(files_dir, exist_ok=True)
     return CLUSTER_MAINTENANCE_REL_PATH
 
 
@@ -324,12 +438,18 @@ def update_remote_worker(
                     except Exception:
                         pass
 
-        # 5. Ensure maintenance project
+        # 5. Ensure maintenance project and stage update payload
         rel_project = ensure_cluster_maintenance_project(shared_root)
+        cluster_shared_dir = os.path.join(shared_root, ".cluster")
+        stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url)
 
-        # 6. Build RunScript task locked to target worker's hostname
+        # 6. Build RunScript task locked to target worker's hostname and shared LAN cache
         task = Metashape.Tasks.RunScript()
-        task.code = generate_worker_updater_code(repo_url=repo_url, expected_hostname=result["hostname"] or "")
+        task.code = generate_worker_updater_code(
+            repo_url=repo_url,
+            expected_hostname=result["hostname"] or "",
+            shared_cluster_dir=cluster_shared_dir,
+        )
         net_task = task.toNetworkTask()
 
         # 7. Create batch locked to 1 worker
@@ -368,6 +488,12 @@ def update_remote_worker(
             time.sleep(poll_interval)
 
         if not batch_done:
+            # Abort the timed-out batch on the cluster server so it does not linger in the queue
+            if hasattr(client, "abortBatch") and batch_id:
+                try:
+                    client.abortBatch(batch_id)
+                except Exception:
+                    pass
             result["error"] = f"Update batch timed out after {timeout} seconds"
             return result
 
@@ -390,20 +516,22 @@ def update_remote_worker(
                 # Await auto-reconnect (10s reconnect window + 10s buffer)
                 reconnect_deadline = time.time() + 30.0
                 reconnected = False
+                target_host_ip = str(result["hostaddr"]).split(":")[0].strip() if result.get("hostaddr") else ""
                 while time.time() < reconnect_deadline:
                     time.sleep(poll_interval)
                     current_workers = list_online_workers(client)
                     for cw in current_workers:
-                        if (
-                            cw.get("worker_id") != wid
-                            and (
-                                str(cw.get("hostname", "")).lower() == str(result["hostname"]).lower()
-                                or str(result["hostaddr"]).split(":")[0] in str(cw.get("hostaddr", ""))
-                            )
-                            and str(cw.get("state", "")).lower() == "ready"
-                        ):
+                        cw_id = cw.get("worker_id")
+                        cw_hname = str(cw.get("hostname", "")).strip().lower()
+                        cw_addr = str(cw.get("hostaddr", "")).strip()
+                        cw_state = str(cw.get("state", "")).strip().lower()
+
+                        match_hname = bool(result["hostname"] and cw_hname == str(result["hostname"]).strip().lower())
+                        match_ip = bool(target_host_ip and target_host_ip != "127.0.0.1" and target_host_ip in cw_addr)
+
+                        if cw_id != wid and (match_hname or match_ip) and cw_state == "ready":
                             result["relaunched"] = True
-                            result["new_worker_id"] = cw.get("worker_id")
+                            result["new_worker_id"] = cw_id
                             result["new_hostaddr"] = cw.get("hostaddr")
                             reconnected = True
                             break

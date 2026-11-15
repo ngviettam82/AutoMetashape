@@ -27,6 +27,7 @@ from autometashape.cluster.updater import (
     ensure_cluster_maintenance_project,
     generate_worker_updater_code,
     list_online_workers,
+    stage_cluster_update_payload,
     update_remote_worker,
 )
 
@@ -47,16 +48,40 @@ class TestFleetUpdater(unittest.TestCase):
         self.assertIn("update_result.txt", code)
 
     def test_ensure_cluster_maintenance_project(self) -> None:
-        """Verify maintenance project creation on shared storage."""
+        """Verify maintenance project creation on shared storage and lock cleanup."""
         with tempfile.TemporaryDirectory() as tmp_dir:
+            # Create a stale lock file
+            files_dir = os.path.join(tmp_dir, ".cluster", "maintenance.files")
+            os.makedirs(files_dir, exist_ok=True)
+            lock_path = os.path.join(files_dir, "lock")
+            with open(lock_path, "w") as f:
+                f.write("stale_lock")
+            self.assertTrue(os.path.isfile(lock_path))
+
             rel = ensure_cluster_maintenance_project(tmp_dir)
             self.assertEqual(rel, CLUSTER_MAINTENANCE_REL_PATH)
+            # Assert lock file was deleted
+            self.assertFalse(os.path.isfile(lock_path))
             full_path = os.path.join(tmp_dir, ".cluster", "maintenance.psx")
             self.assertTrue(os.path.isfile(full_path))
             with open(full_path, "r", encoding="utf-8") as f:
                 content = f.read()
             self.assertIn("<document", content)
             self.assertIn("maintenance.files", content)
+
+    def test_stage_cluster_update_payload(self) -> None:
+        """Verify update payload staging to shared network directory."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            cluster_dir = os.path.join(tmp_dir, ".cluster")
+            os.makedirs(cluster_dir, exist_ok=True)
+            payload_path = os.path.join(cluster_dir, "update_payload.zip")
+            # Create a valid pre-existing dummy zip
+            with open(payload_path, "wb") as f:
+                f.write(b"PK" + b"\x00" * 2048)
+
+            staged = stage_cluster_update_payload(tmp_dir)
+            self.assertEqual(staged, payload_path)
+            self.assertTrue(os.path.isfile(staged))
 
     def test_list_online_workers(self) -> None:
         """Verify online worker filtering logic."""
@@ -266,6 +291,38 @@ class TestFleetUpdater(unittest.TestCase):
                 mock_client.setWorkerPaused.assert_any_call(2, True)
                 # Verified other worker was restored in finally teardown
                 mock_client.setWorkerPaused.assert_any_call(2, False)
+
+    def test_update_remote_worker_timeout_aborts_batch(self) -> None:
+        """Verify update_remote_worker aborts timed-out batch on the server."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "Target-Node", "state": "ready", "paused": False},
+            ]
+        }
+        mock_client.createBatch.return_value = 202
+        # Never completes
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 202, "state": "inprogress"}]}
+
+        mock_metashape = MagicMock()
+        mock_task = MagicMock()
+        mock_task.toNetworkTask.return_value = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = mock_task
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("autometashape.cluster.updater.Metashape", mock_metashape):
+                res = update_remote_worker(
+                    client=mock_client,
+                    worker_id_or_name=1,
+                    shared_root=tmp_dir,
+                    timeout=0.05,
+                    restart=True,
+                    poll_interval=0.01,
+                )
+                self.assertFalse(res["success"])
+                self.assertIn("timed out", res["error"])
+                # Verified batch was cleanly aborted on server to prevent orphan lingering
+                mock_client.abortBatch.assert_called_with(202)
 
 
 if __name__ == "__main__":
