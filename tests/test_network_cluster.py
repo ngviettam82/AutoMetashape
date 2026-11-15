@@ -789,6 +789,43 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertEqual(getattr(net_task, "name", "RunScript"), "RunScript")
             self.assertTrue(getattr(net_task, "gpu_support", True))
             self.assertTrue(s_file.endswith("_autometashape_status.json"))
+            self.assertIn("--crop-method gps-square", getattr(net_task, "args", ""))
+
+    def test_build_monolithic_runscript_task_crop_method_defaults_and_overrides(self) -> None:
+        """Verify build_monolithic_runscript_task defaults crop_method to gps-square and handles overrides."""
+        import tempfile
+
+        import metashape_reconstruction as mr
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            out_dir = os.path.join(tmp_dir, "output")
+            img_dir = os.path.join(tmp_dir, "images")
+            os.makedirs(out_dir, exist_ok=True)
+            os.makedirs(img_dir, exist_ok=True)
+
+            # 1. Default (crop_method omitted) -> gps-square
+            t_def, _, _ = mr.build_monolithic_runscript_task(
+                images_dir=img_dir, output_dir=out_dir, project_name="Test"
+            )
+            self.assertIn("--crop-method gps-square", getattr(t_def, "args", ""))
+
+            # 2. Explicit crop_method=None -> gps-square
+            t_none_arg, _, _ = mr.build_monolithic_runscript_task(
+                images_dir=img_dir, output_dir=out_dir, project_name="Test", crop_method=None
+            )
+            self.assertIn("--crop-method gps-square", getattr(t_none_arg, "args", ""))
+
+            # 3. Explicit crop_method='none' -> none
+            t_none_str, _, _ = mr.build_monolithic_runscript_task(
+                images_dir=img_dir, output_dir=out_dir, project_name="Test", crop_method="none"
+            )
+            self.assertIn("--crop-method none", getattr(t_none_str, "args", ""))
+
+            # 4. Explicit crop_method='structure' -> structure
+            t_struct, _, _ = mr.build_monolithic_runscript_task(
+                images_dir=img_dir, output_dir=out_dir, project_name="Test", crop_method="structure"
+            )
+            self.assertIn("--crop-method structure", getattr(t_struct, "args", ""))
 
     def test_status_file_sidecar_ipc_tracking(self) -> None:
         """Verify emit_ipc_stage writes real-time JSON milestone updates to active status sidecar."""

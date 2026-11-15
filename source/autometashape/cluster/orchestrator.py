@@ -315,7 +315,7 @@ def build_monolithic_runscript_task(
     depth_filtering: str = "moderate",
     custom_faces: int | None = 2000000,
     texture_pages: int | None = 16,
-    crop_method: str | None = "none",
+    crop_method: str | None = "gps-square",
     texture_format: str = "png",
     align_photos: bool = True,
     build_depth_maps: bool = True,
@@ -341,6 +341,8 @@ def build_monolithic_runscript_task(
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
+    if crop_method is None:
+        crop_method = "gps-square" if preset == "pro" else "gps-square"
 
     # Resolve runner script and source package
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
