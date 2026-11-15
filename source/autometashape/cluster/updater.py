@@ -48,34 +48,9 @@ log.append(f"Started worker update on {{node_name}} at {{time.ctime()}}")
 log.append(f"Python: {{sys.executable}}")
 
 user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
-candidates = [
-    os.environ.get("AUTOMETASHAPE_DIR", ""),
-    os.getcwd(),
-    os.path.dirname(os.getcwd()),
-    os.path.join(user_profile, "Documents", "AutoMetashape"),
-    os.path.join(user_profile, "AutoMetashape"),
-    r"C:\\AutoMetashape",
-    r"D:\\AutoMetashape",
-    r"E:\\AutoMetashape",
-]
-target_dir = None
-for cand in candidates:
-    if cand and os.path.isdir(cand) and os.path.exists(os.path.join(cand, "launch_worker.bat")):
-        target_dir = os.path.abspath(cand)
-        break
-
-if not target_dir:
-    curr = os.path.abspath(os.getcwd())
-    for _ in range(4):
-        if os.path.exists(os.path.join(curr, "launch_worker.bat")):
-            target_dir = curr
-            break
-        curr = os.path.dirname(curr)
-
-if not target_dir:
-    target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
-
-log.append(f"Resolved target AutoMetashape directory: {{target_dir}}")
+target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+os.makedirs(target_dir, exist_ok=True)
+log.append(f"Canonical target AutoMetashape directory: {{target_dir}}")
 
 temp_dir = os.environ.get("TEMP", r"C:\\Temp")
 os.makedirs(temp_dir, exist_ok=True)

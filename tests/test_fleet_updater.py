@@ -43,6 +43,8 @@ class TestFleetUpdater(unittest.TestCase):
         self.assertIn("https://example.com/repo.zip", code)
         self.assertIn("urllib.request", code)
         self.assertIn("zipfile", code)
+        self.assertIn("Documents", code)
+        self.assertIn("AutoMetashape", code)
         self.assertIn("worker_config.json", code)
         self.assertIn("server_config.json", code)
         self.assertIn("update_result.txt", code)
