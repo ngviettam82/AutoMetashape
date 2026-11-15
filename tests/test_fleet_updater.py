@@ -137,6 +137,135 @@ class TestFleetUpdater(unittest.TestCase):
         self.assertEqual(args.root, r"\\SRV\Share")
         self.assertEqual(args.node, "canary")
         self.assertFalse(args.no_restart)
+        self.assertTrue(args.force)
+
+        # Test safe flag overrides force default
+        safe_args = parser.parse_args(["--safe"])
+        self.assertFalse(safe_args.force)
+        no_force_args = parser.parse_args(["--no-force"])
+        self.assertFalse(no_force_args.force)
+
+    def test_generate_worker_updater_code_node_lock(self) -> None:
+        """Verify target worker node hostname lock is generated in script."""
+        code = generate_worker_updater_code("https://example.com/repo.zip", expected_hostname="Node-Alpha")
+        self.assertIn("node-alpha", code)
+        self.assertIn("Target node mismatch", code)
+        self.assertIn("raise RuntimeError", code)
+
+    def test_update_remote_worker_safe_mode_skips_busy(self) -> None:
+        """Verify update_remote_worker skips busy worker when force=False."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "Worker-1", "state": "inprogress"},
+            ]
+        }
+        mock_metashape = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("autometashape.cluster.updater.Metashape", mock_metashape):
+                res = update_remote_worker(
+                    client=mock_client,
+                    worker_id_or_name=1,
+                    shared_root=tmp_dir,
+                    force=False,
+                )
+                self.assertFalse(res["success"])
+                self.assertIn("currently inprogress", res["error"])
+                self.assertIn("safe mode", res["error"])
+                mock_client.createBatch.assert_not_called()
+
+    def test_update_remote_worker_force_mode_aborts_busy_worker(self) -> None:
+        """Verify update_remote_worker aborts busy task when force=True (default)."""
+        mock_client = MagicMock()
+        mock_client.workerList.side_effect = [
+            # Initial lookup: worker is busy
+            {"workers": [{"worker_id": 1, "hostname": "Worker-1", "hostaddr": "10.0.0.1:5000", "state": "inprogress"}]},
+            # Polling after abortBatch: worker becomes ready
+            {"workers": [{"worker_id": 1, "hostname": "Worker-1", "hostaddr": "10.0.0.1:5000", "state": "ready"}]},
+            # Polling before batch creation
+            {"workers": [{"worker_id": 1, "hostname": "Worker-1", "hostaddr": "10.0.0.1:5000", "state": "ready"}]},
+            # Post restart lookup
+            {"workers": [{"worker_id": 2, "hostname": "Worker-1", "hostaddr": "10.0.0.1:5001", "state": "ready"}]},
+        ]
+        mock_client.batchList.return_value = {
+            "batches": [
+                {"batch_id": 50, "state": "inprogress"},
+                {"batch_id": 99, "state": "completed"},
+            ]
+        }
+        mock_client.createBatch.return_value = 99
+
+        mock_metashape = MagicMock()
+        mock_task = MagicMock()
+        mock_task.toNetworkTask.return_value = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = mock_task
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("autometashape.cluster.updater.Metashape", mock_metashape):
+                res = update_remote_worker(
+                    client=mock_client,
+                    worker_id_or_name=1,
+                    shared_root=tmp_dir,
+                    timeout=5.0,
+                    restart=True,
+                    poll_interval=0.01,
+                    force=True,
+                )
+                self.assertTrue(res["success"])
+                # Verified active batch was aborted
+                mock_client.abortBatch.assert_called_with(50)
+                # Verified batch was locked to 1 worker
+                mock_client.setBatchWorkerLimit.assert_called_with(99, 1)
+
+    def test_update_remote_worker_isolates_other_workers(self) -> None:
+        """Verify other workers are temporarily paused and restored during target update."""
+        mock_client = MagicMock()
+        mock_client.workerList.side_effect = [
+            # 2 workers online
+            {
+                "workers": [
+                    {"worker_id": 1, "hostname": "Target-Node", "state": "ready", "paused": False},
+                    {"worker_id": 2, "hostname": "Other-Node", "state": "ready", "paused": False},
+                ]
+            },
+            # Polling during isolation
+            {
+                "workers": [
+                    {"worker_id": 1, "hostname": "Target-Node", "state": "ready", "paused": False},
+                    {"worker_id": 2, "hostname": "Other-Node", "state": "ready", "paused": True},
+                ]
+            },
+            # Post restart
+            {
+                "workers": [
+                    {"worker_id": 3, "hostname": "Target-Node", "state": "ready", "paused": False},
+                    {"worker_id": 2, "hostname": "Other-Node", "state": "ready", "paused": True},
+                ]
+            },
+        ]
+        mock_client.createBatch.return_value = 100
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 100, "state": "completed"}]}
+
+        mock_metashape = MagicMock()
+        mock_task = MagicMock()
+        mock_task.toNetworkTask.return_value = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = mock_task
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("autometashape.cluster.updater.Metashape", mock_metashape):
+                res = update_remote_worker(
+                    client=mock_client,
+                    worker_id_or_name=1,
+                    shared_root=tmp_dir,
+                    timeout=5.0,
+                    restart=True,
+                    poll_interval=0.01,
+                )
+                self.assertTrue(res["success"])
+                # Verified other worker was paused during batch
+                mock_client.setWorkerPaused.assert_any_call(2, True)
+                # Verified other worker was restored in finally teardown
+                mock_client.setWorkerPaused.assert_any_call(2, False)
 
 
 if __name__ == "__main__":

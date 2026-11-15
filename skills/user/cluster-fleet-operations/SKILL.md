@@ -151,9 +151,13 @@ The repository provides an end-to-end autonomous remote updater (`scripts/update
   ```powershell
   .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node canary
   ```
-- **Update Specific Worker Node**:
+- **Update Specific Worker Node** (default `--force` aborts active process for immediate update):
   ```powershell
   .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc
+  ```
+- **Update Specific Worker in Safe Mode** (skips worker if busy on active reconstruction):
+  ```powershell
+  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --safe
   ```
 - **Update Entire Fleet in Sequential Waves**:
   ```powershell
@@ -165,16 +169,18 @@ The repository provides an end-to-end autonomous remote updater (`scripts/update
   ```
 
 #### Underlying Remote Update & Auto-Relaunch Architecture
-1. **Maintenance Project Anchor**: The coordinator maintains `.cluster/maintenance.psx` on the shared root as an anchor project.
-2. **Task Dispatch**: Coordinator submits a `Metashape.Tasks.RunScript()` network batch locked to the target worker.
-3. **In-Process Worker Execution**:
+1. **Target Worker State Gating & Force Abort**: If the targeted worker is currently busy on an active job, `--force` (default) pauses other queued batches, sends `client.abortBatch()` to cancel the active task, and ensures the target transitions to `ready`. `--safe` cleanly skips busy workers.
+2. **Cluster Isolation Guard**: Coordinator queries all online workers, temporarily pauses all non-target workers (`client.setWorkerPaused(w, True)`), and locks the batch with `client.setBatchWorkerLimit(batch_id, 1)`. In a guaranteed `finally` teardown, all workers and batches are unpaused.
+3. **In-Task Hostname Verification**: The injected Python script verifies `COMPUTERNAME` against the intended target hostname before performing any downloads or file modifications.
+4. **Maintenance Project Anchor**: The coordinator maintains `.cluster/maintenance.psx` on the shared root as an anchor project.
+5. **In-Process Worker Execution**:
    - Worker downloads latest release archive (`main.zip`) directly via Python `urllib.request`.
    - Extracts archive via `zipfile` and mirrors all updated files into `%USERPROFILE%\Documents\AutoMetashape`.
    - Preserves `worker_config.json` and `server_config.json`.
    - Writes timestamped node verification log to `.cluster/<node>_update_result.txt`.
-4. **Graceful Daemon Signal**: Coordinator calls `client.quitWorker(wid)` once the batch finishes.
-5. **Resilient Re-Launch Loop**: Remote `launch_worker.py` daemon intercepts the process exit, enters its 10s reconnect window, and relaunches `metashape.exe` with the updated codebase.
-6. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
+6. **Graceful Daemon Signal**: Coordinator calls `client.quitWorker(wid)` once the batch finishes.
+7. **Resilient Re-Launch Loop**: Remote `launch_worker.py` daemon intercepts the process exit, enters its 10s reconnect window, and relaunches `metashape.exe` with the updated codebase.
+8. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
 
 ---
 

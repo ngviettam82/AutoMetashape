@@ -20,8 +20,9 @@ DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive
 CLUSTER_MAINTENANCE_REL_PATH = ".cluster/maintenance.psx"
 
 
-def generate_worker_updater_code(repo_url: str = DEFAULT_REPO_ARCHIVE_URL) -> str:
+def generate_worker_updater_code(repo_url: str = DEFAULT_REPO_ARCHIVE_URL, expected_hostname: str = "") -> str:
     """Generate self-contained Python code executed on the remote worker node via RunScript."""
+    clean_expected = expected_hostname.strip().lower()
     return f'''import os
 import shutil
 import sys
@@ -31,6 +32,13 @@ import zipfile
 
 log = []
 node_name = os.environ.get("COMPUTERNAME", "unknown")
+expected_node = "{clean_expected}"
+if expected_node and expected_node != "unknown":
+    if node_name.strip().lower() != expected_node:
+        err_msg = f"Target node mismatch: task assigned to {{node_name}}, expected {{expected_node}}"
+        log.append(f"FATAL: {{err_msg}}")
+        raise RuntimeError(err_msg)
+
 log.append(f"Started worker update on {{node_name}} at {{time.ctime()}}")
 log.append(f"Python: {{sys.executable}}")
 
@@ -154,8 +162,24 @@ def update_remote_worker(
     timeout: float = 60.0,
     restart: bool = True,
     poll_interval: float = 2.0,
+    force: bool = True,
 ) -> dict:
-    """Dispatches remote update to a specific worker node and optionally triggers auto-reconnect restart."""
+    """Dispatches remote update to a specific worker node with cluster isolation and force-abort capability.
+
+    Args:
+        client: Connected Metashape NetworkClient instance.
+        worker_id_or_name: Worker ID, hostname, or IP address substring of the target node.
+        shared_root: Shared network storage root containing .cluster maintenance files.
+        repo_url: URL to repository archive zip.
+        timeout: Maximum timeout in seconds to wait for update batch completion.
+        restart: Whether to signal quitWorker for automatic daemon relaunch.
+        poll_interval: Seconds between status polls.
+        force: If True (default), aborts any active reconstruction processing on the worker so it can update
+            immediately. If False, skips busy workers to preserve ongoing processing.
+
+    Returns:
+        Dictionary detailing success status, batch ID, relaunch confirmation, logs, or error details.
+    """
     result = {
         "success": False,
         "worker_id": None,
@@ -192,88 +216,217 @@ def update_remote_worker(
     result["worker_id"] = wid
     result["hostname"] = target.get("hostname")
     result["hostaddr"] = target.get("hostaddr")
+    node_hname = result["hostname"] or str(worker_id_or_name)
 
-    # 1. Ensure maintenance project
-    rel_project = ensure_cluster_maintenance_project(shared_root)
+    paused_existing_batches: list[int] = []
+    other_workers_paused: dict[int | str, bool] = {}
 
-    # 2. Build RunScript task
-    task = Metashape.Tasks.RunScript()
-    task.code = generate_worker_updater_code(repo_url=repo_url)
-    net_task = task.toNetworkTask()
-
-    # 3. Create batch
     try:
-        batch_id = client.createBatch(rel_project, [net_task])
-        result["batch_id"] = batch_id
-        client.setBatchPaused(batch_id, False)
-    except Exception as e:
-        result["error"] = f"Failed to dispatch update batch: {e}"
-        return result
-
-    # 4. Wait for batch completion
-    start_t = time.time()
-    batch_done = False
-    while time.time() - start_t < timeout:
-        batches_info = client.batchList()
-        batch_entry = None
-        if isinstance(batches_info, dict):
-            for b in batches_info.get("batches", []):
-                if b.get("batch_id") == batch_id:
-                    batch_entry = b
-                    break
-        if batch_entry:
-            state = str(batch_entry.get("state", "")).lower()
-            if state in ("completed", "finished"):
-                batch_done = True
-                break
-            if state in ("failed", "aborted", "cancelled"):
-                result["error"] = f"Update batch failed on worker with state: {state}"
+        # Pre-flight Check: Is target worker currently busy?
+        target_state = str(target.get("state", "")).lower()
+        if target_state not in ("ready", ""):
+            if not force:
+                result["error"] = (
+                    f"Target worker '{node_hname}' (ID={wid}) is currently {target_state}. "
+                    "Skipping update in safe mode (enable force to abort active processing)."
+                )
                 return result
-        time.sleep(poll_interval)
 
-    if not batch_done:
-        result["error"] = f"Update batch timed out after {timeout} seconds"
-        return result
+            # FORCE MODE: Abort active processing to allow immediate update
+            # 1. Temporarily pause queued/inprogress batches on server so worker cannot grab another job
+            if hasattr(client, "batchList") and hasattr(client, "setBatchPaused"):
+                try:
+                    bl = client.batchList()
+                    if isinstance(bl, dict):
+                        for b in bl.get("batches", []):
+                            bid = b.get("batch_id")
+                            bstate = str(b.get("state", "")).lower()
+                            if bstate in ("queued", "inprogress", "running", "active", "submitted", "pending"):
+                                client.setBatchPaused(bid, True)
+                                paused_existing_batches.append(bid)
+                except Exception:
+                    pass
 
-    # Read node result log if available
-    node_name = result["hostname"] or "unknown"
-    res_path = os.path.join(shared_root, ".cluster", f"{node_name}_update_result.txt")
-    if os.path.isfile(res_path):
-        try:
-            with open(res_path, "r", encoding="utf-8") as f:
-                result["log"] = f.read()
-        except Exception:
-            pass
+            # 2. Abort any active in-progress batches on the server
+            if hasattr(client, "abortBatch") and hasattr(client, "batchList"):
+                try:
+                    bl = client.batchList()
+                    if isinstance(bl, dict):
+                        for b in bl.get("batches", []):
+                            bid = b.get("batch_id")
+                            bstate = str(b.get("state", "")).lower()
+                            if bstate in ("inprogress", "running", "active"):
+                                client.abortBatch(bid)
+                except Exception:
+                    pass
 
-    result["success"] = True
-
-    # 5. Optional graceful restart via quitWorker
-    if restart:
-        try:
-            client.quitWorker(wid)
-            # Await auto-reconnect (10s reconnect window + 10s buffer)
-            reconnect_deadline = time.time() + 30.0
-            reconnected = False
-            while time.time() < reconnect_deadline:
-                time.sleep(poll_interval)
-                current_workers = list_online_workers(client)
-                for cw in current_workers:
+            # 3. Wait for target worker to transition to 'ready'
+            abort_start = time.time()
+            target_ready = False
+            while time.time() - abort_start < 10.0:
+                time.sleep(1.0)
+                refreshed = list_online_workers(client)
+                for rw in refreshed:
                     if (
-                        cw.get("worker_id") != wid
-                        and (
-                            str(cw.get("hostname", "")).lower() == str(result["hostname"]).lower()
-                            or str(result["hostaddr"]).split(":")[0] in str(cw.get("hostaddr", ""))
-                        )
-                        and str(cw.get("state", "")).lower() == "ready"
-                    ):
-                        result["relaunched"] = True
-                        result["new_worker_id"] = cw.get("worker_id")
-                        result["new_hostaddr"] = cw.get("hostaddr")
-                        reconnected = True
+                        rw.get("worker_id") == wid or str(rw.get("hostname", "")).lower() == str(node_hname).lower()
+                    ) and str(rw.get("state", "")).lower() == "ready":
+                        target_ready = True
+                        wid = rw.get("worker_id")
+                        result["worker_id"] = wid
                         break
-                if reconnected:
+                if target_ready:
                     break
+
+            # If still not ready after abort signal, force-terminate worker process via quitWorker for auto-reconnect
+            if not target_ready:
+                if hasattr(client, "quitWorker"):
+                    try:
+                        client.quitWorker(wid)
+                    except Exception:
+                        pass
+                    reboot_deadline = time.time() + 30.0
+                    while time.time() < reboot_deadline:
+                        time.sleep(poll_interval)
+                        refreshed = list_online_workers(client)
+                        for rw in refreshed:
+                            if (
+                                str(rw.get("hostname", "")).lower() == str(node_hname).lower()
+                                and str(rw.get("state", "")).lower() == "ready"
+                            ):
+                                wid = rw.get("worker_id")
+                                result["worker_id"] = wid
+                                result["hostname"] = rw.get("hostname")
+                                result["hostaddr"] = rw.get("hostaddr")
+                                target_ready = True
+                                break
+                        if target_ready:
+                            break
+
+            if not target_ready:
+                result["error"] = f"Failed to force worker '{node_hname}' (ID={wid}) into ready state after abort"
+                return result
+
+        # 4. Cluster Isolation: Temporarily pause all OTHER workers so Metashape ONLY assigns update batch to target
+        current_fleet = list_online_workers(client) if target_state not in ("ready", "") else workers
+        for w in current_fleet:
+            w_id = w.get("worker_id")
+            if w_id != wid:
+                other_workers_paused[w_id] = bool(w.get("paused", False))
+                if hasattr(client, "setWorkerPaused"):
+                    try:
+                        client.setWorkerPaused(w_id, True)
+                    except Exception:
+                        pass
+            else:
+                if hasattr(client, "setWorkerPaused"):
+                    try:
+                        client.setWorkerPaused(wid, False)
+                    except Exception:
+                        pass
+
+        # 5. Ensure maintenance project
+        rel_project = ensure_cluster_maintenance_project(shared_root)
+
+        # 6. Build RunScript task locked to target worker's hostname
+        task = Metashape.Tasks.RunScript()
+        task.code = generate_worker_updater_code(repo_url=repo_url, expected_hostname=result["hostname"] or "")
+        net_task = task.toNetworkTask()
+
+        # 7. Create batch locked to 1 worker
+        try:
+            batch_id = client.createBatch(rel_project, [net_task])
+            result["batch_id"] = batch_id
+            if hasattr(client, "setBatchWorkerLimit"):
+                try:
+                    client.setBatchWorkerLimit(batch_id, 1)
+                except Exception:
+                    pass
+            client.setBatchPaused(batch_id, False)
         except Exception as e:
-            result["error"] = f"Update succeeded but quitWorker restart failed: {e}"
+            result["error"] = f"Failed to dispatch update batch: {e}"
+            return result
+
+        # 8. Wait for batch completion
+        start_t = time.time()
+        batch_done = False
+        while time.time() - start_t < timeout:
+            batches_info = client.batchList()
+            batch_entry = None
+            if isinstance(batches_info, dict):
+                for b in batches_info.get("batches", []):
+                    if b.get("batch_id") == batch_id:
+                        batch_entry = b
+                        break
+            if batch_entry:
+                state = str(batch_entry.get("state", "")).lower()
+                if state in ("completed", "finished"):
+                    batch_done = True
+                    break
+                if state in ("failed", "aborted", "cancelled"):
+                    result["error"] = f"Update batch failed on worker with state: {state}"
+                    return result
+            time.sleep(poll_interval)
+
+        if not batch_done:
+            result["error"] = f"Update batch timed out after {timeout} seconds"
+            return result
+
+        # Read node result log if available
+        node_name = result["hostname"] or "unknown"
+        res_path = os.path.join(shared_root, ".cluster", f"{node_name}_update_result.txt")
+        if os.path.isfile(res_path):
+            try:
+                with open(res_path, "r", encoding="utf-8") as f:
+                    result["log"] = f.read()
+            except Exception:
+                pass
+
+        result["success"] = True
+
+        # 9. Optional graceful restart via quitWorker
+        if restart:
+            try:
+                client.quitWorker(wid)
+                # Await auto-reconnect (10s reconnect window + 10s buffer)
+                reconnect_deadline = time.time() + 30.0
+                reconnected = False
+                while time.time() < reconnect_deadline:
+                    time.sleep(poll_interval)
+                    current_workers = list_online_workers(client)
+                    for cw in current_workers:
+                        if (
+                            cw.get("worker_id") != wid
+                            and (
+                                str(cw.get("hostname", "")).lower() == str(result["hostname"]).lower()
+                                or str(result["hostaddr"]).split(":")[0] in str(cw.get("hostaddr", ""))
+                            )
+                            and str(cw.get("state", "")).lower() == "ready"
+                        ):
+                            result["relaunched"] = True
+                            result["new_worker_id"] = cw.get("worker_id")
+                            result["new_hostaddr"] = cw.get("hostaddr")
+                            reconnected = True
+                            break
+                    if reconnected:
+                        break
+            except Exception as e:
+                result["error"] = f"Update succeeded but quitWorker restart failed: {e}"
+
+    finally:
+        # 10. Guaranteed teardown: restore other workers' pause states
+        for ow_id, was_paused in other_workers_paused.items():
+            if hasattr(client, "setWorkerPaused"):
+                try:
+                    client.setWorkerPaused(ow_id, was_paused)
+                except Exception:
+                    pass
+
+        # Restore any paused batches
+        for bid in paused_existing_batches:
+            if hasattr(client, "setBatchPaused"):
+                try:
+                    client.setBatchPaused(bid, False)
+                except Exception:
+                    pass
 
     return result

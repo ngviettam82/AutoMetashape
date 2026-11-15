@@ -77,6 +77,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="List all online cluster workers and exit",
     )
     parser.add_argument(
+        "--force",
+        dest="force",
+        action="store_true",
+        default=True,
+        help="Force worker to abort any active in-progress processing and update immediately (default: enabled)",
+    )
+    parser.add_argument(
+        "--safe",
+        "--no-force",
+        dest="force",
+        action="store_false",
+        help="Safe mode: skip workers that are currently busy processing active projects",
+    )
+    parser.add_argument(
         "--timeout",
         type=float,
         default=90.0,
@@ -196,6 +210,7 @@ def main() -> int:
             repo_url=args.repo_url,
             timeout=args.timeout,
             restart=not args.no_restart,
+            force=args.force,
         )
 
         if res.get("success"):
