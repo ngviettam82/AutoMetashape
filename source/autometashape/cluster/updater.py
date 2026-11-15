@@ -47,12 +47,13 @@ if expected_node and expected_node != "unknown":
 log.append(f"Started worker update on {{node_name}} at {{time.ctime()}}")
 log.append(f"Python: {{sys.executable}}")
 
-user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
+user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+# INVARIANT: %USERPROFILE%/Documents/AutoMetashape is the ONLY permissible hardcoded directory in the architecture.
 target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
 os.makedirs(target_dir, exist_ok=True)
 log.append(f"Canonical target AutoMetashape directory: {{target_dir}}")
 
-temp_dir = os.environ.get("TEMP", r"C:\\Temp")
+temp_dir = os.environ.get("TEMP") or os.environ.get("TMP") or os.path.join(user_profile, "AppData", "Local", "Temp")
 os.makedirs(temp_dir, exist_ok=True)
 zip_path = os.path.join(temp_dir, f"AutoMetashape_remote_update_{{int(time.time())}}.zip")
 extract_dir = os.path.join(temp_dir, f"AutoMetashape_remote_extracted_{{int(time.time())}}")

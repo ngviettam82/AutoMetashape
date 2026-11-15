@@ -139,6 +139,7 @@ When maintaining or upgrading remote cluster worker nodes from the Coordinator h
    - Only proceed across remaining worker nodes in staggered waves after canary passes.
 3. **Preserve Host / Coordinator Exemption**: Coordinator host must be explicitly excluded from worker update batches. Never run worker kill/update commands against the server daemon.
 4. **Zero-Touch Headless Invariants**: Worker nodes execute non-interactively with automatic UNC path inference and dynamic GPU discovery.
+5. **Canonical Local Directory Invariant**: `%USERPROFILE%\Documents\AutoMetashape` is the **only permissible hardcoded directory** across all worker nodes. All other paths (storage root, server IP, GPU devices, scratch folders) MUST be dynamically auto-detected or explicitly configured via CLI/environment variables.
 
 #### Automated Fleet Updater CLI & API
 The repository provides an end-to-end autonomous remote updater (`scripts/update_fleet.py` and `update_fleet.bat`):
