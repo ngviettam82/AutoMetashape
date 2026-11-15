@@ -21,9 +21,15 @@ if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
 )
 
 if "%PYTHON_EXE%"=="" (
-    for %%D in (C D E F G) do (
+    for %%D in (C D E F G H I J K L M N O P Q R S T U V W X Y Z) do (
         if exist "%%D:\Program Files\Agisoft\Metashape Pro\python\python.exe" (
             set "PYTHON_EXE=%%D:\Program Files\Agisoft\Metashape Pro\python\python.exe"
+        )
+        if exist "%%D:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe" (
+            set "PYTHON_EXE=%%D:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe"
+        )
+        if exist "%%D:\Agisoft\Metashape Pro\python\python.exe" (
+            set "PYTHON_EXE=%%D:\Agisoft\Metashape Pro\python\python.exe"
         )
     )
 )
