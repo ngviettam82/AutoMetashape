@@ -218,6 +218,11 @@ Updates any worker or coordinator node directly from GitHub `main` in-place with
   ```powershell
   .\update.bat --server
   ```
+- **Remote Cluster Fleet Updating**:
+  To trigger an automated in-place update across connected remote worker nodes simultaneously from the host coordinator without visiting each machine, use `update_fleet.bat`. See [`cluster-fleet-operations`](../cluster-fleet-operations/SKILL.md) for full remote fleet deployment details:
+  ```powershell
+  .\update_fleet.bat --server 127.0.0.1:5840
+  ```
 
 #### 5.3 Starting the Cluster Server Daemon (Coordinator Workstation)
 The server process coordinates task dispatching and job tracking across all participating cluster nodes:
