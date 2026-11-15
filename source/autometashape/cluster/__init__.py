@@ -17,6 +17,7 @@ from autometashape.cluster.hardware import (
     extract_unc_root,
     find_metashape_monitor_path,
     find_metashape_path,
+    find_metashape_python_path,
     find_metashape_server_path,
     format_file_size,
     generate_worker_bat_content,
@@ -60,9 +61,14 @@ from autometashape.cluster.supervisor import (
 from autometashape.cluster.updater import (
     CLUSTER_MAINTENANCE_REL_PATH,
     DEFAULT_REPO_ARCHIVE_URL,
+    UPDATE_SIGNAL_FILENAME,
     ensure_cluster_maintenance_project,
     generate_worker_updater_code,
     list_online_workers,
+    mirror_directory_with_prune,
+    perform_worker_codebase_update,
+    stage_cluster_update_payload,
+    update_all_workers_parallel,
     update_remote_worker,
 )
 
@@ -97,6 +103,7 @@ __all__ = [
     "extract_unc_root",
     "find_metashape_monitor_path",
     "find_metashape_path",
+    "find_metashape_python_path",
     "find_metashape_server_path",
     "format_file_size",
     "generate_worker_bat_content",
@@ -115,4 +122,9 @@ __all__ = [
     "test_tcp_connection",
     "test_unc_path",
     "update_remote_worker",
+    "update_all_workers_parallel",
+    "UPDATE_SIGNAL_FILENAME",
+    "mirror_directory_with_prune",
+    "perform_worker_codebase_update",
+    "stage_cluster_update_payload",
 ]

@@ -160,27 +160,36 @@ The repository provides an end-to-end autonomous remote updater (`scripts/update
   ```powershell
   .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --safe
   ```
-- **Update Entire Fleet in Sequential Waves**:
+- **Update Entire Fleet in Parallel**:
   ```powershell
   .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node all
   ```
-- **Update Codebase Without Daemon Restart** (in-place script mirror only):
+- **Update Codebase Without Daemon Restart** (signal registration only):
   ```powershell
   .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --no-restart
   ```
 
-#### Underlying Remote Update & Auto-Relaunch Architecture
-1. **Target Worker State Gating & Force Abort**: If the targeted worker is currently busy on an active job, `--force` (default) pauses other queued batches, sends `client.abortBatch()` to cancel the active task, and ensures the target transitions to `ready`. `--safe` cleanly skips busy workers.
+#### Underlying Decoupled Handshake & Process Re-execution Architecture
+1. **Target Worker State Gating & Force Abort**: If the targeted worker is currently busy on an active job, `--force` (default) pauses queued batches, sends `client.abortBatch()` to cancel the active task, and ensures the target transitions to `ready`. `--safe` cleanly skips busy workers to protect jobs.
 2. **Cluster Isolation Guard**: Coordinator queries all online workers, temporarily pauses all non-target workers (`client.setWorkerPaused(w, True)`), and locks the batch with `client.setBatchWorkerLimit(batch_id, 1)`. In a guaranteed `finally` teardown, all workers and batches are unpaused.
-3. **In-Task Hostname Verification**: The injected Python script verifies `COMPUTERNAME` against the intended target hostname before performing any downloads or file modifications.
-4. **Maintenance Project Anchor**: The coordinator maintains `.cluster/maintenance.psx` on the shared root as an anchor project.
-5. **In-Process Worker Execution**:
-   - Worker downloads latest release archive (`main.zip`) directly via Python `urllib.request`.
-   - Extracts archive via `zipfile` and mirrors all updated files into `%USERPROFILE%\Documents\AutoMetashape`.
-   - Preserves `worker_config.json` and `server_config.json`.
-   - Writes timestamped node verification log to `.cluster/<node>_update_result.txt`.
-6. **Graceful Daemon Signal**: Coordinator calls `client.quitWorker(wid)` once the batch finishes.
-7. **Resilient Re-Launch Loop**: Remote `launch_worker.py` daemon intercepts the process exit, enters its 10s reconnect window, and relaunches `metashape.exe` with the updated codebase.
+3. **In-Task Signal Handshake (Zero In-Process File Locks)**:
+   - The injected Python task runs in `<50ms` inside `metashape.exe`.
+   - Verifies target `COMPUTERNAME` and locates target installation directory via `AUTOMETASHAPE_DIR`.
+   - Drops `.update_pending` signal file containing repo URL and payload cache path.
+   - Writes registration notice to `.cluster/<node>_update_result.txt`.
+   - Task completes immediately with zero network heavy downloads inside Metashape.
+4. **Graceful Daemon Signal**: Coordinator verifies task completion and calls `client.quitWorker(wid)`. Child `metashape.exe` terminates cleanly with return code 0, releasing all binary file handles.
+5. **Supervisor Autonomous Mirror & Git-Parity Prune**:
+   - The persistent `launch_worker.py` supervisor intercepts child exit and detects `.update_pending`.
+   - Pulls update payload (preferring high-speed LAN `.cluster/update_payload.zip`, falling back to GitHub).
+   - Extracts archive and executes Git-parity file mirror with automatic pruning of obsolete repository files.
+   - Strictly preserves machine-local files (`worker_config.json`, `server_config.json`), logs, and `.cluster/`.
+   - Removes `.update_pending`.
+6. **Clean Process Image Re-Execution (`os.execv`)**:
+   - Supervisor invokes `os.execv(sys.executable, [sys.executable, launcher_py] + sys.argv[1:])` to replace the Python process image entirely from disk.
+   - Dynamic GPU benchmarking, TCP checks, and updated CLI flags execute fresh without stale memory.
+7. **Zero OS-Python Invariant**:
+   - `launch_worker.bat` and `reexec_supervisor` prioritize Metashape Pro's bundled Python (`python\python.exe`) across all system drives. Worker nodes operate 100% headless without requiring system Python.
 8. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
 
 ---

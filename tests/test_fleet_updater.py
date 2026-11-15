@@ -21,16 +21,22 @@ if _SOURCE_DIR not in sys.path:
 if _SCRIPTS_DIR not in sys.path:
     sys.path.insert(0, _SCRIPTS_DIR)
 
+from autometashape.cluster.hardware import find_metashape_python_path
 from autometashape.cluster.updater import (
     CLUSTER_MAINTENANCE_REL_PATH,
     DEFAULT_REPO_ARCHIVE_URL,
+    UPDATE_SIGNAL_FILENAME,
     ensure_cluster_maintenance_project,
     generate_worker_updater_code,
     list_online_workers,
+    mirror_directory_with_prune,
+    perform_worker_codebase_update,
     stage_cluster_update_payload,
+    update_all_workers_parallel,
     update_remote_worker,
 )
 
+from scripts.launch_worker import check_update_pending
 from scripts.update_fleet import build_arg_parser
 
 
@@ -41,12 +47,9 @@ class TestFleetUpdater(unittest.TestCase):
         """Verify generated remote worker updater script content."""
         code = generate_worker_updater_code("https://example.com/repo.zip")
         self.assertIn("https://example.com/repo.zip", code)
-        self.assertIn("urllib.request", code)
-        self.assertIn("zipfile", code)
         self.assertIn("Documents", code)
         self.assertIn("AutoMetashape", code)
-        self.assertIn("worker_config.json", code)
-        self.assertIn("server_config.json", code)
+        self.assertIn(".update_pending", code)
         self.assertIn("update_result.txt", code)
 
     def test_ensure_cluster_maintenance_project(self) -> None:
@@ -325,6 +328,98 @@ class TestFleetUpdater(unittest.TestCase):
                 self.assertIn("timed out", res["error"])
                 # Verified batch was cleanly aborted on server to prevent orphan lingering
                 mock_client.abortBatch.assert_called_with(202)
+
+    def test_mirror_directory_with_prune(self) -> None:
+        """Verify Git-parity file mirroring and obsolete file pruning with config preservation."""
+        with tempfile.TemporaryDirectory() as src, tempfile.TemporaryDirectory() as dst:
+            # Source (new codebase)
+            with open(os.path.join(src, "active.py"), "w") as f:
+                f.write("print('v2')")
+            with open(os.path.join(src, "new_feature.py"), "w") as f:
+                f.write("print('new')")
+
+            # Destination (installed worker)
+            with open(os.path.join(dst, "active.py"), "w") as f:
+                f.write("print('v1')")
+            with open(os.path.join(dst, "obsolete_file.py"), "w") as f:
+                f.write("print('deprecated')")
+            with open(os.path.join(dst, "worker_config.json"), "w") as f:
+                f.write('{"host": "server:5840", "root": "\\\\share"}')
+            with open(os.path.join(dst, "runtime.log"), "w") as f:
+                f.write("log data")
+
+            copied, pruned = mirror_directory_with_prune(src, dst)
+            self.assertEqual(copied, 2)
+            self.assertEqual(pruned, 1)
+
+            # Assert new files copied
+            self.assertTrue(os.path.isfile(os.path.join(dst, "new_feature.py")))
+            with open(os.path.join(dst, "active.py")) as f:
+                self.assertEqual(f.read(), "print('v2')")
+
+            # Assert obsolete file pruned
+            self.assertFalse(os.path.exists(os.path.join(dst, "obsolete_file.py")))
+
+            # Assert local configs and logs preserved
+            self.assertTrue(os.path.isfile(os.path.join(dst, "worker_config.json")))
+            self.assertTrue(os.path.isfile(os.path.join(dst, "runtime.log")))
+
+    def test_check_update_pending(self) -> None:
+        """Verify supervisor correctly detects .update_pending signal file and loads payload."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            self.assertIsNone(check_update_pending(tmp_dir))
+
+            flag_file = os.path.join(tmp_dir, UPDATE_SIGNAL_FILENAME)
+            with open(flag_file, "w", encoding="utf-8") as f:
+                f.write('{"repo_url": "https://example.com/repo.zip", "shared_cluster_dir": "C:\\temp"}')
+
+            data = check_update_pending(tmp_dir)
+            self.assertIsNotNone(data)
+            self.assertEqual(data.get("repo_url"), "https://example.com/repo.zip")
+            self.assertEqual(data.get("_flag_path"), flag_file)
+
+    def test_find_metashape_python_path(self) -> None:
+        """Verify discovery of Metashape Pro bundled Python executable."""
+        py_path = find_metashape_python_path()
+        self.assertIsNotNone(py_path)
+        self.assertTrue(isinstance(py_path, str))
+
+    def test_update_all_workers_parallel(self) -> None:
+        """Verify parallel rollout dispatches update batches across all online workers."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "Worker-A", "state": "ready"},
+                {"worker_id": 2, "hostname": "Worker-B", "state": "ready"},
+            ]
+        }
+        mock_client.createBatch.side_effect = [101, 102]
+        mock_client.batchList.return_value = {
+            "batches": [
+                {"batch_id": 101, "state": "completed"},
+                {"batch_id": 102, "state": "completed"},
+            ]
+        }
+
+        mock_metashape = MagicMock()
+        mock_task = MagicMock()
+        mock_task.toNetworkTask.return_value = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = mock_task
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with patch("autometashape.cluster.updater.Metashape", mock_metashape):
+                results = update_all_workers_parallel(
+                    client=mock_client,
+                    shared_root=tmp_dir,
+                    timeout=5.0,
+                    restart=False,
+                    poll_interval=0.01,
+                )
+                self.assertEqual(len(results), 2)
+                self.assertTrue(results[0]["success"])
+                self.assertTrue(results[1]["success"])
+                self.assertEqual(results[0]["batch_id"], 101)
+                self.assertEqual(results[1]["batch_id"], 102)
 
 
 if __name__ == "__main__":

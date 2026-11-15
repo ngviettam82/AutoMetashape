@@ -72,6 +72,50 @@ def find_metashape_path() -> str | None:
     return None
 
 
+def find_metashape_python_path(metashape_exe: str | None = None) -> str | None:
+    """Locate Metashape Pro bundled Python executable (python/python.exe).
+
+    Prioritizes the self-contained Python bundled inside Metashape Pro installations,
+    enabling full cluster worker operation on machines without system Python.
+    """
+    if not metashape_exe:
+        metashape_exe = find_metashape_path()
+
+    if metashape_exe and os.path.isfile(metashape_exe):
+        exe_dir = os.path.dirname(metashape_exe)
+        for sub in ("python/python.exe", "python/bin/python3", "python/bin/python", "python.exe"):
+            cand = os.path.normpath(os.path.join(exe_dir, sub))
+            if os.path.isfile(cand):
+                return cand
+
+    # Check standard install locations
+    if sys.platform == "win32":
+        for base in [
+            os.environ.get("PROGRAMFILES"),
+            os.environ.get("ProgramW6432"),
+            os.environ.get("PROGRAMFILES(X86)"),
+        ]:
+            if base:
+                cand = os.path.join(base, "Agisoft", "Metashape Pro", "python", "python.exe")
+                if os.path.isfile(cand):
+                    return cand
+
+        for drive in string.ascii_uppercase:
+            for sub in (
+                rf"{drive}:\Program Files\Agisoft\Metashape Pro\python\python.exe",
+                rf"{drive}:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe",
+                rf"{drive}:\Agisoft\Metashape Pro\python\python.exe",
+            ):
+                if os.path.isfile(sub):
+                    return sub
+
+    # Fallback to sys.executable if it is located inside a Metashape folder
+    if "metashape" in sys.executable.lower():
+        return sys.executable
+
+    return sys.executable
+
+
 def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
     """Locate Metashape Server binary (metashape-server.exe or metashape-server)."""
     if metashape_exe and os.path.isfile(metashape_exe):

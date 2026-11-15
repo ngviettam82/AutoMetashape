@@ -32,6 +32,7 @@ from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_
 from autometashape.cluster.updater import (
     DEFAULT_REPO_ARCHIVE_URL,
     list_online_workers,
+    update_all_workers_parallel,
     update_remote_worker,
 )
 
@@ -177,8 +178,34 @@ def main() -> int:
             f"[Canary Protocol] Selected single canary node: {targets[0].get('hostname')} (ID={targets[0].get('worker_id')})"
         )
     elif target_arg.lower() == "all":
-        targets = online_workers
-        print(f"[Fleet Update] Updating all {len(targets)} connected worker node(s) in sequence...")
+        print(f"[Fleet Update] Updating all {len(online_workers)} connected worker node(s) in parallel...")
+        results = update_all_workers_parallel(
+            client=client,
+            shared_root=args.root,
+            repo_url=args.repo_url,
+            timeout=args.timeout,
+            restart=not args.no_restart,
+            force=args.force,
+        )
+        success_count = sum(1 for r in results if r.get("success"))
+        fail_count = len(results) - success_count
+        for r in results:
+            nname = r.get("hostname") or str(r.get("worker_id"))
+            if r.get("success"):
+                print(f"  [OK] Update signal registered on {nname} (Batch #{r.get('batch_id')})!")
+                if r.get("relaunched"):
+                    print(
+                        f"  [OK] Node successfully restarted into fresh worker (New ID={r.get('new_worker_id')}, Addr={r.get('new_hostaddr')})!"
+                    )
+                elif not args.no_restart:
+                    print(f"  [WARNING] Signal sent to {nname}, but restart confirmation timed out.")
+            else:
+                print(f"  [FAILED] Worker update failed on {nname}: {r.get('error')}", file=sys.stderr)
+
+        print("\n" + "=" * 72)
+        print(f"  Parallel Fleet Update Complete: {success_count} succeeded, {fail_count} failed.")
+        print("=" * 72)
+        return 0 if fail_count == 0 else 1
     else:
         matched = None
         for w in online_workers:

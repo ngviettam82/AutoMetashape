@@ -63,6 +63,49 @@ def cleanup_stale_worker_processes() -> None:
             pass
 
 
+def check_update_pending(target_dir: str) -> dict | None:
+    """Check if an autonomous update was requested via .update_pending signal file."""
+    candidates = [
+        os.path.join(target_dir, cu.UPDATE_SIGNAL_FILENAME),
+        os.path.join(tempfile.gettempdir(), cu.UPDATE_SIGNAL_FILENAME),
+    ]
+    node_name = os.environ.get("COMPUTERNAME", "").strip().lower()
+    if node_name:
+        candidates.append(os.path.join(tempfile.gettempdir(), f"{cu.UPDATE_SIGNAL_FILENAME}_{node_name}"))
+
+    for flag_path in candidates:
+        try:
+            with open(flag_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if not content:
+                continue
+            import json
+
+            data = json.loads(content)
+            if isinstance(data, dict) and (data.get("action") == "autometashape_update" or "repo_url" in data):
+                data["_flag_path"] = flag_path
+                return data
+        except Exception:
+            continue
+    return None
+
+
+def reexec_supervisor(target_dir: str) -> None:
+    """Re-execute the supervisor process image with updated Python code from disk."""
+    launcher_py = os.path.join(target_dir, "scripts", "launch_worker.py")
+    if not os.path.isfile(launcher_py):
+        launcher_py = os.path.abspath(__file__)
+
+    # STRICT INVARIANT: Always prioritize Metashape Pro bundled Python
+    py_exe = cu.find_metashape_python_path() or sys.executable
+    cmd = [py_exe, launcher_py] + sys.argv[1:]
+    print(f"[SUPERVISOR] Re-executing fresh process image: {cmd[0]} {cmd[1]}")
+    sys.stdout.flush()
+    sys.stderr.flush()
+    clear_worker_pid()
+    os.execv(py_exe, cmd)
+
+
 def build_arg_parser() -> argparse.ArgumentParser:
     """Build CLI argument parser for worker launcher."""
     parser = argparse.ArgumentParser(
@@ -409,18 +452,41 @@ def _run_worker_lifecycle() -> int:
 
     # 9. Resilient Execution & Auto-Reconnect Loop
     reconnect_delay = 10.0
+    target_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
+    if not target_dir or not os.path.isdir(target_dir):
+        if os.path.isdir(_REPO_ROOT):
+            target_dir = _REPO_ROOT
+        else:
+            user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+            target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+
     worker_env = os.environ.copy()
-    worker_env["AUTOMETASHAPE_DIR"] = _REPO_ROOT
+    worker_env["AUTOMETASHAPE_DIR"] = target_dir
     while True:
         proc = None
         try:
             start_t = time.time()
-            proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=_REPO_ROOT)
+            proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=target_dir)
             proc.wait()
             ret_code = proc.returncode
 
             elapsed = time.time() - start_t
             print(f"\n[DISCONNECTED] Worker process exited with code {ret_code} (Active: {elapsed:.1f}s).")
+
+            # Check if an autonomous update was requested via .update_pending
+            signal_data = check_update_pending(target_dir)
+            if signal_data is not None:
+                print("\n" + "=" * 72)
+                print("  [SUPERVISOR] Autonomous Update Signal (.update_pending) Detected!")
+                print("  Applying Git-parity codebase update with file pruning...")
+                print("=" * 72)
+                update_ok = cu.perform_worker_codebase_update(signal_data, target_dir)
+                if update_ok:
+                    print("[SUPERVISOR] Update applied successfully! Re-executing fresh supervisor image...")
+                    reexec_supervisor(target_dir)
+                    return 0
+                else:
+                    print("[SUPERVISOR WARNING] Update failed. Resuming worker execution...", file=sys.stderr)
 
             if args.no_reconnect:
                 return ret_code
