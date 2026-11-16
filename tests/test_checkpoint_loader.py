@@ -123,6 +123,34 @@ class TestCheckpointLoader(unittest.TestCase):
         self.assertEqual(aligned, 0)
         self.assertFalse(can_resume)
 
+    def test_dynamic_chunk_wrapper_identity_defense(self) -> None:
+        """Verify resolve_checkpoint_chunk handles C++ binding transient wrappers where id() changes."""
+        class DynamicChunkWrapper(MockChunk):
+            def __eq__(self, other: object) -> bool:
+                return isinstance(other, MockChunk) and other.label == self.label
+
+        chunk = DynamicChunkWrapper("Production_Reconstruction", [MockCamera(True), MockCamera(True)])
+
+        class DynamicDocument:
+            def __init__(self, c: MockChunk) -> None:
+                self.chunks = [c]
+                self._c = c
+
+            @property
+            def chunk(self) -> MockChunk:
+                # Returns a brand new wrapper object on every attribute access
+                return DynamicChunkWrapper(self._c.label, self._c.cameras)
+
+            @chunk.setter
+            def chunk(self, val: MockChunk) -> None:
+                self._c = val
+
+        doc = DynamicDocument(chunk)
+        resolved_chunk, aligned, can_resume = resolve_checkpoint_chunk(doc)
+        self.assertIsNotNone(resolved_chunk)
+        self.assertEqual(aligned, 2)
+        self.assertTrue(can_resume)
+
 
 if __name__ == "__main__":
     unittest.main()
