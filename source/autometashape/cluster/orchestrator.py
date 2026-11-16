@@ -18,12 +18,6 @@ except ImportError:
     Metashape = None
 
 
-from autometashape.core.telemetry import compute_utm_epsg
-
-# Backward-compatibility alias
-_compute_utm_epsg = compute_utm_epsg
-
-
 # Alignment & depth quality maps for cluster tasks
 ALIGN_DOWNSCALE_MAP = {
     "highest": 0,
@@ -40,6 +34,16 @@ DEPTH_DOWNSCALE_MAP = {
     "low": 8,
     "lowest": 16,
 }
+
+
+def _compute_utm_epsg(lon: float, lat: float) -> int:
+    """Calculates standard WGS 84 / UTM Zone EPSG code via core telemetry module."""
+    from autometashape.core.telemetry import compute_utm_epsg
+
+    return compute_utm_epsg(lon, lat)
+
+
+compute_utm_epsg = _compute_utm_epsg
 
 if Metashape is not None:
     DEPTH_FILTER_MAP = {
