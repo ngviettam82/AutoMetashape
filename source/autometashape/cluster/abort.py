@@ -27,13 +27,11 @@ ABORT_DIR_NAME = "aborts"
 ABORT_SIGNALS_JSON = "abort_signals.json"
 
 
-def cleanup_stale_worker_processes() -> None:
-    """Terminate orphaned metashape worker processes on this host to prevent duplicate connections."""
-    if sys.platform == "win32":
+def cleanup_stale_worker_processes(target_pid: Optional[int] = None) -> None:
+    """Safely terminate targeted orphaned metashape worker processes on this host."""
+    if sys.platform == "win32" and target_pid:
         try:
-            subprocess.run(["taskkill", "/IM", "metashape.exe"], capture_output=True, timeout=2)
-            time.sleep(0.3)
-            subprocess.run(["taskkill", "/F", "/IM", "metashape.exe"], capture_output=True, timeout=2)
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(target_pid)], capture_output=True, timeout=2)
         except Exception:
             pass
 
