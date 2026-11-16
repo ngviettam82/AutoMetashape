@@ -1,6 +1,6 @@
 ---
 name: cluster-fleet-operations
-description: "Orchestrates Agisoft Metashape Pro distributed processing clusters, worker node provisioning, dynamic multi-GPU discovery, local NVMe scratch staging, hourly health monitoring, and canary fleet updates. Use when deploying, managing, updating, or troubleshooting distributed photogrammetry clusters and multi-worker fleets."
+description: "Orchestrates Agisoft Metashape Pro distributed processing clusters, worker node provisioning, dynamic multi-GPU discovery, local NVMe scratch staging, hourly health monitoring, canary fleet updates, and signal-based worker abort & self-healing restarts. Use when deploying, managing, updating, or troubleshooting distributed photogrammetry clusters and multi-worker fleets."
 audience: user
 status: stable
 owners:
@@ -24,6 +24,7 @@ Use this skill when:
 - Executing the Autonomous 1-Hour Health & Self-Healing Monitoring Cycle for multi-hour cluster reconstructions.
 - Performing rolling fleet updates (`update.bat`) across remote worker nodes using the Single Canary Node Verification Gate.
 - Troubleshooting worker state transitions (`inprogress -> offline -> ready`), stalled tasks, or network disconnects.
+- Forcibly aborting hung worker processes during monolithic tasks, purging scratch locks, and orchestrating self-healing worker reconnects without server scheduler deadlocks.
 
 Do not use this skill when:
 - Performing single-node local photogrammetry reconstructions without network distribution (use `skills/user/image-to-3d-model/`).
@@ -192,6 +193,56 @@ The repository provides an end-to-end autonomous remote updater (`scripts/update
    - `launch_worker.bat` and `reexec_supervisor` prioritize Metashape Pro's bundled Python (`python\python.exe`) across all system drives. Worker nodes operate 100% headless without requiring system Python.
 8. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
 
+
+### 6. Signal-Based Worker Abort & Self-Healing Watchdog Protocol
+When an Agisoft Metashape batch is paused or aborted on the coordinator while running a monolithic task (`metashape_reconstruction.py`), the worker hangs because native C++ operations (OpenCV, FLANN matching, MVS stereopsis, CUDA depth maps) block the internal network listener. Furthermore, pausing an in-progress batch on the server freezes the scheduler state machine, locking the worker.
+
+AutoMetashape implements an autonomous signal-based abort-and-restart mechanism:
+
+```mermaid
+sequenceDiagram
+    participant Coord as Coordinator / cluster_abort
+    participant Svr as Metashape Server (:5840)
+    participant Watch as launch_worker Watchdog
+    participant MS as metashape.exe (Child Process)
+    participant Share as Shared UNC Root (.cluster/aborts/)
+
+    Coord->>Svr: 1. setBatchPaused(id, False) (Unfreeze Scheduler State Machine)
+    Coord->>Svr: 2. abortBatch(id) & setBatchPriority(-100)
+    Coord->>Share: 3. Atomic Write <node_name>.abort Signal
+    loop Every 1.0s Polling Loop
+        Watch->>Share: Check local .abort_pending & <node>.abort
+    end
+    Watch->>Watch: Abort Signal Detected!
+    Watch->>MS: 4. proc.terminate() + taskkill /F /T /PID (Reap Entire Process Tree)
+    Watch->>Share: 5. cleanup_scratch_locks() (Bounded to max_depth=3)
+    Watch->>Share: 6. Acknowledge: write <node>.abort_ack & delete .abort
+    Watch->>Watch: 7. Delay 1.0s
+    Watch->>MS: 8. Relaunch metashape.exe --worker
+    MS->>Svr: 9. Reconnect & Re-register in State=ready
+    Coord->>Share: Await <node>.abort_ack or Reconnect in workerList()
+```
+
+#### Protocol Details
+1. **Non-Blocking Supervisor Watchdog**:
+   `scripts/launch_worker.py` replaces blocking `wait()` with a 1.0s watchdog polling loop monitoring local `.abort_pending` and network `<root>/.cluster/aborts/<node_name>.abort`.
+2. **Defensive Process-Tree Termination**:
+   `kill_worker_process()` initiates graceful termination, then enforces `taskkill /F /T /PID {proc.pid}` on Windows to ensure both parent worker daemons and any child processes running native CUDA stereopsis or scripts are reaped without leaving orphaned locks.
+3. **Scratch Lock Cleanup**:
+   `cleanup_scratch_locks()` removes stale `lock` files in target output, `%TEMP%`, and NVMe scratch folders, strictly bounded to `max_depth = 3` to eliminate SMB latency over deep octree trees.
+4. **Self-Healing Relaunch**:
+   After clearing signals and locks, the supervisor re-executes `metashape.exe --worker` with a 1.0s delay, seamlessly reconnecting to the coordinator in `State=ready`.
+5. **Remote Abort CLI & Native Runner Delegation**:
+   - `cluster_abort.bat` and `scripts/cluster_abort.py` unpause the frozen batch, abort it, demote its priority to `-100`, dispatch `<node>.abort`, and await acknowledgment:
+     ```powershell
+     # Using the batch runner (automatically locates and launches via metashape.exe -r)
+     .\cluster_abort.bat --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
+
+     # Or using the Python CLI (auto-delegates through metashape.exe -r if run under plain Python)
+     python scripts/cluster_abort.py --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
+     ```
+   - **Metashape Runner Delegation**: Because `Metashape.NetworkClient` is embedded in `metashape.exe` and not in plain Python, `cluster_abort.bat` and `cluster_abort.py` automatically route through `metashape.exe -r` so server unpausing, batch aborting, and priority demotion execute natively.
+
 ---
 
 ## Validation
@@ -206,7 +257,7 @@ python tools/skills/cli.py check
 python tools/check_licenses.py
 
 # Execute test suite covering cluster utilities and CLI arguments
-python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py
+python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py tests/test_worker_abort.py
 ```
 
 ---

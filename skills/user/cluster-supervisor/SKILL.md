@@ -1,6 +1,6 @@
 ---
 name: cluster-supervisor
-description: "Supervises unattended cluster batch execution, storage headroom exhaustion watchdog (Win32 Error 112 defense), automated deliverable integrity verification, and multi-dataset queue chaining. Use when monitoring overnight runs, validating production 3D assets, auto-recovering from low-disk pauses, or scheduling sequential project queues."
+description: "Supervises unattended cluster batch execution, storage headroom exhaustion watchdog (Win32 Error 112 defense), signal-based worker abort & deadlock recovery, hardened checkpoint chunk resolution, automated deliverable integrity verification, and multi-dataset queue chaining. Use when monitoring overnight runs, validating production 3D assets, auto-recovering from low-disk pauses, or scheduling sequential project queues."
 audience: user
 status: stable
 owners:
@@ -183,6 +183,29 @@ To process a sequence of survey datasets without human intervention:
    - **Quality Gate**: Upon batch completion, runs structural verification on Wavefront OBJ, textures, GeoTIFFs, point clouds, and PDF reports.
    - **Scratch Purge**: Clears temporary local NVMe staging caches upon verified deliverable pass.
 
+
+### 5. Signal-Based Worker Abort & Server Deadlock Recovery
+During unattended overnight supervision, an independent monolithic batch or worker may freeze or become unresponsive during native stereopsis or matching. The supervisor or operator triggers deterministic recovery via the signal-based abort mechanism:
+
+1. **Deadlock Defense via Server Unpause**:
+   When Metashape Server freezes due to a paused batch (`batch.paused == True`), the scheduler cannot re-evaluate worker queues. The abort orchestrator calls `client.setBatchPaused(batch_id, False)` before invoking `client.abortBatch(batch_id)`.
+2. **Priority Demotion**:
+   The batch priority is demoted to `-100` (`client.setBatchPriority(batch_id, -100)`) to prevent the scheduler from immediately re-dispatching the cancelled task when the worker reconnects.
+3. **Signal Dispatch & Process Tree Kill**:
+   Writes `<unc_root>/.cluster/aborts/<node_name>.abort`. The worker supervisor's non-blocking watchdog detects the signal, executes `taskkill /F /T /PID` to terminate both the parent daemon and any child processes, purges locks, and auto-reconnects to the cluster in 1.0s.
+4. **Execution**:
+   ```powershell
+   .\cluster_abort.bat --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
+   ```
+
+### 6. Hardened Checkpoint Chunk Resolution & Recovery
+When resuming a project checkpoint via `--resume`, older or GUI-modified projects often lack canonical `Production_Reconstruction` chunk labels, contain single default chunks (`Chunk 1`), or have empty chunk lists.
+
+The unified chunk resolver (`resolve_checkpoint_chunk(doc)`) protects against `AttributeError: 'NoneType' object has no attribute 'cameras'` with deterministic fallback:
+1. **Canonical Label Priority**: Checks if any chunk matches `Production_Reconstruction`.
+2. **Highest Aligned Camera Fallback**: If canonical label is absent, counts aligned cameras across all chunks in a single $O(N)$ pass (`cam.transform and cam.enabled`) and selects the chunk with the highest count.
+3. **Alignment Threshold**: If aligned cameras $\ge 2$, safely resumes downstream MVS depth maps and meshing, skipping camera alignment. If $< 2$, initializes a clean production chunk and restarts alignment from Step 1.
+
 ---
 
 ## Validation
@@ -191,7 +214,7 @@ Verify that supervisor components and deliverable validators pass all quality ch
 
 ```powershell
 # 1. Run unit test suite
-python -m unittest tests/test_verification.py tests/test_supervisor.py
+python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py
 
 # 2. Run skills validation
 python tools/skills/cli.py check
