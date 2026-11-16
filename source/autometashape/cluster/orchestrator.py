@@ -18,11 +18,10 @@ except ImportError:
     Metashape = None
 
 
-def _compute_utm_epsg(lon: float, lat: float) -> int:
-    """Calculates standard WGS 84 / UTM Zone EPSG code for longitude and latitude."""
-    zone = int((lon + 180.0) // 6.0) + 1
-    zone = max(1, min(zone, 60))
-    return 32600 + zone if lat >= 0.0 else 32700 + zone
+from autometashape.core.telemetry import compute_utm_epsg
+
+# Backward-compatibility alias
+_compute_utm_epsg = compute_utm_epsg
 
 
 # Alignment & depth quality maps for cluster tasks
