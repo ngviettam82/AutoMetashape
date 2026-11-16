@@ -13,7 +13,13 @@ from __future__ import annotations
 
 import argparse
 import os
+import subprocess
 import sys
+
+try:
+    import Metashape
+except ImportError:
+    Metashape = None
 
 _SCRIPTS_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPTS_DIR, ".."))
@@ -62,6 +68,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=15.0,
         help="Maximum seconds to wait for worker supervisor to acknowledge and reconnect",
     )
+    parser.add_argument("--no-reexec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -69,6 +76,17 @@ def main() -> int:
     """Main execution function for cluster worker abort utility."""
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    # If running plain Python without Metashape module, auto-delegate through metashape.exe -r
+    # to gain direct access to Metashape.NetworkClient for coordinator server operations.
+    if Metashape is None and not args.no_reexec:
+        from autometashape.cluster.hardware import find_metashape_path
+
+        ms_exe = find_metashape_path()
+        if ms_exe and os.path.isfile(ms_exe):
+            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            res = subprocess.run(cmd)
+            return res.returncode
 
     # Resolve coordinator host
     server_host = args.server.strip()

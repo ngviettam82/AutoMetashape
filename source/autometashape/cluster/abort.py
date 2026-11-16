@@ -41,7 +41,8 @@ def cleanup_stale_worker_processes() -> None:
 def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     """Forcibly and deterministically terminate the worker process and its process tree.
 
-    Optimized to eliminate redundant subprocess calls if process exits gracefully.
+    Guarantees that both parent worker daemon and any child processes running native
+    tasks or scripts are completely reaped, preventing orphaned process locks.
 
     Args:
         proc: subprocess.Popen instance representing the worker process.
@@ -53,12 +54,10 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     if proc is None:
         return True
 
-    # 1. Fast check if already terminated
+    proc_pid = getattr(proc, "pid", None)
     poll_fn = getattr(proc, "poll", None)
-    if callable(poll_fn) and poll_fn() is not None:
-        return True
 
-    # 2. Attempt graceful termination
+    # 1. Attempt graceful termination
     terminate_fn = getattr(proc, "terminate", None)
     if callable(terminate_fn):
         try:
@@ -66,35 +65,30 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             wait_deadline = time.time() + timeout
             while time.time() < wait_deadline:
                 if callable(poll_fn) and poll_fn() is not None:
-                    return True
+                    break
                 time.sleep(0.05)
         except Exception:
             pass
 
-    # 3. Force kill only if still running
-    if callable(poll_fn) and poll_fn() is None:
-        kill_fn = getattr(proc, "kill", None)
-        if callable(kill_fn):
-            try:
-                kill_fn()
-                time.sleep(0.1)
-            except Exception:
-                pass
-
-    # 4. Windows taskkill tree kill defense only if still running
-    if callable(poll_fn) and poll_fn() is None:
-        proc_pid = getattr(proc, "pid", None)
-        if proc_pid and sys.platform == "win32":
-            try:
-                subprocess.run(
-                    ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
-                    capture_output=True,
-                    timeout=5,
-                )
-            except Exception:
-                pass
-        # Clean up any lingering orphaned instances only if process was stuck
+    # 2. Windows taskkill tree kill defense: reap entire process tree including child tasks
+    if proc_pid and sys.platform == "win32":
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
         cleanup_stale_worker_processes()
+    else:
+        if callable(poll_fn) and poll_fn() is None:
+            kill_fn = getattr(proc, "kill", None)
+            if callable(kill_fn):
+                try:
+                    kill_fn()
+                except Exception:
+                    pass
 
     return True
 
@@ -417,7 +411,7 @@ def abort_remote_worker(
         "error": None,
     }
 
-    # Step 1: Connect to Metashape Server
+    # Step 1: Connect to Metashape Server (direct or via metashape.exe -r runner)
     if client is None and Metashape is not None:
         try:
             net_client = Metashape.NetworkClient()
@@ -435,6 +429,47 @@ def abort_remote_worker(
         except Exception as e:
             # Server connection is desirable but optional for signal file dispatch
             result["error"] = f"Warning: Could not connect to Metashape server ({e})"
+    elif client is None and Metashape is None and batch_id is not None:
+        # Fallback for plain Python: unpause & abort batch on server via metashape.exe -r helper
+        try:
+            from autometashape.cluster.hardware import find_metashape_path
+
+            ms_exe = find_metashape_path()
+            if ms_exe and os.path.isfile(ms_exe):
+                host_str = server_host.split(":")[0] if ":" in server_host else server_host
+                port_str = server_host.split(":")[1] if ":" in server_host else "5840"
+                helper_code = f"""import Metashape, sys
+try:
+    c = Metashape.NetworkClient()
+    c.connect("{host_str}", {port_str})
+    bl = c.batchList()
+    for b in (bl.get("batches", []) if isinstance(bl, dict) else []):
+        if b.get("batch_id") == {batch_id}:
+            if b.get("paused") or str(b.get("state", "")).lower() == "paused":
+                c.setBatchPaused({batch_id}, False)
+            break
+    c.abortBatch({batch_id})
+    try:
+        c.setBatchPriority({batch_id}, -100)
+    except Exception:
+        pass
+except Exception:
+    pass
+sys.exit(0)
+"""
+                tmp_helper = os.path.join(tempfile.gettempdir(), f"_ms_abort_{batch_id}.py")
+                with open(tmp_helper, "w", encoding="utf-8") as hf:
+                    hf.write(helper_code)
+                try:
+                    subprocess.run([ms_exe, "-r", tmp_helper], capture_output=True, timeout=10)
+                finally:
+                    if os.path.isfile(tmp_helper):
+                        try:
+                            os.remove(tmp_helper)
+                        except Exception:
+                            pass
+        except Exception as helper_err:
+            result["error"] = f"Warning during fallback server abort: {helper_err}"
 
     # Step 2 & 3: Unpause batch if paused, abort batch, and demote priority
     if client is not None and batch_id is not None:
