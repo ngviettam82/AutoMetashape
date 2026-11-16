@@ -5,6 +5,18 @@
 
 """Distributed processing cluster, hardware discovery, staging, and configuration."""
 
+from autometashape.cluster.abort import (
+    ABORT_DIR_NAME,
+    ABORT_SIGNAL_FILENAME,
+    ABORT_SIGNALS_JSON,
+    abort_remote_worker,
+    acknowledge_abort_signal,
+    check_abort_signal,
+    cleanup_scratch_locks,
+    cleanup_stale_worker_processes,
+    dispatch_abort_signal,
+    kill_worker_process,
+)
 from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     DEFAULT_WORKER_CONFIG_FILENAME,
@@ -73,6 +85,16 @@ from autometashape.cluster.updater import (
 )
 
 __all__ = [
+    "ABORT_DIR_NAME",
+    "ABORT_SIGNAL_FILENAME",
+    "ABORT_SIGNALS_JSON",
+    "abort_remote_worker",
+    "acknowledge_abort_signal",
+    "check_abort_signal",
+    "cleanup_scratch_locks",
+    "cleanup_stale_worker_processes",
+    "dispatch_abort_signal",
+    "kill_worker_process",
     "ALIGN_DOWNSCALE_MAP",
     "CLUSTER_MAINTENANCE_REL_PATH",
     "ClusterSupervisor",

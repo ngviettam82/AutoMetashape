@@ -104,6 +104,7 @@ from autometashape.core.export import (
 )
 from autometashape.core.pipeline import (
     build_arg_parser,
+    resolve_checkpoint_chunk as _impl_resolve_checkpoint_chunk,
     run_reconstruction as _impl_run_reconstruction,
     save_checkpoint as _impl_save_checkpoint,
     wait_for_user_resume as _impl_wait_for_user_resume,
@@ -196,6 +197,11 @@ def build_monolithic_runscript_task(*args, **kwargs):
 def build_unified_cluster_pipeline_tasks(*args, **kwargs):
     _sync_state()
     return _impl_build_unified_cluster_pipeline_tasks(*args, **kwargs)
+
+
+def resolve_checkpoint_chunk(*args, **kwargs):
+    _sync_state()
+    return _impl_resolve_checkpoint_chunk(*args, **kwargs)
 
 
 def save_checkpoint(*args, **kwargs):

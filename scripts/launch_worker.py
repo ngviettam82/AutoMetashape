@@ -467,11 +467,39 @@ def _run_worker_lifecycle() -> int:
         try:
             start_t = time.time()
             proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=target_dir)
-            proc.wait()
-            ret_code = proc.returncode
 
+            # Watchdog polling loop: check for abort signals while proc is running
+            aborted_by_supervisor = False
+            while proc.poll() is None:
+                abort_sig = cu.check_abort_signal(target_dir=target_dir, root_path=root_path)
+                if abort_sig is not None:
+                    batch_id = abort_sig.get("batch_id", "unknown")
+                    sig_node = abort_sig.get("node_name") or os.environ.get("COMPUTERNAME", "unknown")
+                    print(
+                        f"\n[SUPERVISOR] Abort signal detected for worker '{sig_node}' (Target Batch: {batch_id}). "
+                        "Forcibly terminating stuck child process...",
+                        flush=True,
+                    )
+                    # 1. Kill child metashape.exe process immediately
+                    cu.kill_worker_process(proc)
+                    aborted_by_supervisor = True
+
+                    # 2. Clean up scratch locks: remove any stale lock files in target_dir or scratch dirs
+                    cu.cleanup_scratch_locks(target_dir=target_dir, root_path=root_path)
+
+                    # 3. Acknowledge and clear signal file
+                    cu.acknowledge_abort_signal(abort_sig)
+                    break
+                time.sleep(1.0)
+
+            ret_code = proc.poll() if aborted_by_supervisor else proc.returncode
             elapsed = time.time() - start_t
-            print(f"\n[DISCONNECTED] Worker process exited with code {ret_code} (Active: {elapsed:.1f}s).")
+            if aborted_by_supervisor:
+                print(
+                    f"[SUPERVISOR] Child process terminated by watchdog after {elapsed:.1f}s. Preparing clean restart."
+                )
+            else:
+                print(f"\n[DISCONNECTED] Worker process exited with code {ret_code} (Active: {elapsed:.1f}s).")
 
             # Check if an autonomous update was requested via .update_pending
             signal_data = check_update_pending(target_dir)
@@ -489,10 +517,11 @@ def _run_worker_lifecycle() -> int:
                     print("[SUPERVISOR WARNING] Update failed. Resuming worker execution...", file=sys.stderr)
 
             if args.no_reconnect:
-                return ret_code
+                return ret_code if ret_code is not None else 0
 
-            print(f"[AUTO-RECONNECT] Attempting reconnect in {int(reconnect_delay)} seconds (Ctrl+C to abort)...")
-            time.sleep(reconnect_delay)
+            delay = 1.0 if aborted_by_supervisor else reconnect_delay
+            print(f"[AUTO-RECONNECT] Attempting reconnect in {int(delay)} seconds (Ctrl+C to abort)...")
+            time.sleep(delay)
 
         except KeyboardInterrupt:
             print("\n[SHUTDOWN] Worker node stopped by user (Ctrl+C). Goodbye!")

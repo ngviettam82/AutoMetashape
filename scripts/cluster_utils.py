@@ -27,6 +27,16 @@ if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
 from autometashape.cluster import (
+    ABORT_DIR_NAME,
+    ABORT_SIGNAL_FILENAME,
+    ABORT_SIGNALS_JSON,
+    abort_remote_worker,
+    acknowledge_abort_signal,
+    check_abort_signal,
+    cleanup_scratch_locks,
+    cleanup_stale_worker_processes,
+    dispatch_abort_signal,
+    kill_worker_process,
     DEFAULT_SERVER_CONFIG_FILENAME,
     DEFAULT_WORKER_CONFIG_FILENAME,
     check_scratch_disk_headroom,
@@ -83,6 +93,16 @@ def detect_gpu_devices():
 
 __all__ = [
     "DEFAULT_SERVER_CONFIG_FILENAME",
+    "ABORT_DIR_NAME",
+    "ABORT_SIGNAL_FILENAME",
+    "ABORT_SIGNALS_JSON",
+    "abort_remote_worker",
+    "acknowledge_abort_signal",
+    "check_abort_signal",
+    "cleanup_scratch_locks",
+    "cleanup_stale_worker_processes",
+    "dispatch_abort_signal",
+    "kill_worker_process",
     "DEFAULT_WORKER_CONFIG_FILENAME",
     "EXPORT_TAG_MAP",
     "EXPORT_TAG_REGEX",

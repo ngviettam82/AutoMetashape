@@ -220,6 +220,52 @@ def save_checkpoint(doc, target_path=None):
     return doc.chunk
 
 
+def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
+    """Safely resolve the active chunk and aligned camera count from a loaded checkpoint document.
+
+    Handles empty chunks, default-labeled chunks (e.g. 'Chunk 1'), and multi-chunk projects
+    without throwing AttributeError.
+
+    Args:
+        doc: Metashape.Document instance (or mock).
+
+    Returns:
+        tuple of (chunk, aligned_count, can_resume).
+    """
+    prod_chunk = None
+    chunks = getattr(doc, "chunks", None) or []
+    if chunks:
+        # 1. Match canonical label
+        for c in chunks:
+            if getattr(c, "label", None) == "Production_Reconstruction":
+                prod_chunk = c
+                break
+        # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
+        if prod_chunk is None:
+            try:
+                prod_chunk = max(
+                    chunks,
+                    key=lambda c: sum(
+                        1
+                        for cam in (getattr(c, "cameras", None) or [])
+                        if getattr(cam, "transform", None) and getattr(cam, "enabled", True)
+                    ),
+                )
+            except Exception:
+                prod_chunk = chunks[0]
+
+    if prod_chunk is not None and hasattr(doc, "chunk"):
+        doc.chunk = prod_chunk
+
+    chunk = getattr(doc, "chunk", None)
+    if chunk is None or not hasattr(chunk, "cameras") or not chunk.cameras:
+        return None, 0, False
+
+    aligned_count = sum(1 for c in chunk.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True))
+    can_resume = aligned_count >= 2
+    return chunk, aligned_count, can_resume
+
+
 def run_reconstruction(
     images_dir: str,
     output_dir: str = None,
@@ -1131,31 +1177,60 @@ def run_reconstruction(
             except Exception:
                 pass
             prod_chunk = None
-            for c in doc.chunks:
-                if c.label == "Production_Reconstruction":
-                    prod_chunk = c
-                    break
-            if prod_chunk is None and len(doc.chunks) > 1:
-                prod_chunk = max(doc.chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled))
+            if doc.chunks:
+                # 1. Match canonical label
+                for c in doc.chunks:
+                    if getattr(c, "label", None) == "Production_Reconstruction":
+                        prod_chunk = c
+                        break
+                # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
+                if prod_chunk is None:
+                    try:
+                        prod_chunk = max(
+                            doc.chunks,
+                            key=lambda c: sum(
+                                1
+                                for cam in (getattr(c, "cameras", None) or [])
+                                if getattr(cam, "transform", None) and getattr(cam, "enabled", True)
+                            ),
+                        )
+                    except Exception:
+                        prod_chunk = doc.chunks[0]
+
             if prod_chunk is not None:
                 doc.chunk = prod_chunk
-            chunk = doc.chunk
-            aligned_count = sum(1 for c in chunk.cameras if c.transform and c.enabled)
-            if aligned_count >= 2:
+
+            chunk = getattr(doc, "chunk", None)
+            if chunk is None or not hasattr(chunk, "cameras") or not chunk.cameras:
                 print(
-                    f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).",
-                    flush=True,
-                )
-                print("  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).", flush=True)
-                resumed = True
-            else:
-                print(
-                    f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.",
+                    "  [Checkpoint] Project contains no valid chunks or cameras. Initializing fresh project.",
                     flush=True,
                 )
                 doc = Metashape.Document()
                 chunk = doc.addChunk()
                 chunk.label = "Production_Reconstruction"
+            else:
+                aligned_count = sum(
+                    1 for c in chunk.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)
+                )
+                if aligned_count >= 2:
+                    print(
+                        f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).",
+                        flush=True,
+                    )
+                    print(
+                        "  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).",
+                        flush=True,
+                    )
+                    resumed = True
+                else:
+                    print(
+                        f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.",
+                        flush=True,
+                    )
+                    doc = Metashape.Document()
+                    chunk = doc.addChunk()
+                    chunk.label = "Production_Reconstruction"
         except Exception as e:
             print(f"  Failed to load checkpoint ({e}). Starting fresh project.", flush=True)
             doc = Metashape.Document()
