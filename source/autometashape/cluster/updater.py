@@ -97,6 +97,44 @@ def mirror_directory_with_prune(
     return copied, pruned
 
 
+def check_update_pending(target_dir: str, node_name: str | None = None) -> dict | None:
+    """Check if an autonomous update was requested via .update_pending signal file.
+
+    Args:
+        target_dir: Directory where repository code resides.
+        node_name: Optional worker node hostname to check node-specific signal flag.
+
+    Returns:
+        Dictionary containing update signal payload, or None if no update is pending.
+    """
+    candidates = [
+        os.path.join(target_dir, UPDATE_SIGNAL_FILENAME),
+        os.path.join(tempfile.gettempdir(), UPDATE_SIGNAL_FILENAME),
+    ]
+    if node_name is None:
+        target_node = os.environ.get("COMPUTERNAME", "").strip().lower()
+    else:
+        target_node = node_name.strip().lower()
+    if target_node:
+        candidates.append(os.path.join(tempfile.gettempdir(), f"{UPDATE_SIGNAL_FILENAME}_{target_node}"))
+
+    for flag_path in candidates:
+        try:
+            with open(flag_path, "r", encoding="utf-8") as f:
+                content = f.read().strip()
+            if not content:
+                continue
+            import json
+
+            data = json.loads(content)
+            if isinstance(data, dict) and (data.get("action") == "autometashape_update" or "repo_url" in data):
+                data["_flag_path"] = flag_path
+                return data
+        except Exception:
+            continue
+    return None
+
+
 def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
     """Download/copy archive, mirror with Git parity and prune, and clear signal file."""
     flag_path = signal_data.get("_flag_path")

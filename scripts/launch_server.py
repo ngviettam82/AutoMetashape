@@ -60,31 +60,7 @@ if sys.platform == "win32":
                 pass
 
 
-def check_update_pending(target_dir: str) -> dict | None:
-    """Check if an autonomous update was requested via .update_pending signal file."""
-    candidates = [
-        os.path.join(target_dir, cu.UPDATE_SIGNAL_FILENAME),
-        os.path.join(tempfile.gettempdir(), cu.UPDATE_SIGNAL_FILENAME),
-    ]
-    node_name = os.environ.get("COMPUTERNAME", "").strip().lower()
-    if node_name:
-        candidates.append(os.path.join(tempfile.gettempdir(), f"{cu.UPDATE_SIGNAL_FILENAME}_{node_name}"))
-
-    for flag_path in candidates:
-        try:
-            with open(flag_path, "r", encoding="utf-8") as f:
-                content = f.read().strip()
-            if not content:
-                continue
-            import json
-
-            data = json.loads(content)
-            if isinstance(data, dict) and (data.get("action") == "autometashape_update" or "repo_url" in data):
-                data["_flag_path"] = flag_path
-                return data
-        except Exception:
-            continue
-    return None
+check_update_pending = cu.check_update_pending
 
 
 def reexec_server(target_dir: str) -> None:

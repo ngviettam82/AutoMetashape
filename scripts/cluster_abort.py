@@ -28,7 +28,11 @@ if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
 from autometashape.cluster.abort import abort_remote_worker
-from autometashape.cluster.config import load_cluster_config
+from autometashape.cluster.config import (
+    DEFAULT_SERVER_CONFIG_FILENAME,
+    DEFAULT_WORKER_CONFIG_FILENAME,
+    load_cluster_config,
+)
 from autometashape.cluster.hardware import get_primary_lan_ip
 
 
@@ -91,7 +95,7 @@ def main() -> int:
     # Resolve coordinator host
     server_host = args.server.strip()
     if not server_host:
-        server_cfg = load_cluster_config(is_server=True)
+        server_cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
         if server_cfg.get("host") and server_cfg.get("host") != "0.0.0.0":
             server_host = f"{server_cfg['host']}:{server_cfg.get('port', 5840)}"
         else:
@@ -101,7 +105,7 @@ def main() -> int:
     # Resolve shared root UNC path
     shared_root = args.root.strip()
     if not shared_root:
-        worker_cfg = load_cluster_config(is_server=False)
+        worker_cfg = load_cluster_config(filename=DEFAULT_WORKER_CONFIG_FILENAME)
         shared_root = worker_cfg.get("root", "").strip()
 
     target_node = args.node.strip()

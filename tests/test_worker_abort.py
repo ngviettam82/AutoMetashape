@@ -219,6 +219,32 @@ class TestWorkerAbort(unittest.TestCase):
             mock_clean.assert_called_once()
             mock_ack.assert_called_once()
 
+    def test_cluster_abort_cli_and_config_resolution(self) -> None:
+        """Verify scripts/cluster_abort.py correctly resolves server and worker configurations."""
+        import scripts.cluster_abort as ca
+
+        parser = ca.build_arg_parser()
+        args = parser.parse_args(["--node", "worker-node-1", "--batch", "42", "--timeout", "5"])
+        self.assertEqual(args.node, "worker-node-1")
+        self.assertEqual(args.batch, 42)
+        self.assertEqual(args.timeout, 5.0)
+
+        with (
+            patch("sys.argv", ["cluster_abort.py", "--node", "worker-node-1", "--no-reexec"]),
+            patch("scripts.cluster_abort.abort_remote_worker") as mock_abort,
+            patch("scripts.cluster_abort.load_cluster_config") as mock_cfg,
+        ):
+            mock_cfg.return_value = {"host": "192.168.1.50", "port": "5840", "root": r"\\SRV\Share"}
+            mock_abort.return_value = {"success": True, "acknowledged": True, "reconnected": True}
+
+            ret = ca.main()
+            self.assertEqual(ret, 0)
+            mock_abort.assert_called_once()
+            call_kwargs = mock_abort.call_args[1]
+            self.assertEqual(call_kwargs["node_name"], "worker-node-1")
+            self.assertEqual(call_kwargs["server_host"], "192.168.1.50:5840")
+            self.assertEqual(call_kwargs["shared_root"], r"\\SRV\Share")
+
 
 if __name__ == "__main__":
     unittest.main()
