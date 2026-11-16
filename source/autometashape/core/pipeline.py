@@ -1178,61 +1178,32 @@ def run_reconstruction(
                 doc.read_only = False
             except Exception:
                 pass
-            prod_chunk = None
-            if doc.chunks:
-                # 1. Match canonical label
-                for c in doc.chunks:
-                    if getattr(c, "label", None) == "Production_Reconstruction":
-                        prod_chunk = c
-                        break
-                # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
-                if prod_chunk is None:
-                    try:
-                        prod_chunk = max(
-                            doc.chunks,
-                            key=lambda c: sum(
-                                1
-                                for cam in (getattr(c, "cameras", None) or [])
-                                if getattr(cam, "transform", None) and getattr(cam, "enabled", True)
-                            ),
-                        )
-                    except Exception:
-                        prod_chunk = doc.chunks[0]
-
-            if prod_chunk is not None:
-                doc.chunk = prod_chunk
-
-            chunk = getattr(doc, "chunk", None)
-            if chunk is None or not hasattr(chunk, "cameras") or not chunk.cameras:
-                print(
-                    "  [Checkpoint] Project contains no valid chunks or cameras. Initializing fresh project.",
-                    flush=True,
-                )
-                doc = Metashape.Document()
-                chunk = doc.addChunk()
-                chunk.label = "Production_Reconstruction"
-            else:
-                aligned_count = sum(
-                    1 for c in chunk.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)
-                )
-                if aligned_count >= 2:
+            resolved_chunk, aligned_count, can_resume = resolve_checkpoint_chunk(doc)
+            if not can_resume or resolved_chunk is None:
+                if resolved_chunk is None:
                     print(
-                        f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).",
+                        "  [Checkpoint] Project contains no valid chunks or cameras. Initializing fresh project.",
                         flush=True,
                     )
-                    print(
-                        "  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).",
-                        flush=True,
-                    )
-                    resumed = True
                 else:
                     print(
                         f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.",
                         flush=True,
                     )
-                    doc = Metashape.Document()
-                    chunk = doc.addChunk()
-                    chunk.label = "Production_Reconstruction"
+                doc = Metashape.Document()
+                chunk = doc.addChunk()
+                chunk.label = "Production_Reconstruction"
+            else:
+                chunk = resolved_chunk
+                print(
+                    f"  Successfully loaded project with {len(chunk.cameras)} cameras ({aligned_count} aligned).",
+                    flush=True,
+                )
+                print(
+                    "  Skipping Steps 1-3 (Ingestion, Sharpness Filter, Feature Matching, Alignment).",
+                    flush=True,
+                )
+                resumed = True
         except Exception as e:
             print(f"  Failed to load checkpoint ({e}). Starting fresh project.", flush=True)
             doc = Metashape.Document()

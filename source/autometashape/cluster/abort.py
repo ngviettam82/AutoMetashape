@@ -314,9 +314,9 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
             pass
 
     node_temp_abort = os.path.join(tempfile.gettempdir(), f"{ABORT_SIGNAL_FILENAME}_{node_name}")
-    if os.path.isfile(node_temp_temp := node_temp_abort):
+    if os.path.isfile(node_temp_abort):
         try:
-            os.remove(node_temp_temp)
+            os.remove(node_temp_abort)
         except Exception:
             pass
 

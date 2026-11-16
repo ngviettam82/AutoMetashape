@@ -492,7 +492,7 @@ def _run_worker_lifecycle() -> int:
                     break
                 time.sleep(1.0)
 
-            ret_code = proc.poll() if aborted_by_supervisor else proc.returncode
+            ret_code = proc.poll() if proc.poll() is not None else proc.returncode
             elapsed = time.time() - start_t
             if aborted_by_supervisor:
                 print(
