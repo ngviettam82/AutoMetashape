@@ -276,7 +276,7 @@ def run_reconstruction(
     build_depth_maps: bool = True,
     build_mesh: bool = True,
     build_texture: bool = True,
-    keypoint_limit: int = 200000,
+    keypoint_limit: int = 50000,
     keypoint_limit_per_mpx: int = 15000,
     tiepoint_limit: int = 25000,
     filter_stationary_points: bool = True,
@@ -3375,7 +3375,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="high",
         help="Image alignment accuracy/quality (default: high)",
     )
-    parser.add_argument("--keypoint-limit", type=int, default=200000, help="Max keypoints per image (default: 200000)")
+    parser.add_argument("--keypoint-limit", type=int, default=50000, help="Max keypoints per image (default: 50000)")
     parser.add_argument(
         "--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)"
     )

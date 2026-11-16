@@ -39,6 +39,10 @@ class TestImportsWithoutMetashape(unittest.TestCase):
         p_name = infer_project_name(images_dir="/path/to/my_survey_site")
         self.assertEqual(p_name, "my_survey_site")
 
+        # Test pro photogrammetry plan keypoint limit default is 50,000
+        plan = derive_pro_photogrammetry_plan({"has_gps": True, "relief_ratio": 0.05, "shutter": "mechanical"})
+        self.assertEqual(plan["keypoint_limit"], 50000)
+
     def test_import_export_subsystem(self) -> None:
         """Defend that export module can be imported without Metashape C++ binary."""
         from metashape_export import build_arg_parser, infer_project_name

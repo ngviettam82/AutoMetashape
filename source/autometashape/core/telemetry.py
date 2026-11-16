@@ -845,7 +845,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     rolling_shutter = shutter == "rolling"
 
     align_quality = "high"
-    keypoint_limit = 200000
+    keypoint_limit = 50000
     tiepoint_limit = 25000
     guided_matching = True
     adaptive_fitting = True

@@ -503,7 +503,7 @@ def build_unified_cluster_pipeline_tasks(
     align_photos: bool = True,
     align_quality: str = "high",
     reference_preselection_mode: str = "estimated",
-    keypoint_limit: int = 200000,
+    keypoint_limit: int = 50000,
     keypoint_limit_per_mpx: int = 15000,
     tiepoint_limit: int = 25000,
     filter_stationary_points: bool = True,
@@ -572,7 +572,7 @@ def build_unified_cluster_pipeline_tasks(
         t_match.generic_preselection = True
         t_match.reference_preselection = True
         t_match.reference_preselection_mode = presel_mode_enum
-        t_match.keypoint_limit = keypoint_limit or 200000
+        t_match.keypoint_limit = keypoint_limit or 50000
         t_match.keypoint_limit_per_mpx = keypoint_limit_per_mpx or 15000
         t_match.tiepoint_limit = tiepoint_limit or 25000
         t_match.mask_tiepoints = False

@@ -891,6 +891,15 @@ class TestCliArgs(unittest.TestCase):
         self.assertEqual(extract_unc_root("/var/data/images"), "")
         self.assertEqual(extract_unc_root(""), "")
 
+    def test_recon_parser_default_keypoint_limit(self) -> None:
+        """Defend default keypoint-limit is 50,000 to prevent RAM overflow on large datasets."""
+        parser = build_recon_parser()
+        args_default = parser.parse_args(["--images", "dummy_images"])
+        self.assertEqual(args_default.keypoint_limit, 50000)
+
+        args_custom = parser.parse_args(["--images", "dummy_images", "--keypoint-limit", "80000"])
+        self.assertEqual(args_custom.keypoint_limit, 80000)
+
 
 if __name__ == "__main__":
     unittest.main()
