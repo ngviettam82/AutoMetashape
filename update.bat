@@ -39,6 +39,13 @@ if "%SCRIPT_DIR:~0,2%"=="\\" (
     set "TARGET_DIR=%USERPROFILE%\Documents\AutoMetashape"
 )
 
+:: Parse optional action flag early to correctly gate process termination (--server vs worker)
+set "ACTION_FLAG=%~1"
+set "FORWARD_ARGS="
+if not "%ACTION_FLAG%"=="" (
+    for /f "tokens=1,* delims= " %%a in ("%*") do set "FORWARD_ARGS=%%b"
+)
+
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
@@ -151,13 +158,9 @@ if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 set "CFG_BACKUP=%TEMP%\autometashape_worker_config_backup.json"
 if exist "%TARGET_DIR%\worker_config.json" copy /y "%TARGET_DIR%\worker_config.json" "%CFG_BACKUP%" >nul 2>&1
 
-:: Mirror directory: copies new files, removes obsolete old files, preserves worker/server configs and git history
-robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git .agents /XF worker_config.json server_config.json /W:1 /R:2 /NFL /NDL /NJH /NJS /nc /ns /np >nul 2>&1
-
-:: Verify robocopy completed without fatal errors (codes 0-7 indicate success)
-if %ERRORLEVEL% GEQ 8 (
-    echo [ERROR] Robocopy encountered an issue mirroring files to %TARGET_DIR%.
-)
+:: Mirror directory: copies new files, overwrites changed/older files, prunes obsolete files, preserves configs and git history
+robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git .agents /XF worker_config.json server_config.json /W:1 /R:2 /NDL /NJH /NP
+set "ROBO_CODE=!ERRORLEVEL!"
 
 :: Ensure configuration is restored if it was missing from source
 if exist "%CFG_BACKUP%" (
@@ -169,17 +172,23 @@ if exist "%CFG_BACKUP%" (
 del /f /q "%TEMP_ZIP%" >nul 2>&1
 if exist "%TEMP_EXTRACT%" rmdir /s /q "%TEMP_EXTRACT%" >nul 2>&1
 
+:: Verify robocopy completed without fatal errors (codes 0-7 indicate success; >=8 indicates copy failure/locked files)
+if !ROBO_CODE! GEQ 8 (
+    echo.
+    echo =========================================================================
+    echo   [ERROR] Robocopy encountered fatal errors mirroring files (Exit code !ROBO_CODE!).
+    echo   Some files could not be overwritten because they are locked by a running
+    echo   Python process, Metashape Pro, or code editor.
+    echo   Please close running applications and re-run update.bat.
+    echo =========================================================================
+    pause
+    exit /b !ROBO_CODE!
+)
+
 echo =========================================================================
 echo   [SUCCESS] AutoMetashape codebase cleanly replaced and updated in-place!
 echo   Target: %TARGET_DIR%
 echo =========================================================================
-
-:: Optional launch flags with stripped mode argument
-set "ACTION_FLAG=%~1"
-set "FORWARD_ARGS="
-if not "%ACTION_FLAG%"=="" (
-    for /f "tokens=1,* delims= " %%a in ("%*") do set "FORWARD_ARGS=%%b"
-)
 
 if "%ACTION_FLAG%"=="--worker" (
     echo Launching cluster worker daemon...
