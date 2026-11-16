@@ -32,7 +32,7 @@ def cleanup_stale_worker_processes() -> None:
     if sys.platform == "win32":
         try:
             subprocess.run(["taskkill", "/IM", "metashape.exe"], capture_output=True, timeout=2)
-            time.sleep(0.5)
+            time.sleep(0.3)
             subprocess.run(["taskkill", "/F", "/IM", "metashape.exe"], capture_output=True, timeout=2)
         except Exception:
             pass
@@ -40,6 +40,8 @@ def cleanup_stale_worker_processes() -> None:
 
 def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     """Forcibly and deterministically terminate the worker process and its process tree.
+
+    Optimized to eliminate redundant subprocess calls if process exits gracefully.
 
     Args:
         proc: subprocess.Popen instance representing the worker process.
@@ -51,7 +53,7 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     if proc is None:
         return True
 
-    # 1. Check if already terminated
+    # 1. Fast check if already terminated
     poll_fn = getattr(proc, "poll", None)
     if callable(poll_fn) and poll_fn() is not None:
         return True
@@ -65,42 +67,47 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             while time.time() < wait_deadline:
                 if callable(poll_fn) and poll_fn() is not None:
                     return True
+                time.sleep(0.05)
+        except Exception:
+            pass
+
+    # 3. Force kill only if still running
+    if callable(poll_fn) and poll_fn() is None:
+        kill_fn = getattr(proc, "kill", None)
+        if callable(kill_fn):
+            try:
+                kill_fn()
                 time.sleep(0.1)
-        except Exception:
-            pass
+            except Exception:
+                pass
 
-    # 3. Force kill if still running
-    kill_fn = getattr(proc, "kill", None)
-    if callable(kill_fn):
-        try:
-            kill_fn()
-            time.sleep(0.3)
-        except Exception:
-            pass
+    # 4. Windows taskkill tree kill defense only if still running
+    if callable(poll_fn) and poll_fn() is None:
+        proc_pid = getattr(proc, "pid", None)
+        if proc_pid and sys.platform == "win32":
+            try:
+                subprocess.run(
+                    ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
+                    capture_output=True,
+                    timeout=5,
+                )
+            except Exception:
+                pass
+        # Clean up any lingering orphaned instances only if process was stuck
+        cleanup_stale_worker_processes()
 
-    # 4. Windows taskkill tree kill defense
-    proc_pid = getattr(proc, "pid", None)
-    if proc_pid and sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
-                capture_output=True,
-                timeout=5,
-            )
-        except Exception:
-            pass
-
-    # 5. Clean up any remaining orphaned metashape.exe instances
-    cleanup_stale_worker_processes()
     return True
 
 
-def cleanup_scratch_locks(target_dir: str = "", root_path: str = "") -> List[str]:
+def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: int = 3) -> List[str]:
     """Remove any stale lock files in target_dir, temp dir, or local scratch staging dirs.
+
+    Bounded to max_depth to prevent expensive recursive scans of large project or scratch trees.
 
     Args:
         target_dir: Active project target directory to inspect.
         root_path: Shared network storage root containing .cluster maintenance files.
+        max_depth: Maximum directory recursion depth (default: 3).
 
     Returns:
         List of paths of removed lock files.
@@ -135,7 +142,11 @@ def cleanup_scratch_locks(target_dir: str = "", root_path: str = "") -> List[str
         if not os.path.isdir(d):
             continue
         try:
-            for root, _, files in os.walk(d):
+            base_depth = d.rstrip(r"\/").count(os.sep)
+            for root, dirs, files in os.walk(d):
+                cur_depth = root.rstrip(r"\/").count(os.sep) - base_depth
+                if cur_depth >= max_depth:
+                    dirs.clear()  # Prune deeper traversal to avoid massive I/O
                 for f in files:
                     if f.lower() == "lock" or f.lower().endswith(".lock"):
                         lock_path = os.path.join(root, f)
@@ -157,7 +168,8 @@ def check_abort_signal(
 ) -> Optional[Dict[str, Any]]:
     """Check if an autonomous abort signal was requested for this worker node.
 
-    Inspects both local filesystem signal paths and UNC cluster signal paths.
+    Optimized for zero network contention: inspects local fast paths first, then
+    direct per-node signal files, with shared aggregate JSON checked only as a fallback.
 
     Args:
         target_dir: Active worker working directory.
@@ -170,6 +182,7 @@ def check_abort_signal(
     resolved_node = (node_name or os.environ.get("COMPUTERNAME", "unknown")).strip().lower()
     temp_dir = tempfile.gettempdir()
 
+    # 1. Fast local checks (Zero network I/O)
     candidates: List[str] = []
     if target_dir:
         candidates.append(os.path.join(target_dir, ABORT_SIGNAL_FILENAME))
@@ -177,34 +190,13 @@ def check_abort_signal(
     if resolved_node and resolved_node != "unknown":
         candidates.append(os.path.join(temp_dir, f"{ABORT_SIGNAL_FILENAME}_{resolved_node}"))
 
-    # UNC Cluster signal paths
+    # 2. UNC Direct per-node file checks (Atomic single stat, zero contention)
     if root_path and os.path.isdir(root_path):
         aborts_dir = os.path.join(root_path, ".cluster", ABORT_DIR_NAME)
-        if resolved_node and resolved_node != "unknown":
-            candidates.append(os.path.join(aborts_dir, f"{resolved_node}.abort"))
-        candidates.append(os.path.join(aborts_dir, "all.abort"))
-
-        # Shared aggregate json
-        json_sig = os.path.join(root_path, ".cluster", ABORT_SIGNALS_JSON)
-        if os.path.isfile(json_sig):
-            try:
-                with open(json_sig, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if isinstance(data, dict):
-                    entry = data.get(resolved_node) or data.get("all")
-                    if not entry and "signals" in data and isinstance(data["signals"], dict):
-                        entry = data["signals"].get(resolved_node) or data["signals"].get("all")
-                    if isinstance(entry, dict):
-                        entry_copy = dict(entry)
-                        entry_copy["_signal_path"] = json_sig
-                        entry_copy["_json_key"] = (
-                            resolved_node
-                            if resolved_node in data or ("signals" in data and resolved_node in data["signals"])
-                            else "all"
-                        )
-                        return entry_copy
-            except Exception:
-                pass
+        if os.path.isdir(aborts_dir):
+            if resolved_node and resolved_node != "unknown":
+                candidates.append(os.path.join(aborts_dir, f"{resolved_node}.abort"))
+            candidates.append(os.path.join(aborts_dir, "all.abort"))
 
     for flag_path in candidates:
         if not os.path.isfile(flag_path):
@@ -229,6 +221,29 @@ def check_abort_signal(
             return data
         except Exception:
             continue
+
+    # 3. Fallback: Shared aggregate json (Only read if no direct signal file was found)
+    if root_path and os.path.isdir(root_path):
+        json_sig = os.path.join(root_path, ".cluster", ABORT_SIGNALS_JSON)
+        if os.path.isfile(json_sig):
+            try:
+                with open(json_sig, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict):
+                    entry = data.get(resolved_node) or data.get("all")
+                    if not entry and "signals" in data and isinstance(data["signals"], dict):
+                        entry = data["signals"].get(resolved_node) or data["signals"].get("all")
+                    if isinstance(entry, dict):
+                        entry_copy = dict(entry)
+                        entry_copy["_signal_path"] = json_sig
+                        entry_copy["_json_key"] = (
+                            resolved_node
+                            if resolved_node in data or ("signals" in data and resolved_node in data["signals"])
+                            else "all"
+                        )
+                        return entry_copy
+            except Exception:
+                pass
 
     return None
 
@@ -314,7 +329,7 @@ def dispatch_abort_signal(
     shared_root: str = "",
     local_dir: str = "",
 ) -> str:
-    """Dispatches an abort signal file for a target worker node.
+    """Dispatches an abort signal file for a target worker node using atomic replace.
 
     Args:
         node_name: Target worker node hostname.
@@ -337,8 +352,10 @@ def dispatch_abort_signal(
         aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME)
         os.makedirs(aborts_dir, exist_ok=True)
         sig_path = os.path.join(aborts_dir, f"{clean_node}.abort")
-        with open(sig_path, "w", encoding="utf-8") as f:
+        tmp_sig = f"{sig_path}.tmp"
+        with open(tmp_sig, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
+        os.replace(tmp_sig, sig_path)
 
         # Also update aggregate abort_signals.json
         agg_path = os.path.join(shared_root, ".cluster", ABORT_SIGNALS_JSON)
@@ -348,8 +365,10 @@ def dispatch_abort_signal(
                 with open(agg_path, "r", encoding="utf-8") as rf:
                     agg_data = json.load(rf)
             agg_data[clean_node] = payload
-            with open(agg_path, "w", encoding="utf-8") as wf:
+            tmp_agg = f"{agg_path}.tmp"
+            with open(tmp_agg, "w", encoding="utf-8") as wf:
                 json.dump(agg_data, wf, indent=2)
+            os.replace(tmp_agg, agg_path)
         except Exception:
             pass
 
@@ -358,8 +377,10 @@ def dispatch_abort_signal(
     out_dir = local_dir or tempfile.gettempdir()
     os.makedirs(out_dir, exist_ok=True)
     sig_path = os.path.join(out_dir, ABORT_SIGNAL_FILENAME)
-    with open(sig_path, "w", encoding="utf-8") as f:
+    tmp_local = f"{sig_path}.tmp"
+    with open(tmp_local, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
+    os.replace(tmp_local, sig_path)
     return sig_path
 
 
@@ -444,7 +465,7 @@ def abort_remote_worker(
             if not result["error"]:
                 result["error"] = f"Warning during batch abort: {batch_err}"
 
-    # Step 4: Write abort signal file
+    # Step 4: Write abort signal file atomically
     sig_path = ""
     try:
         sig_path = dispatch_abort_signal(

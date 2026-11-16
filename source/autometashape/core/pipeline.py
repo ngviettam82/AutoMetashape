@@ -223,8 +223,7 @@ def save_checkpoint(doc, target_path=None):
 def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
     """Safely resolve the active chunk and aligned camera count from a loaded checkpoint document.
 
-    Handles empty chunks, default-labeled chunks (e.g. 'Chunk 1'), and multi-chunk projects
-    without throwing AttributeError.
+    Optimized with single-pass aligned camera counting across chunks to prevent redundant iterations.
 
     Args:
         doc: Metashape.Document instance (or mock).
@@ -232,27 +231,30 @@ def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
     Returns:
         tuple of (chunk, aligned_count, can_resume).
     """
-    prod_chunk = None
     chunks = getattr(doc, "chunks", None) or []
-    if chunks:
-        # 1. Match canonical label
-        for c in chunks:
-            if getattr(c, "label", None) == "Production_Reconstruction":
-                prod_chunk = c
-                break
-        # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
-        if prod_chunk is None:
-            try:
-                prod_chunk = max(
-                    chunks,
-                    key=lambda c: sum(
-                        1
-                        for cam in (getattr(c, "cameras", None) or [])
-                        if getattr(cam, "transform", None) and getattr(cam, "enabled", True)
-                    ),
-                )
-            except Exception:
-                prod_chunk = chunks[0]
+    if not chunks:
+        return None, 0, False
+
+    # Single-pass pre-computation of aligned camera counts
+    aligned_counts: dict[int, int] = {}
+    canonical_chunk = None
+
+    for c in chunks:
+        if getattr(c, "label", None) == "Production_Reconstruction":
+            canonical_chunk = c
+
+        cameras = getattr(c, "cameras", None) or []
+        count = sum(1 for cam in cameras if getattr(cam, "transform", None) and getattr(cam, "enabled", True))
+        aligned_counts[id(c)] = count
+
+    # 1. Match canonical label
+    prod_chunk = canonical_chunk
+    # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
+    if prod_chunk is None:
+        try:
+            prod_chunk = max(chunks, key=lambda c: aligned_counts.get(id(c), 0))
+        except Exception:
+            prod_chunk = chunks[0]
 
     if prod_chunk is not None and hasattr(doc, "chunk"):
         doc.chunk = prod_chunk
@@ -261,7 +263,7 @@ def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
     if chunk is None or not hasattr(chunk, "cameras") or not chunk.cameras:
         return None, 0, False
 
-    aligned_count = sum(1 for c in chunk.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True))
+    aligned_count = aligned_counts.get(id(chunk), 0)
     can_resume = aligned_count >= 2
     return chunk, aligned_count, can_resume
 
