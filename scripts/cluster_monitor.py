@@ -176,6 +176,84 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
     }
 
 
+def audit_memory_allocation_faults(
+    batches: List[Dict[str, Any]],
+    storage_paths: List[str],
+) -> List[Dict[str, Any]]:
+    """Inspect all batches for std::bad_alloc, out-of-memory crashes, or allocation exceptions."""
+    faults: List[Dict[str, Any]] = []
+
+    for b in batches:
+        bid = b.get("batch_id")
+        bpath = b.get("path", "")
+        pname = os.path.splitext(os.path.basename(bpath))[0]
+        err_by_type = b.get("error_count_by_type", {})
+        last_err = b.get("last_error", {})
+
+        is_oom = False
+        oom_count = 0
+        reasons: List[str] = []
+
+        # 1. Cluster Server recorded error types
+        if "out-of-memory" in err_by_type:
+            is_oom = True
+            cnt = err_by_type["out-of-memory"]
+            oom_count += cnt
+            reasons.append(f"{cnt} out-of-memory event(s) recorded by cluster")
+
+        last_err_msg = str(last_err.get("message", ""))
+        last_err_type = str(last_err.get("type", ""))
+        if "bad allocation" in last_err_msg.lower() or "out-of-memory" in last_err_type.lower():
+            is_oom = True
+            reasons.append(f"Last error: '{last_err_msg}' ({last_err_type})")
+
+        # 2. Check task-level error records if present
+        task = b.get("task", {})
+        for terr in task.get("errors", []):
+            tmsg = str(terr.get("message", ""))
+            ttype = str(terr.get("type", ""))
+            if "bad allocation" in tmsg.lower() or "out-of-memory" in ttype.lower():
+                is_oom = True
+                entry_str = f"Task error: '{tmsg}'"
+                if entry_str not in reasons:
+                    reasons.append(entry_str)
+
+        # 3. Check status sidecar for recorded errors
+        for sp in storage_paths:
+            candidate = os.path.normpath(os.path.join(sp, os.path.dirname(bpath)))
+            sidecar_path = os.path.join(candidate, "_autometashape_status.json")
+            if os.path.isfile(sidecar_path):
+                try:
+                    with open(sidecar_path, "r", encoding="utf-8") as sf:
+                        sdata = json.load(sf)
+                    serr = str(sdata.get("error", "")).lower()
+                    if "bad allocation" in serr or "bad_alloc" in serr or "out of memory" in serr:
+                        is_oom = True
+                        entry_str = f"Sidecar error: {sdata.get('error')}"
+                        if entry_str not in reasons:
+                            reasons.append(entry_str)
+                except Exception:
+                    pass
+                break
+
+        if is_oom:
+            faults.append(
+                {
+                    "batch_id": bid,
+                    "project": pname,
+                    "path": bpath,
+                    "state": b.get("state", "unknown"),
+                    "aborted": b.get("aborted", False),
+                    "failed": b.get("failed", False),
+                    "oom_count": oom_count,
+                    "reasons": reasons,
+                    "last_error": last_err,
+                }
+            )
+
+    return faults
+
+
 def execute_audit(
     server_host: str = "",
     shared_root: str = "",
@@ -209,17 +287,16 @@ def execute_audit(
     # Filter active workers
     active_workers = [w for w in workers if str(w.get("state", "")).lower() != "offline"]
 
-    # 3. Headroom Audit
-    storage_paths = resolve_storage_paths(shared_root, batches)
-    headroom = audit_headroom(storage_paths)
-    headroom_ok = all(free_gb >= min_headroom for free_gb in headroom.values())
+    # 4. Memory Allocation Faults Audit (std::bad_alloc / OOM Defense)
+    allocation_faults = audit_memory_allocation_faults(batches, storage_paths)
+    oom_batch_ids = {f["batch_id"] for f in allocation_faults}
 
     # Categorize batches
     running_batches = [b for b in batches if str(b.get("state", "")).lower() in ("inprogress", "running")]
     pending_batches = [b for b in batches if str(b.get("state", "")).lower() in ("pending", "submitted", "queued")]
     completed_batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done")]
 
-    # 4. Deliverable Verification of Completed Batches
+    # 5. Deliverable Verification of Completed Batches
     deliverable_results: Dict[int, Dict[str, Any]] = {}
     for b in completed_batches:
         bid = b.get("batch_id")
@@ -233,7 +310,11 @@ def execute_audit(
                 rdir = candidate
                 break
         if rdir:
-            deliverable_results[bid] = verify_deliverables(rdir, pname)
+            res = verify_deliverables(rdir, pname)
+            if bid in oom_batch_ids:
+                res["intact"] = False
+                res["oom_fault"] = True
+            deliverable_results[bid] = res
 
     audit_data: Dict[str, Any] = {
         "timestamp": time.time(),
@@ -249,6 +330,7 @@ def execute_audit(
         "completed_count": len(completed_batches),
         "running_batches": running_batches,
         "deliverables": deliverable_results,
+        "allocation_faults": allocation_faults,
     }
 
     if json_output:
@@ -273,16 +355,34 @@ def execute_audit(
         state = w.get("state", "unknown")
         bid = w.get("batch_id", "none")
         res = w.get("resource_usage", {})
-        cpu = res.get("cpu_usage", 0.0) * 100
-        ram = res.get("memory_usage", 0.0) * 100
+        cpu = res.get("cpu_usage", 0.0)
+        ram_gb = res.get("memory_usage", 0.0)
+        ram_warn = " [HIGH RAM WARNING: >=55 GB]" if ram_gb >= 55.0 else ""
         print(
-            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu:>6.1f}% | RAM: {ram:>6.1f}%"
+            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu:>5.1f}% | RAM: {ram_gb:>5.1f} GB{ram_warn}"
         )
 
     # Queue Status
     print(
         f"\n[Queue Status] Total: {len(batches)} | Running: {len(running_batches)} | Pending: {len(pending_batches)} | Completed: {len(completed_batches)}"
     )
+
+    # Memory Allocation Faults Section (std::bad_alloc / OOM)
+    print("\n" + "-" * 80)
+    print("[Memory Allocation Audit (std::bad_alloc / OOM Defense)]")
+    print("-" * 80)
+    if allocation_faults:
+        print(f"  [ALERT: {len(allocation_faults)} BATCH(ES) FAULTED ON std::bad_alloc / OOM]")
+        for f in allocation_faults:
+            bid = f["batch_id"]
+            pname = f["project"]
+            state = f["state"]
+            reasons_str = "; ".join(f["reasons"])
+            print(f"  * Batch #{bid:>2} [Project: {pname}] (State: {state}):")
+            print(f"    - Failure Diagnosis: {reasons_str}")
+            print(f"    - Corrective Action: Worker physical RAM exhausted. Resubmit with '--no-guided-matching' or reduced keypoints limit.")
+    else:
+        print("  [PASS: NO BAD_ALLOC DETECTED] All tasks operating within node physical RAM boundaries.")
 
     # Running Projects Detail
     if running_batches:
@@ -298,13 +398,16 @@ def execute_audit(
             stage_desc = ""
             # Inspect sidecar if present
             for sp in storage_paths:
-                sidecar_path = os.path.join(sp, os.path.dirname(bpath), "_autometashape_status.json")
+                sidecar_path = os.path.normpath(os.path.join(sp, os.path.dirname(bpath), "_autometashape_status.json"))
                 if os.path.isfile(sidecar_path):
                     try:
                         with open(sidecar_path, "r", encoding="utf-8") as sf:
                             sdata = json.load(sf)
-                            stage = sdata.get("stage", stage)
-                            stage_desc = sdata.get("description", "")
+                            stage = sdata.get("stage_key") or sdata.get("stage") or stage
+                            stage_desc = sdata.get("stage_desc") or sdata.get("description", "")
+                            worker_node = sdata.get("worker_node")
+                            if worker_node and assigned_w == "unassigned":
+                                assigned_w = worker_node
                     except Exception:
                         pass
                     break
@@ -315,7 +418,12 @@ def execute_audit(
     if deliverable_results:
         print(f"\n[Completed Batches Deliverable Audit] ({len(deliverable_results)} audited):")
         for bid, d in deliverable_results.items():
-            status = "PASS: VERIFIED" if d.get("intact") else "FAIL: INCOMPLETE"
+            if d.get("oom_fault"):
+                status = "FAIL: BAD_ALLOC (OOM)"
+            elif d.get("intact"):
+                status = "PASS: VERIFIED"
+            else:
+                status = "FAIL: INCOMPLETE"
             print(
                 f"  [{status}] Batch #{bid}: OBJ {d.get('obj_sz_mb', 0)} MB | {d.get('textures_count', 0)} tex | Ortho {d.get('ortho_sz_mb', 0)} MB | Spatial={d.get('spatial', False)}"
             )

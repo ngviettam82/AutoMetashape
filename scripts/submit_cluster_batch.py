@@ -120,6 +120,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Maximum concurrent workers assigned to this batch (default: 1 for monolithic batch)",
     )
     parser.add_argument(
+        "--no-guided-matching",
+        action="store_true",
+        help="Disable guided matching during photo alignment to reduce RAM usage on large datasets",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -189,6 +194,7 @@ def submit_batch(
     no_local_scratch_staging: bool = False,
     preset: str = "pro",
     worker_limit: int = 1,
+    no_guided_matching: bool = False,
 ) -> int:
     """Create project, guarantee physical doc.save materialization, and submit cluster batch."""
     if Metashape is None:
@@ -256,15 +262,17 @@ def submit_batch(
     # BUILD MONOLITHIC NETWORK TASK
     # -------------------------------------------------------------------------
     print("\n[DISPATCH] Constructing cluster network task...", flush=True)
-    script_task = build_monolithic_runscript_task(
+    res_task = build_monolithic_runscript_task(
         images_dir=norm_images,
         output_dir=norm_output,
         project_name=proj_name,
         preset=preset,
         resume=resume,
+        guided_matching=not no_guided_matching,
         local_scratch=not no_local_scratch_staging,
+        network_path=resolved_root,
     )
-    net_task = script_task.toNetworkTask()
+    net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
 
     # Calculate cluster-relative path
     rel_psx = get_cluster_relative_path(psx_path, resolved_root)
@@ -335,6 +343,7 @@ def main() -> int:
             no_local_scratch_staging=args.no_local_scratch_staging,
             preset=args.preset,
             worker_limit=args.worker_limit,
+            no_guided_matching=args.no_guided_matching,
         )
         return 0 if batch_id > 0 else 1
     except Exception as e:

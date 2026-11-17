@@ -90,7 +90,7 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
             try:
                 depth_maps = len(dms)
             except (TypeError, AttributeError):
-                depth_maps = 1
+                depth_maps = 1 if dms else 0
 
         # Dense point cloud
         dense_points = 0

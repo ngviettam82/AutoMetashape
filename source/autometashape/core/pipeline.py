@@ -587,6 +587,18 @@ def run_reconstruction(
 
     def _sync_staging_to_central_share():
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
+            nonlocal doc, chunk
+            if doc is not None:
+                try:
+                    doc.clear()
+                except Exception:
+                    pass
+                doc = None
+                chunk = None
+                import gc
+
+                gc.collect()
+
             print(
                 f"\n[Local Scratch Staging] Synchronizing staged project to central share: {target_network_output}...",
                 flush=True,
@@ -3263,6 +3275,18 @@ def run_reconstruction(
 
     if survey_physics and pro_plan:
         print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
+
+    # Explicitly release Metashape document before scratch synchronization to unlink all open Win32 file handles
+    if doc is not None:
+        try:
+            doc.clear()
+        except Exception:
+            pass
+        doc = None
+        chunk = None
+        import gc
+
+        gc.collect()
 
     # Synchronize staged project and deliverables from local NVMe scratch to central network share
     if local_staging_dir:

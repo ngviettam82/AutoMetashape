@@ -187,7 +187,7 @@ def main() -> int:
     if Metashape is None and not getattr(args, "no_reexec", False):
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe, "-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:]
             res = subprocess.run(cmd)
             return res.returncode
         print("[ERROR] Agisoft Metashape Pro executable not found. Cannot manage cluster queue.", file=sys.stderr)

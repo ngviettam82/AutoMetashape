@@ -1,6 +1,6 @@
 ---
 name: cluster-supervisor
-description: "Supervises unattended cluster batch execution, storage headroom exhaustion watchdog (Win32 Error 112 defense), signal-based worker abort & deadlock recovery, hardened checkpoint chunk resolution, automated deliverable integrity verification, and multi-dataset queue chaining. Use when monitoring overnight runs, validating production 3D assets, auto-recovering from low-disk pauses, or scheduling sequential project queues."
+description: "Supervises cluster fleet telemetry and deliverable verification gates in strict read-only reporting mode. Enforces the Operator Authority Gate: monitors storage headroom watchdogs (Win32 Error 112 defense), audits memory allocation faults (std::bad_alloc / OOM), and verifies deliverable integrity without uncommanded intervention. AI agents and supervisors report health and anomalies to the operator; all queue alterations, aborts, priority shifts, and recovery decisions lie strictly with the human operator. Use when monitoring cluster batch telemetry, diagnosing memory faults or stalled nodes, tracking storage headroom, or validating production 3D assets under the Operator Authority Gate."
 audience: user
 status: stable
 owners:
@@ -9,21 +9,23 @@ owners:
 
 # Autonomous Cluster Supervisor & Deliverable Verification Gate
 
-Comprehensive operational runbook for lights-out, unattended photogrammetry cluster supervision, storage headroom watchdogs (Win32 Error 112 defense), automated deliverable quality verification gates, and sequential multi-dataset queue chaining.
+Comprehensive operational runbook for lights-out photogrammetry cluster telemetry reporting, storage headroom watchdogs (Win32 Error 112 defense), memory allocation fault auditing (`std::bad_alloc` / OOM), automated deliverable quality verification gates, and the Operator Authority Gate.
 
 ---
 
 ## When To Use
 
 Use this skill when:
-- Running multi-hour, overnight, or multi-dataset photogrammetry cluster jobs without human supervision.
-- Preventing catastrophic cluster stalls caused by storage exhaustion (`Win32 Error 112: ERROR_DISK_FULL`).
-- Verifying deliverable integrity (OBJ vertices/faces, linked MTL textures, GeoTIFF CRS projection tags, dense point cloud byte density, and PDF calibration reports) before declaring a job complete.
-- Chaining sequential dataset reconstructions (e.g., `CATP_0167` -> `CATP_0204` -> `CATP_0205`) into an automated queue that clears scratch space between jobs and advances unattended.
-- Quarantining corrupted outputs and resuming or auto-retrying failed stages without crashing the rest of the queue.
+- Monitoring multi-hour, overnight, or multi-dataset photogrammetry cluster jobs in strict read-only reporting mode.
+- Tracking storage headroom (`>= 50 GB`) and warning against catastrophic cluster stalls (`Win32 Error 112: ERROR_DISK_FULL`).
+- Auditing memory allocation faults (`std::bad_alloc`, OOM, C++ allocation limits) across worker nodes.
+- Verifying deliverable integrity (OBJ vertices/faces, linked MTL textures, GeoTIFF CRS projection tags, dense point cloud byte density, and PDF calibration reports) upon task completion.
+- Formulating diagnostic reports and actionable recommendations for the human operator.
 
-Do not use this skill when:
-- Deploying or updating worker nodes and server daemons (use `skills/user/cluster-fleet-operations/`).
+Do not use this skill to:
+- Auto-abort batches, modify priorities, or alter cluster queues without explicit, real-time user permission (strictly prohibited by the Operator Authority Gate).
+- Automatically degrade reconstruction settings or lower quality presets without operator instruction.
+- Deploy or update worker nodes and server daemons (use `skills/user/cluster-fleet-operations/`).
 - Executing an interactive, single-project photogrammetry reconstruction (use `skills/user/image-to-3d-model/`).
 - Running standalone asset format conversions from an existing `.psx` archive (use `skills/user/photogrammetry-export/`).
 
@@ -80,9 +82,10 @@ Metashape MVS depth maps and octree leave partitions peak heavily during dense r
    ```powershell
    python -c "from autometashape.cluster.supervisor import check_storage_headroom; ok, free = check_storage_headroom('\\\\CLUSTER_SHARE\\storage', 50.0); print(f'Headroom OK: {ok} ({free} GB free)')"
    ```
-2. **Watchdog Protocol**:
+2. **Watchdog Reporting Protocol**:
    - Minimum safe threshold: **50.0 GB** free space.
-   - If free space $< 50.0\text{ GB}$, the supervisor automatically halts the job in `PAUSED_LOW_DISK` state, preventing corruption of preceding deliverables.
+   - If free space $< 50.0\text{ GB}$, the supervisor logs a **CRITICAL HEADROOM ALERT** and reports it immediately to the operator.
+   - In accordance with the **Operator Authority Gate**, the supervisor reports the low-disk state so the human operator can decide whether to clear scratch directories, pause batches, or expand network capacity. Automated routines do not silently delete or re-route user assets.
 
 ### 2. Automated Deliverable Quality & Integrity Gate
 Never mark a reconstruction finished simply because `metashape.exe` exited code `0`. Run the deterministic deliverable verification gate:
@@ -184,8 +187,8 @@ To process a sequence of survey datasets without human intervention:
    - **Scratch Purge**: Clears temporary local NVMe staging caches upon verified deliverable pass.
 
 
-### 5. Signal-Based Worker Abort & Server Deadlock Recovery
-During unattended overnight supervision, an independent monolithic batch or worker may freeze or become unresponsive during native stereopsis or matching. The supervisor or operator triggers deterministic recovery via the signal-based abort mechanism:
+### 5. Signal-Based Worker Abort & Operator-Directed Recovery
+During cluster execution, if an independent batch or worker freezes, deadlocks, or encounters an allocation fault (`std::bad_alloc`), recovery is triggered **strictly upon explicit operator authorization**. The supervisor reports the deadlock or fault state to the operator, who directs whether to abort and demote the batch.
 
 1. **Deadlock Defense via Server Unpause**:
    When Metashape Server freezes due to a paused batch (`batch.paused == True`), the scheduler cannot re-evaluate worker queues. The abort orchestrator calls `client.setBatchPaused(batch_id, False)` before invoking `client.abortBatch(batch_id)`.
@@ -193,7 +196,7 @@ During unattended overnight supervision, an independent monolithic batch or work
    The batch priority is demoted to `-100` (`client.setBatchPriority(batch_id, -100)`) to prevent the scheduler from immediately re-dispatching the cancelled task when the worker reconnects.
 3. **Signal Dispatch & Process Tree Kill**:
    Writes `<unc_root>/.cluster/aborts/<node_name>.abort`. The worker supervisor's non-blocking watchdog detects the signal, executes `taskkill /F /T /PID` to terminate both the parent daemon and any child processes, purges locks, and auto-reconnects to the cluster in 1.0s.
-4. **Execution**:
+4. **Execution (Operator Authorized Only)**:
    ```powershell
    .\cluster_abort.bat --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
    ```
@@ -224,16 +227,27 @@ When submitting a standalone or queued batch to the cluster, agents and operator
        --output "\\CLUSTER_SHARE\storage\Survey_0167\Result" --priority 50
    ```
 
-### 8. Cluster Telemetry & Operator-Gated Queue Operations
-To monitor and manage the cluster safely without race conditions or uncommanded interventions:
+### 8. Cluster Telemetry & The Operator Authority Gate
 
-1. **Autonomous Read-Only Telemetry Auditing**:
-   Execute non-intrusive fleet audits inspecting worker health, batch stage progress, and storage headroom ($\ge 50\text{ GB}$):
+**Core Invariant**: The supervisor and AI agent operate strictly as **Read-Only Telemetry Reporters**. All operational decisions (aborts, cancellations, priority changes, re-queuing, setting changes) **lie exclusively with the human operator**. AI agents are strictly prohibited from auto-deciding or mutating cluster state without real-time operator authorization.
+
+1. **Strict Read-Only Telemetry Standard**:
+   Execute non-intrusive fleet audits inspecting worker health, batch stage progress, memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$):
    ```powershell
    python scripts/cluster_monitor.py
    ```
-2. **Operator-Gated Queue Management**:
-   Under the **Operator Authority Gate**, queue modifications must be explicitly authorized by the operator before execution:
+   - All observations, memory faults, and progress metrics are reported to the human operator in chat.
+   - The supervisor does NOT auto-degrade settings, auto-retry, or auto-cancel failed tasks.
+
+2. **Operator Authority Gate Workflow**:
+   Under the **Operator Authority Gate**, any mutation to the cluster queue or worker nodes requires explicit, real-time user permission:
+   - **Step 1: Observe & Report**: Collect telemetry and present findings and diagnoses clearly to the operator.
+   - **Step 2: Propose Action**: Suggest recommended remedies (e.g., "Batch #58 encountered bad allocation. Recommend setting priority to 100 with `--no-guided-matching`").
+   - **Step 3: Await Operator Decision**: Do nothing until the human operator confirms the plan.
+   - **Step 4: Execute Canonical Utility**: Once confirmed, invoke the canonical scripts (`scripts/manage_queue.py`, `scripts/cluster_abort.py`, or `scripts/submit_cluster_batch.py`).
+
+3. **Canonical Queue Management Operations**:
+   Once explicitly approved by the operator, execute modifications via canonical utilities:
    ```powershell
    # List active and queued batches
    python scripts/manage_queue.py list
@@ -243,11 +257,17 @@ To monitor and manage the cluster safely without race conditions or uncommanded 
    python scripts/manage_queue.py unpause --batch 12
 
    # Adjust priority safely
-   python scripts/manage_queue.py set-priority --batch 12 --priority 60
+   python scripts/manage_queue.py set-priority --batch 29 --priority 100
+
+   # Abort a batch upon operator direction
+   python scripts/manage_queue.py abort --batch 58 --demote-priority -100
    ```
-3. **Anti-Pattern: Ban on Script-Side Node Affinity Rejection**:
-   - Never inject `if COMPUTERNAME != target_node: sys.exit(2)` into task execution scripts.
-   - In Metashape Server's priority queue, an unauthorized worker that claims and yields a top-priority task will immediately be re-served the exact same task, triggering an infinite claim-and-yield loop that starves the entire worker fleet.
+
+4. **Anti-Patterns & Prohibitions**:
+   - **Strict Ban on Autonomous Agent Decisions**: Never abort tasks, adjust priorities, or re-submit batches without explicit operator permission.
+   - **Strict Ban on Silent Settings Degradation**: Never auto-downgrade quality presets (e.g., auto-decimating textures, disabling guided matching silently). Maintain strict fidelity unless the operator directs a change.
+   - **Strict Ban on Script-Side Node Affinity Rejection**: Never inject `if COMPUTERNAME != target_node: sys.exit(2)` into task execution scripts.
+   - **Strict Ban on Ad-Hoc Chat Scripts**: Strictly invoke canonical utilities under `scripts/`.
 
 ### 9. Checkpoint Forensics & Diagnostics
 To inspect an existing `.psx` archive non-destructively without risking accidental chunk wipeout:

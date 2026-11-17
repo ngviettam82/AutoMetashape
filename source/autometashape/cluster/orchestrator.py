@@ -338,6 +338,8 @@ def build_monolithic_runscript_task(
     point_cloud_format: str = "laz",
     export_report: bool = False,
     resume: bool = True,
+    guided_matching: bool = True,
+    local_scratch: bool = True,
     network_path: str = "",
     status_file: str | None = None,
 ) -> tuple:
@@ -427,8 +429,10 @@ def build_monolithic_runscript_task(
     else:
         worker_args.append("--no-resume")
 
-    # Independent worker monolithic task unconditionally executes via offline local scratch staging
-    worker_args.append("--local-scratch-staging")
+    if local_scratch:
+        worker_args.append("--local-scratch-staging")
+    else:
+        worker_args.append("--no-local-scratch-staging")
 
     if not align_photos:
         worker_args.append("--no-align-photos")
@@ -444,6 +448,8 @@ def build_monolithic_runscript_task(
         worker_args.append("--no-ortho")
     if not build_point_cloud:
         worker_args.append("--no-point-cloud")
+    if not guided_matching:
+        worker_args.append("--no-guided-matching")
 
     if export_obj:
         worker_args.append("--export-obj")
