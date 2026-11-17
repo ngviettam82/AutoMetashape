@@ -206,21 +206,73 @@ The unified chunk resolver (`resolve_checkpoint_chunk(doc)`) protects against `A
 2. **Highest Aligned Camera Fallback**: If canonical label is absent, counts aligned cameras across all chunks in a single $O(N)$ pass (`cam.transform and cam.enabled`) and selects the chunk with the highest count.
 3. **Alignment Threshold**: If aligned cameras $\ge 2$, safely resumes downstream MVS depth maps and meshing, skipping camera alignment. If $< 2$, initializes a clean production chunk and restarts alignment from Step 1.
 
+### 7. Canonical Batch Submission & Pre-Flight Physical Materialization
+When submitting a standalone or queued batch to the cluster, agents and operators must invoke `scripts/submit_cluster_batch.py` rather than composing ad-hoc Python scripts in chat or scratch directories.
+
+1. **Mandatory Physical Materialization Invariant**:
+   - `scripts/submit_cluster_batch.py` initializes the Metashape document, configures the canonical chunk, adds raw photos, and enforces `doc.save(psx_path)`:
+     ```python
+     doc.save(psx_path)
+     assert os.path.isfile(psx_path), "Project file must exist on disk before dispatch"
+     ```
+   - This prevents worker failure modes where remote nodes claim a task whose project file has not yet been flushed or materialized to shared network storage.
+2. **Direct Storage Standard**:
+   - For datasets physically hosted on the current machine's storage, pass `--no-local-scratch-staging` to eliminate redundant local NVMe staging and disk exhaustion.
+3. **Execution**:
+   ```powershell
+   python scripts/submit_cluster_batch.py --images "\\CLUSTER_SHARE\storage\Survey_0167" `
+       --output "\\CLUSTER_SHARE\storage\Survey_0167\Result" --priority 50
+   ```
+
+### 8. Cluster Telemetry & Operator-Gated Queue Operations
+To monitor and manage the cluster safely without race conditions or uncommanded interventions:
+
+1. **Autonomous Read-Only Telemetry Auditing**:
+   Execute non-intrusive fleet audits inspecting worker health, batch stage progress, and storage headroom ($\ge 50\text{ GB}$):
+   ```powershell
+   python scripts/cluster_monitor.py
+   ```
+2. **Operator-Gated Queue Management**:
+   Under the **Operator Authority Gate**, queue modifications must be explicitly authorized by the operator before execution:
+   ```powershell
+   # List active and queued batches
+   python scripts/manage_queue.py list
+
+   # Pause / Unpause a batch
+   python scripts/manage_queue.py pause --batch 12
+   python scripts/manage_queue.py unpause --batch 12
+
+   # Adjust priority safely
+   python scripts/manage_queue.py set-priority --batch 12 --priority 60
+   ```
+3. **Anti-Pattern: Ban on Script-Side Node Affinity Rejection**:
+   - Never inject `if COMPUTERNAME != target_node: sys.exit(2)` into task execution scripts.
+   - In Metashape Server's priority queue, an unauthorized worker that claims and yields a top-priority task will immediately be re-served the exact same task, triggering an infinite claim-and-yield loop that starves the entire worker fleet.
+
+### 9. Checkpoint Forensics & Diagnostics
+To inspect an existing `.psx` archive non-destructively without risking accidental chunk wipeout:
+```powershell
+python scripts/inspect_checkpoint.py --project "\\CLUSTER_SHARE\storage\Survey_0167\Result\Survey_0167.psx"
+```
+
 ---
 
 ## Validation
 
-Verify that supervisor components and deliverable validators pass all quality checks:
+Verify that supervisor components, canonical scripts, and deliverable validators pass all quality checks:
 
 ```powershell
 # 1. Run unit test suite
-python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py
+python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py tests/test_cluster_dispatch.py
 
 # 2. Run skills validation
 python tools/skills/cli.py check
 
 # 3. Test standalone deliverable verification CLI
 python scripts/verify_deliverables.py --help
+
+# 4. Test canonical batch submission CLI
+python scripts/submit_cluster_batch.py --help
 ```
 
 ---

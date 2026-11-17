@@ -1,6 +1,6 @@
 # Cluster Supervisor Evaluation Scenarios
 
-Evaluation test scenarios for validating unattended cluster supervision, storage headroom watchdogs, deliverable integrity gates, and multi-dataset queue chaining.
+Evaluation test scenarios for validating unattended cluster supervision, storage headroom watchdogs, deliverable integrity gates, canonical batch submission, and multi-dataset queue chaining.
 
 ---
 
@@ -56,3 +56,22 @@ Execute a batch queue containing 2 projects (`Survey_0167` and `Survey_0204`). P
 - Both datasets transition from `PENDING` -> `RUNNING` -> `COMPLETED`.
 - Scratch directory for Project 1 is verified empty before Project 2 starts.
 - Summary dictionary returns `completed_jobs == 2` and `total_jobs == 2`.
+
+---
+
+### Scenario 4: Canonical Batch Dispatch with Pre-Flight Physical .psx Materialization Gate
+**Query:**
+Dispatch a new photogrammetry project to the cluster server using `scripts/submit_cluster_batch.py` from raw photo captures.
+
+**Expected behavior:**
+1. The submission utility scans the input image directory and confirms supported image files.
+2. Dynamically resolves server host, port, and shared root without hardcoded addresses.
+3. Initializes `Metashape.Document()`, creates chunk `Production_Reconstruction`, and adds cameras.
+4. **Enforces Pre-Flight Physical Materialization**: Invokes `doc.save(psx_path)` and verifies `os.path.isfile(psx_path)` on the shared storage filesystem before dispatching.
+5. Submits the batch via `client.createBatch()` and sets target priority and worker limits.
+6. Guarantees that remote workers claiming the batch find an existing physical `.psx` archive, preventing missing-file I/O crashes.
+
+**Pass/fail criteria:**
+- Script exits with code 0.
+- Physical `.psx` project archive exists on disk and is non-empty before batch creation.
+- Server returns a valid `batch_id > 0`.

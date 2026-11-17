@@ -78,7 +78,7 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             )
         except Exception:
             pass
-        cleanup_stale_worker_processes()
+        cleanup_stale_worker_processes(proc_pid)
     else:
         if callable(poll_fn) and poll_fn() is None:
             kill_fn = getattr(proc, "kill", None)

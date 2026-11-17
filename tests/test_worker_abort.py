@@ -219,6 +219,34 @@ class TestWorkerAbort(unittest.TestCase):
             mock_clean.assert_called_once()
             mock_ack.assert_called_once()
 
+    def test_remote_abort_never_executes_local_taskkill(self) -> None:
+        """Verify remote abort targeting another node never runs local process kill commands."""
+        mock_client = MagicMock()
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 99, "state": "running"}]}
+        mock_client.workerList.return_value = {"workers": [{"hostname": "remote_node", "state": "ready"}]}
+
+        with tempfile.TemporaryDirectory() as shared_root:
+            with (
+                patch("subprocess.run") as mock_subproc,
+                patch("time.sleep", return_value=None),
+            ):
+                result = abort_remote_worker(
+                    node_name="remote_node",
+                    batch_id=99,
+                    shared_root=shared_root,
+                    server_host="127.0.0.1:5840",
+                    timeout=1.0,
+                    client=mock_client,
+                )
+
+                # Ensure subprocess.run was NEVER called with taskkill
+                for call_args in mock_subproc.call_args_list:
+                    cmd_list = call_args[0][0] if call_args[0] else []
+                    self.assertNotIn("taskkill", cmd_list)
+                    self.assertNotIn("/IM", cmd_list)
+
+                self.assertTrue(result["success"])
+
     def test_cluster_abort_cli_and_config_resolution(self) -> None:
         """Verify scripts/cluster_abort.py correctly resolves server and worker configurations."""
         import scripts.cluster_abort as ca

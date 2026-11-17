@@ -226,8 +226,9 @@ sequenceDiagram
 #### Protocol Details
 1. **Non-Blocking Supervisor Watchdog**:
    `scripts/launch_worker.py` replaces blocking `wait()` with a 1.0s watchdog polling loop monitoring local `.abort_pending` and network `<root>/.cluster/aborts/<node_name>.abort`.
-2. **Defensive Process-Tree Termination**:
+2. **Defensive Process-Tree Termination & Dual-Role Safety**:
    `kill_worker_process()` initiates graceful termination, then enforces `taskkill /F /T /PID {proc.pid}` on Windows to ensure both parent worker daemons and any child processes running native CUDA stereopsis or scripts are reaped without leaving orphaned locks.
+   - **Zero Host-Wide Taskkill**: In environments where a machine hosts both coordinator services and a compute worker, never execute `taskkill /IM metashape.exe`. All termination must be strictly scoped by target PID. Remote nodes are signaled exclusively via atomic UNC files without local process interference.
 3. **Scratch Lock Cleanup**:
    `cleanup_scratch_locks()` removes stale `lock` files in target output, `%TEMP%`, and NVMe scratch folders, strictly bounded to `max_depth = 3` to eliminate SMB latency over deep octree trees.
 4. **Self-Healing Relaunch**:

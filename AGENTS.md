@@ -8,6 +8,7 @@ Always read the workspace root `AGENTS.md` and relevant sections of the project'
 - [Coding Style](CONTRIBUTING.md#coding-style) for repository-specific standards, formatting, and import hygiene.
 - [Unit Testing](CONTRIBUTING.md#unit-testing) for test quality, authoring gates, and mutation verification; consult repository test skills (`skills/developer/test-audit/SKILL.md`).
 - [Build & Validation Tools](CONTRIBUTING.md#build--validation-tools) for project launchers (`build.bat`, `format_code.bat`, pre-commit hooks).
+- [Cluster Operations & Safeguards](CONTRIBUTING.md#6-cluster-operations--safeguards) for operator authority gates, PID process isolation, pre-flight `doc.save` materialization, and canonical scripts.
 
 The project contribution guide owns shared rules. Follow them instead of assuming global defaults.
 
@@ -15,6 +16,8 @@ The project contribution guide owns shared rules. Follow them instead of assumin
 
 - Follow a more-specific `AGENTS.md` in the directory or subsystem being changed if one exists.
 - Preserve unrelated workspace changes and **never commit generated plans, scratch files, or agent artifacts**.
+- Observe the **Operator Authority Gate**: never abort tasks, modify priorities, or alter cluster queues without explicit, real-time user permission.
+- Never compose ad-hoc cluster execution scripts in chat or scratch folders; strictly invoke canonical utilities under `scripts/` (`submit_cluster_batch.py`, `cluster_monitor.py`, `manage_queue.py`, `cluster_abort.py`, `inspect_checkpoint.py`).
 - Identify the behavior's owner and make the smallest surgical change that resolves the defect.
 - Run the narrowest relevant checks during editing, then the required project validation suite (`build.bat` or pre-commit checks).
 - Run project code formatting (`format_code.bat`) before submitting changes.
