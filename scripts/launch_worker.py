@@ -69,7 +69,13 @@ def reexec_supervisor(target_dir: str) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     clear_worker_pid()
-    os.execv(py_exe, cmd)
+    if sys.platform == "win32":
+        # Windows wexecv does not quote arguments containing spaces, which causes
+        # 'C:\Program: can't open file...' crash when py_exe or path has spaces.
+        quoted_cmd = [f'"{c}"' if " " in c and not (c.startswith('"') and c.endswith('"')) else c for c in cmd]
+        os.execv(py_exe, quoted_cmd)
+    else:
+        os.execv(py_exe, cmd)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
