@@ -71,7 +71,7 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
     print(f"Total Chunks Found: {len(doc.chunks)}")
 
     for idx, c in enumerate(doc.chunks):
-        label = getattr(c, "label", f"Chunk {idx+1}")
+        label = getattr(c, "label", f"Chunk {idx + 1}")
         cams = getattr(c, "cameras", None) or []
         total_cams = len(cams)
         aligned_cams = sum(1 for cam in cams if getattr(cam, "transform", None) and getattr(cam, "enabled", True))
@@ -124,12 +124,20 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
         }
         chunks_info.append(c_data)
 
-        print(f"\n[Chunk {idx+1}] Label: '{label}'")
-        print(f"  - Cameras       : {aligned_cams} aligned / {total_cams} total ({aligned_cams/total_cams*100:.1f}%)" if total_cams else "  - Cameras: 0")
+        print(f"\n[Chunk {idx + 1}] Label: '{label}'")
+        print(
+            f"  - Cameras       : {aligned_cams} aligned / {total_cams} total ({aligned_cams / total_cams * 100:.1f}%)"
+            if total_cams
+            else "  - Cameras: 0"
+        )
         print(f"  - Tie Points    : {tie_points:,}")
         print(f"  - Depth Maps    : {depth_maps:,}")
         print(f"  - Dense Points  : {dense_points:,}")
-        print(f"  - 3D Mesh Model : {model_faces:,} faces, {model_vertices:,} vertices" if model_faces else "  - 3D Mesh Model: None")
+        print(
+            f"  - 3D Mesh Model : {model_faces:,} faces, {model_vertices:,} vertices"
+            if model_faces
+            else "  - 3D Mesh Model: None"
+        )
         print(f"  - Orthomosaic   : {'Present' if has_ortho else 'None'}")
         print(f"  - Elevation (DEM): {'Present' if has_elevation else 'None'}")
 

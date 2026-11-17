@@ -247,7 +247,10 @@ def submit_batch(
                 f"[FATAL ERROR] Project file was not created on disk: {psx_path}. "
                 "Aborting dispatch to protect workers from missing-file crashes."
             )
-        print(f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).", flush=True)
+        print(
+            f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).",
+            flush=True,
+        )
 
     # -------------------------------------------------------------------------
     # BUILD MONOLITHIC NETWORK TASK
@@ -298,7 +301,9 @@ def submit_batch(
         pass
 
     print("=" * 72, flush=True)
-    print(f"[SUCCESS] Project '{proj_name}' is active on cluster as Batch #{batch_id} (Priority: {priority})!", flush=True)
+    print(
+        f"[SUCCESS] Project '{proj_name}' is active on cluster as Batch #{batch_id} (Priority: {priority})!", flush=True
+    )
     print("=" * 72, flush=True)
     return batch_id
 

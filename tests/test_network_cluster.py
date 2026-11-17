@@ -1277,6 +1277,47 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertIn("--images 101126/CATP_0205", args_str.replace("\\", "/"))
             self.assertIn("--output 101126/Result/CATP_0205", args_str.replace("\\", "/"))
 
+    def test_worker_delegation_to_local_documents_codebase(self) -> None:
+        r"""Verify worker entry point delegates execution from shared network script to local Documents\AutoMetashape."""
+        import subprocess
+
+        repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+        real_script = os.path.join(repo_root, "scripts", "metashape_reconstruction.py")
+
+        with tempfile.TemporaryDirectory() as tmp_shared, tempfile.TemporaryDirectory() as tmp_local:
+            # Shared network copy
+            shared_dir = os.path.join(tmp_shared, ".autometashape", "scripts")
+            os.makedirs(shared_dir, exist_ok=True)
+            shared_script = os.path.join(shared_dir, "metashape_reconstruction.py")
+            with open(real_script, "r", encoding="utf-8") as rf:
+                with open(shared_script, "w", encoding="utf-8") as wf:
+                    wf.write(rf.read())
+
+            # Local worker installation
+            local_scripts = os.path.join(tmp_local, "scripts")
+            local_source = os.path.join(tmp_local, "source")
+            os.makedirs(local_scripts, exist_ok=True)
+            os.makedirs(local_source, exist_ok=True)
+            local_script = os.path.join(local_scripts, "metashape_reconstruction.py")
+            with open(local_script, "w", encoding="utf-8") as f:
+                f.write("import sys\nprint('[LOCAL WORKER EXECUTION SUCCESS]')\nsys.exit(0)\n")
+
+            # Invoke shared script pointing AUTOMETASHAPE_DIR to local worker directory
+            env = os.environ.copy()
+            env["AUTOMETASHAPE_DIR"] = tmp_local
+            env.pop("AUTOMETASHAPE_LOCAL_DELEGATED", None)
+
+            res = subprocess.run(
+                [sys.executable, shared_script],
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(res.returncode, 0)
+            self.assertIn("[WORKER DELEGATION] Handing off task to local node codebase", res.stdout)
+            self.assertIn("[LOCAL WORKER EXECUTION SUCCESS]", res.stdout)
+
 
 if __name__ == "__main__":
     unittest.main()

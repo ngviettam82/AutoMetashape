@@ -125,6 +125,7 @@ class TestCheckpointLoader(unittest.TestCase):
 
     def test_dynamic_chunk_wrapper_identity_defense(self) -> None:
         """Verify resolve_checkpoint_chunk handles C++ binding transient wrappers where id() changes."""
+
         class DynamicChunkWrapper(MockChunk):
             def __eq__(self, other: object) -> bool:
                 return isinstance(other, MockChunk) and other.label == self.label

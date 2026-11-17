@@ -46,7 +46,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Command: list
     list_p = subparsers.add_parser("list", help="List all batches on the cluster server")
     list_p.add_argument("--server", type=str, default="", help="Cluster server host")
-    list_p.add_argument("--filter", type=str, default="all", choices=["all", "running", "pending", "completed"], help="Filter by state")
+    list_p.add_argument(
+        "--filter", type=str, default="all", choices=["all", "running", "pending", "completed"], help="Filter by state"
+    )
 
     # Command: set-priority
     prio_p = subparsers.add_parser("set-priority", help="Change priority of a batch")

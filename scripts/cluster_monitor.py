@@ -275,10 +275,14 @@ def execute_audit(
         res = w.get("resource_usage", {})
         cpu = res.get("cpu_usage", 0.0) * 100
         ram = res.get("memory_usage", 0.0) * 100
-        print(f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu:>6.1f}% | RAM: {ram:>6.1f}%")
+        print(
+            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu:>6.1f}% | RAM: {ram:>6.1f}%"
+        )
 
     # Queue Status
-    print(f"\n[Queue Status] Total: {len(batches)} | Running: {len(running_batches)} | Pending: {len(pending_batches)} | Completed: {len(completed_batches)}")
+    print(
+        f"\n[Queue Status] Total: {len(batches)} | Running: {len(running_batches)} | Pending: {len(pending_batches)} | Completed: {len(completed_batches)}"
+    )
 
     # Running Projects Detail
     if running_batches:
@@ -312,7 +316,9 @@ def execute_audit(
         print(f"\n[Completed Batches Deliverable Audit] ({len(deliverable_results)} audited):")
         for bid, d in deliverable_results.items():
             status = "PASS: VERIFIED" if d.get("intact") else "FAIL: INCOMPLETE"
-            print(f"  [{status}] Batch #{bid}: OBJ {d.get('obj_sz_mb', 0)} MB | {d.get('textures_count', 0)} tex | Ortho {d.get('ortho_sz_mb', 0)} MB | Spatial={d.get('spatial', False)}")
+            print(
+                f"  [{status}] Batch #{bid}: OBJ {d.get('obj_sz_mb', 0)} MB | {d.get('textures_count', 0)} tex | Ortho {d.get('ortho_sz_mb', 0)} MB | Spatial={d.get('spatial', False)}"
+            )
 
     print("\n" + "=" * 80)
     print("MONITOR AUDIT COMPLETE - Cluster healthy and operational.")

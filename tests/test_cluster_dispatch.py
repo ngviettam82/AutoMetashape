@@ -19,11 +19,14 @@ for p in (_SCRIPTS_DIR, _SOURCE_DIR):
     if p not in sys.path:
         sys.path.insert(0, p)
 
-from scripts.cluster_monitor import audit_headroom, build_arg_parser as build_monitor_parser
+from scripts.cluster_monitor import audit_headroom
+from scripts.cluster_monitor import build_arg_parser as build_monitor_parser
 from scripts.inspect_checkpoint import build_arg_parser as build_inspect_parser
 from scripts.manage_queue import build_arg_parser as build_queue_parser
 from scripts.submit_cluster_batch import (
     build_arg_parser as build_submit_parser,
+)
+from scripts.submit_cluster_batch import (
     find_photos_in_directory,
     resolve_server_address,
     resolve_shared_root,
@@ -36,17 +39,26 @@ class TestClusterDispatchValidation(unittest.TestCase):
     def test_submit_batch_arg_parser(self):
         """Verify submit_cluster_batch argument parser accepts all required and optional flags."""
         parser = build_submit_parser()
-        args = parser.parse_args([
-            "--images", r"\\SRV\Share\Survey_01",
-            "--output", r"\\SRV\Share\Survey_01\Result",
-            "--priority", "75",
-            "--server", "192.168.1.50:5840",
-            "--root", r"\\SRV\Share",
-            "--resume",
-            "--no-local-scratch-staging",
-            "--preset", "ultra",
-            "--worker-limit", "2",
-        ])
+        args = parser.parse_args(
+            [
+                "--images",
+                r"\\SRV\Share\Survey_01",
+                "--output",
+                r"\\SRV\Share\Survey_01\Result",
+                "--priority",
+                "75",
+                "--server",
+                "192.168.1.50:5840",
+                "--root",
+                r"\\SRV\Share",
+                "--resume",
+                "--no-local-scratch-staging",
+                "--preset",
+                "ultra",
+                "--worker-limit",
+                "2",
+            ]
+        )
         self.assertEqual(args.images, r"\\SRV\Share\Survey_01")
         self.assertEqual(args.output, r"\\SRV\Share\Survey_01\Result")
         self.assertEqual(args.priority, 75)
@@ -68,7 +80,9 @@ class TestClusterDispatchValidation(unittest.TestCase):
     def test_dynamic_root_resolution(self):
         """Verify dynamic extraction of shared root from UNC and filesystem paths."""
         self.assertEqual(resolve_shared_root(r"\\SRV\CustomRoot", r"\\SRV\CustomRoot\Sub"), r"\\SRV\CustomRoot")
-        self.assertEqual(resolve_shared_root("", r"\\NAS_HOST\SharedFolder\2026\Project.psx"), r"\\NAS_HOST\SharedFolder")
+        self.assertEqual(
+            resolve_shared_root("", r"\\NAS_HOST\SharedFolder\2026\Project.psx"), r"\\NAS_HOST\SharedFolder"
+        )
 
     def test_find_photos_in_directory(self):
         """Verify recursive photo file discovery."""
