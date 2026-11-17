@@ -349,37 +349,10 @@ def build_monolithic_runscript_task(
     if crop_method is None:
         crop_method = "gps-square" if preset == "pro" else "gps-square"
 
-    # Resolve runner script and source package
-    repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    current_script = os.path.join(repo_root, "scripts", "metashape_reconstruction.py")
-    current_source = os.path.join(repo_root, "source")
-    shared_script = None
+    # Standard relative entry point on worker local repository
+    rel_script = "scripts/metashape_reconstruction.py"
     norm_net = os.path.normpath(network_path.strip()) if network_path and network_path.strip() else ""
-    if norm_net and os.path.isdir(norm_net):
-        shared_autometashape = os.path.join(norm_net, ".autometashape")
-        shared_scripts_dir = os.path.join(shared_autometashape, "scripts")
-        shared_source_dir = os.path.join(shared_autometashape, "source")
-        try:
-            os.makedirs(shared_scripts_dir, exist_ok=True)
-            shared_script = os.path.join(shared_scripts_dir, "metashape_reconstruction.py")
-            if os.path.exists(current_script):
-                shutil.copy2(current_script, shared_script)
-            if os.path.isdir(current_source):
-                shutil.copytree(current_source, shared_source_dir, dirs_exist_ok=True)
-        except Exception:
-            shared_script = None
-
     norm_net_lower = os.path.abspath(norm_net).lower() if norm_net else ""
-    if shared_script and os.path.exists(shared_script):
-        try:
-            rel_script = os.path.relpath(shared_script, norm_net).replace("\\", "/")
-        except Exception:
-            rel_script = shared_script.replace("\\", "/")
-    else:
-        if norm_net and os.path.abspath(current_script).lower().startswith(norm_net_lower):
-            rel_script = os.path.relpath(current_script, norm_net).replace("\\", "/")
-        else:
-            rel_script = current_script.replace("\\", "/")
 
     if norm_net and os.path.abspath(images_dir).lower().startswith(norm_net_lower):
         rel_images = os.path.relpath(images_dir, norm_net).replace("\\", "/")
@@ -472,17 +445,30 @@ def build_monolithic_runscript_task(
         worker_args.append("--export-report")
 
     cmd_args = subprocess.list2cmdline(worker_args)
+    arg_tokens = repr(worker_args)
+    bootstrap_code = f"""import os, runpy, sys
+
+user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
+repo_dir = os.environ.get("AUTOMETASHAPE_DIR") or os.path.join(user_profile, "Documents", "AutoMetashape")
+script_path = os.path.join(repo_dir, "scripts", "metashape_reconstruction.py")
+source_dir = os.path.join(repo_dir, "source")
+if not os.path.isfile(script_path):
+    raise FileNotFoundError(f"[Worker] Local AutoMetashape script not found: {{script_path}}")
+if source_dir not in sys.path:
+    sys.path.insert(0, source_dir)
+sys.argv = [script_path] + {arg_tokens}
+runpy.run_path(script_path, run_name="__main__")
+"""
+
     if Metashape is not None:
         rs = Metashape.Tasks.RunScript()
-        if shared_script and os.path.exists(shared_script):
-            rs.path = shared_script.replace("/", "\\")
-        else:
-            rs.path = rel_script
+        rs.code = bootstrap_code
         rs.args = cmd_args
         net_task = rs.toNetworkTask()
         try:
             if hasattr(net_task, "params") and isinstance(net_task.params, dict):
-                net_task.params["path"] = rel_script
+                net_task.params["code"] = bootstrap_code
+                net_task.params["args"] = cmd_args
         except Exception:
             pass
         try:
@@ -497,6 +483,7 @@ def build_monolithic_runscript_task(
         net_task = MagicMock()
         net_task.name = "RunScript"
         net_task.gpu_support = True
+        net_task.code = bootstrap_code
         net_task.args = cmd_args
 
     return net_task, rel_script, status_file

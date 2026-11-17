@@ -1231,8 +1231,8 @@ class TestNetworkCluster(unittest.TestCase):
                             saved_doc_path = mock_doc.save.call_args[0][0]
                             self.assertEqual(os.path.dirname(os.path.abspath(saved_doc_path)), os.path.abspath(out_dir))
 
-    def test_build_monolithic_runscript_task_mirrors_scripts_and_source(self) -> None:
-        """Verify build_monolithic_runscript_task mirrors both scripts/ and source/ to .autometashape."""
+    def test_build_monolithic_runscript_task_inline_bootstrap_zero_shared_disk_leak(self) -> None:
+        """Verify build_monolithic_runscript_task uses inline task.code bootstrap and leaves shared disk clean."""
         import metashape_reconstruction as mr
 
         with tempfile.TemporaryDirectory() as tmp_net:
@@ -1248,12 +1248,18 @@ class TestNetworkCluster(unittest.TestCase):
                 network_path=tmp_net,
             )
 
-            shared_script = os.path.join(tmp_net, ".autometashape", "scripts", "metashape_reconstruction.py")
-            shared_source = os.path.join(tmp_net, ".autometashape", "source")
+            shared_autometashape = os.path.join(tmp_net, ".autometashape")
 
-            self.assertTrue(os.path.isfile(shared_script))
-            self.assertTrue(os.path.isdir(shared_source))
-            self.assertEqual(rel_script, ".autometashape/scripts/metashape_reconstruction.py")
+            # Invariant: Zero script files or directories created on network share
+            self.assertFalse(os.path.exists(shared_autometashape))
+
+            # Invariant: Pure inline task.code bootstrap
+            bootstrap_code = getattr(task, "code", "")
+            if not bootstrap_code and hasattr(task, "params") and isinstance(task.params, dict):
+                bootstrap_code = task.params.get("code", "")
+            self.assertIn("metashape_reconstruction.py", bootstrap_code)
+            self.assertIn("runpy.run_path", bootstrap_code)
+            self.assertTrue(getattr(task, "gpu_support", True))
 
     def test_build_monolithic_runscript_task_case_insensitive_unc_resolution(self) -> None:
         """Verify build_monolithic_runscript_task correctly relativizes paths despite UNC case differences."""
