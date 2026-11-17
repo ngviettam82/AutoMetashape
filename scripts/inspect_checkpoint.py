@@ -87,7 +87,10 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
         depth_maps = 0
         dms = getattr(c, "depth_maps", None)
         if dms is not None:
-            depth_maps = len(dms)
+            try:
+                depth_maps = len(dms)
+            except (TypeError, AttributeError):
+                depth_maps = 1
 
         # Dense point cloud
         dense_points = 0
