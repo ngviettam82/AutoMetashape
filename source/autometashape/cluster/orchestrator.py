@@ -8,7 +8,6 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 import time
 
@@ -448,7 +447,7 @@ def build_monolithic_runscript_task(
     arg_tokens = repr(worker_args)
     bootstrap_code = f"""import os, runpy, sys
 
-user_profile = os.environ.get("USERPROFILE", r"C:\\Users\\Default")
+user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
 repo_dir = os.environ.get("AUTOMETASHAPE_DIR") or os.path.join(user_profile, "Documents", "AutoMetashape")
 script_path = os.path.join(repo_dir, "scripts", "metashape_reconstruction.py")
 source_dir = os.path.join(repo_dir, "source")

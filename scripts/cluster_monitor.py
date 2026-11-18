@@ -380,7 +380,9 @@ def execute_audit(
             reasons_str = "; ".join(f["reasons"])
             print(f"  * Batch #{bid:>2} [Project: {pname}] (State: {state}):")
             print(f"    - Failure Diagnosis: {reasons_str}")
-            print(f"    - Corrective Action: Worker physical RAM exhausted. Resubmit with '--no-guided-matching' or reduced keypoints limit.")
+            print(
+                "    - Corrective Action: Worker physical RAM exhausted. Resubmit with '--no-guided-matching' or reduced keypoints limit."
+            )
     else:
         print("  [PASS: NO BAD_ALLOC DETECTED] All tasks operating within node physical RAM boundaries.")
 
