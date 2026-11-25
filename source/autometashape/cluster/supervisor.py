@@ -247,9 +247,7 @@ class ClusterSupervisor:
                     }
                     is_net = bool(job.extra_args.get("network_enable"))
                     forward_kwargs = {
-                        k: v
-                        for k, v in job.extra_args.items()
-                        if k in sig_params and k not in reserved_keys
+                        k: v for k, v in job.extra_args.items() if k in sig_params and k not in reserved_keys
                     }
                     if not is_net:
                         # Local sequential execution does not use Metashape Network Processing;
@@ -977,7 +975,9 @@ def main() -> int:
     if Metashape is None and not getattr(args, "no_reexec", False):
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            entry_script = os.path.abspath(sys.argv[0]) if sys.argv and os.path.isfile(sys.argv[0]) else os.path.abspath(__file__)
+            entry_script = (
+                os.path.abspath(sys.argv[0]) if sys.argv and os.path.isfile(sys.argv[0]) else os.path.abspath(__file__)
+            )
             cmd = [ms_exe, "-r", entry_script] + sys.argv[1:] + ["--no-reexec"]
             res = subprocess.run(cmd)
             return res.returncode

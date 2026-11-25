@@ -23,8 +23,8 @@ Evaluation scenarios verifying photogrammetry asset export deliverables.
 
 ## Scenario 4: Dense Point Cloud & DEM GeoTIFF Export
 - **Query**: "Export the dense point cloud as compressed LAZ and export the digital elevation model as GeoTIFF from my existing Metashape project."
-- **Expected Behavior**: Reads existing `building_reconstruction.psx` without re-running alignment, and exports `point_cloud.laz` and `dem.tif`.
-- **Pass Criteria**: `point_cloud.laz` and `dem.tif` created, non-empty, and valid GIS formats.
+- **Expected Behavior**: Reads existing `<project_name>.psx` without re-running alignment, and exports `<project_name>.laz` and `<project_name>_dem.tif`.
+- **Pass Criteria**: `.laz` and `_dem.tif` created, non-empty, and valid GIS formats.
 - **Fail Criteria**: Re-running full MVS pipeline unnecessarily or export throwing unhandled exception.
 
 ## Scenario 5: Executive Calibration PDF Report Export

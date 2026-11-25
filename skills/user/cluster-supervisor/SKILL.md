@@ -132,12 +132,19 @@ Machine-readable JSON output can be requested using `--json`:
 
 The supervisor supports two distinct cluster operational architectures:
 
-#### Mode 1: Centralized Task Mode (`--sequential` / `--no-concurrent`)
-- **Behavior**: Datasets in the queue are processed one project at a time. For each project, the supervisor breaks the reconstruction down into granular network tasks (MatchPhotos, BuildDepthMaps) where **all available cluster workers collaborate concurrently on the same project**.
-- **Best For**: Single massive surveys (e.g., 5,000+ images) requiring the aggregate compute and VRAM of the entire GPU fleet.
+#### Mode 1: Centralized Task Mode / Local Sequential (`--sequential` / `--no-concurrent`)
+- **Behavior**: Datasets in the queue are processed one project at a time. When `--network-enable` is passed, the supervisor distributes granular tasks (MatchPhotos, BuildDepthMaps) across all online cluster workers on one project. When `--network-enable` is omitted, projects run sequentially on the local workstation GPU (supporting both `--scan-dir` and local Dual-SSD `--source-share` / `--result-share` topologies with automatic `metashape.exe -r` re-exec and default `obj`/`ortho` deliverable exports).
+- **Best For**: Single massive surveys (e.g., 5,000+ images) requiring the aggregate compute and VRAM of the entire GPU fleet, or single-workstation Dual-SSD processing.
 - **Invocation**:
   ```powershell
+  # Distributed centralized cluster mode:
   python scripts/cluster_supervisor.py --manifest queue.json --network-enable --network-host 10.5.10.202 --sequential
+
+  # Local workstation Dual-SSD sequential mode (no cluster server required):
+  python scripts/cluster_supervisor.py `
+      --source-share "\\CLUSTER_SHARE\DataSSD\101126" `
+      --result-share "\\CLUSTER_SHARE\ResultSSD\101126" `
+      --preset pro --ortho-resolution 0.05 --sequential
   ```
 
 #### Mode 2: Independent Project Mode (`--concurrent` / `--parallel-dispatch`)
@@ -189,7 +196,7 @@ To process a sequence of survey datasets without human intervention:
 
 3. **Supervision Lifecycle**:
    - **Pre-flight Headroom Watchdog**: Inspects free storage capacity across the writable Result Share (SSD #2) before queue dispatch (Data Source Share SSD #1 is validated strictly read-only).
-   - **Dispatch**: Auto-unpauses paused online workers, materializes `.psx` stubs with `doc.clear()`, and submits via idempotent `safe_create_cluster_batch()` (rejecting zombie `error_count > 0` batches) with `worker_limit=1` in Mode 2.
+   - **Dispatch**: Respects operator-paused workers passively (never calls `setWorkerPaused` unilaterally), materializes `.psx` stubs with `doc.clear()`, and submits via idempotent `safe_create_cluster_batch()` (rejecting zombie `error_count > 0` batches) with `worker_limit=1` in Mode 2.
    - **Telemetry & Infinite-Retry Defense**: Non-blocking polling loop checks `batchInfo()` and worker sidecar `_autometashape_status.json` every 2.0s. If Metashape Server 2.2.2 leaves an errored batch in `state="inprogress"` with `error_count > 0`, the supervisor immediately invokes `abortBatch()` to stop infinite worker retries.
    - **Quality Gate**: Upon batch completion, runs structural verification on default expected assets (`["obj", "ortho"]`, plus `dem`/`point_cloud`/`report` when enabled).
    - **Scratch Purge**: Clears temporary local NVMe staging caches upon verified deliverable pass.
@@ -246,7 +253,7 @@ When submitting a standalone or queued batch to the cluster, agents and operator
 **Core Invariant**: The supervisor and AI agent operate strictly as **Read-Only Telemetry Reporters**. All operational decisions (aborts, cancellations, priority changes, re-queuing, setting changes) **lie exclusively with the human operator**. AI agents are strictly prohibited from auto-deciding or mutating cluster state without real-time operator authorization.
 
 1. **Strict Read-Only Telemetry Standard**:
-   Execute non-intrusive fleet audits inspecting worker health (scaled CPU % and RAM GB, with **no artificial 55 GB RAM guard**), batch stage progress, passive post-mortem memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$ across Result & Data Source SSD shares):
+   Execute non-intrusive fleet audits inspecting worker health (scaled CPU % and RAM GB, with **no artificial 55 GB RAM guard**), batch stage progress, passive post-mortem memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$ across Result & Data Source SSD shares). `cluster_monitor.py` strictly isolates read-only `--source-share` from deliverable/sidecar lookups and skips internal `.cluster/` maintenance batches:
    ```powershell
    python scripts/cluster_monitor.py --result-share "\\CLUSTER_SHARE\ResultSSD" --source-share "\\CLUSTER_SHARE\DataSSD"
    ```

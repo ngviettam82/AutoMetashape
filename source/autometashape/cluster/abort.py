@@ -56,6 +56,7 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     poll_fn = getattr(proc, "poll", None)
 
     # 1. Attempt graceful termination
+    exited_gracefully = False
     terminate_fn = getattr(proc, "terminate", None)
     if callable(terminate_fn):
         try:
@@ -63,6 +64,7 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             wait_deadline = time.time() + timeout
             while time.time() < wait_deadline:
                 if callable(poll_fn) and poll_fn() is not None:
+                    exited_gracefully = True
                     break
                 time.sleep(0.05)
         except Exception:
@@ -80,7 +82,7 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             pass
         cleanup_stale_worker_processes(proc_pid)
     else:
-        if callable(poll_fn) and poll_fn() is None:
+        if not exited_gracefully and callable(poll_fn) and poll_fn() is None:
             kill_fn = getattr(proc, "kill", None)
             if callable(kill_fn):
                 try:

@@ -44,9 +44,11 @@ Every source file must begin with the project's canonical SPDX license header:
 - Ban raw `print()` for production logging; use structured loggers or explicit progress reporting.
 
 ### 3. Automated Formatting
-Always execute repository formatters before submitting changes:
+Always execute repository formatters and lint checks before submitting changes:
 ```powershell
 .\format_code.bat
+ruff format --check .
+ruff check .
 ```
 
 ---

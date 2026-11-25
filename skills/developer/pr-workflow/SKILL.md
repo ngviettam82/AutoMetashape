@@ -35,11 +35,12 @@ git checkout -b feature/<descriptive-name>
 ```
 
 ### 2. Presubmit Validation Gate
-Execute project validation tools before staging changes:
+Execute project validation tools before staging changes (mirroring all 4 GitHub Actions workflows):
 ```powershell
-python tools/skills/cli.py check
-python tools/check_licenses.py
 .\format_code.bat
+.\build.bat
+ruff format --check .
+ruff check .
 ```
 
 ### 3. Atomic Conventional Commits

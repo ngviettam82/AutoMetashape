@@ -19,7 +19,7 @@ Use this skill as the **primary entry point** when:
 - Starting, planning, or executing any photogrammetry request end-to-end from a folder of survey photos.
 - Pointing the agent to a directory containing one or multiple survey project folders (e.g. `D:\Surveys` or `\\CLUSTER_SHARE\Captures`) without manually writing JSON queue manifests.
 - Running lights-out, unattended overnight batch reconstructions across multiple projects.
-- The user provides requirements (folder path, target outputs, mode: cluster vs. standalone, preset: `pro` vs. `building`) and expects complete autonomous execution.
+- The user provides requirements (folder path, target outputs, mode: cluster vs. standalone, preset: `pro` default, `building` legacy alias, or `custom`) and expects complete autonomous execution.
 
 Do not use this skill when:
 - Deploying or updating worker nodes without processing datasets (use `skills/user/cluster-fleet-operations/`).
@@ -63,7 +63,7 @@ flowchart TD
 You provide the master coordinator with an input root directory. The coordinator automatically inspects the folder topology:
 
 ```powershell
-# Auto-discover all datasets in a folder and preview queue without executing
+# Auto-discover all datasets in a folder and execute the supervised queue (use --help to inspect options)
 python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\Surveys" --output-root "\\CLUSTER_SHARE\Deliverables" --min-headroom-gb 50.0
 ```
 
@@ -92,14 +92,24 @@ Resolve the operational mode based on user constraints:
      ```
 
 2. **Standalone Workstation Mode** (Recommended for single-machine local NVMe execution):
-   - Executes reconstruction directly on the local GPU with automatic NVMe scratch staging.
-   - Command pattern:
+   - Executes reconstruction directly on the local GPU with automatic NVMe scratch staging (`scripts/cluster_supervisor.py` auto-delegates via `metashape.exe -r` when run under plain Python and enables `obj`/`ortho` deliverable exports by default).
+   - Supports both single-folder (`--scan-dir`) and Dual Shared Folder (`--source-share` / `--result-share --sequential`) topologies:
      ```powershell
+     # Single-folder local execution:
      python scripts/cluster_supervisor.py `
        --scan-dir "D:\Captures" `
        --output-root "D:\Deliverables" `
        --preset pro `
        --min-headroom-gb 30.0
+
+     # Dual Shared Folder local sequential execution (read-only SSD #1 -> writable SSD #2):
+     python scripts/cluster_supervisor.py `
+       --source-share "\\CLUSTER_SHARE\DataSSD_Surveys" `
+       --result-share "\\CLUSTER_SHARE\ResultSSD_Deliverables" `
+       --preset pro `
+       --ortho-resolution 0.05 `
+       --sequential `
+       --min-headroom-gb 50.0
      ```
 
 ### Phase 2: Storage Headroom Watchdog (Win32 Error 112 Defense)
@@ -113,7 +123,7 @@ Each project executes using the standardized **Production Geomatics (`pro`)** pr
 - USGS 4-Pass gradual selection tie-point filtering and camera parameter re-optimization.
 - GPU MVS dense depth map stereopsis with moderate outlier filtering (dense point cloud disabled by default in `pro`; opt-in via `--build-point-cloud`).
 - 2,000,000 polygon arbitrary 3D surface mesh.
-- 1:1 texel-budgeted 8K ($8192\times 8192$) texture atlas baking with ghosting removal.
+- Deterministic 16-page 8K ($16 \times 8192\times 8192$) texture atlas baking with mosaic blending and ghosting removal (reusing existing Metashape 2.2.2 `BuildUV/page_count` atlases on `--resume`).
 - True Orthomosaic built and exported at **5 cm/px (`0.05 m/px`)** by default (customizable via `--ortho-resolution`), plus optional DEM (`--build-dem`).
 
 ### Phase 4: Automated Deliverable Integrity Gate
@@ -167,7 +177,7 @@ python scripts/cluster_supervisor.py --help
 
 ## Maintenance
 
-- **Subfolder Heuristics**: Update `SUPPORTED_IMAGE_EXTS` in `source/autometashape/cluster/supervisor.py` when adding new sensor formats (e.g., thermal raw).
+- **Subfolder Heuristics**: Update `SUPPORTED_IMAGE_EXTS` in `source/autometashape/core/telemetry.py` when adding new sensor formats (e.g., thermal raw).
 - **Sub-Skill Synchronization**: When modifying parameters in `image-to-3d-model` or `cluster-fleet-operations`, ensure passthrough arguments in `discover_dataset_projects` remain synchronized.
 
 ---

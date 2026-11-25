@@ -17,6 +17,7 @@ In Metashape Network Processing:
 
 from __future__ import annotations
 
+import ntpath
 import os
 import shutil
 import sys
@@ -26,12 +27,30 @@ from typing import Any, Dict, List, Optional
 from autometashape.cluster.hardware import extract_unc_root
 
 
-def is_subpath(child: str, parent: str) -> bool:
+def _is_windows_drive_path(path: str) -> bool:
+    """Return True if ``path`` starts with a Windows drive designator (e.g. ``C:\\`` or ``D:/``)."""
+    cleaned = (path or "").strip()
+    return len(cleaned) >= 2 and cleaned[0].isalpha() and cleaned[1] == ":"
+
+
+def _split_drive_and_segments(path: str, win_style: bool) -> tuple[str, List[str]]:
+    """Split a normalized path into its drive/UNC share root and non-empty path segments."""
+    if win_style:
+        win_path = path.replace("/", "\\")
+        drv, tail = ntpath.splitdrive(win_path)
+        segs = [s for s in tail.split("\\") if s]
+        return drv, segs
+    drv, tail = os.path.splitdrive(path)
+    segs = [s for s in tail.replace("\\", "/").split("/") if s]
+    return drv, segs
+
+
+def is_subpath(child: str, parent: str, case_insensitive: Optional[bool] = None) -> bool:
     """Return True if ``child`` is equal to or nested beneath ``parent``.
 
-    Compares normalized drive/UNC share roots and exact path segments with Windows
+    Compares normalized drive/UNC share roots and exact path segments with Windows/SMB
     case-folding, eliminating both prefix-collision bugs (``\\\\SRV\\Data2`` vs
-    ``\\\\SRV\\Data``) and Windows ``ntpath.commonpath`` UNC root trailing-slash errors.
+    ``\\\\SRV\\Data``) and cross-platform ``posixpath``/``ntpath`` discrepancies.
     """
     if not child or not parent:
         return False
@@ -40,18 +59,44 @@ def is_subpath(child: str, parent: str) -> bool:
         abs_parent = normalize_share_path(parent)
         if not abs_child or not abs_parent:
             return False
-        if sys.platform == "win32":
-            abs_child = abs_child.lower()
-            abs_parent = abs_parent.lower()
-        drv_c, tail_c = os.path.splitdrive(abs_child)
-        drv_p, tail_p = os.path.splitdrive(abs_parent)
+        win_style = (
+            is_unc_path(abs_child)
+            or is_unc_path(abs_parent)
+            or _is_windows_drive_path(abs_child)
+            or _is_windows_drive_path(abs_parent)
+        )
+        fold_case = (sys.platform == "win32" or win_style) if case_insensitive is None else case_insensitive
+        cmp_child = abs_child.lower() if fold_case else abs_child
+        cmp_parent = abs_parent.lower() if fold_case else abs_parent
+        drv_c, segs_c = _split_drive_and_segments(cmp_child, win_style=win_style)
+        drv_p, segs_p = _split_drive_and_segments(cmp_parent, win_style=win_style)
         if drv_c != drv_p:
             return False
-        segs_c = [s for s in tail_c.replace("\\", "/").split("/") if s]
-        segs_p = [s for s in tail_p.replace("\\", "/").split("/") if s]
         return len(segs_c) >= len(segs_p) and segs_c[: len(segs_p)] == segs_p
     except ValueError:
         return False
+
+
+def relpath_under(child: str, parent: str, case_insensitive: Optional[bool] = None) -> Optional[str]:
+    """Return POSIX-slash relative path from ``parent`` to ``child`` if nested, else ``None``.
+
+    Preserves original segment casing from ``child`` even when matching case-insensitively
+    across Windows SMB shares or mixed-case paths on POSIX runners.
+    """
+    if not is_subpath(child, parent, case_insensitive=case_insensitive):
+        return None
+    abs_child = normalize_share_path(child)
+    abs_parent = normalize_share_path(parent)
+    win_style = (
+        is_unc_path(abs_child)
+        or is_unc_path(abs_parent)
+        or _is_windows_drive_path(abs_child)
+        or _is_windows_drive_path(abs_parent)
+    )
+    _, orig_segs_c = _split_drive_and_segments(abs_child, win_style=win_style)
+    _, orig_segs_p = _split_drive_and_segments(abs_parent, win_style=win_style)
+    rel_segs = orig_segs_c[len(orig_segs_p) :]
+    return "/".join(rel_segs) if rel_segs else "."
 
 
 def is_unc_path(path: str) -> bool:
@@ -68,6 +113,8 @@ def normalize_share_path(path: str) -> str:
     if is_unc_path(raw):
         body = raw.lstrip("\\/").replace("/", "\\").rstrip("\\")
         return f"\\\\{body}" if body else ""
+    if _is_windows_drive_path(raw):
+        return ntpath.normpath(raw.replace("/", "\\"))
     return os.path.normpath(os.path.abspath(raw))
 
 
@@ -103,10 +150,12 @@ def map_source_to_result_dir(
     norm_src_root = normalize_share_path(source_share)
     norm_res_root = normalize_share_path(result_share)
 
-    if norm_src_root and is_subpath(norm_src_proj, norm_src_root):
-        rel = os.path.relpath(norm_src_proj, norm_src_root)
-        if rel not in (".", ""):
-            return os.path.normpath(os.path.join(norm_res_root, rel))
+    if norm_src_root:
+        rel = relpath_under(norm_src_proj, norm_src_root)
+        if rel not in (None, ".", ""):
+            if is_unc_path(norm_res_root) or _is_windows_drive_path(norm_res_root):
+                return ntpath.normpath(ntpath.join(norm_res_root, rel.replace("/", "\\")))
+            return os.path.normpath(os.path.join(norm_res_root, *rel.split("/")))
 
     inferred_name = project_name or os.path.basename(norm_src_proj.rstrip("\\/"))
     if inferred_name and os.path.basename(norm_res_root.rstrip("\\/")).lower() == inferred_name.lower():
@@ -199,11 +248,14 @@ def validate_dual_share_topology(
         )
 
     if norm_source and norm_result:
-        same_dir = (
-            norm_source.lower() == norm_result.lower()
-            if sys.platform == "win32"
-            else norm_source == norm_result
+        fold_same = (
+            sys.platform == "win32"
+            or is_unc_path(norm_source)
+            or is_unc_path(norm_result)
+            or _is_windows_drive_path(norm_source)
+            or _is_windows_drive_path(norm_result)
         )
+        same_dir = norm_source.lower() == norm_result.lower() if fold_same else norm_source == norm_result
         if same_dir:
             warnings.append(
                 f"Data source folder and Result folder point to the same directory ('{norm_source}'). "

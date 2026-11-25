@@ -40,11 +40,14 @@ Before adding any test, answer and verify:
 - No loose exception catches without verifying error messages or types.
 - No sleep-based synchronization; use deterministic polling or reactive events.
 - No hardcoded absolute file system paths.
+- Enforce cross-platform POSIX/Windows parity: tests run on both `ubuntu-latest` and `windows-latest` in CI (`.github/workflows/test.yml`); never assume `os.path` uses `ntpath` or `sys.platform == "win32"` when testing UNC/Windows paths or `subprocess` lifecycles.
 
 ### 3. Execution
-Run test verification suites using project launchers:
+Run test verification suites using the canonical unittest runner (matching CI and `build.bat`):
 ```powershell
-python -m pytest tests/
+.\build.bat
+# Or directly:
+python -m unittest discover -s tests
 ```
 
 ---

@@ -769,7 +769,7 @@ class TestAuditRegressions(unittest.TestCase):
                 fake_doc.chunk = fake_chunk
                 fake_doc.chunks = [fake_chunk]
                 fake_ms = SimpleNamespace(
-                    Document=lambda: fake_doc,
+                    Document=lambda d=fake_doc: d,
                     app=SimpleNamespace(enumGPUDevices=lambda: []),
                     ReferencePreselectionMode=SimpleNamespace(
                         ReferencePreselectionEstimated=1,
@@ -999,6 +999,44 @@ class TestAuditRegressions(unittest.TestCase):
             with patch.object(sup_mod, "Metashape", fake_ms):
                 conc_sup.run_concurrent_queue()
             fake_client.setWorkerPaused.assert_not_called()
+
+    def test_cross_platform_posix_abort_and_dual_share_paths(self) -> None:
+        """Verify kill_worker_process and dual_share/orchestrator path helpers succeed on Linux/POSIX."""
+        from autometashape.cluster.dual_share import is_subpath, relpath_under
+
+        # 1. Non-Windows kill_worker_process must NOT re-poll after graceful exit (prevents StopIteration)
+        mock_proc = MagicMock()
+        mock_proc.poll.side_effect = [None, None, 0]
+        mock_proc.pid = 4242
+        with patch.object(sys, "platform", "linux"):
+            self.assertTrue(abort_mod.kill_worker_process(mock_proc, timeout=0.2))
+        mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_not_called()
+
+        # 2. UNC & Windows drive paths stay case-insensitive and collision-safe even when sys.platform == "linux"
+        with patch.object(sys, "platform", "linux"):
+            self.assertTrue(is_subpath(r"\\srv\data\site_a\sub", r"\\SRV\Data"))
+            self.assertFalse(is_subpath(r"\\SRV\Data2\Site_A", r"\\SRV\Data"))
+            self.assertFalse(is_subpath(r"D:\Result\Site_A", r"C:\Source"))
+            self.assertEqual(
+                relpath_under(r"\\srv\data\Site_A\Sub", r"\\SRV\Data"),
+                "Site_A/Sub",
+            )
+            # Case-insensitive cluster root relativization preserves child casing without "../" traversal
+            with tempfile.TemporaryDirectory() as tmp_net:
+                img_dir = os.path.join(tmp_net, "101126", "CATP_0205")
+                out_dir = os.path.join(tmp_net, "101126", "Result", "CATP_0205")
+                os.makedirs(img_dir, exist_ok=True)
+                os.makedirs(out_dir, exist_ok=True)
+                task, _, _ = orch_mod.build_monolithic_runscript_task(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    project_name="CATP_0205",
+                    network_path=tmp_net.lower(),
+                )
+                args_str = getattr(task, "args", "").replace("\\", "/")
+                self.assertIn("--images 101126/CATP_0205", args_str)
+                self.assertIn("--output 101126/Result/CATP_0205", args_str)
 
 
 if __name__ == "__main__":

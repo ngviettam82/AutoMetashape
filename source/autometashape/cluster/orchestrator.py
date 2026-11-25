@@ -17,7 +17,7 @@ except ImportError:
     Metashape = None
 
 
-from autometashape.cluster.dual_share import is_subpath
+from autometashape.cluster.dual_share import normalize_share_path, relpath_under
 
 # Alignment & depth quality maps for cluster tasks
 ALIGN_DOWNSCALE_MAP = {
@@ -378,22 +378,17 @@ def build_monolithic_runscript_task(
 
     # Standard relative entry point on worker local repository
     rel_script = "scripts/metashape_reconstruction.py"
-    norm_net = os.path.normpath(network_path.strip()) if network_path and network_path.strip() else ""
+    norm_net = normalize_share_path(network_path) if network_path and network_path.strip() else ""
 
-    if norm_net and is_subpath(images_dir, norm_net):
-        rel_images = os.path.relpath(images_dir, norm_net).replace("\\", "/")
-    else:
-        rel_images = images_dir.replace("\\", "/")
-
-    if norm_net and is_subpath(output_dir, norm_net):
-        rel_output = os.path.relpath(output_dir, norm_net).replace("\\", "/")
-    else:
-        rel_output = output_dir.replace("\\", "/")
-
-    if norm_net and is_subpath(status_file, norm_net):
-        rel_status = os.path.relpath(status_file, norm_net).replace("\\", "/")
-    else:
-        rel_status = status_file.replace("\\", "/")
+    rel_images = (
+        relpath_under(images_dir, norm_net, case_insensitive=True) if norm_net else None
+    ) or images_dir.replace("\\", "/")
+    rel_output = (
+        relpath_under(output_dir, norm_net, case_insensitive=True) if norm_net else None
+    ) or output_dir.replace("\\", "/")
+    rel_status = (
+        relpath_under(status_file, norm_net, case_insensitive=True) if norm_net else None
+    ) or status_file.replace("\\", "/")
 
     worker_args = [
         "--images",

@@ -35,6 +35,9 @@ fi
 if [ -n "$RUFF_CMD" ]; then
     $RUFF_CMD format .
     $RUFF_CMD check .
+else
+    echo "[WARN] ruff not found in PATH or Python environment; skipping ruff format/check."
+    echo "[WARN] Install ruff ('pip install ruff') to mirror GitHub Actions Lint & Format checks locally."
 fi
 
 echo "[FORMAT] Validating agent skills..."

@@ -16,7 +16,7 @@ Lightweight export and packaging workflow converting existing or GUI-modified Ag
 ## When To Use
 
 Use this skill when:
-- Re-exporting deliverables after opening `building_reconstruction.psx` in Metashape GUI to manually sculpt, clean stray geometry, crop, or tweak UV textures.
+- Re-exporting deliverables after opening `<project_name>.psx` in Metashape GUI to manually sculpt, clean stray geometry, crop, or tweak UV textures.
 - Executing decoupled pipelined asset exports on the Host CPU while GPU cluster workers crunch the next project in the batch queue.
 - Converting an existing Metashape project directly into standalone binary glTF (`.glb`), Wavefront OBJ (`.obj`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), or AutoCAD DXF (`.dxf`).
 - Packaging hierarchical 3D Tiled Models (Cesium 3D Tiles `tileset.json` + `b3dm`, Agisoft `.tls`, Esri `.slpk`, `.osgb`) for streaming web GIS and Unreal Engine.
@@ -36,7 +36,7 @@ Do not use this skill when:
 
 ```mermaid
 flowchart LR
-    A["Existing Metashape Project<br/>(building_reconstruction.psx)"] --> B["scripts/metashape_export.py"]
+    A["Existing Metashape Project<br/>(<project_name>.psx)"] --> B["scripts/metashape_export.py"]
     B --> C["3D Models<br/>(GLB, OBJ, FBX, PLY, DXF)"]
     B --> D["Dense Cloud & Tie Points<br/>(LAZ, LAS, PLY, E57)"]
     B --> E["Hierarchical 3D Tiles<br/>(Cesium tileset.json, TLS, SLPK)"]
@@ -54,35 +54,35 @@ flowchart LR
 ### 1. Basic Export Command
 Run export operations directly against the existing project file. You can execute using standard Python (which automatically detects Metashape Pro across all installed drives and re-launches with `-r`) or via the Metashape binary:
 ```powershell
-python scripts/metashape_export.py --project "<path_to_project>/building_reconstruction.psx"
+python scripts/metashape_export.py --project "<path_to_project>/<project_name>.psx"
 ```
 Or directly via Metashape Pro:
 ```powershell
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
-    --project "<path_to_project>/building_reconstruction.psx"
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py `
+    --project "<path_to_project>/<project_name>.psx"
 ```
 
 ### 2. Exporting Point Clouds, Elevation Models, Contours, Orthomosaics & 3D Tiles
 Export dense point clouds, DEM, vector contours, metric 5 cm/px orthomosaics (`--ortho-resolution 0.05` default), Cesium 3D Tiles, and executive calibration reports from an existing project (non-mesh exports work even when `chunk.model` is absent if `--no-export-glb --no-export-obj` are passed):
 ```powershell
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
-    --project "<path_to_project>/building_reconstruction.psx" \
-    --export-point-cloud --point-cloud-format laz \
-    --export-dem \
-    --export-contours --contour-interval 1.0 --contours-format shp \
-    --export-tiled-model --tiled-model-format cesium \
-    --export-fbx --export-ply \
-    --export-orthomosaic --ortho-resolution 0.05 \
-    --export-report \
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py `
+    --project "<path_to_project>/<project_name>.psx" `
+    --export-point-cloud --point-cloud-format laz `
+    --export-dem `
+    --export-contours --contour-interval 1.0 --contours-format shp `
+    --export-tiled-model --tiled-model-format cesium `
+    --export-fbx --export-ply `
+    --export-orthomosaic --ortho-resolution 0.05 `
+    --export-report `
     --report-title "Production Site Verification Audit"
 ```
 
 ### 3. Optional Fast Texture Re-Baking & Delighting
 To re-bake UV mapping, a 16-page 8K texture atlas, and apply delighting (shadow removal) directly from the solved mesh without re-running camera alignment or depth maps:
 ```powershell
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
-    --project "<path_to_project>/building_reconstruction.psx" \
-    --rebake-texture --texture-pages 16 \
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py `
+    --project "<path_to_project>/<project_name>.psx" `
+    --rebake-texture --texture-pages 16 `
     --remove-lighting
 ```
 
@@ -92,18 +92,18 @@ In the AutoMetashape distributed pipeline, `scripts/metashape_export.py` functio
 - Operates concurrently with bounded concurrency limits (1 to 8, default 5), isolating project folders and releasing `.psx` document locks via `doc.clear()`.
 - Command recipe:
 ```powershell
-& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
-    --project "D:/Exports/Project_A/Project_A.psx" \
-    --output "D:/Exports/Project_A" \
-    --export-glb --export-obj --texture-format tiff \
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py `
+    --project "D:/Exports/Project_A/Project_A.psx" `
+    --output "D:/Exports/Project_A" `
+    --export-glb --export-obj --texture-format tiff `
     --export-dem --export-orthomosaic --ortho-resolution 0.05
 ```
 
 ### 5. Format Specifications
-- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` / `.tif`, with `{project_name}.obj` auto-recovery), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
+- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` default or `.tif` / `.jpg` via `--texture-format`, with `{project_name}.obj` auto-recovery), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
 - **Dense Point Cloud (`.laz`, `.las`, `.ply`, `.e57`)**: `chunk.exportPointCloud()`, preserving coordinates, colors, normals, confidence, and classifications.
 - **Hierarchical 3D Tiled Model**: Cesium 3D Tiles (`tiled_model/tileset.json` + `.b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), OpenSceneGraph (`.osgb`).
-- **Topographic Contours (`.shp`, `.dxf`, `.geojson`, `.kml`)**: Vector contour polylines with metric elevation attributes.
+- **Topographic Contours (`.shp`, `.dxf`, `.geojson`, `.kml`)**: Vector contour polylines with metric elevation attributes (on-demand DEM generation automatically applies projected metric UTM CRS for geographic chunks).
 - **Elevation Model (`dem.tif`)**: BigTIFF LZW GeoTIFF with ESRI `.tfw` world file.
 - **Orthomosaic (`orthomosaic.tif`)**: BigTIFF LZW GeoTIFF with alpha channel, automatic metric UTM projection (via WKT `PROJCS` detection), default **5 cm/px (`--ortho-resolution 0.05`)**, and `.tfw` / `.prj` files.
 - **Quality Report (`report.pdf`)**: Camera calibration, reprojection errors, and survey statistics.

@@ -6,23 +6,22 @@
   - Automatically loads all photos across subfolders into unified global bundle adjustment (default `--multi-chunk disable` ensures zero chunk-merging false alignment artifacts).
 
   - Automatically calculates `gps-square` horizontal bounding box while preserving full vertical elevation range.
-  - Builds CUDA MVS depth maps and fuses into 600,000 polygon faces with Level-30 planar hole closing.
-  - Bakes a 16-page 8K ($16 \times 8192 \times 8192$) lossless TIFF texture atlas with mosaic blending, hole filling, and ghosting suppression.
-  - Generates `model.obj`, `model.mtl`, `model.tif`, `model.glb`, and native editable `building_reconstruction.psx`.
+  - Builds CUDA MVS depth maps and fuses into a 2,000,000 (2M) polygon face arbitrary 3D mesh (customizable via `--faces`).
+  - Bakes a 16-page 8K ($16 \times 8192 \times 8192$) texture atlas (`--texture-format tiff` or default `png`) with mosaic blending, hole filling, and ghosting suppression.
+  - Generates `<project_name>.obj`, `<project_name>.mtl`, 8K texture pages, `<project_name>.glb` (when `--export-glb` is passed), and native editable `<project_name>.psx`.
 - **Pass/fail criteria**:
-  - Pass: >90% of views registered; 600K face mesh generated; 16-page 8K texture atlas baked; `.glb` and `.psx` created in `model/`.
+  - Pass: >90% of views registered; 2M face mesh generated; 16-page 8K texture atlas baked; `.obj` and `.psx` created in target output directory.
   - Fail: Duplicate ghost walls from barometric drift; failing to align multiple subfolders; untextured or non-manifold mesh.
 
 ### Scenario 2: Aerial Site Survey & Terrain Mapping (Pro Preset)
 - **Query**: "Process this aerial drone map dataset at `data/survey/site_ortho` using the pro preset to give me a high-density terrain mesh and orthomosaic."
 - **Expected behavior**:
-  - Uses `--preset pro` and applies the Production Geomatics standard: 2,000,000 (2M) face arbitrary 3D mesh, 22-page 8K texture atlas, gentle tie-point filtering, and native GeoTIFF orthomosaic & elevation DEM generation.
-  - Computes dense depth maps across the complete surveyed footprint without clipping perimeter vegetation or access roads.
-  - Meshes arbitrary surface to 2M faces for fine topographic relief.
-  - Generates 2D GeoTIFF orthomosaic directly inside the Metashape project and exports `orthomosaic.tif` alongside `orthomosaic.tfw` world file with LZW BigTIFF compression.
+  - Uses `--preset pro` and applies the Production Geomatics standard: 2,000,000 (2M) face arbitrary 3D mesh, deterministic 16-page 8K texture atlas, gentle tie-point filtering, and native metric 5 cm/px GeoTIFF orthomosaic generation (with `--build-dem` opt-in).
+  - Computes dense depth maps and meshes arbitrary surface to 2M faces for fine topographic relief.
+  - Generates 2D GeoTIFF orthomosaic directly inside the Metashape project and exports `<project_name>_orthomosaic.tif` alongside `.tfw` and `.prj` files with LZW BigTIFF compression at `0.05 m/px` in projected UTM CRS.
 - **Pass/fail criteria**:
-  - Pass: Complete boundary uncropped; 2M face mesh; `orthomosaic.tif` and `orthomosaic.tfw` generated; saved inside `.psx`.
-  - Fail: Scene cropped by building bounding box; orthomosaic missing or failing with uncaught coordinate projection error.
+  - Pass: 2M face mesh; `<project_name>_orthomosaic.tif`, `.tfw`, and `.prj` generated at 5 cm/px; saved inside `<project_name>.psx`.
+  - Fail: Orthomosaic missing, exported in unprojected degrees, or failing with uncaught coordinate projection error.
 
 ### Scenario 3: Ground Handheld Walkthrough Photogrammetry & Checkpoint Resume
 - **Query**: "I took 150 photos walking around a monument without any GPS. Reconstruct it using optical ray convergence, and if interrupted, resume without restarting."
@@ -41,7 +40,7 @@
 - **Expected behavior**:
   - Enumerate all immediate subfolders inside `D:/Surveys/Batch_March` and present a structured list of detected projects with photo counts to the user.
   - Sequentially process Project 1 with `scripts/metashape_reconstruction.py --images "D:/Surveys/Batch_March/<Project_1>"`. All subfolder images within `Project_1` are solved in a single global bundle adjustment by default (`--multi-chunk disable`), avoiding chunk merging errors.
-  - Verify Project 1 deliverables: confirm `model.obj`, `model.mtl`, 16-page 8K `model.tif`, `model.glb`, and `building_reconstruction.psx` exist and are non-empty; verify registration $\ge 90\%$.
+  - Verify Project 1 deliverables: confirm `<project_name>.obj`, `<project_name>.mtl`, 16-page 8K textures, `<project_name>_orthomosaic.tif`, and `<project_name>.psx` exist and are non-empty; verify registration $\ge 90\%$.
   - Only after Project 1 verification passes, advance to Project 2 and repeat.
   - After all projects finish, output a comprehensive summary table with deliverable paths and quality metrics.
 - **Pass/fail criteria**:
@@ -53,13 +52,12 @@
 - **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; act as a senior photogrammetrist, audit the survey optics, calculate the true GSD, run USGS gradual selection bundle adjustment, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
 - **Expected behavior**:
   - Uses `--preset pro` (or `--profile`), inspecting image telemetry, sensor hardware pitch, optical GSD in cm/px, flying height $H_{AGL}$, forward/lateral overlap, and shutter mechanism.
-  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411 or Phantom 4 Pro to prevent synthetic vertical elevation drift).
-  - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 12`, `PA <= 2.5`, `RE <= 0.35`, `ImageCount >= 3`) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting and tie point covariance).
-  - Computes exact 1:1 ground texel density budget from the reconstructed 3D surface area and GSD.
-  - Enables `buildPointCloud` (`.laz`), slope-adaptive ground classification, `buildDem` (`dem.tif`), `buildOrthomosaic` (`orthomosaic.tif`), and exports an executive PDF quality report (`report.pdf`).
+  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411, Phantom 4 Pro, or Zenmuse L2; preserves rolling shutter on Hasselblad Mavic 3 L2D-20c).
+  - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `ImageCount >= 2`, capped at `<= 10%` per pass) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting and tie point covariance).
+  - Opts into `buildPointCloud` (`--build-point-cloud --export-point-cloud`), slope-adaptive ground classification (`--classify-ground`), `buildDem` (`--build-dem --export-dem`), `buildOrthomosaic` (`--export-ortho`), and exports an executive PDF quality report (`--export-report`).
   - Outputs the executive Geomatics Engineering Summary with initial vs optimized RMS reprojection errors.
 - **Pass/fail criteria**:
-  - Pass: Profiling audits optics and GSD correctly; executes USGS 4-pass optimization achieving RMS $< 0.35\text{ px}$; deliverables include `point_cloud.laz`, `dem.tif`, `orthomosaic.tif`, `report.pdf`, `model.glb`, `model.obj`, and `building_reconstruction.psx`.
+  - Pass: Profiling audits optics and GSD correctly; executes USGS 4-pass optimization reducing RMS reprojection error; deliverables include `<project_name>.laz`, `<project_name>_dem.tif`, `<project_name>_orthomosaic.tif`, `<project_name>_report.pdf`, `<project_name>.obj`, and `<project_name>.psx`.
   - Fail: Blindly falling back to rigid manual presets; failing to extract EXIF telemetry; fitting distortion coefficients to high-uncertainty tie points; crashing during point cloud or DEM generation.
 
 ### Scenario 6: Dense Point Cloud Generation & Ground Point Classification
