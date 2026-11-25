@@ -54,7 +54,11 @@ class TestClusterDispatchValidation(unittest.TestCase):
                 "--resume",
                 "--no-local-scratch-staging",
                 "--preset",
-                "ultra",
+                "building",
+                "--ortho-resolution",
+                "0.05",
+                "--tiepoint-limit",
+                "40000",
                 "--worker-limit",
                 "2",
             ]
@@ -65,7 +69,9 @@ class TestClusterDispatchValidation(unittest.TestCase):
         self.assertEqual(args.server, "192.168.1.50:5840")
         self.assertTrue(args.resume)
         self.assertTrue(args.no_local_scratch_staging)
-        self.assertEqual(args.preset, "ultra")
+        self.assertEqual(args.preset, "building")
+        self.assertAlmostEqual(args.ortho_resolution, 0.05)
+        self.assertEqual(args.tiepoint_limit, 40000)
         self.assertEqual(args.worker_limit, 2)
 
     def test_dynamic_server_resolution(self):

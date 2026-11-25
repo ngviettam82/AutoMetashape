@@ -76,7 +76,13 @@ def reexec_server(target_dir: str) -> None:
     sys.stdout.flush()
     sys.stderr.flush()
     clear_server_pid()
-    os.execv(py_exe, cmd)
+    if sys.platform == "win32":
+        # Windows wexecv does not quote arguments containing spaces, which causes
+        # 'C:\Program: can't open file...' crash when py_exe or path has spaces.
+        quoted_cmd = [f'"{c}"' if " " in c and not (c.startswith('"') and c.endswith('"')) else c for c in cmd]
+        os.execv(py_exe, quoted_cmd)
+    else:
+        os.execv(py_exe, cmd)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -123,18 +129,17 @@ def _run_server_lifecycle() -> int:
     port = args.port or saved_config.get("port", "5840")
     dispatch_port = args.dispatch_port or saved_config.get("dispatch_port", "5841")
 
-    # 2. Locate Metashape Server binary
+    # 2. Locate Metashape Server binary (Metashape Pro 2.x requires standalone metashape-server)
     ms_exe = cu.find_metashape_path()
     server_bin = cu.find_metashape_server_path(ms_exe)
     if not server_bin or not os.path.isfile(server_bin):
-        if ms_exe and os.path.isfile(ms_exe):
-            server_bin = ms_exe
-            use_embedded_flag = True
-        else:
-            print("[FATAL ERROR] Metashape Server executable not found.", file=sys.stderr)
-            return 1
-    else:
-        use_embedded_flag = False
+        print(
+            "[FATAL ERROR] Standalone 'metashape-server' executable was not found. "
+            "Agisoft Metashape Pro 2.x requires the standalone metashape-server binary "
+            "(metashape.exe no longer supports the legacy 1.x --server flag).",
+            file=sys.stderr,
+        )
+        return 1
 
     lan_ip = cu.get_primary_lan_ip()
 
@@ -157,23 +162,13 @@ def _run_server_lifecycle() -> int:
         print("A Metashape Server or other service is already active on this port.", file=sys.stderr)
 
     # 4. Construct Command
-    if use_embedded_flag:
-        server_cmd = [
-            server_bin,
-            "--server",
-            "--control",
-            f"{host}:{port}",
-            "--dispatch",
-            f"{host}:{dispatch_port}",
-        ]
-    else:
-        server_cmd = [
-            server_bin,
-            "--host",
-            f"{host}:{port}",
-            "--no-database",
-            "--resume-workers",
-        ]
+    server_cmd = [
+        server_bin,
+        "--host",
+        f"{host}:{port}",
+        "--no-database",
+        "--resume-workers",
+    ]
 
     print("\n[INSTRUCTIONS FOR REMOTE WORKERS]")
     print(f'Run on each worker PC:  .\\launch_worker.bat --host {lan_ip} --root "\\\\{lan_ip}\\<share>"')

@@ -89,7 +89,21 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--port", type=str, default=None, help="Cluster Server control port (default: 5840)")
     parser.add_argument(
-        "--root", type=str, default="", help="Shared Network Storage UNC path (e.g. \\\\SERVER\\SharedMetashape)"
+        "--root",
+        "--result-root",
+        "--result-share",
+        dest="root",
+        type=str,
+        default="",
+        help="Shared Network Storage UNC path for Metashape --root / Result SSD (e.g. \\\\SERVER\\ResultShare)",
+    )
+    parser.add_argument(
+        "--source-root",
+        "--source-share",
+        dest="source_root",
+        type=str,
+        default="",
+        help="Optional Data Source Share UNC path (SSD #1, read-only raw photos) validated on worker startup",
     )
     parser.add_argument(
         "--cpu-enable",
@@ -238,6 +252,11 @@ def _run_worker_lifecycle() -> int:
     host = args.host or os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip() or saved_config.get("host", "")
     port = args.port or os.environ.get("AUTOMETASHAPE_CLUSTER_PORT", "").strip() or saved_config.get("port", "5840")
     root_path = args.root or os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip() or saved_config.get("root", "")
+    source_root = (
+        args.source_root
+        or os.environ.get("AUTOMETASHAPE_SOURCE_ROOT", "").strip()
+        or saved_config.get("source_root", "")
+    )
 
     # CPU Enable Resolution
     if args.cpu_enable is not None:
@@ -341,6 +360,8 @@ def _run_worker_lifecycle() -> int:
                     "root": root_path,
                     "cpu_enable": int(cpu_enable),
                 }
+                if source_root:
+                    persist_data["source_root"] = source_root
                 # STRICT INVARIANT: Only persist gpu_mask if explicitly configured with a non-auto override
                 if explicit_gpu_mask is not None:
                     persist_data["gpu_mask"] = explicit_gpu_mask
@@ -373,7 +394,9 @@ def _run_worker_lifecycle() -> int:
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
     print(f"  Cluster Server  : {host}:{port}")
-    print(f"  Shared Storage  : {root_path}")
+    print(f"  Result Storage  : {root_path}")
+    if source_root:
+        print(f"  Data Source SSD : {source_root}")
     print(f"  Metashape Binary: {ms_exe}")
     print(f"  GPU Device Mask : {gpu_display_label}")
     print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
@@ -393,13 +416,22 @@ def _run_worker_lifecycle() -> int:
         print("  Check that metashape-server is running and TCP port 5840 is open in firewall.", file=sys.stderr)
 
     # 7. Pre-Flight Diagnostic 3: Shared Storage UNC Access Test
-    print(f"[PRE-FLIGHT] Validating shared network storage access: {root_path}...")
+    print(f"[PRE-FLIGHT] Validating shared Result storage access: {root_path}...")
     valid_unc, unc_err = cu.test_unc_path(root_path)
     if valid_unc:
-        print("  [OK] Shared storage root is accessible and verified.")
+        print("  [OK] Shared Result storage root is accessible and verified.")
     else:
-        print(f"  [WARNING] Storage verification issue: {unc_err}", file=sys.stderr)
+        print(f"  [WARNING] Result storage verification issue: {unc_err}", file=sys.stderr)
         print("  Ensure network credentials and file sharing permissions are granted.", file=sys.stderr)
+
+    if source_root:
+        print(f"[PRE-FLIGHT] Validating Data Source storage access (read-only): {source_root}...")
+        valid_src, src_err = cu.test_unc_path(source_root)
+        if valid_src:
+            print("  [OK] Data Source share is accessible and verified.")
+        else:
+            print(f"  [WARNING] Data Source share verification issue: {src_err}", file=sys.stderr)
+            print("  Ensure worker node has read access to the Data Source SMB share.", file=sys.stderr)
 
     # 8. Build Worker Command
     worker_cmd = [

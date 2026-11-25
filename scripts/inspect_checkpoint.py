@@ -62,92 +62,116 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
         raise FileNotFoundError(f"Project archive does not exist: {norm_path}")
 
     doc = Metashape.Document()
-    doc.open(norm_path)
+    try:
+        try:
+            doc.open(norm_path, read_only=True, ignore_lock=True)
+        except TypeError:
+            doc.open(norm_path)
 
-    chunks_info: List[Dict[str, Any]] = []
-    print("=" * 80)
-    print(f"AUTOMETASHAPE CHECKPOINT FORENSICS: {norm_path}")
-    print("=" * 80)
-    print(f"Total Chunks Found: {len(doc.chunks)}")
+        chunks_info: List[Dict[str, Any]] = []
+        print("=" * 80)
+        print(f"AUTOMETASHAPE CHECKPOINT FORENSICS: {norm_path}")
+        print("=" * 80)
+        print(f"Total Chunks Found: {len(doc.chunks)}")
 
-    for idx, c in enumerate(doc.chunks):
-        label = getattr(c, "label", f"Chunk {idx + 1}")
-        cams = getattr(c, "cameras", None) or []
-        total_cams = len(cams)
-        aligned_cams = sum(1 for cam in cams if getattr(cam, "transform", None) and getattr(cam, "enabled", True))
+        for idx, c in enumerate(doc.chunks):
+            label = getattr(c, "label", f"Chunk {idx + 1}")
+            cams = getattr(c, "cameras", None) or []
+            total_cams = len(cams)
+            aligned_cams = sum(1 for cam in cams if getattr(cam, "transform", None) and getattr(cam, "enabled", True))
 
-        # Tie points
-        tie_points = 0
-        pc = getattr(c, "point_cloud", None)
-        if pc is not None:
-            pts = getattr(pc, "points", None)
-            tie_points = len(pts) if pts is not None else 0
+            # Tie points (Metashape 2.x uses chunk.tie_points; 1.x used chunk.point_cloud)
+            tie_points = 0
+            tp = getattr(c, "tie_points", None)
+            if tp is not None:
+                pts = getattr(tp, "points", None)
+                tie_points = len(pts) if pts is not None else 0
+            else:
+                legacy_pc = getattr(c, "point_cloud", None)
+                if legacy_pc is not None and hasattr(legacy_pc, "points"):
+                    pts = getattr(legacy_pc, "points", None)
+                    tie_points = len(pts) if pts is not None else 0
 
-        # Depth maps
-        depth_maps = 0
-        dms = getattr(c, "depth_maps", None)
-        if dms is not None:
-            try:
-                depth_maps = len(dms)
-            except (TypeError, AttributeError):
-                depth_maps = 1 if dms else 0
+            # Depth maps (Metashape 2.x DepthMaps container exposes .keys())
+            depth_maps = 0
+            dms = getattr(c, "depth_maps", None)
+            if dms is not None:
+                if hasattr(dms, "keys"):
+                    try:
+                        depth_maps = len(dms.keys())
+                    except Exception:
+                        depth_maps = 1
+                else:
+                    try:
+                        depth_maps = len(dms)
+                    except (TypeError, AttributeError):
+                        depth_maps = 1 if dms else 0
 
-        # Dense point cloud
-        dense_points = 0
-        dpc = getattr(c, "dense_cloud", None) or getattr(c, "point_cloud_dense", None)
-        if dpc is not None:
-            dense_points = getattr(dpc, "point_count", 0)
+            # Dense point cloud (Metashape 2.x uses chunk.point_cloud.point_count; 1.x used dense_cloud)
+            dense_points = 0
+            pc2 = getattr(c, "point_cloud", None)
+            if pc2 is not None and hasattr(pc2, "point_count"):
+                dense_points = int(getattr(pc2, "point_count", 0) or 0)
+            else:
+                dpc = getattr(c, "dense_cloud", None) or getattr(c, "point_cloud_dense", None)
+                if dpc is not None:
+                    dense_points = int(getattr(dpc, "point_count", 0) or 0)
 
-        # Mesh Model
-        model_faces = 0
-        model_vertices = 0
-        model = getattr(c, "model", None)
-        if model is not None:
-            faces = getattr(model, "faces", None)
-            verts = getattr(model, "vertices", None)
-            model_faces = len(faces) if faces is not None else 0
-            model_vertices = len(verts) if verts is not None else 0
+            # Mesh Model
+            model_faces = 0
+            model_vertices = 0
+            model = getattr(c, "model", None)
+            if model is not None:
+                faces = getattr(model, "faces", None)
+                verts = getattr(model, "vertices", None)
+                model_faces = len(faces) if faces is not None else 0
+                model_vertices = len(verts) if verts is not None else 0
 
-        # Orthomosaic
-        has_ortho = getattr(c, "orthomosaic", None) is not None
-        has_elevation = getattr(c, "elevation", None) is not None
+            # Orthomosaic & Elevation
+            has_ortho = getattr(c, "orthomosaic", None) is not None
+            has_elevation = getattr(c, "elevation", None) is not None
 
-        c_data = {
-            "index": idx,
-            "label": label,
-            "total_cameras": total_cams,
-            "aligned_cameras": aligned_cams,
-            "tie_points": tie_points,
-            "depth_maps": depth_maps,
-            "dense_points": dense_points,
-            "model_faces": model_faces,
-            "model_vertices": model_vertices,
-            "has_orthomosaic": has_ortho,
-            "has_elevation": has_elevation,
-        }
-        chunks_info.append(c_data)
+            c_data = {
+                "index": idx,
+                "label": label,
+                "total_cameras": total_cams,
+                "aligned_cameras": aligned_cams,
+                "tie_points": tie_points,
+                "depth_maps": depth_maps,
+                "dense_points": dense_points,
+                "model_faces": model_faces,
+                "model_vertices": model_vertices,
+                "has_orthomosaic": has_ortho,
+                "has_elevation": has_elevation,
+            }
+            chunks_info.append(c_data)
 
-        print(f"\n[Chunk {idx + 1}] Label: '{label}'")
-        print(
-            f"  - Cameras       : {aligned_cams} aligned / {total_cams} total ({aligned_cams / total_cams * 100:.1f}%)"
-            if total_cams
-            else "  - Cameras: 0"
-        )
-        print(f"  - Tie Points    : {tie_points:,}")
-        print(f"  - Depth Maps    : {depth_maps:,}")
-        print(f"  - Dense Points  : {dense_points:,}")
-        print(
-            f"  - 3D Mesh Model : {model_faces:,} faces, {model_vertices:,} vertices"
-            if model_faces
-            else "  - 3D Mesh Model: None"
-        )
-        print(f"  - Orthomosaic   : {'Present' if has_ortho else 'None'}")
-        print(f"  - Elevation (DEM): {'Present' if has_elevation else 'None'}")
+            print(f"\n[Chunk {idx + 1}] Label: '{label}'")
+            print(
+                f"  - Cameras        : {aligned_cams} aligned / {total_cams} total ({aligned_cams / total_cams * 100:.1f}%)"
+                if total_cams
+                else "  - Cameras        : 0"
+            )
+            print(f"  - Tie Points     : {tie_points:,}")
+            print(f"  - Depth Maps     : {depth_maps:,}")
+            print(f"  - Dense Points   : {dense_points:,}")
+            print(
+                f"  - 3D Mesh Model  : {model_faces:,} faces, {model_vertices:,} vertices"
+                if model_faces
+                else "  - 3D Mesh Model  : None"
+            )
+            print(f"  - Orthomosaic    : {'Present' if has_ortho else 'None'}")
+            print(f"  - Elevation (DEM): {'Present' if has_elevation else 'None'}")
 
-    print("\n" + "=" * 80)
-    print("CHECKPOINT INSPECTION COMPLETE.")
-    print("=" * 80)
-    return {"project_path": norm_path, "chunks": chunks_info}
+        print("\n" + "=" * 80)
+        print("CHECKPOINT INSPECTION COMPLETE.")
+        print("=" * 80)
+        return {"project_path": norm_path, "chunks": chunks_info}
+    finally:
+        try:
+            doc.clear()
+        except Exception:
+            pass
 
 
 def main() -> int:

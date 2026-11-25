@@ -33,18 +33,26 @@ from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
 )
+from autometashape.cluster.dual_share import (
+    discover_dual_share_projects,
+    is_subpath,
+    resolve_result_network_root,
+    validate_dual_share_topology,
+)
 from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
 from autometashape.cluster.orchestrator import (
     _norm_cluster_path,
     build_monolithic_runscript_task,
+    safe_create_cluster_batch,
 )
+from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
 
-IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".tif", ".tiff", ".dng", ".png"}
+IMAGE_EXTENSIONS = SUPPORTED_IMAGE_EXTS
 
 
 def get_cluster_relative_path(target_path: str, shared_root: str) -> str:
     """Compute cluster-relative POSIX path for Metashape Network Server."""
-    if shared_root:
+    if shared_root and is_subpath(target_path, shared_root):
         try:
             rel = os.path.relpath(target_path, shared_root).replace("\\", "/")
             if not rel.startswith(".."):
@@ -63,14 +71,30 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--images",
         type=str,
-        required=True,
-        help="Path to folder containing raw capture images (UNC or local path)",
+        default="",
+        help="Path to folder containing raw capture images (UNC or local path). Optional when --source-share is used.",
     )
     parser.add_argument(
         "--output",
         type=str,
         default="",
         help="Target output directory for deliverables and .psx archive (default: <images>/Result)",
+    )
+    parser.add_argument(
+        "--source-share",
+        "--data-root",
+        dest="source_share",
+        type=str,
+        default="",
+        help="Data Source Share (SSD #1, read-only raw image root) for dual-share multi-SSD workflows",
+    )
+    parser.add_argument(
+        "--result-share",
+        "--result-root",
+        dest="result_share",
+        type=str,
+        default="",
+        help="Result Share (SSD #2, writable .psx + deliverables root and Metashape --root) for dual-share workflows",
     )
     parser.add_argument(
         "--project-name",
@@ -94,7 +118,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--root",
         type=str,
         default="",
-        help="Shared cluster storage root path (default: auto-detected from server config or image path)",
+        help="Shared cluster storage root path (default: auto-detected from result-share, output UNC, or server config)",
     )
     parser.add_argument(
         "--resume",
@@ -110,8 +134,38 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--preset",
         type=str,
         default="pro",
-        choices=["fast", "standard", "pro", "ultra"],
+        choices=["pro", "custom", "building"],
         help="Reconstruction quality preset",
+    )
+    parser.add_argument(
+        "--ortho-resolution",
+        type=float,
+        default=0.05,
+        help="Orthomosaic build and export ground sampling distance in meters/pixel (default: 0.05 = 5 cm/px)",
+    )
+    parser.add_argument(
+        "--keypoint-limit",
+        type=int,
+        default=None,
+        help="Maximum keypoints per image during alignment (default: preset/pro plan = 50000)",
+    )
+    parser.add_argument(
+        "--keypoint-limit-per-mpx",
+        type=int,
+        default=None,
+        help="Keypoint limit per megapixel for guided matching (default: preset/pro plan = 2000)",
+    )
+    parser.add_argument(
+        "--tiepoint-limit",
+        type=int,
+        default=None,
+        help="Maximum tie points per image during alignment (default: preset/pro plan = 40000)",
+    )
+    parser.add_argument(
+        "--build-point-cloud",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Explicitly enable (--build-point-cloud) or disable (--no-build-point-cloud) dense point cloud generation",
     )
     parser.add_argument(
         "--worker-limit",
@@ -195,6 +249,11 @@ def submit_batch(
     preset: str = "pro",
     worker_limit: int = 1,
     no_guided_matching: bool = False,
+    ortho_resolution: float = 0.05,
+    keypoint_limit: Optional[int] = None,
+    keypoint_limit_per_mpx: Optional[int] = None,
+    tiepoint_limit: Optional[int] = None,
+    build_point_cloud: Optional[bool] = None,
 ) -> int:
     """Create project, guarantee physical doc.save materialization, and submit cluster batch."""
     if Metashape is None:
@@ -214,64 +273,85 @@ def submit_batch(
 
     print("=" * 72, flush=True)
     print("  AutoMetashape: Canonical Cluster Batch Submission", flush=True)
-    print(f"  Project Name    : {proj_name}", flush=True)
-    print(f"  Images Directory: {norm_images}", flush=True)
-    print(f"  Output Directory: {norm_output}", flush=True)
-    print(f"  Project PSX     : {psx_path}", flush=True)
-    print(f"  Cluster Server  : {resolved_server}", flush=True)
-    print(f"  Shared Root     : {resolved_root}", flush=True)
-    print(f"  Priority Integer: {priority}", flush=True)
+    print(f"  Project Name     : {proj_name}", flush=True)
+    print(f"  Images Directory : {norm_images}", flush=True)
+    print(f"  Output Directory : {norm_output}", flush=True)
+    print(f"  Project PSX      : {psx_path}", flush=True)
+    print(f"  Cluster Server   : {resolved_server}", flush=True)
+    print(f"  Shared Root      : {resolved_root}", flush=True)
+    print(f"  Preset           : {preset}", flush=True)
+    print(f"  Ortho Resolution : {ortho_resolution:.4f} m/px", flush=True)
+    print(f"  Priority Integer : {priority}", flush=True)
     print(f"  Resume Checkpoint: {resume}", flush=True)
-    print(f"  Direct Storage  : {no_local_scratch_staging}", flush=True)
+    print(f"  Direct Storage   : {no_local_scratch_staging}", flush=True)
     print("=" * 72, flush=True)
 
     # -------------------------------------------------------------------------
     # MANDATORY ARCHITECTURAL INVARIANT: PHYSICAL PROJECT MATERIALIZATION
+    # Always release .psx locks via doc.clear() before dispatching to workers.
     # -------------------------------------------------------------------------
     doc = Metashape.Document()
-    if resume and os.path.isfile(psx_path):
-        print(f"\n[CHECKPOINT] Opening existing project archive: {psx_path}...", flush=True)
-        doc.open(psx_path)
-        print(f"[OK] Checkpoint opened with {len(doc.chunks)} chunk(s).", flush=True)
-    else:
-        print("\n[INGEST] Scanning raw survey images...", flush=True)
-        photos = find_photos_in_directory(norm_images)
-        if not photos:
-            raise ValueError(f"No supported image files found under: {norm_images}")
-        print(f"  Found {len(photos)} photos.", flush=True)
+    try:
+        if resume and os.path.isfile(psx_path):
+            print(f"\n[CHECKPOINT] Verifying existing project archive: {psx_path}...", flush=True)
+            try:
+                doc.open(psx_path, read_only=True, ignore_lock=True)
+            except TypeError:
+                doc.open(psx_path)
+            print(f"[OK] Checkpoint verified with {len(doc.chunks)} chunk(s).", flush=True)
+        else:
+            print("\n[INGEST] Verifying raw survey images...", flush=True)
+            photos = find_photos_in_directory(norm_images)
+            if not photos:
+                raise ValueError(f"No supported image files found under: {norm_images}")
+            print(f"  Verified {len(photos)} photos in source folder (deferred ingest on worker).", flush=True)
 
-        chunk = doc.addChunk()
-        chunk.label = "Production_Reconstruction"
-        print(f"  Adding {len(photos)} photos to canonical chunk '{chunk.label}'...", flush=True)
-        chunk.addPhotos(photos)
+            chunk = doc.addChunk()
+            chunk.label = "Production_Reconstruction"
 
-        # MANDATORY: Save doc to disk and verify physical file existence BEFORE submission!
-        print(f"  [MATERIALIZE] Saving document to shared disk: {psx_path}...", flush=True)
-        doc.save(psx_path)
-        if not os.path.isfile(psx_path):
-            raise IOError(
-                f"[FATAL ERROR] Project file was not created on disk: {psx_path}. "
-                "Aborting dispatch to protect workers from missing-file crashes."
+            # MANDATORY: Save minimal valid .psx stub to Result Share and verify existence BEFORE submission!
+            print(f"  [MATERIALIZE] Saving project stub to shared disk: {psx_path}...", flush=True)
+            doc.save(psx_path)
+            if not os.path.isfile(psx_path):
+                raise IOError(
+                    f"[FATAL ERROR] Project file was not created on disk: {psx_path}. "
+                    "Aborting dispatch to protect workers from missing-file crashes."
+                )
+            print(
+                f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).",
+                flush=True,
             )
-        print(
-            f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).",
-            flush=True,
-        )
+    finally:
+        try:
+            doc.clear()
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # BUILD MONOLITHIC NETWORK TASK
     # -------------------------------------------------------------------------
     print("\n[DISPATCH] Constructing cluster network task...", flush=True)
-    res_task = build_monolithic_runscript_task(
-        images_dir=norm_images,
-        output_dir=norm_output,
-        project_name=proj_name,
-        preset=preset,
-        resume=resume,
-        guided_matching=not no_guided_matching,
-        local_scratch=not no_local_scratch_staging,
-        network_path=resolved_root,
-    )
+    task_kwargs: dict[str, Any] = {
+        "images_dir": norm_images,
+        "output_dir": norm_output,
+        "project_name": proj_name,
+        "preset": preset,
+        "resume": resume,
+        "guided_matching": not no_guided_matching,
+        "local_scratch": not no_local_scratch_staging,
+        "network_path": resolved_root,
+        "ortho_resolution": ortho_resolution,
+    }
+    if keypoint_limit is not None:
+        task_kwargs["keypoint_limit"] = keypoint_limit
+    if keypoint_limit_per_mpx is not None:
+        task_kwargs["keypoint_limit_per_mpx"] = keypoint_limit_per_mpx
+    if tiepoint_limit is not None:
+        task_kwargs["tiepoint_limit"] = tiepoint_limit
+    if build_point_cloud is not None:
+        task_kwargs["build_point_cloud"] = build_point_cloud
+
+    res_task = build_monolithic_runscript_task(**task_kwargs)
     net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
 
     # Calculate cluster-relative path
@@ -285,10 +365,13 @@ def submit_batch(
     net_client = Metashape.NetworkClient()
     net_client.connect(server_ip, server_port)
 
-    # Submit batch
+    # Submit batch via idempotent safe_create_cluster_batch (deduplicates & rejects zombie error batches)
     print(f"  Submitting batch for '{rel_psx}'...", flush=True)
-    batch_id = net_client.createBatch(rel_psx, [net_task])
-    print(f"  [OK] Batch created successfully with ID: #{batch_id}", flush=True)
+    batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_psx, [net_task])
+    if attached_existing:
+        print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
+    else:
+        print(f"  [OK] Batch created successfully with ID: #{batch_id}", flush=True)
 
     # Configure priority and worker limits
     try:
@@ -321,6 +404,11 @@ def main() -> int:
     parser = build_arg_parser()
     args = parser.parse_args()
 
+    if not args.images and not args.source_share:
+        parser.error("Either --images or --source-share (with --result-share) must be provided.")
+    if args.source_share and not args.result_share and not args.output:
+        parser.error("--source-share requires --result-share (or --output) to define the writable Result SSD share.")
+
     # Plain Python Auto-Delegation
     if Metashape is None and not args.no_reexec:
         ms_exe = find_metashape_path()
@@ -332,18 +420,71 @@ def main() -> int:
         return 1
 
     try:
+        if args.source_share:
+            result_share = args.result_share or args.output
+            topo = validate_dual_share_topology(args.source_share, result_share, min_headroom_gb=50.0)
+            if not topo["valid"]:
+                for err in topo["errors"]:
+                    print(f"[FATAL ERROR] {err}", file=sys.stderr, flush=True)
+                return 1
+            for warn in topo.get("warnings", []):
+                print(f"[WARNING] {warn}", flush=True)
+
+            resolved_root = resolve_result_network_root(result_share, explicit_root=args.root)
+            projects = discover_dual_share_projects(args.source_share, result_share)
+            if not projects:
+                print(
+                    f"[FATAL ERROR] No image datasets discovered under source share: {args.source_share}",
+                    file=sys.stderr,
+                )
+                return 1
+
+            submitted_ids: List[int] = []
+            for proj in projects:
+                bid = submit_batch(
+                    images_dir=proj.images_dir,
+                    output_dir=proj.output_dir,
+                    project_name=args.project_name if len(projects) == 1 and args.project_name else proj.project_name,
+                    priority=args.priority,
+                    server_host=args.server,
+                    shared_root=resolved_root,
+                    resume=args.resume,
+                    no_local_scratch_staging=args.no_local_scratch_staging,
+                    preset=args.preset,
+                    worker_limit=args.worker_limit,
+                    no_guided_matching=args.no_guided_matching,
+                    ortho_resolution=args.ortho_resolution,
+                    keypoint_limit=args.keypoint_limit,
+                    keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
+                    tiepoint_limit=args.tiepoint_limit,
+                    build_point_cloud=args.build_point_cloud,
+                )
+                if bid > 0:
+                    submitted_ids.append(bid)
+            return 0 if len(submitted_ids) == len(projects) else 1
+
+        effective_root = args.root
+        if args.result_share:
+            effective_root = resolve_result_network_root(args.result_share, explicit_root=args.root)
+        effective_output = args.output or args.result_share
+
         batch_id = submit_batch(
             images_dir=args.images,
-            output_dir=args.output,
+            output_dir=effective_output,
             project_name=args.project_name,
             priority=args.priority,
             server_host=args.server,
-            shared_root=args.root,
+            shared_root=effective_root,
             resume=args.resume,
             no_local_scratch_staging=args.no_local_scratch_staging,
             preset=args.preset,
             worker_limit=args.worker_limit,
             no_guided_matching=args.no_guided_matching,
+            ortho_resolution=args.ortho_resolution,
+            keypoint_limit=args.keypoint_limit,
+            keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
+            tiepoint_limit=args.tiepoint_limit,
+            build_point_cloud=args.build_point_cloud,
         )
         return 0 if batch_id > 0 else 1
     except Exception as e:

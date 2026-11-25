@@ -7,11 +7,35 @@
 
 from __future__ import annotations
 
+import ctypes
 import os
 import shutil
 import string
 import sys
 import tempfile
+
+_WIN32_DRIVE_REMOVABLE = 2
+_WIN32_DRIVE_FIXED = 3
+_WIN32_DRIVE_REMOTE = 4
+_WIN32_DRIVE_CDROM = 5
+
+
+def _is_fixed_local_windows_drive(drive_root: str) -> bool:
+    """Return True when ``drive_root`` is a fixed local volume (rejecting mapped SMB/USB/optical drives)."""
+    if sys.platform != "win32":
+        return True
+    try:
+        kernel32 = getattr(ctypes, "windll", None)
+        if kernel32 is None:
+            return True
+        drive_type = int(kernel32.kernel32.GetDriveTypeW(drive_root))
+        # Reject mapped network shares (4), removable media (2), and optical drives (5).
+        # Note: DRIVE_NO_ROOT_DIR (1) only occurs alongside os.path.exists()==True under mocked tests.
+        if drive_type in (_WIN32_DRIVE_REMOVABLE, _WIN32_DRIVE_REMOTE, _WIN32_DRIVE_CDROM):
+            return False
+        return True
+    except Exception:
+        return True
 
 
 def check_scratch_disk_headroom(scratch_dir: str, min_free_gb: float = 100.0) -> tuple[bool, float]:
@@ -61,6 +85,8 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
         for letter in string.ascii_uppercase:
             drive_root = f"{letter}:\\"
             if os.path.exists(drive_root):
+                if not _is_fixed_local_windows_drive(drive_root):
+                    continue
                 try:
                     usage = shutil.disk_usage(drive_root)
                     free_gb = usage.free / (1024**3)

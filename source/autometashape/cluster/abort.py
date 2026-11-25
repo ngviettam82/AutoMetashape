@@ -110,25 +110,30 @@ def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: 
     if target_dir and os.path.isdir(target_dir):
         lock_dirs.append(target_dir)
 
-    temp_dir = tempfile.gettempdir()
-    if os.path.isdir(temp_dir):
-        lock_dirs.append(temp_dir)
-
     if root_path and os.path.isdir(root_path):
         cluster_dir = os.path.join(root_path, ".cluster")
         if os.path.isdir(cluster_dir):
             lock_dirs.append(cluster_dir)
 
-    # Local scratch directories across system drives
+    # Local scratch directories across system drives (AutoMetashape-scoped only)
     if sys.platform == "win32":
         for letter in string.ascii_uppercase:
             scratch_cand = rf"{letter}:\AutoMetashape_Scratch"
             if os.path.isdir(scratch_cand):
                 lock_dirs.append(scratch_cand)
     else:
-        for cand in ["/mnt/scratch", "/var/tmp", "/tmp", os.path.expanduser("~/AutoMetashape_Scratch")]:
+        for cand in [
+            "/mnt/scratch/AutoMetashape_Scratch",
+            "/var/tmp/AutoMetashape_Scratch",
+            "/tmp/AutoMetashape_Scratch",
+            os.path.expanduser("~/AutoMetashape_Scratch"),
+        ]:
             if os.path.isdir(cand):
                 lock_dirs.append(cand)
+
+    temp_scratch = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
+    if os.path.isdir(temp_scratch):
+        lock_dirs.append(temp_scratch)
 
     for d in lock_dirs:
         if not os.path.isdir(d):
@@ -290,6 +295,34 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 os.remove(sig_path)
             except Exception:
                 pass
+            # Also purge matching node entry from sibling .cluster/abort_signals.json
+            # to prevent the watchdog from firing a second kill on the next poll.
+            parent_dir = os.path.dirname(sig_path)
+            cluster_dir = (
+                os.path.dirname(parent_dir) if os.path.basename(parent_dir).lower() == ABORT_DIR_NAME else parent_dir
+            )
+            agg_json = os.path.join(cluster_dir, ABORT_SIGNALS_JSON)
+            if os.path.isfile(agg_json):
+                try:
+                    with open(agg_json, "r", encoding="utf-8") as rf:
+                        agg_data = json.load(rf)
+                    changed = False
+                    if isinstance(agg_data, dict):
+                        for k in (node_name, "all"):
+                            if k in agg_data and (k == node_name or sig_path.lower().endswith("all.abort")):
+                                del agg_data[k]
+                                changed = True
+                        if "signals" in agg_data and isinstance(agg_data["signals"], dict):
+                            if node_name in agg_data["signals"]:
+                                del agg_data["signals"][node_name]
+                                changed = True
+                    if changed:
+                        tmp_agg = f"{agg_json}.tmp"
+                        with open(tmp_agg, "w", encoding="utf-8") as wf:
+                            json.dump(agg_data, wf, indent=2)
+                        os.replace(tmp_agg, agg_json)
+                except Exception:
+                    pass
         else:
             try:
                 os.remove(sig_path)

@@ -26,6 +26,11 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.dual_share import (
+    discover_dual_share_projects,
+    is_subpath,
+    validate_dual_share_topology,
+)
 from autometashape.cluster.hardware import extract_unc_root
 from autometashape.cluster.orchestrator import (
     build_monolithic_runscript_task,
@@ -33,6 +38,7 @@ from autometashape.cluster.orchestrator import (
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import get_optimal_local_scratch_dir
+from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
 from autometashape.core.verification import verify_project_deliverables
 
 
@@ -64,6 +70,25 @@ def check_storage_headroom(target_path: str, min_headroom_gb: float = 50.0) -> T
         return True, 999.0
 
 
+def _derive_default_expected_assets(extra_args: Optional[Dict[str, Any]] = None) -> List[str]:
+    """Derive default deliverable verification targets from the job's enabled export flags."""
+    extra = extra_args or {}
+    assets: List[str] = []
+    if extra.get("export_obj", True):
+        assets.append("obj")
+    if extra.get("export_glb", False):
+        assets.append("glb")
+    if extra.get("export_dem", False):
+        assets.append("dem")
+    if extra.get("export_ortho", True):
+        assets.append("ortho")
+    if extra.get("export_point_cloud", False):
+        assets.append("point_cloud")
+    if extra.get("export_report", False):
+        assets.append("report")
+    return assets or ["obj", "ortho"]
+
+
 class QueueJob:
     """Represents a discrete reconstruction dataset job in the supervisor queue."""
 
@@ -82,8 +107,10 @@ class QueueJob:
             os.path.abspath(output_dir) if output_dir else os.path.join(self.images_dir, self.project_name)
         )
         self.preset = preset
-        self.expected_assets = expected_assets or ["obj", "dem", "ortho"]
         self.extra_args = extra_args or {}
+        self.expected_assets = (
+            list(expected_assets) if expected_assets is not None else _derive_default_expected_assets(self.extra_args)
+        )
         self.status: str = "PENDING"
         self.verification_report: Optional[Dict[str, Any]] = None
         self.error_message: Optional[str] = None
@@ -430,6 +457,26 @@ class ClusterSupervisor:
         except Exception as exc:
             raise RuntimeError(f"Failed to connect to cluster coordinator at {net_host}:{net_port}: {exc}") from exc
 
+        # Ensure paused online workers are resumed before multi-project dispatch
+        try:
+            raw_w = net_client.workerList()
+            w_list = (
+                raw_w.get("workers", [])
+                if isinstance(raw_w, dict)
+                else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+            )
+            for w in w_list:
+                w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
+                w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
+                w_state = str(w.get("state", "") if isinstance(w, dict) else getattr(w, "state", "")).lower()
+                if w_paused and w_id is not None and w_state != "offline":
+                    try:
+                        net_client.setWorkerPaused(w_id, False)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
         active_batches: Dict[int, QueueJob] = {}
         batch_status_files: Dict[int, str] = {}
         completed_results: List[Dict[str, Any]] = []
@@ -465,6 +512,8 @@ class ClusterSupervisor:
                 if hasattr(Metashape, "Document"):
                     doc = Metashape.Document()
                     doc.save(psx_path)
+                    if hasattr(doc, "clear"):
+                        doc.clear()
 
             net_path = (
                 job.extra_args.get("network_path")
@@ -474,7 +523,7 @@ class ClusterSupervisor:
             if net_path:
                 job.extra_args["network_path"] = net_path
 
-            if net_path:
+            if net_path and is_subpath(psx_path, net_path):
                 rel_psx = os.path.relpath(psx_path, net_path).replace("\\", "/")
             else:
                 rel_psx = psx_path.replace("\\", "/")
@@ -602,6 +651,14 @@ class ClusterSupervisor:
                         break
 
                 elif b_status in ("failed", "aborted"):
+                    # Critical Metashape 2.2+ defense: server keeps state='inprogress' and retries infinitely
+                    # on generic-error / io-error / process-terminated unless explicitly aborted.
+                    raw_server_state = str(b_info.get("state", "")).lower() if isinstance(b_info, dict) else ""
+                    if raw_server_state not in ("completed", "failed", "aborted", "cancelled"):
+                        try:
+                            net_client.abortBatch(batch_id)
+                        except Exception:
+                            pass
                     print(
                         f"\n  [ERROR] [{job.project_name} | Batch #{batch_id}] Batch failed: {b_err}",
                         file=sys.stderr,
@@ -650,9 +707,6 @@ class ClusterSupervisor:
             "jobs": completed_results,
             "results": completed_results,
         }
-
-
-SUPPORTED_IMAGE_EXTS = (".jpg", ".jpeg", ".tif", ".tiff", ".png", ".dng")
 
 
 def discover_dataset_projects(
@@ -767,10 +821,43 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=None,
         help="Root directory containing survey datasets to auto-discover and queue",
     )
+    group.add_argument(
+        "--source-share",
+        "--data-root",
+        dest="source_share",
+        default=None,
+        help="Dual-SSD Data Source shared folder (SSD #1, read-only raw photos; pair with --result-share)",
+    )
     parser.add_argument(
         "--output-root",
         default=None,
         help="Root directory where output deliverables folders will be created for auto-discovered datasets",
+    )
+    parser.add_argument(
+        "--result-share",
+        "--result-root",
+        dest="result_share",
+        default=None,
+        help="Dual-SSD Result shared folder (SSD #2, writable .psx + deliverables; also resolves Metashape --root)",
+    )
+    parser.add_argument(
+        "--ortho-resolution",
+        type=float,
+        default=0.05,
+        help="Orthomosaic pixel size in meters (default: 0.05 = 5 cm/px; 0 = native GSD)",
+    )
+    parser.add_argument(
+        "--build-point-cloud",
+        dest="build_point_cloud",
+        action="store_true",
+        default=False,
+        help="Enable dense point cloud generation (disabled by default in 'pro' preset)",
+    )
+    parser.add_argument(
+        "--no-point-cloud",
+        dest="build_point_cloud",
+        action="store_false",
+        help="Disable dense point cloud generation",
     )
     parser.add_argument(
         "--preset",
@@ -865,7 +952,10 @@ def main() -> int:
         concurrent=is_concurrent,
     )
 
-    extra_args: Dict[str, Any] = {}
+    extra_args: Dict[str, Any] = {
+        "ortho_resolution": args.ortho_resolution,
+        "build_point_cloud": args.build_point_cloud,
+    }
     if args.network_enable:
         extra_args["network_enable"] = True
         extra_args["network_host"] = args.network_host
@@ -874,7 +964,44 @@ def main() -> int:
         if args.network_path:
             extra_args["network_path"] = args.network_path
 
-    if args.manifest:
+    if args.source_share:
+        target_result = args.result_share or args.output_root
+        if not target_result:
+            print(
+                "[FATAL] --result-share (or --output-root) is required when using --source-share.",
+                file=sys.stderr,
+            )
+            return 1
+        validation = validate_dual_share_topology(
+            source_share=args.source_share,
+            result_share=target_result,
+            result_network_root=args.network_path,
+            min_headroom_gb=args.min_headroom_gb,
+        )
+        for warn in validation["warnings"]:
+            print(f"[Dual-Share Warning] {warn}", flush=True)
+        if not validation["valid"]:
+            print(f"[FATAL] Dual-share validation failed: {'; '.join(validation['errors'])}", file=sys.stderr)
+            return 1
+        extra_args["network_path"] = validation["result_network_root"]
+        try:
+            jobs = discover_dual_share_projects(
+                source_share=validation["source_share"],
+                result_share=validation["result_share"],
+                preset=args.preset,
+                expected_assets=args.expect,
+                extra_args=extra_args,
+                result_network_root=validation["result_network_root"],
+            )
+        except Exception as exc:
+            print(f"[FATAL] Failed to discover dual-share datasets in '{args.source_share}': {exc}", file=sys.stderr)
+            return 1
+        if not jobs:
+            print(f"[WARNING] No survey image datasets found in '{args.source_share}'.", file=sys.stderr)
+            return 0
+        supervisor.queue.extend(jobs)
+
+    elif args.manifest:
         if not os.path.isfile(args.manifest):
             print(f"[FATAL] Manifest file not found: {args.manifest}", file=sys.stderr)
             return 1

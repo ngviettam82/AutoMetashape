@@ -410,9 +410,9 @@ class TestCliArgs(unittest.TestCase):
                     code = ls._run_server_lifecycle()
                     self.assertEqual(code, 1)
 
-    def test_server_launcher_embedded_mode_command_structure(self) -> None:
-        """Verify launch_server uses embedded --server syntax when metashape-server.exe is absent."""
-        from unittest.mock import MagicMock, patch
+    def test_server_launcher_missing_standalone_server_rejects_legacy_embedded(self) -> None:
+        """Verify launch_server rejects Metashape 1.x embedded fallback and exits 1 if metashape-server.exe is absent."""
+        from unittest.mock import patch
 
         import launch_server as ls
 
@@ -424,22 +424,10 @@ class TestCliArgs(unittest.TestCase):
             with patch("sys.argv", ["launch_server.py", "--host", "127.0.0.1", "--port", "5840"]):
                 with patch("cluster_utils.find_metashape_path", return_value=dummy_ms):
                     with patch("cluster_utils.find_metashape_server_path", return_value=None):
-                        with patch("cluster_utils.test_tcp_connection", return_value=False):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = MagicMock()
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_popen.return_value = mock_proc
-
-                                code = ls._run_server_lifecycle()
-                                self.assertEqual(code, 0)
-                                cmd = mock_popen.call_args[0][0]
-                                self.assertEqual(cmd[0], dummy_ms)
-                                self.assertIn("--server", cmd)
-                                self.assertIn("--control", cmd)
-                                self.assertIn("127.0.0.1:5840", cmd)
-                                self.assertIn("--dispatch", cmd)
-                                self.assertIn("127.0.0.1:5841", cmd)
+                        with patch("subprocess.Popen") as mock_popen:
+                            code = ls._run_server_lifecycle()
+                            self.assertEqual(code, 1)
+                            mock_popen.assert_not_called()
         finally:
             if os.path.exists(dummy_ms):
                 os.remove(dummy_ms)

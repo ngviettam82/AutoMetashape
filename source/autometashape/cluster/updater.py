@@ -11,6 +11,7 @@ import os
 import shutil
 import tempfile
 import time
+import zipfile
 
 try:
     import Metashape
@@ -324,12 +325,40 @@ def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_
     return payload_zip if os.path.isfile(payload_zip) else ""
 
 
-def ensure_cluster_maintenance_project(shared_root: str) -> str:
-    """Ensure .cluster/maintenance.psx exists on the shared network storage and clean stale locks."""
+def _sanitize_worker_slug(worker_slug: str) -> str:
+    """Convert a worker hostname or ID into a filesystem-safe ASCII slug."""
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(worker_slug or "").strip())
+    return cleaned.strip("_").lower()
+
+
+def _abort_stale_maintenance_batches(client, rel_project: str) -> None:
+    """Abort any lingering cluster batch referencing ``rel_project`` to prevent Duplicate batch errors."""
+    norm_target = rel_project.replace("\\", "/").strip("/").lower()
+    if hasattr(client, "batchList") and hasattr(client, "abortBatch"):
+        try:
+            bl = client.batchList()
+            if isinstance(bl, dict):
+                for b in bl.get("batches", []):
+                    bpath = str(b.get("path") or "").replace("\\", "/").strip("/").lower()
+                    bid = b.get("batch_id")
+                    if bid is not None and bpath == norm_target:
+                        try:
+                            client.abortBatch(bid)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
+
+
+def ensure_cluster_maintenance_project(shared_root: str, worker_slug: str = "") -> str:
+    """Ensure a valid Metashape maintenance .psx exists on shared storage and clean stale locks."""
     cluster_dir = os.path.join(shared_root, ".cluster")
     os.makedirs(cluster_dir, exist_ok=True)
-    psx_path = os.path.join(cluster_dir, "maintenance.psx")
-    files_dir = os.path.join(cluster_dir, "maintenance.files")
+    slug = _sanitize_worker_slug(worker_slug)
+    base_name = f"maintenance_{slug}" if slug else "maintenance"
+    rel_path = f".cluster/{base_name}.psx" if slug else CLUSTER_MAINTENANCE_REL_PATH
+    psx_path = os.path.join(cluster_dir, f"{base_name}.psx")
+    files_dir = os.path.join(cluster_dir, f"{base_name}.files")
     os.makedirs(files_dir, exist_ok=True)
 
     # Pre-clean any lingering local/network lock files from previous interrupted runs
@@ -340,21 +369,31 @@ def ensure_cluster_maintenance_project(shared_root: str) -> str:
         except Exception:
             pass
 
-    if not os.path.isfile(psx_path):
-        if Metashape is not None:
+    project_zip = os.path.join(files_dir, "project.zip")
+    if not os.path.isfile(psx_path) or not os.path.isfile(project_zip):
+        if Metashape is not None and hasattr(Metashape, "Document"):
             try:
                 doc = Metashape.Document()
                 doc.save(psx_path)
-                return CLUSTER_MAINTENANCE_REL_PATH
+                if hasattr(doc, "clear"):
+                    doc.clear()
+                if os.path.isfile(psx_path):
+                    return rel_path
             except Exception:
                 pass
-        # Fallback to standard Metashape XML project structure
+        # Fallback: write BOTH the .psx XML manifest AND a valid minimal project.zip archive
         xml_content = (
-            '<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="maintenance.files/project.zip"/>\n'
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            f'<document version="1.2.0" path="{base_name}.files/project.zip"/>\n'
         )
         with open(psx_path, "w", encoding="utf-8") as f:
             f.write(xml_content)
-    return CLUSTER_MAINTENANCE_REL_PATH
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0">\n  <chunks next_id="0"/>\n</document>\n'
+        )
+        with zipfile.ZipFile(project_zip, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("doc.xml", doc_xml)
+    return rel_path
 
 
 def list_online_workers(client) -> list[dict]:
@@ -460,18 +499,25 @@ def update_remote_worker(
                 except Exception:
                     pass
 
-            # 2. Abort any active in-progress batches on the server
-            if hasattr(client, "abortBatch") and hasattr(client, "batchList"):
-                try:
-                    bl = client.batchList()
-                    if isinstance(bl, dict):
-                        for b in bl.get("batches", []):
-                            bid = b.get("batch_id")
-                            bstate = str(b.get("state", "")).lower()
-                            if bstate in ("inprogress", "running", "active"):
-                                client.abortBatch(bid)
-                except Exception:
-                    pass
+            # 2. Abort ONLY the active batch running on target worker (never disrupt unrelated workers!)
+            if hasattr(client, "abortBatch"):
+                target_bid = target.get("batch_id")
+                if target_bid is not None:
+                    try:
+                        client.abortBatch(target_bid)
+                    except Exception:
+                        pass
+                elif hasattr(client, "batchList"):
+                    try:
+                        bl = client.batchList()
+                        if isinstance(bl, dict):
+                            for b in bl.get("batches", []):
+                                bid = b.get("batch_id")
+                                bstate = str(b.get("state", "")).lower()
+                                if bstate in ("inprogress", "running", "active"):
+                                    client.abortBatch(bid)
+                    except Exception:
+                        pass
 
             # 3. Wait for target worker to transition to 'ready'
             abort_start = time.time()
@@ -551,7 +597,8 @@ def update_remote_worker(
         )
         net_task = task.toNetworkTask()
 
-        # 7. Create batch locked to 1 worker
+        # 7. Abort any stale maintenance batch on rel_project and create new batch locked to 1 worker
+        _abort_stale_maintenance_batches(client, rel_project)
         try:
             batch_id = client.createBatch(rel_project, [net_task])
             result["batch_id"] = batch_id
@@ -565,7 +612,7 @@ def update_remote_worker(
             result["error"] = f"Failed to dispatch update batch: {e}"
             return result
 
-        # 8. Wait for batch completion
+        # 8. Wait for batch completion (detecting Metashape 2.2.2 infinite-retry error_count > 0!)
         start_t = time.time()
         batch_done = False
         while time.time() - start_t < timeout:
@@ -578,12 +625,27 @@ def update_remote_worker(
                         break
             if batch_entry:
                 state = str(batch_entry.get("state", "")).lower()
+                err_cnt = int(batch_entry.get("error_count", 0) or 0)
+                is_failed = bool(batch_entry.get("failed") or batch_entry.get("aborted") or err_cnt > 0)
+                if is_failed or state in ("failed", "aborted", "cancelled"):
+                    if state not in ("completed", "finished", "failed", "aborted", "cancelled") and hasattr(
+                        client, "abortBatch"
+                    ):
+                        try:
+                            client.abortBatch(batch_id)
+                        except Exception:
+                            pass
+                    last_err = batch_entry.get("last_error")
+                    err_detail = (
+                        last_err.get("message")
+                        if isinstance(last_err, dict) and last_err.get("message")
+                        else f"state={state}, error_count={err_cnt}"
+                    )
+                    result["error"] = f"Update batch failed on worker ({err_detail})"
+                    return result
                 if state in ("completed", "finished"):
                     batch_done = True
                     break
-                if state in ("failed", "aborted", "cancelled"):
-                    result["error"] = f"Update batch failed on worker with state: {state}"
-                    return result
             time.sleep(poll_interval)
 
         if not batch_done:
@@ -679,7 +741,6 @@ def update_all_workers_parallel(
 
     # 1. Stage update payload once
     stage_cluster_update_payload(shared_root, repo_url)
-    rel_project = ensure_cluster_maintenance_project(shared_root)
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
 
     # 2. If force mode, pause queued and abort active tasks on busy workers
@@ -710,76 +771,120 @@ def update_all_workers_parallel(
             if all(str(w.get("state", "")).lower() in ("ready", "") for w in fresh):
                 break
 
-    # 3. Create update batch for each worker
+    # 3. Record original pause state across fleet so we isolate each node cleanly during signal dispatch
+    orig_worker_paused: dict[int | str, bool] = {
+        w.get("worker_id"): bool(w.get("paused", False)) for w in workers if w.get("worker_id") is not None
+    }
+
     worker_batches: list[dict] = []
-    for w in workers:
-        wid = w.get("worker_id")
-        hname = w.get("hostname", "")
-        wstate = str(w.get("state", "")).lower()
-        node_res = {
-            "success": False,
-            "worker_id": wid,
-            "hostname": hname,
-            "hostaddr": w.get("hostaddr"),
-            "batch_id": None,
-            "relaunched": False,
-            "new_worker_id": None,
-            "new_hostaddr": None,
-            "log": "",
-            "error": None,
-        }
-
-        if wstate not in ("ready", "") and not force:
-            node_res["error"] = f"Worker {hname} is busy ({wstate}). Skipped in safe mode."
-            worker_batches.append(node_res)
-            continue
-
-        try:
-            task = Metashape.Tasks.RunScript()
-            task.code = generate_worker_updater_code(
-                repo_url=repo_url,
-                expected_hostname=hname,
-                shared_cluster_dir=cluster_shared_dir,
-            )
-            net_task = task.toNetworkTask()
-            batch_id = client.createBatch(rel_project, [net_task])
-            node_res["batch_id"] = batch_id
-            if hasattr(client, "setBatchWorkerLimit"):
-                client.setBatchWorkerLimit(batch_id, 1)
-            client.setBatchPaused(batch_id, False)
-        except Exception as e:
-            node_res["error"] = f"Failed to dispatch batch: {e}"
-
-        worker_batches.append(node_res)
-
     try:
-        # 4. Poll until all dispatched batches finish
-        start_t = time.time()
-        while time.time() - start_t < timeout:
-            all_done = True
-            bl = client.batchList() if hasattr(client, "batchList") else {}
-            batches_map = {}
-            if isinstance(bl, dict):
-                for b in bl.get("batches", []):
-                    batches_map[b.get("batch_id")] = str(b.get("state", "")).lower()
+        for w in workers:
+            wid = w.get("worker_id")
+            hname = w.get("hostname", "")
+            wstate = str(w.get("state", "")).lower()
+            node_res = {
+                "success": False,
+                "worker_id": wid,
+                "hostname": hname,
+                "hostaddr": w.get("hostaddr"),
+                "batch_id": None,
+                "relaunched": False,
+                "new_worker_id": None,
+                "new_hostaddr": None,
+                "log": "",
+                "error": None,
+            }
 
-            for nr in worker_batches:
-                bid = nr.get("batch_id")
-                if not bid or nr.get("success") or nr.get("error"):
-                    continue
-                state = batches_map.get(bid, "")
-                if state in ("completed", "finished"):
-                    nr["success"] = True
-                elif state in ("failed", "aborted", "cancelled"):
-                    nr["error"] = f"Batch failed with state: {state}"
-                else:
-                    all_done = False
+            if wstate not in ("ready", "") and not force:
+                node_res["error"] = f"Worker {hname} is busy ({wstate}). Skipped in safe mode."
+                worker_batches.append(node_res)
+                continue
 
-            if all_done:
-                break
-            time.sleep(poll_interval)
+            # Isolate target worker (pause others) to avoid Metashape worker-stealing / retry thrashing
+            if hasattr(client, "setWorkerPaused"):
+                for other_w in workers:
+                    other_id = other_w.get("worker_id")
+                    if other_id is not None:
+                        try:
+                            client.setWorkerPaused(other_id, other_id != wid)
+                        except Exception:
+                            pass
 
-        # 5. Read result logs and issue quitWorker for completed workers
+            rel_project = ensure_cluster_maintenance_project(shared_root, worker_slug=f"{hname}_{wid}")
+            _abort_stale_maintenance_batches(client, rel_project)
+
+            try:
+                task = Metashape.Tasks.RunScript()
+                task.code = generate_worker_updater_code(
+                    repo_url=repo_url,
+                    expected_hostname=hname,
+                    shared_cluster_dir=cluster_shared_dir,
+                )
+                net_task = task.toNetworkTask()
+                batch_id = client.createBatch(rel_project, [net_task])
+                node_res["batch_id"] = batch_id
+                if hasattr(client, "setBatchWorkerLimit"):
+                    client.setBatchWorkerLimit(batch_id, 1)
+                client.setBatchPaused(batch_id, False)
+            except Exception as e:
+                node_res["error"] = f"Failed to dispatch batch: {e}"
+                worker_batches.append(node_res)
+                continue
+
+            # Poll this isolated worker's quick signal batch (~1-2s) with infinite-retry abort defense
+            start_t = time.time()
+            while time.time() - start_t < timeout:
+                bl = client.batchList() if hasattr(client, "batchList") else {}
+                batch_entry = None
+                if isinstance(bl, dict):
+                    for b in bl.get("batches", []):
+                        if b.get("batch_id") == batch_id:
+                            batch_entry = b
+                            break
+                if batch_entry:
+                    state = str(batch_entry.get("state", "")).lower()
+                    err_cnt = int(batch_entry.get("error_count", 0) or 0)
+                    is_failed = bool(batch_entry.get("failed") or batch_entry.get("aborted") or err_cnt > 0)
+                    if is_failed or state in ("failed", "aborted", "cancelled"):
+                        if state not in ("completed", "finished", "failed", "aborted", "cancelled") and hasattr(
+                            client, "abortBatch"
+                        ):
+                            try:
+                                client.abortBatch(batch_id)
+                            except Exception:
+                                pass
+                        last_err = batch_entry.get("last_error")
+                        err_detail = (
+                            last_err.get("message")
+                            if isinstance(last_err, dict) and last_err.get("message")
+                            else f"state={state}"
+                        )
+                        node_res["error"] = f"Batch failed ({err_detail})"
+                        break
+                    if state in ("completed", "finished"):
+                        node_res["success"] = True
+                        break
+                time.sleep(poll_interval)
+
+            if not node_res["success"] and not node_res["error"]:
+                if hasattr(client, "abortBatch"):
+                    try:
+                        client.abortBatch(batch_id)
+                    except Exception:
+                        pass
+                node_res["error"] = f"Update batch timed out after {timeout}s"
+
+            worker_batches.append(node_res)
+
+        # Restore worker pause states before parallel daemon restarts
+        if hasattr(client, "setWorkerPaused"):
+            for orig_wid, was_paused in orig_worker_paused.items():
+                try:
+                    client.setWorkerPaused(orig_wid, was_paused)
+                except Exception:
+                    pass
+
+        # 5. Read result logs and issue quitWorker in parallel for all completed workers
         relaunching_nodes = []
         for nr in worker_batches:
             if nr.get("success"):
@@ -830,7 +935,13 @@ def update_all_workers_parallel(
                     break
 
     finally:
-        # Restore any paused batches
+        # Always restore worker pause states and paused batches
+        if hasattr(client, "setWorkerPaused"):
+            for orig_wid, was_paused in orig_worker_paused.items():
+                try:
+                    client.setWorkerPaused(orig_wid, was_paused)
+                except Exception:
+                    pass
         for bid in paused_existing_batches:
             if hasattr(client, "setBatchPaused"):
                 try:

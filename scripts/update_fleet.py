@@ -97,6 +97,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default=90.0,
         help="Maximum timeout in seconds per worker update batch",
     )
+    parser.add_argument(
+        "--no-reexec",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -106,14 +111,17 @@ def main() -> int:
     args = parser.parse_args()
 
     # If Metashape module is not loaded in current Python runtime, re-exec via metashape.exe
-    if Metashape is None:
+    if Metashape is None and not args.no_reexec:
         ms_exe = find_metashape_path()
         if not ms_exe or not os.path.isfile(ms_exe):
             print("[FATAL ERROR] Agisoft Metashape Professional binary not found.", file=sys.stderr)
             return 1
-        cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:]
+        cmd = [ms_exe, "-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:]
         proc = subprocess.run(cmd)
         return proc.returncode
+    if Metashape is None:
+        print("[FATAL ERROR] Metashape Python module is unavailable in this runtime.", file=sys.stderr)
+        return 1
 
     # Resolve host
     host = args.host.strip()

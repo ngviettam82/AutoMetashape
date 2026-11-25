@@ -17,6 +17,8 @@ except ImportError:
     Metashape = None
 
 
+from autometashape.cluster.dual_share import is_subpath
+
 # Alignment & depth quality maps for cluster tasks
 ALIGN_DOWNSCALE_MAP = {
     "highest": 0,
@@ -179,7 +181,7 @@ def build_cluster_gradual_selection_tasks(
     # Pass 4: Multi-ray Multiplicity
     t4 = Metashape.Tasks.CleanTiePoints()
     t4.criterion = Metashape.TiePoints.Criterion.ImageCount
-    t4.threshold = max(2, min_rays)
+    t4.threshold = max(1, min_rays - 1)
     o4 = Metashape.Tasks.OptimizeCameras()
     o4.fit_f = o4.fit_cx = o4.fit_cy = o4.fit_b1 = o4.fit_b2 = True
     o4.fit_k1 = o4.fit_k2 = o4.fit_k3 = o4.fit_k4 = True
@@ -313,19 +315,23 @@ def build_monolithic_runscript_task(
     project_name: str,
     preset: str = "pro",
     align_quality: str = "high",
+    keypoint_limit: int | None = None,
+    keypoint_limit_per_mpx: int | None = None,
+    tiepoint_limit: int | None = None,
     depth_quality: str = "high",
-    depth_filtering: str = "moderate",
+    depth_filtering: str | None = "moderate",
     custom_faces: int | None = 2000000,
     texture_pages: int | None = 16,
     crop_method: str | None = "gps-square",
     texture_format: str = "png",
+    ortho_resolution: float = 0.05,
     align_photos: bool = True,
     build_depth_maps: bool = True,
     build_mesh: bool = True,
     build_texture: bool = True,
     build_dem: bool = False,
     build_orthomosaic: bool = True,
-    build_point_cloud: bool = True,
+    build_point_cloud: bool = False,
     export_obj: bool = True,
     export_glb: bool = False,
     export_fbx: bool = False,
@@ -335,35 +341,56 @@ def build_monolithic_runscript_task(
     export_ortho: bool = True,
     export_point_cloud: bool = False,
     point_cloud_format: str = "laz",
+    export_tie_points: bool = False,
     export_report: bool = False,
     resume: bool = True,
     guided_matching: bool = True,
     local_scratch: bool = True,
     network_path: str = "",
     status_file: str | None = None,
+    surface_type: str | None = None,
+    rolling_shutter: bool | None = None,
+    filter_tiepoints: bool | None = None,
+    build_contours: bool = False,
+    contour_interval: float = 1.0,
+    contours_format: str = "shp",
+    build_tiled_model: bool = False,
+    tiled_model_format: str = "cesium",
+    tile_size: int = 256,
+    classify_ground: bool | None = None,
+    classify_points: bool = False,
+    remove_lighting: bool = False,
+    delighting_color_mode: bool = False,
+    calibrate_colors: bool = False,
+    detect_markers: bool = False,
+    target_type: str = "circular12",
+    marker_tolerance: int = 50,
+    import_reference: str | None = None,
+    smooth_mesh: bool = False,
+    smooth_strength: float = 3.0,
+    decimate_mesh: int | None = None,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
     if crop_method is None:
-        crop_method = "gps-square" if preset == "pro" else "gps-square"
+        crop_method = "gps-square"
 
     # Standard relative entry point on worker local repository
     rel_script = "scripts/metashape_reconstruction.py"
     norm_net = os.path.normpath(network_path.strip()) if network_path and network_path.strip() else ""
-    norm_net_lower = os.path.abspath(norm_net).lower() if norm_net else ""
 
-    if norm_net and os.path.abspath(images_dir).lower().startswith(norm_net_lower):
+    if norm_net and is_subpath(images_dir, norm_net):
         rel_images = os.path.relpath(images_dir, norm_net).replace("\\", "/")
     else:
         rel_images = images_dir.replace("\\", "/")
 
-    if norm_net and os.path.abspath(output_dir).lower().startswith(norm_net_lower):
+    if norm_net and is_subpath(output_dir, norm_net):
         rel_output = os.path.relpath(output_dir, norm_net).replace("\\", "/")
     else:
         rel_output = output_dir.replace("\\", "/")
 
-    if norm_net and os.path.abspath(status_file).lower().startswith(norm_net_lower):
+    if norm_net and is_subpath(status_file, norm_net):
         rel_status = os.path.relpath(status_file, norm_net).replace("\\", "/")
     else:
         rel_status = status_file.replace("\\", "/")
@@ -382,7 +409,7 @@ def build_monolithic_runscript_task(
         "--depth-quality",
         depth_quality,
         "--depth-filtering",
-        depth_filtering,
+        depth_filtering or "moderate",
         "--faces",
         str(custom_faces or 2000000),
         "--texture-pages",
@@ -391,9 +418,25 @@ def build_monolithic_runscript_task(
         crop_method or "none",
         "--texture-format",
         texture_format,
+        "--ortho-resolution",
+        str(ortho_resolution if ortho_resolution is not None else 0.05),
         "--status-file",
         rel_status,
     ]
+    if keypoint_limit is not None:
+        worker_args.extend(["--keypoint-limit", str(keypoint_limit)])
+    if keypoint_limit_per_mpx is not None:
+        worker_args.extend(["--keypoint-limit-per-mpx", str(keypoint_limit_per_mpx)])
+    if tiepoint_limit is not None:
+        worker_args.extend(["--tiepoint-limit", str(tiepoint_limit)])
+    if surface_type:
+        worker_args.extend(["--surface-type", surface_type])
+    if rolling_shutter is True:
+        worker_args.append("--rolling-shutter")
+    elif rolling_shutter is False:
+        worker_args.append("--no-rolling-shutter")
+    if filter_tiepoints is False:
+        worker_args.append("--no-filter-tiepoints")
     if network_path:
         worker_args.extend(["--network-path", network_path])
     if resume:
@@ -414,14 +457,67 @@ def build_monolithic_runscript_task(
         worker_args.append("--no-build-mesh")
     if not build_texture:
         worker_args.append("--no-build-texture")
-    if not build_dem:
+    if build_dem:
+        worker_args.append("--build-dem")
+    else:
         worker_args.append("--no-dem")
-    if not build_orthomosaic:
+    if build_orthomosaic:
+        worker_args.append("--ortho")
+    else:
         worker_args.append("--no-ortho")
-    if not build_point_cloud:
+    if build_point_cloud:
+        worker_args.append("--build-point-cloud")
+    else:
         worker_args.append("--no-point-cloud")
     if not guided_matching:
         worker_args.append("--no-guided-matching")
+
+    if build_contours:
+        worker_args.extend(
+            [
+                "--build-contours",
+                "--contour-interval",
+                str(contour_interval),
+                "--contours-format",
+                contours_format,
+            ]
+        )
+    if build_tiled_model:
+        worker_args.extend(
+            [
+                "--build-tiled-model",
+                "--tiled-model-format",
+                tiled_model_format,
+                "--tile-size",
+                str(tile_size),
+            ]
+        )
+    if classify_ground:
+        worker_args.append("--classify-ground")
+    if classify_points:
+        worker_args.append("--classify-points")
+    if remove_lighting:
+        worker_args.append("--remove-lighting")
+        if delighting_color_mode:
+            worker_args.append("--delighting-color-mode")
+    if calibrate_colors:
+        worker_args.append("--calibrate-colors")
+    if detect_markers:
+        worker_args.extend(
+            [
+                "--detect-markers",
+                "--target-type",
+                target_type,
+                "--marker-tolerance",
+                str(marker_tolerance),
+            ]
+        )
+    if import_reference:
+        worker_args.extend(["--import-reference", import_reference])
+    if smooth_mesh:
+        worker_args.extend(["--smooth-mesh", "--smooth-strength", str(smooth_strength)])
+    if decimate_mesh and decimate_mesh > 0:
+        worker_args.extend(["--decimate-mesh", str(decimate_mesh)])
 
     if export_obj:
         worker_args.append("--export-obj")
@@ -433,6 +529,8 @@ def build_monolithic_runscript_task(
         worker_args.append("--export-ply")
     if export_dxf:
         worker_args.append("--export-dxf")
+    if export_tie_points:
+        worker_args.append("--export-tie-points")
     if export_dem:
         worker_args.append("--export-dem")
     if export_ortho:
@@ -496,8 +594,8 @@ def build_unified_cluster_pipeline_tasks(
     align_quality: str = "high",
     reference_preselection_mode: str = "estimated",
     keypoint_limit: int = 50000,
-    keypoint_limit_per_mpx: int = 15000,
-    tiepoint_limit: int = 25000,
+    keypoint_limit_per_mpx: int = 2000,
+    tiepoint_limit: int = 40000,
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
     adaptive_fitting: bool = True,
@@ -507,7 +605,7 @@ def build_unified_cluster_pipeline_tasks(
     build_depth_maps: bool = True,
     depth_quality: str = "high",
     depth_filtering: str = "moderate",
-    build_point_cloud: bool = True,
+    build_point_cloud: bool = False,
     points_spacing: float = 0.02,
     build_mesh: bool = True,
     surface_type: str = "arbitrary",
@@ -518,7 +616,7 @@ def build_unified_cluster_pipeline_tasks(
     ghosting_filter: bool = True,
     build_dem: bool = False,
     build_orthomosaic: bool = False,
-    ortho_resolution: float = 0.02,
+    ortho_resolution: float = 0.05,
     ortho_cull_faces: bool = True,
     build_tiled_model: bool = False,
     tile_size: int = 256,
@@ -565,8 +663,8 @@ def build_unified_cluster_pipeline_tasks(
         t_match.reference_preselection = True
         t_match.reference_preselection_mode = presel_mode_enum
         t_match.keypoint_limit = keypoint_limit or 50000
-        t_match.keypoint_limit_per_mpx = keypoint_limit_per_mpx or 15000
-        t_match.tiepoint_limit = tiepoint_limit or 25000
+        t_match.keypoint_limit_per_mpx = keypoint_limit_per_mpx or 2000
+        t_match.tiepoint_limit = tiepoint_limit or 40000
         t_match.mask_tiepoints = False
         t_match.filter_stationary_points = filter_stationary_points
         t_match.guided_matching = guided_matching
@@ -686,9 +784,11 @@ def build_unified_cluster_pipeline_tasks(
         )
 
     # Geodesy / Projection Setup for DEM & Ortho
+    from autometashape.core.telemetry import is_projected_crs
+
     proj = Metashape.OrthoProjection()
     target_crs = chunk.crs if chunk else None
-    if chunk and chunk.crs and not getattr(chunk.crs, "projcs", None):
+    if chunk and chunk.crs and not is_projected_crs(chunk.crs):
         gps_cams = [
             c
             for c in chunk.cameras
@@ -732,8 +832,8 @@ def build_unified_cluster_pipeline_tasks(
         t_om.ghosting_filter = ghosting_filter
         t_om.cull_faces = ortho_cull_faces
         t_om.projection = proj
-        if getattr(proj.crs, "projcs", None) and ortho_resolution and ortho_resolution > 0:
-            t_om.resolution = ortho_resolution
+        if ortho_resolution and ortho_resolution > 0:
+            t_om.resolution = float(ortho_resolution)
         tasks.append(t_om)
         stage_info.append(("BuildOrthomosaic", "ortho", "Generating Orthomosaic"))
 
@@ -822,6 +922,8 @@ def build_unified_cluster_pipeline_tasks(
         comp.tiff_big = True
         t_dem.image_compression = comp
         t_dem.save_world = True
+        if target_crs:
+            t_dem.projection = proj
         t_dem.path = get_exp_path(dem_out)
         tasks.append(t_dem)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Elevation Model (DEM)"))
@@ -836,6 +938,10 @@ def build_unified_cluster_pipeline_tasks(
         t_ortho.image_compression = comp
         t_ortho.save_world = True
         t_ortho.save_alpha = True
+        if target_crs:
+            t_ortho.projection = proj
+        if ortho_resolution and ortho_resolution > 0:
+            t_ortho.resolution = float(ortho_resolution)
         t_ortho.path = get_exp_path(ortho_out)
         tasks.append(t_ortho)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Orthomosaic"))
@@ -889,7 +995,13 @@ def safe_create_cluster_batch(
                 fb_state = (
                     fb_info.get("state", "") if isinstance(fb_info, dict) else getattr(fb_info, "state", "")
                 ).lower()
-                if not force_fresh and fb_state in ("inprogress", "running", "submitted", "pending", "queued"):
+                fb_err_cnt = fb_info.get("error_count", 0) if isinstance(fb_info, dict) else 0
+                fb_healthy_active = (
+                    fb_state in ("inprogress", "running", "submitted", "pending", "queued")
+                    and not (isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
+                    and fb_err_cnt == 0
+                )
+                if not force_fresh and fb_healthy_active:
                     print(
                         f"  [Cluster] Attaching to active batch #{fb_id} via findBatch for '{rel_psx}' ({fb_state}).",
                         flush=True,
@@ -914,7 +1026,13 @@ def safe_create_cluster_batch(
             if _norm_cluster_path(b_path) == norm_target:
                 b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
                 b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
-                if not force_fresh and b_state in ("inprogress", "running", "submitted", "pending", "queued"):
+                b_err_cnt = b.get("error_count", 0) if isinstance(b, dict) else 0
+                b_healthy_active = (
+                    b_state in ("inprogress", "running", "submitted", "pending", "queued")
+                    and not (isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
+                    and b_err_cnt == 0
+                )
+                if not force_fresh and b_healthy_active:
                     print(f"  [Cluster] Attaching to active batch #{b_id} for '{rel_psx}' ({b_state}).", flush=True)
                     return b_id, True
                 else:
@@ -1008,12 +1126,25 @@ def evaluate_cluster_batch_info(b_info: dict) -> tuple[str, bool, str]:
 
     if has_failed:
         err_msgs = []
+        seen_msgs = set()
+
+        def _add_msg(msg: str) -> None:
+            cleaned = msg.strip()
+            if cleaned and cleaned not in seen_msgs:
+                seen_msgs.add(cleaned)
+                err_msgs.append(cleaned)
+
         last_err = b_info.get("last_error")
         if isinstance(last_err, dict) and last_err.get("message"):
-            err_msgs.append(str(last_err["message"]))
+            _add_msg(str(last_err["message"]))
+        elif isinstance(last_err, str) and last_err.strip():
+            _add_msg(last_err)
         for t in tasks_info:
             for err in t.get("errors", []):
-                err_msgs.append(str(err))
+                if isinstance(err, dict):
+                    _add_msg(str(err.get("message") or err.get("type") or err))
+                else:
+                    _add_msg(str(err))
         resolved_state = "aborted" if (state == "aborted" or b_info.get("aborted")) else "failed"
         err_str = "; ".join(err_msgs) if err_msgs else f"Batch {resolved_state} on cluster node"
         return resolved_state, False, err_str

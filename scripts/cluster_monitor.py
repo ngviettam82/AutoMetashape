@@ -54,9 +54,20 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--root",
+        "--result-root",
+        "--result-share",
+        dest="root",
         type=str,
         default="",
-        help="Shared cluster network storage path to audit headroom and deliverables",
+        help="Shared cluster Result storage path (SSD #2) to audit headroom and deliverables",
+    )
+    parser.add_argument(
+        "--source-root",
+        "--source-share",
+        dest="source_root",
+        type=str,
+        default="",
+        help="Optional Data Source share (SSD #1) to include in headroom monitoring",
     )
     parser.add_argument(
         "--min-headroom",
@@ -95,14 +106,23 @@ def resolve_server_address(cli_server: str) -> str:
     return "127.0.0.1:5840"
 
 
-def resolve_storage_paths(cli_root: str, batches: List[Dict[str, Any]]) -> List[str]:
+def resolve_storage_paths(
+    cli_root: str,
+    batches: List[Dict[str, Any]],
+    source_root: str = "",
+) -> List[str]:
     """Dynamically discover storage paths and UNC shares to audit."""
     paths: List[str] = []
     if cli_root.strip():
         paths.append(os.path.normpath(cli_root.strip()))
 
+    if source_root.strip():
+        norm_src = os.path.normpath(source_root.strip())
+        if norm_src not in paths:
+            paths.append(norm_src)
+
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
-    if cfg.get("root") and cfg["root"] not in paths:
+    if cfg.get("root") and os.path.normpath(cfg["root"]) not in paths:
         paths.append(os.path.normpath(cfg["root"]))
 
     # Inspect batch paths to extract network shares dynamically
@@ -139,27 +159,48 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
     if not os.path.isdir(result_dir):
         return {"intact": False, "reason": "Directory does not exist"}
 
-    obj_files = glob.glob(os.path.join(result_dir, "*.obj"))
-    obj_sz = (os.path.getsize(obj_files[0]) / (1024 * 1024)) if obj_files else 0.0
+    escaped_dir = glob.escape(result_dir)
+    obj_files = glob.glob(os.path.join(escaped_dir, "*.obj"))
+    obj_bytes = os.path.getsize(obj_files[0]) if obj_files else 0
+    obj_sz = obj_bytes / (1024 * 1024)
 
-    mtl_files = glob.glob(os.path.join(result_dir, "*.mtl"))
-    png_files = sorted(glob.glob(os.path.join(result_dir, "*.png")) + glob.glob(os.path.join(result_dir, "*.tif")))
-    tex_files = [p for p in png_files if proj_name in os.path.basename(p) and "_orthomosaic" not in p]
+    mtl_files = glob.glob(os.path.join(escaped_dir, "*.mtl"))
+    img_candidates = sorted(
+        glob.glob(os.path.join(escaped_dir, "*.png"))
+        + glob.glob(os.path.join(escaped_dir, "*.tif"))
+        + glob.glob(os.path.join(escaped_dir, "*.tiff"))
+        + glob.glob(os.path.join(escaped_dir, "*.jpg"))
+        + glob.glob(os.path.join(escaped_dir, "*.jpeg"))
+    )
+    proj_low = proj_name.lower()
+    tex_files = [
+        p
+        for p in img_candidates
+        if proj_low in os.path.basename(p).lower()
+        and "_orthomosaic" not in os.path.basename(p).lower()
+        and "_dem" not in os.path.basename(p).lower()
+    ]
 
-    ortho_files = glob.glob(os.path.join(result_dir, "*_orthomosaic.tif"))
+    ortho_files = glob.glob(os.path.join(escaped_dir, "*_orthomosaic.tif"))
     if not ortho_files:
-        ortho_files = [p for p in glob.glob(os.path.join(result_dir, "*.tif")) if "_orthomosaic" in p]
-    ortho_sz = (os.path.getsize(ortho_files[0]) / (1024 * 1024)) if ortho_files else 0.0
+        ortho_files = [
+            p for p in glob.glob(os.path.join(escaped_dir, "*.tif")) if "_orthomosaic" in os.path.basename(p).lower()
+        ]
+    ortho_bytes = os.path.getsize(ortho_files[0]) if ortho_files else 0
+    ortho_sz = ortho_bytes / (1024 * 1024)
 
-    prj_files = glob.glob(os.path.join(result_dir, "*.prj"))
-    tfw_files = glob.glob(os.path.join(result_dir, "*.tfw"))
+    prj_files = glob.glob(os.path.join(escaped_dir, "*.prj"))
+    tfw_files = glob.glob(os.path.join(escaped_dir, "*.tfw"))
 
+    # Align minimum non-trivial byte threshold (1,000 bytes) with canonical verification.py so
+    # compact meshes and 25x-lighter 5 cm/px GeoTIFF orthomosaics are never falsely flagged.
     intact = bool(
         obj_files
-        and obj_sz >= 1.0
+        and obj_bytes >= 1000
+        and mtl_files
         and len(tex_files) >= 1
         and ortho_files
-        and ortho_sz >= 1.0
+        and ortho_bytes >= 1000
         and prj_files
         and tfw_files
     )
@@ -174,6 +215,32 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
         "ortho_sz_mb": round(ortho_sz, 1),
         "spatial": bool(prj_files and tfw_files),
     }
+
+
+def _is_oom_error_text(text: str) -> bool:
+    """Return True if an error message or type indicates an out-of-memory / bad_alloc fault."""
+    low = text.lower()
+    return "bad allocation" in low or "bad_alloc" in low or "out of memory" in low or "out-of-memory" in low
+
+
+def format_worker_resource_usage(worker: Dict[str, Any]) -> Tuple[float, float]:
+    """Convert Metashape NetworkClient worker resource_usage fractions to (cpu_pct, ram_gb).
+
+    Metashape Pro 2.x reports ``resource_usage.cpu_usage`` and ``resource_usage.memory_usage``
+    as normalized 0.0–1.0 ratios relative to total CPU and ``worker.memory_size`` (bytes).
+    Falls back gracefully if values are already expressed in percentage / GB.
+    """
+    res = worker.get("resource_usage", {}) or {}
+    raw_cpu = float(res.get("cpu_usage", 0.0) or 0.0)
+    cpu_pct = raw_cpu * 100.0 if 0.0 <= raw_cpu <= 1.0 else raw_cpu
+
+    raw_mem = float(res.get("memory_usage", 0.0) or 0.0)
+    mem_size_bytes = float(worker.get("memory_size", 0.0) or 0.0)
+    if mem_size_bytes > 0.0 and 0.0 <= raw_mem <= 1.0:
+        ram_gb = raw_mem * (mem_size_bytes / (1024.0**3))
+    else:
+        ram_gb = raw_mem
+    return cpu_pct, ram_gb
 
 
 def audit_memory_allocation_faults(
@@ -203,7 +270,7 @@ def audit_memory_allocation_faults(
 
         last_err_msg = str(last_err.get("message", ""))
         last_err_type = str(last_err.get("type", ""))
-        if "bad allocation" in last_err_msg.lower() or "out-of-memory" in last_err_type.lower():
+        if _is_oom_error_text(last_err_msg) or _is_oom_error_text(last_err_type):
             is_oom = True
             reasons.append(f"Last error: '{last_err_msg}' ({last_err_type})")
 
@@ -212,7 +279,7 @@ def audit_memory_allocation_faults(
         for terr in task.get("errors", []):
             tmsg = str(terr.get("message", ""))
             ttype = str(terr.get("type", ""))
-            if "bad allocation" in tmsg.lower() or "out-of-memory" in ttype.lower():
+            if _is_oom_error_text(tmsg) or _is_oom_error_text(ttype):
                 is_oom = True
                 entry_str = f"Task error: '{tmsg}'"
                 if entry_str not in reasons:
@@ -226,8 +293,8 @@ def audit_memory_allocation_faults(
                 try:
                     with open(sidecar_path, "r", encoding="utf-8") as sf:
                         sdata = json.load(sf)
-                    serr = str(sdata.get("error", "")).lower()
-                    if "bad allocation" in serr or "bad_alloc" in serr or "out of memory" in serr:
+                    serr = str(sdata.get("error", ""))
+                    if _is_oom_error_text(serr):
                         is_oom = True
                         entry_str = f"Sidecar error: {sdata.get('error')}"
                         if entry_str not in reasons:
@@ -259,6 +326,7 @@ def execute_audit(
     shared_root: str = "",
     min_headroom: float = 50.0,
     json_output: bool = False,
+    source_root: str = "",
 ) -> Dict[str, Any]:
     """Execute complete read-only cluster monitoring audit."""
     if Metashape is None:
@@ -280,14 +348,20 @@ def execute_audit(
     batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
 
     # 3. Headroom Audit
-    storage_paths = resolve_storage_paths(shared_root, batches)
+    storage_paths = resolve_storage_paths(shared_root, batches, source_root=source_root)
     headroom = audit_headroom(storage_paths)
-    headroom_ok = all(free_gb >= min_headroom for free_gb in headroom.values())
+    # Only enforce writable headroom threshold on Result/non-read-only roots; if source_root is explicitly
+    # separate and read-only, we still report its free space without failing writable Result headroom.
+    norm_source = os.path.normpath(source_root.strip()).lower() if source_root.strip() else ""
+    checked_headroom = {
+        p: gb for p, gb in headroom.items() if not norm_source or os.path.normpath(p).lower() != norm_source
+    }
+    headroom_ok = all(free_gb >= min_headroom for free_gb in (checked_headroom or headroom).values())
 
     # Filter active workers
     active_workers = [w for w in workers if str(w.get("state", "")).lower() != "offline"]
 
-    # 4. Memory Allocation Faults Audit (std::bad_alloc / OOM Defense)
+    # 4. Memory Allocation Faults Audit (passive post-mortem std::bad_alloc / OOM reporting)
     allocation_faults = audit_memory_allocation_faults(batches, storage_paths)
     oom_batch_ids = {f["batch_id"] for f in allocation_faults}
 
@@ -295,6 +369,11 @@ def execute_audit(
     running_batches = [b for b in batches if str(b.get("state", "")).lower() in ("inprogress", "running")]
     pending_batches = [b for b in batches if str(b.get("state", "")).lower() in ("pending", "submitted", "queued")]
     completed_batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done")]
+    errored_batches = [
+        b
+        for b in batches
+        if b.get("failed") or int(b.get("error_count", 0) or 0) > 0 or str(b.get("state", "")).lower() == "failed"
+    ]
 
     # 5. Deliverable Verification of Completed Batches
     deliverable_results: Dict[int, Dict[str, Any]] = {}
@@ -316,9 +395,26 @@ def execute_audit(
                 res["oom_fault"] = True
             deliverable_results[bid] = res
 
+    incomplete_deliverables = [bid for bid, d in deliverable_results.items() if not d.get("intact")]
+    issues: List[str] = []
+    if not headroom_ok:
+        issues.append(f"Result storage headroom below {min_headroom:.1f} GB")
+    if not active_workers:
+        issues.append("No active workers online")
+    if allocation_faults:
+        issues.append(f"{len(allocation_faults)} batch(es) reported OOM/bad_alloc")
+    if errored_batches:
+        issues.append(f"{len(errored_batches)} batch(es) recorded execution errors")
+    if incomplete_deliverables:
+        issues.append(f"{len(incomplete_deliverables)} completed batch(es) failed deliverable verification")
+
+    healthy = len(issues) == 0
+
     audit_data: Dict[str, Any] = {
         "timestamp": time.time(),
         "server": resolved_server,
+        "healthy": healthy,
+        "issues": issues,
         "headroom": headroom,
         "headroom_ok": headroom_ok,
         "min_headroom_gb": min_headroom,
@@ -328,6 +424,7 @@ def execute_audit(
         "running_count": len(running_batches),
         "pending_count": len(pending_batches),
         "completed_count": len(completed_batches),
+        "errored_count": len(errored_batches),
         "running_batches": running_batches,
         "deliverables": deliverable_results,
         "allocation_faults": allocation_faults,
@@ -347,29 +444,26 @@ def execute_audit(
     headroom_strs = [f"{p}: {gb:.2f} GB free" for p, gb in headroom.items()]
     print(f"[Headroom ({'PASS' if headroom_ok else 'WARN'})] {' | '.join(headroom_strs)}")
 
-    # Workers
+    # Workers (passive CPU % & RAM GB telemetry — no artificial RAM guard)
     print(f"\n[Fleet Health] {len(active_workers)} active workers online:")
     for w in active_workers:
         wid = w.get("worker_id", "?")
         hname = w.get("hostname", "unknown")
         state = w.get("state", "unknown")
         bid = w.get("batch_id", "none")
-        res = w.get("resource_usage", {})
-        cpu = res.get("cpu_usage", 0.0)
-        ram_gb = res.get("memory_usage", 0.0)
-        ram_warn = " [HIGH RAM WARNING: >=55 GB]" if ram_gb >= 55.0 else ""
+        cpu_pct, ram_gb = format_worker_resource_usage(w)
         print(
-            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu:>5.1f}% | RAM: {ram_gb:>5.1f} GB{ram_warn}"
+            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu_pct:>5.1f}% | RAM: {ram_gb:>5.1f} GB"
         )
 
     # Queue Status
     print(
-        f"\n[Queue Status] Total: {len(batches)} | Running: {len(running_batches)} | Pending: {len(pending_batches)} | Completed: {len(completed_batches)}"
+        f"\n[Queue Status] Total: {len(batches)} | Running: {len(running_batches)} | Pending: {len(pending_batches)} | Completed: {len(completed_batches)} | Errored: {len(errored_batches)}"
     )
 
-    # Memory Allocation Faults Section (std::bad_alloc / OOM)
+    # Memory Allocation Faults Section (passive post-mortem std::bad_alloc / OOM reporting)
     print("\n" + "-" * 80)
-    print("[Memory Allocation Audit (std::bad_alloc / OOM Defense)]")
+    print("[Memory Allocation Audit (std::bad_alloc / OOM Post-Mortem)]")
     print("-" * 80)
     if allocation_faults:
         print(f"  [ALERT: {len(allocation_faults)} BATCH(ES) FAULTED ON std::bad_alloc / OOM]")
@@ -384,7 +478,7 @@ def execute_audit(
                 "    - Corrective Action: Worker physical RAM exhausted. Resubmit with '--no-guided-matching' or reduced keypoints limit."
             )
     else:
-        print("  [PASS: NO BAD_ALLOC DETECTED] All tasks operating within node physical RAM boundaries.")
+        print("  [PASS: NO BAD_ALLOC DETECTED] No out-of-memory faults recorded across cluster batches.")
 
     # Running Projects Detail
     if running_batches:
@@ -431,7 +525,10 @@ def execute_audit(
             )
 
     print("\n" + "=" * 80)
-    print("MONITOR AUDIT COMPLETE - Cluster healthy and operational.")
+    if healthy:
+        print("MONITOR AUDIT COMPLETE [PASS] - Cluster healthy and operational.")
+    else:
+        print(f"MONITOR AUDIT COMPLETE [WARN] - Attention required: {'; '.join(issues)}")
     print("=" * 80)
     return audit_data
 
@@ -457,6 +554,7 @@ def main() -> int:
             shared_root=args.root,
             min_headroom=args.min_headroom,
             json_output=args.json,
+            source_root=args.source_root,
         )
         return 0
     except Exception as e:
