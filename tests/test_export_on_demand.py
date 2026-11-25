@@ -108,6 +108,68 @@ class TestExportOnDemand(unittest.TestCase):
         self.assertTrue(mock_chunk.buildOrthomosaic.called)
         self.assertTrue(mock_chunk.exportRaster.called)
 
+    def test_export_contours_builds_dem_on_demand_with_metric_utm_projection(self) -> None:
+        """Defend that on-demand DEM generation for contours applies projected metric UTM CRS."""
+        from types import SimpleNamespace
+
+        class _WktCRS:
+            def __init__(self, wkt: str) -> None:
+                self.wkt = wkt
+
+        mock_doc = MagicMock()
+        mock_chunk = MagicMock()
+        mock_chunk.model = None
+        mock_chunk.point_cloud = None
+        mock_chunk.depth_maps = {"cam1": b"d"}
+        mock_chunk.elevation = None
+        mock_chunk.crs = _WktCRS('GEOGCS["WGS 84"]')
+        mock_chunk.cameras = [
+            SimpleNamespace(
+                reference=SimpleNamespace(location=SimpleNamespace(x=106.7, y=10.8, z=80.0)),
+                transform=object(),
+                enabled=True,
+            )
+        ]
+        mock_doc.chunk = mock_chunk
+
+        captured_dem_kwargs = {}
+
+        def mock_build_dem(*args, **kwargs):
+            captured_dem_kwargs.update(kwargs)
+            mock_chunk.elevation = MagicMock()
+
+        mock_chunk.buildDem.side_effect = mock_build_dem
+
+        with patch.object(metashape_export, "Metashape", create=True) as mock_meta:
+            mock_meta.Document.return_value = mock_doc
+            mock_meta.app.enumGPUDevices.return_value = []
+            mock_meta.DataSource.ElevationData = 1
+            mock_meta.DataSource.DepthMapsData = 2
+            mock_meta.DataSource.ModelData = 3
+            mock_meta.DataSource.PointCloudData = 4
+            mock_meta.ShapesFormat.ShapesFormatSHP = 1
+            mock_meta.OrthoProjection.side_effect = lambda: SimpleNamespace(crs=None)
+            mock_meta.CoordinateSystem.side_effect = lambda code: _WktCRS(f'PROJCS["{code}"]')
+
+            with (
+                patch("os.path.exists", return_value=True),
+                patch("os.path.getsize", return_value=1024),
+                patch("os.makedirs"),
+            ):
+                metashape_export.export_project_assets(
+                    project_path="dummy.psx",
+                    output_dir="dummy_out",
+                    export_glb=False,
+                    export_obj=False,
+                    export_contours=True,
+                )
+
+        self.assertTrue(mock_chunk.buildDem.called)
+        self.assertIn("projection", captured_dem_kwargs)
+        self.assertIn("EPSG::32648", captured_dem_kwargs["projection"].crs.wkt)
+        self.assertTrue(mock_chunk.buildContours.called)
+        self.assertTrue(mock_chunk.exportShapes.called)
+
 
 if __name__ == "__main__":
     unittest.main()

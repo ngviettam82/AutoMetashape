@@ -22,7 +22,7 @@ try:
 except ImportError:
     Metashape = None
 
-from autometashape.cluster.dual_share import resolve_result_network_root
+from autometashape.cluster.dual_share import is_subpath, resolve_result_network_root
 from autometashape.cluster.hardware import extract_unc_root
 from autometashape.cluster.orchestrator import (
     ALIGN_DOWNSCALE_MAP,
@@ -69,6 +69,54 @@ from autometashape.ipc.protocol import (
     emit_ipc_stage,
     set_active_status_file,
 )
+
+
+def _get_model_texture_page_count(model: Any) -> int:
+    """Return the baked UV texture atlas page count for a Metashape model.
+
+    In Metashape 2.x, ``model.textures`` holds one ``Model.Texture`` entry per texture
+    type (e.g. a single ``DiffuseMap`` object) rather than one entry per UV page; the
+    actual page count is recorded in ``model.meta["BuildUV/page_count"]``.
+    """
+    if model is None:
+        return 0
+
+    textures = getattr(model, "textures", None)
+    has_texture = bool(textures)
+    if not has_texture:
+        tex_fn = getattr(model, "texture", None)
+        if callable(tex_fn) and tex_fn():
+            has_texture = True
+    if not has_texture:
+        return 0
+
+    meta = getattr(model, "meta", None)
+    if meta is not None:
+        raw_pages = None
+        try:
+            if hasattr(meta, "get"):
+                raw_pages = meta.get("BuildUV/page_count")
+            elif "BuildUV/page_count" in meta:
+                raw_pages = meta["BuildUV/page_count"]
+        except Exception:
+            try:
+                raw_pages = meta["BuildUV/page_count"]
+            except Exception:
+                raw_pages = None
+        if raw_pages is not None:
+            try:
+                parsed = int(str(raw_pages).strip())
+                if parsed > 0:
+                    return parsed
+            except (ValueError, TypeError):
+                pass
+
+    if textures:
+        try:
+            return len(textures)
+        except TypeError:
+            return 1
+    return 1
 
 
 def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
@@ -643,8 +691,11 @@ def run_reconstruction(
                             pass
             sync_ok = sync_staged_project_to_network(local_staging_dir, target_network_output)
             if sync_ok:
-                if status_file and local_staging_dir in status_file:
-                    set_active_status_file(status_file.replace(local_staging_dir, target_network_output))
+                if status_file and is_subpath(status_file, local_staging_dir):
+                    rel_status = os.path.relpath(status_file, local_staging_dir)
+                    set_active_status_file(os.path.join(target_network_output, rel_status))
+                elif status_file:
+                    set_active_status_file(status_file)
                 else:
                     set_active_status_file(None)
                 print(
@@ -2509,12 +2560,7 @@ def run_reconstruction(
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
     if not build_texture:
         print("\n[INFO] Texture Atlas generation skipped by workflow selection.", flush=True)
-    current_pages = 0
-    if chunk.model:
-        if hasattr(chunk.model, "textures") and chunk.model.textures:
-            current_pages = len(chunk.model.textures)
-        elif hasattr(chunk.model, "texture") and chunk.model.texture():
-            current_pages = 1
+    current_pages = _get_model_texture_page_count(chunk.model)
 
     if not build_texture or chunk.model is None:
         pass

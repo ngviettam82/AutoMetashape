@@ -230,6 +230,57 @@ class TestDualShareTopology(unittest.TestCase):
         self.assertEqual(wrk_args.root, r"\\SRV\SSD2_Results")
         self.assertEqual(wrk_args.source_root, r"\\SRV\SSD1_Photos")
 
+    def test_submit_cluster_batch_dual_share_forwards_explicit_root_to_validation(self) -> None:
+        """Verify submit_cluster_batch.main forwards --root to validate_dual_share_topology and discovery."""
+        from scripts import submit_cluster_batch as sub_mod
+
+        with tempfile.TemporaryDirectory() as src_root, tempfile.TemporaryDirectory() as res_root:
+            sub_res = os.path.join(res_root, "BatchOut")
+            os.makedirs(sub_res, exist_ok=True)
+            fake_proj = MagicMock(
+                images_dir=os.path.join(src_root, "SiteA"),
+                output_dir=os.path.join(sub_res, "SiteA"),
+                project_name="SiteA",
+            )
+            fake_topo = {
+                "valid": True,
+                "errors": [],
+                "warnings": [],
+                "result_network_root": res_root,
+            }
+            argv = [
+                "submit_cluster_batch.py",
+                "--source-share",
+                src_root,
+                "--result-share",
+                sub_res,
+                "--root",
+                res_root,
+                "--no-reexec",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(sub_mod, "Metashape", object()),
+                patch.object(sub_mod, "validate_dual_share_topology", return_value=fake_topo) as mock_val,
+                patch.object(sub_mod, "discover_dual_share_projects", return_value=[fake_proj]) as mock_disc,
+                patch.object(sub_mod, "submit_batch", return_value=101) as mock_sub,
+            ):
+                rc = sub_mod.main()
+
+            self.assertEqual(rc, 0)
+            mock_val.assert_called_once_with(
+                src_root,
+                sub_res,
+                result_network_root=res_root,
+                min_headroom_gb=50.0,
+            )
+            mock_disc.assert_called_once_with(
+                src_root,
+                sub_res,
+                result_network_root=os.path.normpath(os.path.abspath(res_root)),
+            )
+            mock_sub.assert_called_once()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -626,7 +626,11 @@ def export_project_assets(
                     src_data = Metashape.DataSource.DepthMapsData
                 elif getattr(chunk, "model", None) is not None:
                     src_data = Metashape.DataSource.ModelData
-                chunk.buildDem(source_data=src_data)
+                dem_kwargs = {"source_data": src_data}
+                proj_dem = _build_metric_ortho_projection(chunk)
+                if proj_dem is not None:
+                    dem_kwargs["projection"] = proj_dem
+                chunk.buildDem(**dem_kwargs)
                 doc.save()
                 has_dem = getattr(chunk, "elevation", None) is not None
             except Exception as e_dem_cnt:

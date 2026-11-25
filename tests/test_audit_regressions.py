@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import io
+import json
 import os
 import sys
 import tempfile
@@ -632,6 +633,188 @@ class TestAuditRegressions(unittest.TestCase):
         self.assertIn("/MIR /XD .git .agents", content)
         self.assertIn(r".agents\skills.json", content)
         self.assertIn(r".agents\skills", content)
+
+    def test_resume_reuses_metashape_2x_16page_texture_without_rebake(self) -> None:
+        """Verify Metashape 2.2.2 models (len(textures)==1, meta BuildUV/page_count=='16') skip re-bake on resume."""
+        # Unit checks on helper
+        ms2_model = SimpleNamespace(
+            textures=[SimpleNamespace(type="DiffuseMap")],
+            meta={"BuildUV/page_count": "16", "BuildUV/texture_size": "8192"},
+        )
+        self.assertEqual(pipeline_mod._get_model_texture_page_count(ms2_model), 16)
+
+        # UV metadata present without baked textures must still report 0 pages
+        uv_only_model = SimpleNamespace(textures=[], meta={"BuildUV/page_count": "16"})
+        self.assertEqual(pipeline_mod._get_model_texture_page_count(uv_only_model), 0)
+
+        # Legacy model without meta falls back to len(textures)
+        legacy_model = SimpleNamespace(textures=[object(), object()])
+        self.assertEqual(pipeline_mod._get_model_texture_page_count(legacy_model), 2)
+        self.assertEqual(pipeline_mod._get_model_texture_page_count(None), 0)
+
+        # End-to-end resume run must NOT call buildUV / buildTexture when 16-page atlas already exists
+        with tempfile.TemporaryDirectory() as tmp_root:
+            img_dir = os.path.join(tmp_root, "photos")
+            out_dir = os.path.join(tmp_root, "result")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+            with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+            psx_path = os.path.join(out_dir, "SiteTex.psx")
+            with open(psx_path, "w", encoding="utf-8") as f:
+                f.write("<document/>")
+
+            fake_chunk = MagicMock()
+            fake_chunk.cameras = [MagicMock(transform=object(), enabled=True)]
+            fake_chunk.depth_maps = {"cam1": b"d1"}
+            fake_chunk.model = SimpleNamespace(
+                vertices=[1, 2, 3],
+                faces=[1, 2],
+                textures=[SimpleNamespace(type="DiffuseMap")],
+                meta={"BuildUV/page_count": "16"},
+            )
+            fake_chunk.orthomosaic = SimpleNamespace(width=100, height=100)
+            fake_chunk.elevation = None
+            fake_chunk.point_cloud = None
+
+            fake_doc = MagicMock()
+            fake_doc.chunk = fake_chunk
+            fake_doc.chunks = [fake_chunk]
+
+            fake_ms = SimpleNamespace(
+                Document=lambda: fake_doc,
+                app=SimpleNamespace(enumGPUDevices=lambda: []),
+                ReferencePreselectionMode=SimpleNamespace(
+                    ReferencePreselectionEstimated=1,
+                    ReferencePreselectionSource=2,
+                    ReferencePreselectionSequential=3,
+                ),
+                FilterMode=SimpleNamespace(ModerateFiltering=2),
+                MappingMode=SimpleNamespace(GenericMapping=1),
+                BlendingMode=SimpleNamespace(MosaicBlending=1),
+            )
+
+            with patch.object(pipeline_mod, "Metashape", fake_ms):
+                pipeline_mod.run_reconstruction(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    project_name="SiteTex",
+                    preset="pro",
+                    resume=True,
+                    local_scratch_staging=False,
+                    align_photos=False,
+                    build_depth_maps=False,
+                    build_mesh=True,
+                    build_texture=True,
+                    texture_pages=16,
+                    rebake_texture=False,
+                    build_orthomosaic=False,
+                    build_dem=False,
+                    build_point_cloud=False,
+                    export_obj=False,
+                    export_glb=False,
+                    export_ortho=False,
+                )
+
+            fake_chunk.buildUV.assert_not_called()
+            fake_chunk.buildTexture.assert_not_called()
+
+            # Explicit page count mismatch (4 vs 16) MUST still trigger re-bake
+            with patch.object(pipeline_mod, "Metashape", fake_ms):
+                pipeline_mod.run_reconstruction(
+                    images_dir=img_dir,
+                    output_dir=out_dir,
+                    project_name="SiteTex",
+                    preset="pro",
+                    resume=True,
+                    local_scratch_staging=False,
+                    align_photos=False,
+                    build_depth_maps=False,
+                    build_mesh=True,
+                    build_texture=True,
+                    texture_pages=4,
+                    rebake_texture=False,
+                    build_orthomosaic=False,
+                    build_dem=False,
+                    build_point_cloud=False,
+                    export_obj=False,
+                    export_glb=False,
+                    export_ortho=False,
+                )
+
+            fake_chunk.buildUV.assert_called_once()
+            fake_chunk.buildTexture.assert_called_once()
+
+    def test_local_scratch_cluster_status_file_writes_completed_after_sync(self) -> None:
+        """Verify external shared --status-file and default staged status file both reach 'completed' after sync."""
+        for use_external_status in (True, False):
+            with tempfile.TemporaryDirectory() as tmp_root:
+                img_dir = os.path.join(tmp_root, "photos")
+                net_out = os.path.join(tmp_root, "shared_result")
+                scratch_dir = os.path.join(tmp_root, "nvme_scratch")
+                for d in (img_dir, net_out, scratch_dir):
+                    os.makedirs(d, exist_ok=True)
+                with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                    f.write(b"\xff\xd8\xff\xd9")
+
+                shared_status = os.path.join(net_out, "_autometashape_status.json")
+                fake_chunk = MagicMock()
+                fake_chunk.cameras = [MagicMock(transform=object(), enabled=True)]
+                fake_chunk.model = None
+                fake_chunk.orthomosaic = None
+                fake_chunk.elevation = None
+                fake_chunk.point_cloud = None
+
+                fake_doc = MagicMock()
+                fake_doc.chunk = fake_chunk
+                fake_doc.chunks = [fake_chunk]
+                fake_ms = SimpleNamespace(
+                    Document=lambda: fake_doc,
+                    app=SimpleNamespace(enumGPUDevices=lambda: []),
+                    ReferencePreselectionMode=SimpleNamespace(
+                        ReferencePreselectionEstimated=1,
+                        ReferencePreselectionSource=2,
+                        ReferencePreselectionSequential=3,
+                    ),
+                    FilterMode=SimpleNamespace(ModerateFiltering=2),
+                )
+
+                with (
+                    patch.object(pipeline_mod, "Metashape", fake_ms),
+                    patch.object(pipeline_mod, "check_scratch_disk_headroom", return_value=(True, 250.0)),
+                ):
+                    pipeline_mod.run_reconstruction(
+                        images_dir=img_dir,
+                        output_dir=net_out,
+                        project_name="SiteStatus",
+                        preset="pro",
+                        resume=False,
+                        local_scratch_staging=True,
+                        scratch_dir=scratch_dir,
+                        status_file=shared_status if use_external_status else None,
+                        align_photos=False,
+                        build_depth_maps=False,
+                        build_mesh=False,
+                        build_texture=False,
+                        build_orthomosaic=False,
+                        build_dem=False,
+                        build_point_cloud=False,
+                        export_obj=False,
+                        export_glb=False,
+                        export_ortho=False,
+                    )
+
+                self.assertTrue(
+                    os.path.isfile(shared_status),
+                    msg=f"Status file missing on shared output (use_external_status={use_external_status})",
+                )
+                with open(shared_status, "r", encoding="utf-8") as sf:
+                    status_data = json.load(sf)
+                self.assertEqual(status_data["status"], "completed")
+                self.assertEqual(status_data["stage_key"], "complete")
+                self.assertAlmostEqual(status_data["progress"], 100.0)
+                # Local staging directory must stay deleted (never recreated by IPC_COMPLETE)
+                self.assertFalse(os.path.exists(os.path.join(scratch_dir, "SiteStatus_local_stage")))
 
 
 if __name__ == "__main__":

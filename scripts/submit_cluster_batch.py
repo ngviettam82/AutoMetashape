@@ -422,7 +422,12 @@ def main() -> int:
     try:
         if args.source_share:
             result_share = args.result_share or args.output
-            topo = validate_dual_share_topology(args.source_share, result_share, min_headroom_gb=50.0)
+            topo = validate_dual_share_topology(
+                args.source_share,
+                result_share,
+                result_network_root=args.root,
+                min_headroom_gb=50.0,
+            )
             if not topo["valid"]:
                 for err in topo["errors"]:
                     print(f"[FATAL ERROR] {err}", file=sys.stderr, flush=True)
@@ -431,7 +436,11 @@ def main() -> int:
                 print(f"[WARNING] {warn}", flush=True)
 
             resolved_root = resolve_result_network_root(result_share, explicit_root=args.root)
-            projects = discover_dual_share_projects(args.source_share, result_share)
+            projects = discover_dual_share_projects(
+                args.source_share,
+                result_share,
+                result_network_root=resolved_root,
+            )
             if not projects:
                 print(
                     f"[FATAL ERROR] No image datasets discovered under source share: {args.source_share}",
