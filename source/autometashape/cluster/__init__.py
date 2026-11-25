@@ -24,6 +24,16 @@ from autometashape.cluster.config import (
     load_cluster_config,
     save_cluster_config,
 )
+from autometashape.cluster.dual_share import (
+    discover_dual_share_projects,
+    is_subpath,
+    is_unc_path,
+    map_source_to_result_dir,
+    normalize_share_path,
+    resolve_result_network_root,
+    run_dual_share_cluster_pipeline,
+    validate_dual_share_topology,
+)
 from autometashape.cluster.hardware import (
     detect_gpu_devices,
     extract_unc_root,
@@ -121,6 +131,7 @@ __all__ = [
     "check_storage_headroom",
     "detect_gpu_devices",
     "discover_dataset_projects",
+    "discover_dual_share_projects",
     "ensure_cluster_maintenance_project",
     "evaluate_cluster_batch_info",
     "extract_unc_root",
@@ -136,9 +147,15 @@ __all__ = [
     "get_primary_lan_ip",
     "get_psx_files_dir",
     "is_integrated_gpu",
+    "is_subpath",
+    "is_unc_path",
     "list_online_workers",
     "load_cluster_config",
+    "map_source_to_result_dir",
+    "normalize_share_path",
     "normalize_unicode_path",
+    "resolve_result_network_root",
+    "run_dual_share_cluster_pipeline",
     "safe_create_cluster_batch",
     "save_cluster_config",
     "sync_staged_project_to_network",
@@ -151,4 +168,5 @@ __all__ = [
     "mirror_directory_with_prune",
     "perform_worker_codebase_update",
     "stage_cluster_update_payload",
+    "validate_dual_share_topology",
 ]

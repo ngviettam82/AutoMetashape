@@ -17,6 +17,13 @@ _SOURCE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "sou
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
+from autometashape.cluster.dual_share import (
+    discover_dual_share_projects,
+    is_subpath,
+    map_source_to_result_dir,
+    run_dual_share_cluster_pipeline,
+    validate_dual_share_topology,
+)
 from autometashape.cluster.supervisor import (
     ClusterSupervisor,
     QueueJob,
@@ -25,6 +32,20 @@ from autometashape.cluster.supervisor import (
     discover_dataset_projects,
     main,
 )
+
+__all__ = [
+    "ClusterSupervisor",
+    "QueueJob",
+    "build_arg_parser",
+    "check_storage_headroom",
+    "discover_dataset_projects",
+    "discover_dual_share_projects",
+    "is_subpath",
+    "main",
+    "map_source_to_result_dir",
+    "run_dual_share_cluster_pipeline",
+    "validate_dual_share_topology",
+]
 
 if __name__ == "__main__":
     sys.exit(main())
