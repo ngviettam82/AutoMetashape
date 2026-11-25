@@ -73,5 +73,22 @@ Dispatch a new photogrammetry project to the cluster server using `scripts/submi
 
 **Pass/fail criteria:**
 - Script exits with code 0.
-- Physical `.psx` project archive exists on disk and is non-empty before batch creation.
-- Server returns a valid `batch_id > 0`.
+- Physical `.psx` project archive exists on disk and is non-empty before batch creation (locks released via `doc.clear()`).
+- Server returns a valid `batch_id > 0` via idempotent `safe_create_cluster_batch()`.
+
+---
+
+### Scenario 5: Dual Shared Folder (Multi-SSD) Dispatch & 5 cm/px Orthomosaic Gate
+**Query:**
+Dispatch a multi-project batch reading raw survey photos from read-only SSD #1 (`\\CLUSTER_SHARE\DataSSD`) and writing `.psx` archives and 5 cm/px orthomosaics to writable SSD #2 (`\\CLUSTER_SHARE\ResultSSD`) using the `pro` preset.
+
+**Expected behavior:**
+1. Validates `DataSSD` read-only and verifies `ResultSSD` writability + headroom (`>= 50 GB`), anchoring Metashape `--root` strictly to `ResultSSD`.
+2. Discovers all project subfolders under `DataSSD` and maps mirrored output folders under `ResultSSD`.
+3. Dispatches monolithic worker batches with `pro` defaults (`tiepoint_limit=40000`, `keypoint_limit_per_mpx=2000`, `build_point_cloud=False`, `ortho_resolution=0.05`).
+4. Leaves `DataSSD` 100% unmodified and verifies `["obj", "ortho"]` deliverables on `ResultSSD` with exact `0.05 m/px` pixel scale.
+
+**Pass/fail criteria:**
+- `validate_dual_share_topology` returns `valid == True` with `result_network_root` rooted on `ResultSSD`.
+- Zero files written into `DataSSD`.
+- Exported orthomosaic `.tfw` reports `0.05 m/px` and dense point cloud count is `0`.

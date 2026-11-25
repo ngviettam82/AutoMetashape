@@ -117,14 +117,14 @@ Each project executes using the standardized **Production Geomatics (`pro`)** pr
 - True Orthomosaic built and exported at **5 cm/px (`0.05 m/px`)** by default (customizable via `--ortho-resolution`), plus optional DEM (`--build-dem`).
 
 ### Phase 4: Automated Deliverable Integrity Gate
-Upon pipeline completion, the coordinator verifies generated deliverables before marking success:
+Upon pipeline completion, the coordinator verifies generated deliverables before marking success (default `pro` assets: `obj` and `ortho`; include `dem`, `point_cloud`, or `report` when explicitly enabled):
 ```powershell
-python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\Deliverables\CATP_0167" --expect obj dem ortho point_cloud report
+python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\CATP_0167" --expect obj ortho
 ```
 - **OBJ & MTL**: Non-zero bytes, valid vertex/face polygons, and valid texture links.
-- **GeoTIFF**: Valid TIFF/BigTIFF headers and CRS spatial tags.
-- **Point Cloud**: LAZ/LAS/PLY size matches expected point density.
-- **PDF Report**: Calibration report exists and exceeds $15\text{ KB}$.
+- **GeoTIFF**: Valid TIFF/BigTIFF headers and CRS spatial tags (5 cm/px default metric orthomosaic).
+- **Point Cloud (Opt-In)**: LAZ/LAS/PLY size matches expected point density when `--build-point-cloud --export-point-cloud` is enabled.
+- **PDF Report (Opt-In)**: Calibration report exists and exceeds $15\text{ KB}$ when `--export-report` is enabled.
 
 ### Phase 5: Scratch Purge & Executive Geomatics Summary
 - Upon successful verification, the local NVMe staging folder `{project}_local_stage` is purged cleanly.
@@ -136,13 +136,13 @@ python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\Deliverables\CATP_0
 ========================================================================================
   Datasets Processed  : 3 / 3 Completed & Verified
   Total Duration      : 3.42 hours
-  Storage Headroom    : 342.5 GB free on \\CLUSTER_SHARE\Storage
+  Storage Headroom    : 342.5 GB free on \\CLUSTER_SHARE\ResultSSD
 
   PROJECT            PHOTOS   VERTICES / FACES     ORTHO RES    STATUS   DELIVERABLES
   --------------------------------------------------------------------------------------
-  CATP_0167           1,420   1.02M / 2.00M        1.2 cm/px    PASS     OBJ, DEM, Ortho, PDF
-  CATP_0204           2,150   1.04M / 2.00M        1.0 cm/px    PASS     OBJ, DEM, Ortho, PDF
-  CATP_0205             890   0.98M / 1.95M        1.5 cm/px    PASS     OBJ, DEM, Ortho, PDF
+  CATP_0167           1,420   1.02M / 2.00M        5.0 cm/px    PASS     OBJ, Ortho
+  CATP_0204           2,150   1.04M / 2.00M        5.0 cm/px    PASS     OBJ, Ortho
+  CATP_0205             890   0.98M / 1.95M        5.0 cm/px    PASS     OBJ, Ortho
 ========================================================================================
 ```
 

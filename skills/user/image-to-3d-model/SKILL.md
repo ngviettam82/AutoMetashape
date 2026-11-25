@@ -42,7 +42,7 @@ Do not use this skill when:
 flowchart TD
     A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Pro Survey Physics & Telemetry Audit<br/>(Optics DB, Pixel Pitch, H_AGL, GSD, Shutter Physics, Relief Ratio R)"]
     B --> C["2. Quality Filtering, Markers & GCPs<br/>(Sharpness Filter < 0.50, detectMarkers, importReference)"]
-    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 40K/60K Keypoints, Guided Matching)"]
+    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 50K Keypoints, 40K Tiepoints, 2K/MPx, Guided Matching)"]
     D --> E["4. USGS 4-Pass Gradual Selection Bundle Adjustment<br/>(Pass 1: RU<=12 -> Pass 2: PA<=2.5 -> Pass 3: RE<=0.35 -> Pass 4: Rays>=3)"]
     E --> F["5. Morphological Surface Meshing<br/>(Planar R<0.08: HeightField | 3D R>=0.08: Arbitrary)"]
     E --> G["6. Dense Point Cloud & Slope-Adaptive Ground Filtering<br/>(buildPointCloud, Adaptive Cell Size & Angle, Semantic AI)"]
@@ -371,10 +371,10 @@ When maintaining or upgrading remote cluster worker nodes from the Host/Coordina
 ### 6. Web Studio Dynamic Telemetry Dashboard
 
 The integrated Web Studio (`web/projects_dashboard.html`) provides real-time survey asset intelligence, optics audits, and KPI tracking without mock data or static placeholders:
-1. **Live Telemetry Generation**: The GUI automatically profiles active queue projects and completed output directories using `analyze_survey_physics()`, writing structured telemetry into `web/projects_data.js`.
+1. **Live Telemetry Generation**: Cluster supervisor and pipeline runs profile active and completed output directories using `analyze_survey_physics()`, writing structured telemetry into `web/projects_data.js`.
 2. **KPI Metrics**: Real-time aggregation of total survey photos, alignment percentage, active/completed project counts, total 3D mesh faces, and 8K texture atlas pages.
 3. **Dynamic GSD Distribution**: Inline SVG bar chart visually rendering Ground Sampling Distance (GSD) compliance ($< 1.5\text{ cm/px}$) across all ingested flight missions.
-4. **Zero-State Handling**: Standalone browser opens display an empty state banner with instructions instead of hardcoded mock records.
+4. **Zero-State Handling**: Standalone browser opens display a clean empty-state banner with CLI instructions (`scripts/cluster_supervisor.py`, `scripts/submit_cluster_batch.py`, `scripts/cluster_monitor.py`) instead of hardcoded mock records.
 
 ### 7. CLI Recipes & Usage
 

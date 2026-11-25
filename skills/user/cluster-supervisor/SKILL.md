@@ -88,10 +88,10 @@ Metashape MVS depth maps and octree leave partitions peak heavily during dense r
    - In accordance with the **Operator Authority Gate**, the supervisor reports the low-disk state so the human operator can decide whether to clear scratch directories, pause batches, or expand network capacity. Automated routines do not silently delete or re-route user assets.
 
 ### 2. Automated Deliverable Quality & Integrity Gate
-Never mark a reconstruction finished simply because `metashape.exe` exited code `0`. Run the deterministic deliverable verification gate:
+Never mark a reconstruction finished simply because `metashape.exe` exited code `0`. Run the deterministic deliverable verification gate (default `pro` expected assets are `["obj", "ortho"]`; add `dem`, `point_cloud`, or `report` when opted in):
 
 ```powershell
-python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\Khảo sát Địa hình Đà Nẵng" --expect obj dem ortho point_cloud report
+python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\Survey_0167" --expect obj ortho
 ```
 
 The verification gate executes 5 structural integrity checks:
@@ -188,10 +188,10 @@ To process a sequence of survey datasets without human intervention:
    ```
 
 3. **Supervision Lifecycle**:
-   - **Pre-flight Headroom Watchdog**: Inspects free storage capacity across target output share before queue dispatch.
-   - **Dispatch**: Submits batches to Metashape scheduler (sequentially for Mode 1 or concurrently with `worker_limit=1` for Mode 2).
-   - **Telemetry Monitoring**: Non-blocking polling loop checks `batchInfo()` and worker sidecar `_autometashape_status.json` every 2.0s.
-   - **Quality Gate**: Upon batch completion, runs structural verification on Wavefront OBJ, textures, GeoTIFFs, point clouds, and PDF reports.
+   - **Pre-flight Headroom Watchdog**: Inspects free storage capacity across the writable Result Share (SSD #2) before queue dispatch (Data Source Share SSD #1 is validated strictly read-only).
+   - **Dispatch**: Auto-unpauses paused online workers, materializes `.psx` stubs with `doc.clear()`, and submits via idempotent `safe_create_cluster_batch()` (rejecting zombie `error_count > 0` batches) with `worker_limit=1` in Mode 2.
+   - **Telemetry & Infinite-Retry Defense**: Non-blocking polling loop checks `batchInfo()` and worker sidecar `_autometashape_status.json` every 2.0s. If Metashape Server 2.2.2 leaves an errored batch in `state="inprogress"` with `error_count > 0`, the supervisor immediately invokes `abortBatch()` to stop infinite worker retries.
+   - **Quality Gate**: Upon batch completion, runs structural verification on default expected assets (`["obj", "ortho"]`, plus `dem`/`point_cloud`/`report` when enabled).
    - **Scratch Purge**: Clears temporary local NVMe staging caches upon verified deliverable pass.
 
 
@@ -246,9 +246,9 @@ When submitting a standalone or queued batch to the cluster, agents and operator
 **Core Invariant**: The supervisor and AI agent operate strictly as **Read-Only Telemetry Reporters**. All operational decisions (aborts, cancellations, priority changes, re-queuing, setting changes) **lie exclusively with the human operator**. AI agents are strictly prohibited from auto-deciding or mutating cluster state without real-time operator authorization.
 
 1. **Strict Read-Only Telemetry Standard**:
-   Execute non-intrusive fleet audits inspecting worker health, batch stage progress, memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$):
+   Execute non-intrusive fleet audits inspecting worker health (scaled CPU % and RAM GB, with **no artificial 55 GB RAM guard**), batch stage progress, passive post-mortem memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$ across Result & Data Source SSD shares):
    ```powershell
-   python scripts/cluster_monitor.py
+   python scripts/cluster_monitor.py --result-share "\\CLUSTER_SHARE\ResultSSD" --source-share "\\CLUSTER_SHARE\DataSSD"
    ```
    - All observations, memory faults, and progress metrics are reported to the human operator in chat.
    - The supervisor does NOT auto-degrade settings, auto-retry, or auto-cancel failed tasks.
@@ -297,7 +297,7 @@ Verify that supervisor components, canonical scripts, and deliverable validators
 
 ```powershell
 # 1. Run unit test suite
-python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py tests/test_cluster_dispatch.py
+python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py tests/test_cluster_dispatch.py tests/test_dual_share.py tests/test_audit_regressions.py
 
 # 2. Run skills validation
 python tools/skills/cli.py check

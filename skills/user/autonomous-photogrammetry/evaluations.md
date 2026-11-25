@@ -13,7 +13,7 @@ The operator points to `D:\Surveys` which contains 3 project subfolders: `Site_A
 2. The coordinator scans `D:\Surveys`, excludes non-project folders, and discovers all 3 project subfolders.
 3. Automatically synthesizes 3 discrete `QueueJob` instances without asking the user for a manual JSON manifest.
 4. Pre-flight checks storage headroom (> 50 GB) before each job.
-5. Processes each project sequentially using the Pro preset (alignment, USGS filtering, MVS, 8K texture, DEM, Ortho).
+5. Processes each project sequentially using the Pro preset (alignment at 50K keypoints / 40K tiepoints / 2K per MPx, USGS filtering, MVS, 8K texture, 5 cm/px metric Ortho; dense point cloud opt-in).
 6. Executes `verify_project_deliverables` on each output directory upon stage completion.
 7. Purges local NVMe scratch between jobs.
 8. Produces a consolidated delivery summary table detailing all 3 projects.

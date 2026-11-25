@@ -62,8 +62,8 @@ Or directly via Metashape Pro:
     --project "<path_to_project>/building_reconstruction.psx"
 ```
 
-### 2. Exporting Point Clouds, Elevation Models, Contours & 3D Tiles
-Export dense point clouds, DEM, vector contours, Cesium 3D Tiles, and executive calibration reports from an existing project:
+### 2. Exporting Point Clouds, Elevation Models, Contours, Orthomosaics & 3D Tiles
+Export dense point clouds, DEM, vector contours, metric 5 cm/px orthomosaics (`--ortho-resolution 0.05` default), Cesium 3D Tiles, and executive calibration reports from an existing project (non-mesh exports work even when `chunk.model` is absent if `--no-export-glb --no-export-obj` are passed):
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
     --project "<path_to_project>/building_reconstruction.psx" \
@@ -72,7 +72,7 @@ Export dense point clouds, DEM, vector contours, Cesium 3D Tiles, and executive 
     --export-contours --contour-interval 1.0 --contours-format shp \
     --export-tiled-model --tiled-model-format cesium \
     --export-fbx --export-ply \
-    --export-orthomosaic \
+    --export-orthomosaic --ortho-resolution 0.05 \
     --export-report \
     --report-title "Production Site Verification Audit"
 ```
@@ -87,25 +87,25 @@ To re-bake UV mapping, a 16-page 8K texture atlas, and apply delighting (shadow 
 ```
 
 ### 4. Decoupled Pipelined Overlap Export
-In the AutoMetashape Studio architecture, `scripts/metashape_export.py` functions as the decoupled background exporter:
+In the AutoMetashape distributed pipeline, `scripts/metashape_export.py` functions as the decoupled background exporter:
 - As soon as the GPU reconstruction cluster finishes meshing a project, it triggers this script in the background on the Host CPU.
-- Operates concurrently with bounded concurrency limits (1 to 8, default 5), isolating project folders and `.psx` document locks.
-- Command recipe generated automatically by the coordinator:
+- Operates concurrently with bounded concurrency limits (1 to 8, default 5), isolating project folders and releasing `.psx` document locks via `doc.clear()`.
+- Command recipe:
 ```powershell
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_export.py \
     --project "D:/Exports/Project_A/Project_A.psx" \
     --output "D:/Exports/Project_A" \
     --export-glb --export-obj --texture-format tiff \
-    --export-dem --export-orthomosaic
+    --export-dem --export-orthomosaic --ortho-resolution 0.05
 ```
 
 ### 5. Format Specifications
-- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` / `.tif`), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
+- **3D Models**: Binary glTF (`.glb`), Wavefront OBJ (`.obj` + `.mtl` + `.png` / `.tif`, with `{project_name}.obj` auto-recovery), Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`).
 - **Dense Point Cloud (`.laz`, `.las`, `.ply`, `.e57`)**: `chunk.exportPointCloud()`, preserving coordinates, colors, normals, confidence, and classifications.
 - **Hierarchical 3D Tiled Model**: Cesium 3D Tiles (`tiled_model/tileset.json` + `.b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), OpenSceneGraph (`.osgb`).
 - **Topographic Contours (`.shp`, `.dxf`, `.geojson`, `.kml`)**: Vector contour polylines with metric elevation attributes.
 - **Elevation Model (`dem.tif`)**: BigTIFF LZW GeoTIFF with ESRI `.tfw` world file.
-- **Orthomosaic (`orthomosaic.tif`)**: BigTIFF LZW GeoTIFF with alpha channel and `.tfw` world file.
+- **Orthomosaic (`orthomosaic.tif`)**: BigTIFF LZW GeoTIFF with alpha channel, automatic metric UTM projection (via WKT `PROJCS` detection), default **5 cm/px (`--ortho-resolution 0.05`)**, and `.tfw` / `.prj` files.
 - **Quality Report (`report.pdf`)**: Camera calibration, reprojection errors, and survey statistics.
 
 ---
