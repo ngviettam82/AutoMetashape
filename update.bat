@@ -149,9 +149,21 @@ if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 set "CFG_BACKUP=%TEMP%\autometashape_worker_config_backup.json"
 if exist "%TARGET_DIR%\worker_config.json" copy /y "%TARGET_DIR%\worker_config.json" "%CFG_BACKUP%" >nul 2>&1
 
-:: Mirror directory: copies new files, overwrites changed/older files, prunes obsolete files, preserves configs and git history
-robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git /XF worker_config.json server_config.json /W:1 /R:2 /NDL /NJH /NP
+:: Mirror directory: copies new files, overwrites changed/older files, prunes obsolete files,
+:: preserves configs, git history, and untracked .agents/ developer notes.
+robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git .agents /XF worker_config.json server_config.json /W:1 /R:2 /NDL /NJH /NP
 set "ROBO_CODE=!ERRORLEVEL!"
+
+:: Sync tracked skill discovery metadata under .agents\ without disturbing untracked .agents\ folders
+if !ROBO_CODE! LSS 8 (
+    if exist "!EXTRACT_SOURCE!\.agents\skills.json" (
+        if not exist "%TARGET_DIR%\.agents" mkdir "%TARGET_DIR%\.agents"
+        copy /y "!EXTRACT_SOURCE!\.agents\skills.json" "%TARGET_DIR%\.agents\skills.json" >nul 2>&1
+    )
+    if exist "!EXTRACT_SOURCE!\.agents\skills" (
+        robocopy "!EXTRACT_SOURCE!\.agents\skills" "%TARGET_DIR%\.agents\skills" /MIR /W:1 /R:2 /NDL /NJH /NP >nul 2>&1
+    )
+)
 
 :: Ensure configuration is restored if it was missing from source
 if exist "%CFG_BACKUP%" (

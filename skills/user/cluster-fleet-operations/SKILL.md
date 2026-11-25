@@ -109,7 +109,7 @@ For multi-hour cluster runs, run the canonical read-only monitor CLI:
 ```powershell
 python scripts/cluster_monitor.py --server 127.0.0.1:5840 --result-share "\\HOST_PC\ResultSSD" --source-share "\\HOST_PC\DataSSD"
 ```
-1. **Telemetry & Resource Scaling**: Reports accurate CPU % and RAM GB scaled from Metashape 2.x `workerList()` 0–1 resource fractions (`memory_usage * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM reporting.
+1. **Telemetry & Resource Scaling**: Reports accurate CPU % and RAM GB from Metashape 2.x `workerList()` `0–100%` resource usage metrics (`(memory_usage / 100.0) * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM reporting.
 2. **Sidecar Inspection**: Read `_autometashape_status.json` from the shared output directory.
 3. **Structured Hourly Status Reporting**:
    - Active Batches: Current stage, subtask completion %, elapsed time, ETA.

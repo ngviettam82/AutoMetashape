@@ -224,22 +224,21 @@ def _is_oom_error_text(text: str) -> bool:
 
 
 def format_worker_resource_usage(worker: Dict[str, Any]) -> Tuple[float, float]:
-    """Convert Metashape NetworkClient worker resource_usage fractions to (cpu_pct, ram_gb).
+    """Convert Metashape NetworkClient worker resource_usage percentages to (cpu_pct, ram_gb).
 
-    Metashape Pro 2.x reports ``resource_usage.cpu_usage`` and ``resource_usage.memory_usage``
-    as normalized 0.0–1.0 ratios relative to total CPU and ``worker.memory_size`` (bytes).
-    Falls back gracefully if values are already expressed in percentage / GB.
+    Metashape Pro 2.x (empirically verified on 2.2.2 build 20889) reports both
+    ``resource_usage.cpu_usage`` and ``resource_usage.memory_usage`` directly as
+    ``0.0–100.0`` percentages relative to total CPU capacity and ``worker.memory_size`` (bytes).
     """
     res = worker.get("resource_usage", {}) or {}
-    raw_cpu = float(res.get("cpu_usage", 0.0) or 0.0)
-    cpu_pct = raw_cpu * 100.0 if 0.0 <= raw_cpu <= 1.0 else raw_cpu
+    cpu_pct = float(res.get("cpu_usage", 0.0) or 0.0)
 
-    raw_mem = float(res.get("memory_usage", 0.0) or 0.0)
+    raw_mem_pct = float(res.get("memory_usage", 0.0) or 0.0)
     mem_size_bytes = float(worker.get("memory_size", 0.0) or 0.0)
-    if mem_size_bytes > 0.0 and 0.0 <= raw_mem <= 1.0:
-        ram_gb = raw_mem * (mem_size_bytes / (1024.0**3))
+    if mem_size_bytes > 0.0:
+        ram_gb = (raw_mem_pct / 100.0) * (mem_size_bytes / (1024.0**3))
     else:
-        ram_gb = raw_mem
+        ram_gb = raw_mem_pct
     return cpu_pct, ram_gb
 
 

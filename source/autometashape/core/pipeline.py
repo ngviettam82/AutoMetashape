@@ -560,20 +560,25 @@ def run_reconstruction(
                             dirs_exist_ok=True,
                             ignore=shutil.ignore_patterns("lock", "model.tmp", "*.tmp"),
                         )
-            elif not resume and target_network_output:
-                for old_p in (
-                    os.path.join(target_network_output, f"{project_name}.psx"),
-                    os.path.join(target_network_output, "building_reconstruction.psx"),
+            elif not resume and local_staging_dir:
+                # Fresh run (--no-resume): purge only stale local NVMe scratch files, NEVER delete the
+                # shared network .psx stub while the cluster batch is active (deleting the shared stub
+                # causes Metashape Server io-error infinite retries if a fire-and-forget batch crashes
+                # mid-run before final sync). _sync_staging_to_central_share() replaces the shared .psx
+                # atomically once a fresh local .psx has been saved.
+                for old_local_p in (
+                    os.path.join(local_staging_dir, f"{project_name}.psx"),
+                    os.path.join(local_staging_dir, "building_reconstruction.psx"),
                 ):
-                    old_f = get_psx_files_dir(old_p)
-                    if os.path.isdir(old_f):
+                    old_local_f = get_psx_files_dir(old_local_p)
+                    if os.path.isdir(old_local_f):
                         try:
-                            shutil.rmtree(old_f, ignore_errors=True)
+                            shutil.rmtree(old_local_f, ignore_errors=True)
                         except Exception:
                             pass
-                    if os.path.isfile(old_p):
+                    if os.path.isfile(old_local_p):
                         try:
-                            os.remove(old_p)
+                            os.remove(old_local_p)
                         except Exception:
                             pass
         else:
@@ -597,7 +602,7 @@ def run_reconstruction(
     doc = None
     chunk = None
 
-    def _sync_staging_to_central_share() -> bool:
+    def _sync_staging_to_central_share(replace_fresh_project: bool = False) -> bool:
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
             nonlocal doc, chunk
             if doc is not None:
@@ -621,6 +626,21 @@ def run_reconstruction(
                     os.remove(local_lock)
                 except Exception:
                     pass
+            # On completed fresh (--no-resume) runs, purge stale shared .files right before
+            # overwriting with the freshly built local .psx/.files pair. Early crashes (atexit,
+            # replace_fresh_project=False) leave the shared .psx stub untouched so Metashape Server
+            # never enters an io-error infinite retry loop.
+            if replace_fresh_project:
+                for old_p in (
+                    os.path.join(target_network_output, f"{project_name}.psx"),
+                    os.path.join(target_network_output, "building_reconstruction.psx"),
+                ):
+                    net_old_files = get_psx_files_dir(old_p)
+                    if os.path.isdir(net_old_files):
+                        try:
+                            shutil.rmtree(net_old_files, ignore_errors=True)
+                        except Exception:
+                            pass
             sync_ok = sync_staged_project_to_network(local_staging_dir, target_network_output)
             if sync_ok:
                 if status_file and local_staging_dir in status_file:
@@ -3284,7 +3304,7 @@ def run_reconstruction(
             atexit.unregister(_sync_staging_to_central_share)
         except Exception:
             pass
-        sync_ok = _sync_staging_to_central_share()
+        sync_ok = _sync_staging_to_central_share(replace_fresh_project=not resume)
         if not sync_ok:
             raise RuntimeError(
                 f"[Local Scratch Staging] Failed to synchronize staged deliverables from '{local_staging_dir}' "

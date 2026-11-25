@@ -359,14 +359,39 @@ class TestAuditRegressions(unittest.TestCase):
             self.assertFalse(plan_l2["rolling_shutter"])
 
     def test_cluster_monitor_no_ram_guard_and_accurate_unit_scaling(self) -> None:
-        """Verify cluster_monitor scales 0-1 fractions to % and GB and emits NO >=55 GB RAM guard."""
+        """Verify cluster_monitor scales Metashape 2.x 0-100% metrics cleanly and emits NO >=55 GB RAM guard."""
+        # Case 1: Idle worker with sub-1% usage (must NOT be inflated 100x!)
+        idle_worker = {
+            "worker_id": 2,
+            "hostname": "IDLE-NODE",
+            "state": "ready",
+            "memory_size": int(31.77 * (1024**3)),
+            "resource_usage": {"cpu_usage": 0.077, "memory_usage": 0.2345},
+        }
+        idle_cpu, idle_ram = monitor_mod.format_worker_resource_usage(idle_worker)
+        self.assertAlmostEqual(idle_cpu, 0.077, places=3)
+        self.assertAlmostEqual(idle_ram, 0.0745, places=3)
+
+        # Case 2: Busy worker with >1% usage (must convert % of host RAM to GB, NOT print raw %)
+        busy_worker = {
+            "worker_id": 3,
+            "hostname": "BUSY-NODE",
+            "state": "inprogress",
+            "memory_size": int(31.77 * (1024**3)),
+            "resource_usage": {"cpu_usage": 3.55, "memory_usage": 6.54},
+        }
+        busy_cpu, busy_ram = monitor_mod.format_worker_resource_usage(busy_worker)
+        self.assertAlmostEqual(busy_cpu, 3.55, places=2)
+        self.assertAlmostEqual(busy_ram, 2.078, places=2)
+
+        # Case 3: High-RAM worker (>=55 GB) emits accurate 57.6 GB and ZERO RAM guard warning
         worker = {
             "worker_id": 1,
             "hostname": "GPU-RIG-01",
             "state": "inprogress",
             "batch_id": 10,
             "memory_size": 64 * (1024**3),
-            "resource_usage": {"cpu_usage": 0.45, "memory_usage": 0.90},
+            "resource_usage": {"cpu_usage": 45.0, "memory_usage": 90.0},
         }
         cpu_pct, ram_gb = monitor_mod.format_worker_resource_usage(worker)
         self.assertAlmostEqual(cpu_pct, 45.0, places=2)
@@ -554,6 +579,59 @@ class TestAuditRegressions(unittest.TestCase):
         self.assertEqual(sup_mod._derive_default_expected_assets({}), ["obj", "ortho"])
         self.assertEqual(sup_mod._derive_default_expected_assets({"build_dem": True}), ["obj", "ortho"])
         self.assertEqual(sup_mod._derive_default_expected_assets({"export_dem": True}), ["obj", "dem", "ortho"])
+
+    def test_no_resume_local_staging_preserves_shared_psx_stub_on_early_crash(self) -> None:
+        """Verify --no-resume with local scratch staging never deletes the shared .psx stub before final sync."""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            img_dir = os.path.join(tmp_root, "src_photos")
+            net_out = os.path.join(tmp_root, "shared_result")
+            scratch_dir = os.path.join(tmp_root, "nvme_scratch")
+            for d in (img_dir, net_out, scratch_dir):
+                os.makedirs(d, exist_ok=True)
+            with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+
+            # Seed the shared .psx stub materialized by submit_cluster_batch.py
+            shared_psx = os.path.join(net_out, "SiteX.psx")
+            shared_files = os.path.join(net_out, "SiteX.files")
+            os.makedirs(shared_files, exist_ok=True)
+            with open(shared_psx, "w", encoding="utf-8") as f:
+                f.write("<document/>")
+            with open(os.path.join(shared_files, "project.zip"), "wb") as f:
+                f.write(b"PK\x05\x06" + b"\x00" * 18)
+
+            # Simulate an early worker crash right after entering local scratch staging
+            fake_ms = SimpleNamespace(
+                Document=MagicMock(side_effect=RuntimeError("SIMULATED_EARLY_CRASH")),
+                app=SimpleNamespace(enumGPUDevices=lambda: []),
+            )
+            with (
+                patch.object(pipeline_mod, "Metashape", fake_ms),
+                patch.object(pipeline_mod, "check_scratch_disk_headroom", return_value=(True, 200.0)),
+                patch("atexit.register"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    pipeline_mod.run_reconstruction(
+                        images_dir=img_dir,
+                        output_dir=net_out,
+                        project_name="SiteX",
+                        resume=False,
+                        local_scratch_staging=True,
+                        scratch_dir=scratch_dir,
+                    )
+
+            # Shared .psx stub and .files directory MUST survive so Metashape Server never spins on io-error!
+            self.assertTrue(os.path.isfile(shared_psx))
+            self.assertTrue(os.path.isdir(shared_files))
+
+    def test_update_bat_protects_untracked_agents_while_syncing_skills(self) -> None:
+        """Verify update.bat excludes .agents from root /MIR and explicitly syncs tracked .agents/skills."""
+        update_bat_path = os.path.join(_REPO_ROOT, "update.bat")
+        with open(update_bat_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("/MIR /XD .git .agents", content)
+        self.assertIn(r".agents\skills.json", content)
+        self.assertIn(r".agents\skills", content)
 
 
 if __name__ == "__main__":
