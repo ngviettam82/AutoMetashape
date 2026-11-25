@@ -22,6 +22,7 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.dual_share import resolve_result_network_root
 from autometashape.cluster.hardware import extract_unc_root
 from autometashape.cluster.orchestrator import (
     ALIGN_DOWNSCALE_MAP,
@@ -58,6 +59,7 @@ from autometashape.core.telemetry import (
     compute_utm_epsg,
     derive_pro_photogrammetry_plan,
     discover_image_subfolder_groups,
+    is_projected_crs,
     print_pro_engineering_report,
 )
 from autometashape.ipc.protocol import (
@@ -276,21 +278,21 @@ def run_reconstruction(
     build_depth_maps: bool = True,
     build_mesh: bool = True,
     build_texture: bool = True,
-    keypoint_limit: int = 50000,
-    keypoint_limit_per_mpx: int = 15000,
-    tiepoint_limit: int = 25000,
+    keypoint_limit: int | None = None,
+    keypoint_limit_per_mpx: int | None = None,
+    tiepoint_limit: int | None = None,
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
     adaptive_fitting: bool = True,
     reference_preselection_mode: str = "estimated",
     filter_tiepoints: bool = True,
     depth_quality: str = "high",
-    depth_filtering: str = "moderate",
+    depth_filtering: str | None = None,
     custom_faces: int = None,
     faces: int | None = None,
     texture_pages: int = None,
     points_spacing: float = 0.02,
-    ortho_resolution: float = 0.02,
+    ortho_resolution: float | None = None,
     ortho_cull_faces: bool = True,
     fill_holes: bool = True,
     ghosting_filter: bool = True,
@@ -301,8 +303,8 @@ def run_reconstruction(
     disable_quality_filter: bool = False,
     no_crop: bool = False,
     pro_mode: bool | None = None,
-    rolling_shutter: bool = True,
-    close_holes: bool = False,
+    rolling_shutter: bool | None = None,
+    close_holes: bool | None = None,
     pause_after_crop: bool = False,
     resume: bool = True,
     multi_chunk: str = "disable",
@@ -316,7 +318,7 @@ def run_reconstruction(
     export_ortho: bool = False,
     build_dem: bool = None,
     export_dem: bool = False,
-    build_point_cloud: bool = True,
+    build_point_cloud: bool | None = None,
     export_point_cloud: bool = False,
     point_cloud_format: str = "laz",
     classify_ground: bool = None,
@@ -485,11 +487,17 @@ def run_reconstruction(
         preset = "pro"
 
     # Auto-detect shared storage UNC root when cluster mode is enabled and network_path is empty
+    # Always prioritize output_dir (Result SSD Share) over images_dir (Data Source SSD Share)
     if not network_path and network_enable:
-        detected_unc = extract_unc_root(output_dir) or extract_unc_root(images_dir)
+        detected_unc = (
+            resolve_result_network_root(output_dir) if extract_unc_root(output_dir) else extract_unc_root(images_dir)
+        )
         if detected_unc:
             network_path = detected_unc
             print(f"  [Network Cluster] Auto-detected shared storage UNC root: {network_path}", flush=True)
+
+    # Preserve original caller preference for forwarding to remote independent workers
+    worker_local_scratch_pref = bool(local_scratch_staging)
 
     # Resolve Local Scratch Staging (Mechanism B)
     if network_enable:
@@ -585,7 +593,11 @@ def run_reconstruction(
         status_file = os.path.join(output_dir, "_autometashape_status.json")
     set_active_status_file(status_file)
 
-    def _sync_staging_to_central_share():
+    # Pre-initialize doc/chunk before defining atexit sync handler so early exceptions never raise UnboundLocalError
+    doc = None
+    chunk = None
+
+    def _sync_staging_to_central_share() -> bool:
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
             nonlocal doc, chunk
             if doc is not None:
@@ -622,9 +634,11 @@ def run_reconstruction(
                 )
             else:
                 print(
-                    f"  [Local Scratch Staging] [WARNING] Issue occurred during sync to {target_network_output}.",
+                    f"  [Local Scratch Staging] [ERROR] Failed to synchronize staged deliverables to {target_network_output}.",
                     file=sys.stderr,
                 )
+            return bool(sync_ok)
+        return True
 
     if local_staging_dir:
         atexit.register(_sync_staging_to_central_share)
@@ -648,6 +662,14 @@ def run_reconstruction(
             pro_plan = derive_pro_photogrammetry_plan(survey_physics)
             print_pro_engineering_report(survey_physics, pro_plan)
 
+            if keypoint_limit is None:
+                keypoint_limit = pro_plan.get("keypoint_limit", 50000)
+            if keypoint_limit_per_mpx is None:
+                keypoint_limit_per_mpx = pro_plan.get("keypoint_limit_per_mpx", 2000)
+            if tiepoint_limit is None:
+                tiepoint_limit = pro_plan.get("tiepoint_limit", 40000)
+            if ortho_resolution is None:
+                ortho_resolution = pro_plan.get("ortho_resolution", 0.05)
             if crop_method is None:
                 crop_method = pro_plan["crop_method"]
             if custom_faces is None:
@@ -686,6 +708,18 @@ def run_reconstruction(
             )
 
     # Final safety fallbacks
+    if keypoint_limit is None:
+        keypoint_limit = 50000
+    if keypoint_limit_per_mpx is None:
+        keypoint_limit_per_mpx = 2000
+    if tiepoint_limit is None:
+        tiepoint_limit = 40000
+    if ortho_resolution is None:
+        ortho_resolution = 0.05
+    if depth_filtering is None:
+        depth_filtering = "moderate"
+    if rolling_shutter is None:
+        rolling_shutter = True
     if crop_method is None:
         crop_method = "gps-square"
     if custom_faces is None:
@@ -700,7 +734,7 @@ def run_reconstruction(
     if export_dem or build_contours:
         build_dem = True
     if build_point_cloud is None:
-        build_point_cloud = True
+        build_point_cloud = False
     if classify_ground is None:
         classify_ground = False
     if close_holes is None:
@@ -831,16 +865,6 @@ def run_reconstruction(
                 client = Metashape.NetworkClient()
                 try:
                     client.connect(f"{network_host}:{network_port}")
-                    raw_workers = client.workerList()
-                    if isinstance(raw_workers, dict):
-                        workers = raw_workers.get("workers", [])
-                    elif isinstance(raw_workers, (list, tuple)):
-                        workers = list(raw_workers)
-                    else:
-                        workers = []
-
-                    # Do not blindly unpause workers that were intentionally paused
-
                     raw_workers = client.workerList()
                     if isinstance(raw_workers, dict):
                         workers = raw_workers.get("workers", [])
@@ -1017,6 +1041,10 @@ def run_reconstruction(
                     "The offline monolithic process is the exclusive execution method for independent workers."
                 )
             net_tasks = [t.toNetworkTask(chunk_target) for t in task_list]
+            try:
+                doc.clear()
+            except Exception:
+                pass
             w_limit = None
             batch_id, was_attached = safe_create_cluster_batch(
                 net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False
@@ -1064,28 +1092,38 @@ def run_reconstruction(
                     )
                     break
                 elif b_status in ("failed", "aborted"):
+                    raw_b_st = str(b_info.get("state", "")).lower() if isinstance(b_info, dict) else ""
+                    if raw_b_st not in ("completed", "failed", "aborted", "cancelled"):
+                        try:
+                            net_client.abortBatch(batch_id)
+                        except Exception:
+                            pass
                     err_str = b_err or "unknown cluster error"
                     print(f"  [Cluster] [ERROR] Task '{task_desc}' {b_status}: {err_str}", flush=True)
 
                     is_bad_alloc = any(
+                        term in err_str.lower() for term in ("bad allocation", "bad_alloc", "out of memory")
+                    ) or any(
                         any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
                         for t in tasks_info
                         for e in t.get("errors", [])
                     )
                     if is_bad_alloc:
-                        failed_t = next(
-                            (
-                                t
-                                for t in tasks_info
-                                if any(
-                                    term in str(e).lower()
-                                    for term in ("bad allocation", "bad_alloc", "out of memory")
-                                    for e in t.get("errors", [])
-                                )
-                            ),
-                            tasks_info[0] if tasks_info else None,
-                        )
-                        failed_w_id = failed_t.get("worker_id") if failed_t else None
+                        failed_w_id = None
+                        last_e = b_info.get("last_error") if isinstance(b_info, dict) else None
+                        if isinstance(last_e, dict) and last_e.get("worker_id") is not None:
+                            failed_w_id = last_e.get("worker_id")
+                        if failed_w_id is None:
+                            for t in tasks_info:
+                                for e in t.get("errors", []):
+                                    if isinstance(e, dict) and e.get("worker_id") is not None:
+                                        failed_w_id = e.get("worker_id")
+                                        break
+                                if failed_w_id is not None:
+                                    break
+                                if t.get("worker_id") is not None:
+                                    failed_w_id = t.get("worker_id")
+                                    break
                         print(
                             f"\n  [Cluster Memory Gate] Worker node {failed_w_id} encountered bad allocation (out of memory) on '{task_desc}'.",
                             flush=True,
@@ -1156,6 +1194,7 @@ def run_reconstruction(
                                     pass
 
                     print(f"  [Cluster] Falling back to local execution for '{task_desc}'...", flush=True)
+                    _safe_reopen()
                     return False
 
             _safe_reopen()
@@ -1166,12 +1205,13 @@ def run_reconstruction(
                 f"  [Cluster] [WARNING] Cluster dispatch exception: {e_dispatch}. Falling back to local execution...",
                 flush=True,
             )
+            _safe_reopen()
             return False
 
     if resume and target_psx:
         print(f"\n[Checkpoint] Found existing project (resume enabled): {target_psx}", flush=True)
         try:
-            files_dir = get_psx_files_dir(psx_out)
+            files_dir = get_psx_files_dir(target_psx)
             lock_file = os.path.join(files_dir, "lock")
             if os.path.isfile(lock_file):
                 try:
@@ -1260,6 +1300,7 @@ def run_reconstruction(
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
+    use_multi_chunk = False
     if not resumed:
         # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
         groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
@@ -1273,7 +1314,6 @@ def run_reconstruction(
             Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
         )
 
-        use_multi_chunk = False
         if multi_chunk == "force" and len(groups) >= 1:
             use_multi_chunk = True
         elif multi_chunk == "auto" and len(groups) > 1:
@@ -1548,573 +1588,481 @@ def run_reconstruction(
                 except Exception as e_mk:
                     print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
-        # -------------------------------------------------------------
-        # Autonomous Unified Project Batch (Independent Project Mode)
-        # -------------------------------------------------------------
-        if cluster_enabled and network_independent_workers:
-            if pause_after_crop or crop_method == "manual":
-                raise ValueError(
-                    "[Cluster] Independent worker mode strictly enforces unattended offline execution. "
-                    "Manual cropping and pause_after_crop cannot be used when --network-independent-workers is active."
+    # -------------------------------------------------------------
+    # Autonomous Unified Project Batch (Independent Project Mode)
+    # Placed outside `if not resumed:` so resumed checkpoints also dispatch to dedicated workers.
+    # -------------------------------------------------------------
+    if cluster_enabled and network_independent_workers:
+        if pause_after_crop or crop_method == "manual":
+            raise ValueError(
+                "[Cluster] Independent worker mode strictly enforces unattended offline execution. "
+                "Manual cropping and pause_after_crop cannot be used when --network-independent-workers is active."
+            )
+
+    unified_succeeded = False
+    if cluster_enabled and network_independent_workers:
+        try:
+            print("\n=========================================================================", flush=True)
+            print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
+            print("  Full Project Pipeline Bundled into 1 Dedicated Worker Batch", flush=True)
+            print("  Worker Node Lock: 1 node (Zero Intermediate LAN Syncs, Zero Worker Hopping)", flush=True)
+            print("=========================================================================", flush=True)
+
+            doc.save(psx_out)
+            rel_psx = get_cluster_rel_path()
+
+            has_depth = False
+            if chunk and chunk.depth_maps is not None:
+                try:
+                    has_depth = (
+                        len(chunk.depth_maps.keys()) > 0
+                        if hasattr(chunk.depth_maps, "keys")
+                        else bool(chunk.depth_maps)
+                    )
+                except Exception:
+                    has_depth = bool(chunk.depth_maps)
+
+            has_point_cloud = False
+            if chunk and chunk.point_cloud is not None:
+                try:
+                    has_point_cloud = getattr(chunk.point_cloud, "point_count", 0) > 0
+                except Exception:
+                    has_point_cloud = False
+
+            has_mesh = False
+            if chunk and chunk.model is not None:
+                try:
+                    has_mesh = len(chunk.model.faces) > 0 if hasattr(chunk.model, "faces") else True
+                except Exception:
+                    has_mesh = False
+
+            has_tex = False
+            if has_mesh and chunk.model is not None and not rebake_texture:
+                try:
+                    if hasattr(chunk.model, "textures"):
+                        has_tex = len(chunk.model.textures) == (texture_pages or 16)
+                    elif hasattr(chunk.model, "texture") and chunk.model.texture():
+                        has_tex = (texture_pages or 16) == 1
+                except Exception:
+                    has_tex = False
+
+            has_dem_asset = bool(chunk and getattr(chunk, "elevation", None) is not None)
+            has_ortho_asset = bool(chunk and getattr(chunk, "orthomosaic", None) is not None)
+
+            # Release coordinator handle so remote workers never hit Win32 file lock contention on psx_out
+            try:
+                doc.clear()
+            except Exception:
+                pass
+
+            u_align = align_photos and (not use_multi_chunk) and (not resumed)
+            u_depth = build_depth_maps and not (resumed and has_depth)
+            u_pc = build_point_cloud and not (resumed and has_point_cloud)
+            u_mesh = build_mesh and not (resumed and has_mesh)
+            u_tex = build_texture and not (resumed and has_tex)
+            u_dem = build_dem and not (resumed and has_dem_asset)
+            u_ortho = build_orthomosaic and not (resumed and has_ortho_asset)
+
+            if resumed:
+                reused_items = []
+                if not u_align:
+                    reused_items.append("Aligned Cameras")
+                if has_depth and not u_depth:
+                    reused_items.append("Depth Maps")
+                if has_point_cloud and not u_pc:
+                    reused_items.append("Point Cloud")
+                if has_mesh and not u_mesh:
+                    reused_items.append("Surface Mesh")
+                if has_tex and not u_tex:
+                    reused_items.append("Texture Atlas")
+                if has_dem_asset and not u_dem:
+                    reused_items.append("DEM")
+                if has_ortho_asset and not u_ortho:
+                    reused_items.append("Orthomosaic")
+                if reused_items:
+                    print(
+                        f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}",
+                        flush=True,
+                    )
+
+            def _build_mono_task(
+                *,
+                m_align: bool,
+                m_depth: bool,
+                m_pc: bool,
+                m_mesh: bool,
+                m_tex: bool,
+                m_dem: bool,
+                m_ortho: bool,
+                m_resume: bool,
+            ):
+                return build_monolithic_runscript_task(
+                    images_dir=images_dir,
+                    output_dir=target_network_output or output_dir,
+                    project_name=project_name,
+                    preset=preset,
+                    align_quality=align_quality,
+                    keypoint_limit=keypoint_limit,
+                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                    tiepoint_limit=tiepoint_limit,
+                    depth_quality=depth_quality,
+                    depth_filtering=depth_filtering,
+                    custom_faces=custom_faces,
+                    texture_pages=texture_pages,
+                    crop_method=crop_method,
+                    texture_format=texture_format,
+                    ortho_resolution=ortho_resolution,
+                    align_photos=m_align,
+                    build_depth_maps=m_depth,
+                    build_mesh=m_mesh,
+                    build_texture=m_tex,
+                    build_dem=m_dem,
+                    build_orthomosaic=m_ortho,
+                    build_point_cloud=m_pc,
+                    export_obj=export_obj,
+                    export_glb=export_glb,
+                    export_fbx=export_fbx,
+                    export_ply=export_ply,
+                    export_dxf=export_dxf,
+                    export_dem=export_dem,
+                    export_ortho=export_ortho,
+                    export_point_cloud=export_point_cloud,
+                    point_cloud_format=point_cloud_format,
+                    export_tie_points=export_tie_points,
+                    export_report=export_report,
+                    resume=m_resume,
+                    guided_matching=guided_matching,
+                    local_scratch=worker_local_scratch_pref,
+                    network_path=network_path,
+                    surface_type=surface_type,
+                    rolling_shutter=rolling_shutter,
+                    filter_tiepoints=filter_tiepoints,
+                    build_contours=build_contours,
+                    contour_interval=contour_interval,
+                    contours_format=contours_format,
+                    build_tiled_model=build_tiled_model,
+                    tiled_model_format=tiled_model_format,
+                    tile_size=tile_size,
+                    classify_ground=classify_ground,
+                    classify_points=classify_points,
+                    remove_lighting=remove_lighting,
+                    delighting_color_mode=delighting_color_mode,
+                    calibrate_colors=calibrate_colors,
+                    detect_markers=detect_markers,
+                    target_type=target_type,
+                    marker_tolerance=marker_tolerance,
+                    import_reference=import_reference,
+                    smooth_mesh=smooth_mesh,
+                    smooth_strength=smooth_strength,
+                    decimate_mesh=decimate_mesh,
                 )
 
-        unified_succeeded = False
-        if cluster_enabled and network_independent_workers:
-            try:
-                print("\n=========================================================================", flush=True)
-                print("  AUTOMETASHAPE: AUTONOMOUS UNIFIED CLUSTER BATCH (INDEPENDENT MODE)", flush=True)
-                print("  Full Project Pipeline Bundled into 1 Dedicated Worker Batch", flush=True)
-                print("  Worker Node Lock: 1 node (Zero Intermediate LAN Syncs, Zero Worker Hopping)", flush=True)
-                print("=========================================================================", flush=True)
-
-                doc.save(psx_out)
-                rel_psx = get_cluster_rel_path()
-
-                has_depth = False
-                if chunk and chunk.depth_maps is not None:
+            def _abort_if_still_active(bid: int, info_obj: Any) -> None:
+                raw_st = str(info_obj.get("state", "")).lower() if isinstance(info_obj, dict) else ""
+                if raw_st not in ("completed", "failed", "aborted", "cancelled"):
                     try:
-                        has_depth = (
-                            len(chunk.depth_maps.keys()) > 0
-                            if hasattr(chunk.depth_maps, "keys")
-                            else bool(chunk.depth_maps)
-                        )
+                        net_client.abortBatch(bid)
                     except Exception:
-                        has_depth = bool(chunk.depth_maps)
+                        pass
 
-                has_point_cloud = False
-                if chunk and chunk.point_cloud is not None:
+            def _poll_monolithic_batch(bid: int, tag: str, s_file: str | None) -> tuple[str, bool, str, dict]:
+                p_start = time.time()
+                p_last_stage = None
+                p_last_prog = -1.0
+                p_last_log = 0.0
+                consec_rpc_errs = 0
+                while True:
+                    time.sleep(1.0)
                     try:
-                        has_point_cloud = getattr(chunk.point_cloud, "point_count", 0) > 0
-                    except Exception:
-                        has_point_cloud = False
-
-                has_mesh = False
-                if chunk and chunk.model is not None:
-                    try:
-                        has_mesh = len(chunk.model.faces) > 0 if hasattr(chunk.model, "faces") else True
-                    except Exception:
-                        has_mesh = False
-
-                has_tex = False
-                if has_mesh and chunk.model is not None and not rebake_texture:
-                    try:
-                        if hasattr(chunk.model, "textures"):
-                            has_tex = len(chunk.model.textures) == (texture_pages or 16)
-                        elif hasattr(chunk.model, "texture") and chunk.model.texture():
-                            has_tex = (texture_pages or 16) == 1
-                    except Exception:
-                        has_tex = False
-
-                has_dem_asset = bool(chunk and getattr(chunk, "elevation", None) is not None)
-                has_ortho_asset = bool(chunk and getattr(chunk, "orthomosaic", None) is not None)
-
-                u_align = align_photos and (not use_multi_chunk) and (not resumed)
-                u_depth = build_depth_maps and not (resumed and has_depth)
-                u_pc = build_point_cloud and not (resumed and has_point_cloud)
-                u_mesh = build_mesh and not (resumed and has_mesh)
-                u_tex = build_texture and not (resumed and has_tex)
-                u_dem = build_dem and not (resumed and has_dem_asset)
-                u_ortho = build_orthomosaic and not (resumed and has_ortho_asset)
-
-                if resumed:
-                    reused_items = []
-                    if not u_align:
-                        reused_items.append("Aligned Cameras")
-                    if has_depth and not u_depth:
-                        reused_items.append("Depth Maps")
-                    if has_point_cloud and not u_pc:
-                        reused_items.append("Point Cloud")
-                    if has_mesh and not u_mesh:
-                        reused_items.append("Surface Mesh")
-                    if has_tex and not u_tex:
-                        reused_items.append("Texture Atlas")
-                    if has_dem_asset and not u_dem:
-                        reused_items.append("DEM")
-                    if has_ortho_asset and not u_ortho:
-                        reused_items.append("Orthomosaic")
-                    if reused_items:
+                        info = net_client.batchInfo(bid)
+                        consec_rpc_errs = 0
+                    except Exception as e_rpc:
+                        consec_rpc_errs += 1
+                        if consec_rpc_errs >= 5:
+                            return "failed", False, f"Lost connection polling batch #{bid}: {e_rpc}", {}
                         print(
-                            f"  [Cluster Checkpoint] Reusing completed assets from project: {', '.join(reused_items)}",
+                            f"  [Cluster Warning] Transient batchInfo error ({consec_rpc_errs}/5): {e_rpc}",
                             flush=True,
                         )
+                        continue
 
-                # Check if all requested reconstruction stages are already satisfied in checkpoint
-                if not any([u_align, u_depth, u_mesh, u_tex, u_dem, u_ortho, u_pc]):
+                    t_info = info.get("tasks", []) if isinstance(info, dict) else []
+                    if s_file and os.path.exists(s_file):
+                        try:
+                            with open(s_file, "r", encoding="utf-8") as sf:
+                                s_data = json.load(sf)
+                            st_k = s_data.get("stage_key", "recon")
+                            st_d = s_data.get("stage_desc", "Reconstructing")
+                            s_prog = float(s_data.get("progress", 0.0))
+                            w_node = s_data.get("worker_node", "Worker Node")
+                            if st_k != p_last_stage:
+                                emit_ipc_stage(st_k, st_d)
+                                print(
+                                    f"\n>>> [{tag} Stage] Active Stage: {st_d} (Node: {w_node})",
+                                    flush=True,
+                                )
+                                p_last_stage = st_k
+                            now_p = time.time()
+                            if abs(s_prog - p_last_prog) >= 0.5 or (
+                                now_p - p_last_log >= 10.0 and s_prog != p_last_prog
+                            ):
+                                p_elapsed = (now_p - p_start) / 60.0
+                                print(
+                                    f"  [{tag} Progress] {st_d}: {s_prog:.1f}% (Worker: {w_node}, Elapsed: {p_elapsed:.1f} min)",
+                                    flush=True,
+                                )
+                                p_last_prog = s_prog
+                                p_last_log = now_p
+                        except Exception:
+                            pass
+                    elif t_info:
+                        act = next(
+                            (t for t in t_info if t.get("state") in ("running", "inprogress", "submitted")),
+                            t_info[-1],
+                        )
+                        act_name = act.get("name", "RunScript")
+                        s_prog = act.get("progress", 0.0)
+                        now_p = time.time()
+                        if abs(s_prog - p_last_prog) >= 0.5 or (now_p - p_last_log >= 10.0 and s_prog != p_last_prog):
+                            p_elapsed = (now_p - p_start) / 60.0
+                            print(
+                                f"  [{tag} Progress] Dedicated Worker Processing - {act_name}: {s_prog:.1f}% (Elapsed: {p_elapsed:.1f} min)",
+                                flush=True,
+                            )
+                            p_last_prog = s_prog
+                            p_last_log = now_p
+
+                    st, ok, err_m = evaluate_cluster_batch_info(info)
+                    if ok:
+                        return st, True, "", info
+                    if st in ("failed", "aborted"):
+                        _abort_if_still_active(bid, info)
+                        return st, False, err_m or "unknown cluster error", info
+
+            # Check if all requested reconstruction stages are already satisfied in checkpoint
+            if not any([u_align, u_depth, u_mesh, u_tex, u_dem, u_ortho, u_pc]):
+                print(
+                    "  [Cluster Checkpoint] All reconstruction stages already complete in checkpoint. Skipping cluster dispatch.",
+                    flush=True,
+                )
+                unified_succeeded = True
+            else:
+                net_task, rel_script, status_file = _build_mono_task(
+                    m_align=u_align,
+                    m_depth=u_depth,
+                    m_pc=u_pc,
+                    m_mesh=u_mesh,
+                    m_tex=u_tex,
+                    m_dem=u_dem,
+                    m_ortho=u_ortho,
+                    m_resume=resume,
+                )
+
+                batch_id, was_attached = safe_create_cluster_batch(
+                    net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
+                )
+                if was_attached:
                     print(
-                        "  [Cluster Checkpoint] All reconstruction stages already complete in checkpoint. Skipping cluster dispatch.",
+                        f"  [Cluster] Attached to active Monolithic Batch ID={batch_id} on dedicated worker node.",
+                        flush=True,
+                    )
+                else:
+                    print(
+                        f"  [Cluster] Created Monolithic RunScript Batch ID={batch_id} locked to 1 dedicated worker node.",
+                        flush=True,
+                    )
+
+                t_u_start = time.time()
+                b_status, b_success, b_err, b_info = _poll_monolithic_batch(batch_id, "Cluster", status_file)
+                if b_success:
+                    elapsed_min = (time.time() - t_u_start) / 60.0
+                    print(
+                        f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!",
                         flush=True,
                     )
                     unified_succeeded = True
-                else:
-                    net_task, rel_script, status_file = build_monolithic_runscript_task(
-                        images_dir=images_dir,
-                        output_dir=target_network_output or output_dir,
-                        project_name=project_name,
-                        preset=preset,
-                        align_quality=align_quality,
-                        depth_quality=depth_quality,
-                        depth_filtering=depth_filtering,
-                        custom_faces=custom_faces,
-                        texture_pages=texture_pages,
-                        crop_method=crop_method,
-                        texture_format=texture_format,
-                        align_photos=u_align,
-                        build_depth_maps=u_depth,
-                        build_mesh=u_mesh,
-                        build_texture=u_tex,
-                        build_dem=u_dem,
-                        build_orthomosaic=u_ortho,
-                        build_point_cloud=u_pc,
-                        export_obj=export_obj,
-                        export_glb=export_glb,
-                        export_fbx=export_fbx,
-                        export_ply=export_ply,
-                        export_dxf=export_dxf,
-                        export_dem=export_dem,
-                        export_ortho=export_ortho,
-                        export_point_cloud=export_point_cloud,
-                        point_cloud_format=point_cloud_format,
-                        export_report=export_report,
-                        resume=resume,
-                        network_path=network_path,
-                    )
+                elif b_status in ("failed", "aborted"):
+                    print(f"  [Cluster] [ERROR] Unified batch {b_status}: {b_err}", flush=True)
+                    tasks_info = b_info.get("tasks", []) if isinstance(b_info, dict) else []
+                    failed_worker_id = None
+                    last_err = b_info.get("last_error") if isinstance(b_info, dict) else None
+                    if isinstance(last_err, dict) and last_err.get("worker_id") is not None:
+                        failed_worker_id = last_err.get("worker_id")
+                    if failed_worker_id is None:
+                        for t in tasks_info:
+                            for terr in t.get("errors", []):
+                                if isinstance(terr, dict) and terr.get("worker_id") is not None:
+                                    failed_worker_id = terr.get("worker_id")
+                                    break
+                            if failed_worker_id is not None:
+                                break
+                            if t.get("worker_id") is not None:
+                                failed_worker_id = t.get("worker_id")
+                                break
 
-                    batch_id, was_attached = safe_create_cluster_batch(
-                        net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
-                    )
-                    if was_attached:
-                        print(
-                            f"  [Cluster] Attached to active Monolithic Batch ID={batch_id} on dedicated worker node.",
-                            flush=True,
-                        )
-                    else:
-                        print(
-                            f"  [Cluster] Created Monolithic RunScript Batch ID={batch_id} locked to 1 dedicated worker node.",
-                            flush=True,
-                        )
+                    emit_ipc_event(f"@@AUTOMETASHAPE_UNIFIED_FAIL:{batch_id}:{failed_worker_id or 'unknown'}@@")
 
-                    t_u_start = time.time()
-                    last_stage_key = None
-                    last_progress = -1.0
-                    last_log_time = 0.0
-
-                    while True:
-                        time.sleep(1.0)
-                        b_info = net_client.batchInfo(batch_id)
-                        tasks_info = b_info.get("tasks", [])
-
-                        # Real-time sidecar status file telemetry from dedicated worker
-                        if status_file and os.path.exists(status_file):
+                    # Tier 1 Handoff / Resume: Re-dispatch RunScript task with resume=True to another cluster node
+                    try:
+                        if failed_worker_id is not None:
                             try:
-                                with open(status_file, "r", encoding="utf-8") as sf:
-                                    s_data = json.load(sf)
-                                stage_k = s_data.get("stage_key", "recon")
-                                stage_desc = s_data.get("stage_desc", "Reconstructing")
-                                sub_prog = float(s_data.get("progress", 0.0))
-                                worker_node = s_data.get("worker_node", "Worker Node")
-
-                                if stage_k != last_stage_key:
-                                    emit_ipc_stage(stage_k, stage_desc)
-                                    print(
-                                        f"\n>>> [Stage Transition] Active Stage: {stage_desc} (Node: {worker_node})",
-                                        flush=True,
-                                    )
-                                    last_stage_key = stage_k
-
-                                now_t = time.time()
-                                if abs(sub_prog - last_progress) >= 0.5 or (
-                                    now_t - last_log_time >= 10.0 and sub_prog != last_progress
-                                ):
-                                    elapsed_min = (now_t - t_u_start) / 60.0
-                                    print(
-                                        f"  [Cluster Progress] {stage_desc}: {sub_prog:.1f}% (Worker: {worker_node}, Elapsed: {elapsed_min:.1f} min)",
-                                        flush=True,
-                                    )
-                                    last_progress = sub_prog
-                                    last_log_time = now_t
+                                net_client.setWorkerPaused(failed_worker_id, True)
                             except Exception:
                                 pass
-                        elif tasks_info:
-                            active_task = next(
-                                (t for t in tasks_info if t.get("state") in ("running", "inprogress", "submitted")),
-                                tasks_info[-1],
+
+                        raw_w = net_client.workerList()
+                        w_list = (
+                            raw_w.get("workers", [])
+                            if isinstance(raw_w, dict)
+                            else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+                        )
+                        other_workers = [
+                            w
+                            for w in w_list
+                            if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
+                            != failed_worker_id
+                            and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                            and str(w.get("state", "") if isinstance(w, dict) else "").lower() != "offline"
+                        ]
+
+                        if other_workers:
+                            handoff_net_task, _, _ = _build_mono_task(
+                                m_align=u_align,
+                                m_depth=u_depth,
+                                m_pc=u_pc,
+                                m_mesh=u_mesh,
+                                m_tex=u_tex,
+                                m_dem=u_dem,
+                                m_ortho=u_ortho,
+                                m_resume=True,
                             )
-                            t_sub_name = active_task.get("name", "RunScript")
-                            sub_prog = active_task.get("progress", 0.0)
-
-                            now_t = time.time()
-                            if abs(sub_prog - last_progress) >= 0.5 or (
-                                now_t - last_log_time >= 10.0 and sub_prog != last_progress
-                            ):
-                                elapsed_min = (now_t - t_u_start) / 60.0
-                                print(
-                                    f"  [Cluster Progress] Dedicated Worker Processing - {t_sub_name}: {sub_prog:.1f}% (Elapsed: {elapsed_min:.1f} min)",
-                                    flush=True,
-                                )
-                                last_progress = sub_prog
-                                last_log_time = now_t
-
-                        b_status, b_success, b_err = evaluate_cluster_batch_info(b_info)
-                        if b_success:
-                            elapsed_min = (time.time() - t_u_start) / 60.0
+                            handoff_batch_id, _ = safe_create_cluster_batch(
+                                net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True
+                            )
                             print(
-                                f"\n  [Cluster] [OK] Entire unified project completed on dedicated worker in {elapsed_min:.2f} min!",
+                                f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.",
                                 flush=True,
                             )
-                            unified_succeeded = True
-                            break
-                        elif b_status in ("failed", "aborted"):
-                            err_str = b_err or "unknown cluster error"
-                            print(f"  [Cluster] [ERROR] Unified batch {b_status}: {err_str}", flush=True)
 
-                            failed_worker_id = None
-                            for t in tasks_info:
-                                if t.get("errors") and t.get("worker_id") is not None:
-                                    failed_worker_id = t.get("worker_id")
-                                    break
-                            if failed_worker_id is None and tasks_info:
-                                failed_worker_id = tasks_info[0].get("worker_id")
-                            if failed_worker_id is None:
-                                last_err = b_info.get("last_error")
-                                if isinstance(last_err, dict) and last_err.get("worker_id") is not None:
-                                    failed_worker_id = last_err.get("worker_id")
-
-                            emit_ipc_event(f"@@AUTOMETASHAPE_UNIFIED_FAIL:{batch_id}:{failed_worker_id or 'unknown'}@@")
-
-                            # Tier 1 Handoff / Resume: Re-dispatch RunScript task with resume=True to another cluster node
-                            try:
-                                if failed_worker_id is not None:
-                                    try:
-                                        net_client.setWorkerPaused(failed_worker_id, True)
-                                    except Exception:
-                                        pass
-
-                                raw_w = net_client.workerList()
-                                w_list = (
-                                    raw_w.get("workers", [])
-                                    if isinstance(raw_w, dict)
-                                    else (raw_w if isinstance(raw_w, (list, tuple)) else [])
-                                )
-                                other_workers = [
-                                    w
-                                    for w in w_list
-                                    if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
-                                    != failed_worker_id
-                                    and not (
-                                        w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
-                                    )
-                                ]
-
-                                if other_workers:
-                                    handoff_net_task, _, _ = build_monolithic_runscript_task(
-                                        images_dir=images_dir,
-                                        output_dir=target_network_output or output_dir,
-                                        project_name=project_name,
-                                        preset=preset,
-                                        align_quality=align_quality,
-                                        depth_quality=depth_quality,
-                                        depth_filtering=depth_filtering,
-                                        custom_faces=custom_faces,
-                                        texture_pages=texture_pages,
-                                        crop_method=crop_method,
-                                        texture_format=texture_format,
-                                        align_photos=u_align,
-                                        build_depth_maps=u_depth,
-                                        build_mesh=u_mesh,
-                                        build_texture=u_tex,
-                                        build_dem=u_dem,
-                                        build_orthomosaic=u_ortho,
-                                        build_point_cloud=u_pc,
-                                        export_obj=export_obj,
-                                        export_glb=export_glb,
-                                        export_fbx=export_fbx,
-                                        export_ply=export_ply,
-                                        export_dxf=export_dxf,
-                                        export_dem=export_dem,
-                                        export_ortho=export_ortho,
-                                        export_point_cloud=export_point_cloud,
-                                        point_cloud_format=point_cloud_format,
-                                        export_report=export_report,
-                                        resume=True,
-                                        network_path=network_path,
-                                    )
-                                    handoff_batch_id, _ = safe_create_cluster_batch(
-                                        net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True
-                                    )
+                            if failed_worker_id is not None:
+                                try:
+                                    net_client.setWorkerPaused(failed_worker_id, False)
                                     print(
-                                        f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.",
+                                        f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.",
                                         flush=True,
                                     )
+                                except Exception:
+                                    pass
 
-                                    if failed_worker_id is not None:
-                                        try:
-                                            net_client.setWorkerPaused(failed_worker_id, False)
-                                            print(
-                                                f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.",
-                                                flush=True,
-                                            )
-                                        except Exception:
-                                            pass
+                            h_start = time.time()
+                            hb_status, hb_success, hb_err, _ = _poll_monolithic_batch(
+                                handoff_batch_id, "Handoff", status_file
+                            )
+                            if hb_success:
+                                h_elapsed = (time.time() - h_start) / 60.0
+                                print(
+                                    f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!",
+                                    flush=True,
+                                )
+                                unified_succeeded = True
+                            else:
+                                print(
+                                    f"  [Cluster] [ERROR] Handoff batch {hb_status} on second worker: {hb_err}",
+                                    flush=True,
+                                )
+                                # Tier 2: Repeated failure -> restart from scratch with freshly materialized .psx stub
+                                print(
+                                    "\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.",
+                                    flush=True,
+                                )
+                                print(
+                                    "  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...",
+                                    flush=True,
+                                )
+                                emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
+                                try:
+                                    files_dir = get_psx_files_dir(psx_out)
+                                    if os.path.isdir(files_dir):
+                                        shutil.rmtree(files_dir, ignore_errors=True)
+                                    if os.path.exists(psx_out):
+                                        os.remove(psx_out)
+                                    # Pre-flight .psx materialization (CONTRIBUTING.md 6.3) before dispatching
+                                    stub_doc = Metashape.Document()
+                                    stub_doc.save(psx_out)
+                                    if hasattr(stub_doc, "clear"):
+                                        stub_doc.clear()
 
-                                    h_start = time.time()
-                                    h_last_stage = None
-                                    h_last_prog = -1.0
-                                    h_last_log = 0.0
-
-                                    handoff_ok = False
-                                    while True:
-                                        time.sleep(1.0)
-                                        hb_info = net_client.batchInfo(handoff_batch_id)
-                                        hb_tasks = hb_info.get("tasks", [])
-
-                                        if status_file and os.path.exists(status_file):
-                                            try:
-                                                with open(status_file, "r", encoding="utf-8") as sf:
-                                                    hs_data = json.load(sf)
-                                                hk_stage = hs_data.get("stage_key", "recon")
-                                                hk_desc = hs_data.get("stage_desc", "Handoff Reconstructing")
-                                                h_prog = float(hs_data.get("progress", 0.0))
-                                                h_node = hs_data.get("worker_node", "Second Worker")
-                                                if hk_stage != h_last_stage:
-                                                    emit_ipc_stage(hk_stage, hk_desc)
-                                                    print(
-                                                        f"\n>>> [Handoff Stage] Active on Second Worker: {hk_desc} (Node: {h_node})",
-                                                        flush=True,
-                                                    )
-                                                    h_last_stage = hk_stage
-
-                                                h_now = time.time()
-                                                if abs(h_prog - h_last_prog) >= 0.5 or (
-                                                    h_now - h_last_log >= 10.0 and h_prog != h_last_prog
-                                                ):
-                                                    h_elapsed = (h_now - h_start) / 60.0
-                                                    print(
-                                                        f"  [Handoff Progress] {hk_desc}: {h_prog:.1f}% (Worker: {h_node}, Elapsed: {h_elapsed:.1f} min)",
-                                                        flush=True,
-                                                    )
-                                                    h_last_prog = h_prog
-                                                    h_last_log = h_now
-                                            except Exception:
-                                                pass
-                                        elif hb_tasks:
-                                            h_active = next(
-                                                (
-                                                    t
-                                                    for t in hb_tasks
-                                                    if t.get("state") in ("running", "inprogress", "submitted")
-                                                ),
-                                                hb_tasks[-1],
-                                            )
-                                            h_name = h_active.get("name", "RunScript")
-                                            h_prog = h_active.get("progress", 0.0)
-                                            h_now = time.time()
-                                            if abs(h_prog - h_last_prog) >= 0.5 or (
-                                                h_now - h_last_log >= 10.0 and h_prog != h_last_prog
-                                            ):
-                                                h_elapsed = (h_now - h_start) / 60.0
-                                                print(
-                                                    f"  [Handoff Progress] {h_name}: {h_prog:.1f}% (Elapsed: {h_elapsed:.1f} min)",
-                                                    flush=True,
-                                                )
-                                                h_last_prog = h_prog
-                                                h_last_log = h_now
-
-                                        hb_status, hb_success, hb_err = evaluate_cluster_batch_info(hb_info)
-                                        if hb_success:
-                                            h_elapsed = (time.time() - h_start) / 60.0
-                                            print(
-                                                f"\n  [Cluster] [OK] Remaining tasks successfully completed on second cluster worker in {h_elapsed:.2f} min!",
-                                                flush=True,
-                                            )
-                                            handoff_ok = True
-                                            unified_succeeded = True
-                                            break
-                                        elif hb_status in ("failed", "aborted"):
-                                            print(
-                                                f"  [Cluster] [ERROR] Handoff batch {hb_status} on second worker: {hb_err}",
-                                                flush=True,
-                                            )
-                                            break
-
-                                    if handoff_ok:
-                                        break
+                                    scratch_net_task, _, _ = _build_mono_task(
+                                        m_align=True,
+                                        m_depth=build_depth_maps,
+                                        m_pc=build_point_cloud,
+                                        m_mesh=build_mesh,
+                                        m_tex=build_texture,
+                                        m_dem=build_dem,
+                                        m_ortho=build_orthomosaic,
+                                        m_resume=False,
+                                    )
+                                    scratch_batch_id, _ = safe_create_cluster_batch(
+                                        net_client,
+                                        rel_psx,
+                                        [scratch_net_task],
+                                        worker_limit=1,
+                                        force_fresh=True,
+                                    )
+                                    print(
+                                        f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.",
+                                        flush=True,
+                                    )
+                                    sc_start = time.time()
+                                    sc_status, sc_success, sc_err, _ = _poll_monolithic_batch(
+                                        scratch_batch_id, "Scratch", status_file
+                                    )
+                                    if sc_success:
+                                        sc_elapsed = (time.time() - sc_start) / 60.0
+                                        print(
+                                            f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!",
+                                            flush=True,
+                                        )
+                                        unified_succeeded = True
                                     else:
-                                        # Tier 2: Repeated failure! Try restarting from scratch on a clean worker node
                                         print(
-                                            "\n  [Cluster Recovery] Repeated failure: Handoff failed on secondary worker.",
+                                            f"  [Cluster] [ERROR] Fresh scratch batch {sc_status}: {sc_err}",
                                             flush=True,
                                         )
-                                        print(
-                                            "  [Cluster Recovery] Attempting complete project restart from scratch on a clean worker node...",
-                                            flush=True,
-                                        )
-                                        emit_ipc_event(f"@@AUTOMETASHAPE_RESTART_SCRATCH:{project_name}@@")
-                                        try:
-                                            files_dir = get_psx_files_dir(psx_out)
-                                            if os.path.isdir(files_dir):
-                                                try:
-                                                    shutil.rmtree(files_dir, ignore_errors=True)
-                                                except Exception:
-                                                    pass
-                                            if os.path.exists(psx_out):
-                                                try:
-                                                    os.remove(psx_out)
-                                                except Exception:
-                                                    pass
+                                except Exception as e_scratch:
+                                    print(f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True)
+                        elif failed_worker_id is not None:
+                            try:
+                                net_client.setWorkerPaused(failed_worker_id, False)
+                            except Exception:
+                                pass
+                    except Exception as e_failover:
+                        print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
 
-                                            scratch_net_task, _, _ = build_monolithic_runscript_task(
-                                                images_dir=images_dir,
-                                                output_dir=target_network_output or output_dir,
-                                                project_name=project_name,
-                                                preset=preset,
-                                                align_quality=align_quality,
-                                                depth_quality=depth_quality,
-                                                depth_filtering=depth_filtering,
-                                                custom_faces=custom_faces,
-                                                texture_pages=texture_pages,
-                                                crop_method=crop_method,
-                                                texture_format=texture_format,
-                                                align_photos=True,
-                                                build_depth_maps=build_depth_maps,
-                                                build_mesh=build_mesh,
-                                                build_texture=build_texture,
-                                                build_dem=build_dem,
-                                                build_orthomosaic=build_orthomosaic,
-                                                build_point_cloud=build_point_cloud,
-                                                export_obj=export_obj,
-                                                export_glb=export_glb,
-                                                export_fbx=export_fbx,
-                                                export_ply=export_ply,
-                                                export_dxf=export_dxf,
-                                                export_dem=export_dem,
-                                                export_ortho=export_ortho,
-                                                export_point_cloud=export_point_cloud,
-                                                point_cloud_format=point_cloud_format,
-                                                export_report=export_report,
-                                                resume=False,
-                                                network_path=network_path,
-                                            )
-                                            scratch_batch_id, _ = safe_create_cluster_batch(
-                                                net_client,
-                                                rel_psx,
-                                                [scratch_net_task],
-                                                worker_limit=1,
-                                                force_fresh=True,
-                                            )
-                                            print(
-                                                f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.",
-                                                flush=True,
-                                            )
-
-                                            sc_start = time.time()
-                                            sc_last_stage = None
-                                            sc_last_prog = -1.0
-                                            sc_last_log = 0.0
-
-                                            while True:
-                                                time.sleep(1.0)
-                                                sc_info = net_client.batchInfo(scratch_batch_id)
-                                                sc_tasks = sc_info.get("tasks", [])
-
-                                                if status_file and os.path.exists(status_file):
-                                                    try:
-                                                        with open(status_file, "r", encoding="utf-8") as sf:
-                                                            scs_data = json.load(sf)
-                                                        sck_stage = scs_data.get("stage_key", "recon")
-                                                        sck_desc = scs_data.get("stage_desc", "Scratch Reconstructing")
-                                                        sc_prog = float(scs_data.get("progress", 0.0))
-                                                        sc_node = scs_data.get("worker_node", "Scratch Worker")
-                                                        if sck_stage != sc_last_stage:
-                                                            emit_ipc_stage(sck_stage, sck_desc)
-                                                            print(
-                                                                f"\n>>> [Scratch Stage] Active: {sck_desc} (Node: {sc_node})",
-                                                                flush=True,
-                                                            )
-                                                            sc_last_stage = sck_stage
-
-                                                        sc_now = time.time()
-                                                        if abs(sc_prog - sc_last_prog) >= 0.5 or (
-                                                            sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog
-                                                        ):
-                                                            sc_elapsed = (sc_now - sc_start) / 60.0
-                                                            print(
-                                                                f"  [Scratch Progress] {sck_desc}: {sc_prog:.1f}% (Worker: {sc_node}, Elapsed: {sc_elapsed:.1f} min)",
-                                                                flush=True,
-                                                            )
-                                                            sc_last_prog = sc_prog
-                                                            sc_last_log = sc_now
-                                                    except Exception:
-                                                        pass
-                                                elif sc_tasks:
-                                                    sc_active = next(
-                                                        (
-                                                            t
-                                                            for t in sc_tasks
-                                                            if t.get("state") in ("running", "inprogress", "submitted")
-                                                        ),
-                                                        sc_tasks[-1],
-                                                    )
-                                                    sc_name = sc_active.get("name", "RunScript")
-                                                    sc_prog = sc_active.get("progress", 0.0)
-                                                    sc_now = time.time()
-                                                    if abs(sc_prog - sc_last_prog) >= 0.5 or (
-                                                        sc_now - sc_last_log >= 10.0 and sc_prog != sc_last_prog
-                                                    ):
-                                                        sc_elapsed = (sc_now - sc_start) / 60.0
-                                                        print(
-                                                            f"  [Scratch Progress] {sc_name}: {sc_prog:.1f}% (Elapsed: {sc_elapsed:.1f} min)",
-                                                            flush=True,
-                                                        )
-                                                        sc_last_prog = sc_prog
-                                                        sc_last_log = sc_now
-
-                                                sc_status, sc_success, sc_err = evaluate_cluster_batch_info(sc_info)
-                                                if sc_success:
-                                                    sc_elapsed = (time.time() - sc_start) / 60.0
-                                                    print(
-                                                        f"\n  [Cluster] [OK] Fresh scratch reconstruction completed successfully in {sc_elapsed:.2f} min!",
-                                                        flush=True,
-                                                    )
-                                                    unified_succeeded = True
-                                                    break
-                                                elif sc_status in ("failed", "aborted"):
-                                                    print(
-                                                        f"  [Cluster] [ERROR] Fresh scratch batch {sc_status}: {sc_err}",
-                                                        flush=True,
-                                                    )
-                                                    break
-                                        except Exception as e_scratch:
-                                            print(
-                                                f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True
-                                            )
-                                            break
-                            except Exception as e_failover:
-                                print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
-                            break
-
-                if unified_succeeded:
-                    _safe_reopen()
-                    chunk = doc.chunk
-                    total_time = (time.time() - t_start) / 60.0
-                    print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
-                    emit_ipc_event(IPC_COMPLETE)
-                    if survey_physics and pro_plan:
-                        print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
-                    return
-            except Exception as e_unified:
-                print(
-                    f"  [Cluster] [ERROR] Unified offline batch failed: {e_unified}",
-                    flush=True,
-                )
-                unified_succeeded = False
-
-        if cluster_enabled and network_independent_workers:
-            raise RuntimeError(
-                f"[Cluster] Independent worker offline batch execution failed for project '{project_name}'. "
-                "The offline monolithic process is the only method permitted for independent workers; "
-                "fallback to stage-by-stage network processing is strictly disabled."
+            if unified_succeeded:
+                _safe_reopen()
+                chunk = doc.chunk
+                total_time = (time.time() - t_start) / 60.0
+                print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
+                emit_ipc_event(IPC_COMPLETE)
+                if survey_physics and pro_plan:
+                    print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
+                return
+        except Exception as e_unified:
+            print(
+                f"  [Cluster] [ERROR] Unified offline batch failed: {e_unified}",
+                flush=True,
             )
+            unified_succeeded = False
 
+    if cluster_enabled and network_independent_workers:
+        raise RuntimeError(
+            f"[Cluster] Independent worker offline batch execution failed for project '{project_name}'. "
+            "The offline monolithic process is the only method permitted for independent workers; "
+            "fallback to stage-by-stage network processing is strictly disabled."
+        )
+
+    if not resumed:
         # Fallback Stage-by-Stage Feature Matching & Camera Alignment (Single-Chunk Mode)
         if not use_multi_chunk:
             if not align_photos:
@@ -2384,11 +2332,29 @@ def run_reconstruction(
                 flush=True,
             )
 
-            if filter_point_confidence and chunk.point_cloud:
+            if filter_point_confidence and filter_point_confidence > 0 and chunk.point_cloud:
                 print(f"  Filtering low-confidence points (< {filter_point_confidence})...", flush=True)
-                chunk.point_cloud.setConfidenceFilter(filter_point_confidence, 255)
-                chunk.point_cloud.removeSelectedPoints()
-                chunk.point_cloud.resetFilters()
+                try:
+                    if hasattr(chunk, "cleanPointCloud") and hasattr(Metashape.PointCloud, "Criterion"):
+                        chunk.cleanPointCloud(
+                            criterion=Metashape.PointCloud.Criterion.Confidence,
+                            threshold=int(filter_point_confidence),
+                        )
+                    else:
+                        chunk.point_cloud.setConfidenceFilter(0, max(0, int(filter_point_confidence) - 1))
+                        all_classes = (
+                            list(Metashape.PointClass.values.values())
+                            if hasattr(Metashape, "PointClass") and hasattr(Metashape.PointClass, "values")
+                            else [Metashape.PointClass.Created]
+                        )
+                        chunk.point_cloud.removePoints(all_classes)
+                        chunk.point_cloud.resetFilters()
+                except Exception as e_conf:
+                    print(f"  [WARNING] Point confidence filtering skipped: {e_conf}", flush=True)
+                    try:
+                        chunk.point_cloud.resetFilters()
+                    except Exception:
+                        pass
 
             if classify_ground and chunk.point_cloud:
                 c_size = ground_cell_size if ground_cell_size is not None else 50.0
@@ -2678,6 +2644,7 @@ def run_reconstruction(
             print(f"  [6b/7] [WARNING] 3D Tiled Model generation/export issue: {e_tile}. Continuing...", flush=True)
 
     # Step 7b: Digital Elevation Model (DEM) Generation & GeoTIFF Export
+    dem_exported_locally = False
     if build_dem:
         try:
             has_dem = getattr(chunk, "elevation", None) is not None
@@ -2687,7 +2654,7 @@ def run_reconstruction(
                 t_dem = time.time()
                 proj = Metashape.OrthoProjection()
                 target_crs = chunk.crs
-                if chunk.crs and not getattr(chunk.crs, "projcs", None):
+                if chunk.crs and not is_projected_crs(chunk.crs):
                     aligned_gps = [
                         c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
                     ]
@@ -2760,6 +2727,7 @@ def run_reconstruction(
                     f"  [7b/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out) / (1024 * 1024):.2f} MB)",
                     flush=True,
                 )
+                dem_exported_locally = True
             else:
                 print(
                     "  [7b/7] [INFO] DEM saved in project checkpoint. GeoTIFF file export skipped as requested.",
@@ -2797,16 +2765,22 @@ def run_reconstruction(
             print(f"  [7b2/7] [WARNING] Topographic contours issue: {e_cnt}. Continuing...", flush=True)
 
     # Step 7c: Orthomosaic Generation & GeoTIFF Export
+    ortho_exported_locally = False
+    eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
     if build_orthomosaic:
         try:
             has_ortho = chunk.orthomosaic is not None
             if not has_ortho:
-                emit_ipc_stage("ortho", "Generating Orthomosaic from Reconstructed Surface Mesh")
-                print("\n[7c/7] Generating Orthomosaic from Reconstructed Surface Mesh...", flush=True)
+                res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+                emit_ipc_stage("ortho", f"Generating Orthomosaic ({res_label}) from Reconstructed Surface Mesh")
+                print(
+                    f"\n[7c/7] Generating Orthomosaic ({res_label}) from Reconstructed Surface Mesh...",
+                    flush=True,
+                )
                 t_ortho = time.time()
                 proj = Metashape.OrthoProjection()
                 target_crs = chunk.crs
-                if chunk.crs and not getattr(chunk.crs, "projcs", None):
+                if chunk.crs and not is_projected_crs(chunk.crs):
                     aligned_gps = [
                         c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
                     ]
@@ -2844,8 +2818,8 @@ def run_reconstruction(
                         t_om.ghosting_filter = ghosting_filter
                         t_om.cull_faces = ortho_cull_faces
                         t_om.projection = proj
-                        if getattr(proj.crs, "projcs", None) and ortho_resolution > 0:
-                            t_om.resolution = ortho_resolution
+                        if eff_ortho_res > 0:
+                            t_om.resolution = eff_ortho_res
                         ortho_desc = (
                             "Generating True Orthomosaic from Elevation Surface (DEM)"
                             if surf_data == Metashape.DataSource.ElevationData
@@ -2869,7 +2843,7 @@ def run_reconstruction(
                         ghosting_filter=ghosting_filter,
                         cull_faces=ortho_cull_faces,
                         projection=proj,
-                        resolution=ortho_resolution if getattr(proj.crs, "projcs", None) else 0,
+                        resolution=eff_ortho_res,
                     )
                 print(
                     f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho) / 60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).",
@@ -2889,22 +2863,27 @@ def run_reconstruction(
 
             if (not cluster_enabled) and export_ortho:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
-                print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+                res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+                print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)
                 comp = Metashape.ImageCompression()
                 comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
                 comp.tiff_big = True
-                chunk.exportRaster(
-                    path=ortho_out,
-                    source_data=Metashape.DataSource.OrthomosaicData,
-                    image_format=Metashape.ImageFormat.ImageFormatTIFF,
-                    image_compression=comp,
-                    save_world=True,
-                    save_alpha=True,
-                )
+                ortho_export_kwargs = {
+                    "path": ortho_out,
+                    "source_data": Metashape.DataSource.OrthomosaicData,
+                    "image_format": Metashape.ImageFormat.ImageFormatTIFF,
+                    "image_compression": comp,
+                    "save_world": True,
+                    "save_alpha": True,
+                }
+                if eff_ortho_res > 0:
+                    ortho_export_kwargs["resolution"] = eff_ortho_res
+                chunk.exportRaster(**ortho_export_kwargs)
                 print(
                     f"  [7c/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)",
                     flush=True,
                 )
+                ortho_exported_locally = True
             else:
                 print(
                     "  [7c/7] [INFO] Orthomosaic saved in project checkpoint. GeoTIFF file export skipped as requested.",
@@ -2983,7 +2962,15 @@ def run_reconstruction(
                 t_dxf.path = get_cluster_export_path(dxf_out)
                 export_tasks.append(t_dxf)
 
-            if export_dem and (getattr(chunk, "elevation", None) is not None or build_dem):
+            if export_tie_points and getattr(chunk, "tie_points", None) is not None:
+                tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
+                t_tp = Metashape.Tasks.ExportPointCloud()
+                t_tp.format = Metashape.PointCloudFormat.PointCloudFormatPLY
+                t_tp.source_data = Metashape.DataSource.TiePointsData
+                t_tp.path = get_cluster_export_path(tp_out)
+                export_tasks.append(t_tp)
+
+            if export_dem and getattr(chunk, "elevation", None) is not None:
                 dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
                 t_dem = Metashape.Tasks.ExportRaster()
                 t_dem.source_data = Metashape.DataSource.ElevationData
@@ -2996,7 +2983,7 @@ def run_reconstruction(
                 t_dem.path = get_cluster_export_path(dem_out)
                 export_tasks.append(t_dem)
 
-            if export_ortho and (chunk.orthomosaic is not None or build_orthomosaic):
+            if export_ortho and getattr(chunk, "orthomosaic", None) is not None:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
                 t_ortho = Metashape.Tasks.ExportRaster()
                 t_ortho.source_data = Metashape.DataSource.OrthomosaicData
@@ -3007,10 +2994,12 @@ def run_reconstruction(
                 t_ortho.image_compression = comp
                 t_ortho.save_world = True
                 t_ortho.save_alpha = True
+                if eff_ortho_res > 0:
+                    t_ortho.resolution = eff_ortho_res
                 t_ortho.path = get_cluster_export_path(ortho_out)
                 export_tasks.append(t_ortho)
 
-            if export_point_cloud and (chunk.point_cloud is not None or build_point_cloud):
+            if export_point_cloud and getattr(chunk, "point_cloud", None) is not None:
                 pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
                 pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
                     pc_format_ext,
@@ -3092,7 +3081,12 @@ def run_reconstruction(
         except Exception as e_obj:
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 
-    if (not cluster_exported) and export_dem and getattr(chunk, "elevation", None) is not None:
+    if (
+        (not cluster_exported)
+        and (not dem_exported_locally)
+        and export_dem
+        and getattr(chunk, "elevation", None) is not None
+    ):
         try:
             dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
             comp = Metashape.ImageCompression()
@@ -3112,20 +3106,23 @@ def run_reconstruction(
         except Exception as e_dem:
             print(f"  [7/7] [WARNING] DEM fallback export issue: {e_dem}", flush=True)
 
-    if (not cluster_exported) and export_ortho and chunk.orthomosaic is not None:
+    if (not cluster_exported) and (not ortho_exported_locally) and export_ortho and chunk.orthomosaic is not None:
         try:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
             comp.tiff_big = True
-            chunk.exportRaster(
-                path=ortho_out,
-                source_data=Metashape.DataSource.OrthomosaicData,
-                image_format=Metashape.ImageFormat.ImageFormatTIFF,
-                image_compression=comp,
-                save_world=True,
-                save_alpha=True,
-            )
+            fb_ortho_kwargs = {
+                "path": ortho_out,
+                "source_data": Metashape.DataSource.OrthomosaicData,
+                "image_format": Metashape.ImageFormat.ImageFormatTIFF,
+                "image_compression": comp,
+                "save_world": True,
+                "save_alpha": True,
+            }
+            if eff_ortho_res > 0:
+                fb_ortho_kwargs["resolution"] = eff_ortho_res
+            chunk.exportRaster(**fb_ortho_kwargs)
             print(
                 f"  [7/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
@@ -3269,13 +3266,6 @@ def run_reconstruction(
         except Exception:
             pass
 
-    total_time = (time.time() - t_start) / 60.0
-    print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
-    emit_ipc_event(IPC_COMPLETE)
-
-    if survey_physics and pro_plan:
-        print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
-
     # Explicitly release Metashape document before scratch synchronization to unlink all open Win32 file handles
     if doc is not None:
         try:
@@ -3288,13 +3278,25 @@ def run_reconstruction(
 
         gc.collect()
 
-    # Synchronize staged project and deliverables from local NVMe scratch to central network share
+    # Synchronize staged project and deliverables from local NVMe scratch to central share BEFORE declaring completion
     if local_staging_dir:
         try:
             atexit.unregister(_sync_staging_to_central_share)
         except Exception:
             pass
-        _sync_staging_to_central_share()
+        sync_ok = _sync_staging_to_central_share()
+        if not sync_ok:
+            raise RuntimeError(
+                f"[Local Scratch Staging] Failed to synchronize staged deliverables from '{local_staging_dir}' "
+                f"to central share '{target_network_output}'."
+            )
+
+    total_time = (time.time() - t_start) / 60.0
+    print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
+    emit_ipc_event(IPC_COMPLETE)
+
+    if survey_physics and pro_plan:
+        print_pro_engineering_report(survey_physics, pro_plan, usgs_stats=usgs_stats)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -3305,12 +3307,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--images",
         "--photos-dir",
+        "--source-share",
+        "--data-root",
         dest="images",
         required=True,
-        help="Input directory containing raw images (scanned recursively across all subfolders)",
+        help="Input directory or Data Source shared folder (SSD #1) containing raw images (scanned recursively)",
     )
     parser.add_argument(
-        "--output", default=None, help="Output directory for 3D assets (default: <images_dir>/<project_name>)"
+        "--output",
+        "--result-share",
+        "--result-root",
+        dest="output",
+        default=None,
+        help="Output directory or Result shared folder (SSD #2) for .psx and 3D assets (default: <images_dir>/<project_name>)",
     )
     parser.add_argument(
         "--project-name",
@@ -3395,15 +3404,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--align-quality",
-        choices=["highest", "high", "medium", "low"],
+        choices=["highest", "high", "medium", "low", "lowest"],
         default="high",
         help="Image alignment accuracy/quality (default: high)",
     )
     parser.add_argument("--keypoint-limit", type=int, default=50000, help="Max keypoints per image (default: 50000)")
     parser.add_argument(
-        "--keypoint-limit-per-mpx", type=int, default=15000, help="Max keypoints per megapixel (default: 15000)"
+        "--keypoint-limit-per-mpx", type=int, default=2000, help="Max keypoints per megapixel (default: 2000)"
     )
-    parser.add_argument("--tiepoint-limit", type=int, default=25000, help="Max tiepoints per image (default: 25000)")
+    parser.add_argument("--tiepoint-limit", type=int, default=40000, help="Max tiepoints per image (default: 40000)")
     parser.add_argument(
         "--reference-preselection-mode",
         dest="reference_preselection_mode",
@@ -3413,7 +3422,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--depth-quality",
-        choices=["ultra", "high", "medium", "low"],
+        choices=["ultra", "high", "medium", "low", "lowest"],
         default="high",
         help="Depth map quality (default: high)",
     )
@@ -3575,13 +3584,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="png",
         help="Format for exported texture atlas files (default: png)",
     )
-    # Point Cloud Options
+    # Point Cloud Options (Disabled by default in 'pro' preset; opt-in via --build-point-cloud)
     parser.add_argument(
         "--build-point-cloud",
         dest="build_point_cloud",
         action="store_true",
-        default=True,
-        help="Generate dense point cloud from depth maps (default: True)",
+        default=None,
+        help="Generate dense point cloud from depth maps (default: False in 'pro' preset)",
     )
     parser.add_argument(
         "--no-point-cloud",
@@ -3679,6 +3688,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         dest="export_ortho",
         action="store_false",
         help="Disable GeoTIFF True Orthomosaic file export",
+    )
+    parser.add_argument(
+        "--ortho-resolution",
+        type=float,
+        default=0.05,
+        help="Orthomosaic pixel size in meters for build and GeoTIFF export (default: 0.05 = 5 cm/px; 0 = native GSD)",
     )
     # Quality Report Options
     parser.add_argument(
@@ -3865,5 +3880,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Resume reconstruction from existing project checkpoint if available (default: True). Use --no-resume to force a fresh restart from scratch.",
+    )
+    parser.add_argument(
+        "--no-reexec",
+        action="store_true",
+        help=argparse.SUPPRESS,
     )
     return parser

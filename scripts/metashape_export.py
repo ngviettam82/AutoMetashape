@@ -175,6 +175,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable GeoTIFF Orthomosaic export",
     )
     parser.add_argument(
+        "--ortho-resolution",
+        type=float,
+        default=0.05,
+        help="Orthomosaic pixel size in meters for on-demand build and export (default: 0.05 = 5 cm/px; 0 = native GSD)",
+    )
+    parser.add_argument(
         "--export-report",
         dest="export_report",
         action="store_true",
@@ -295,6 +301,7 @@ if __name__ == "__main__":
         point_cloud_format=args.point_cloud_format,
         export_dem=args.export_dem,
         export_orthomosaic=args.export_orthomosaic,
+        ortho_resolution=args.ortho_resolution,
         export_report=args.export_report,
         report_title=args.report_title,
         export_tiled_model=args.export_tiled_model,

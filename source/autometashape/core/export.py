@@ -16,6 +16,7 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.core.telemetry import compute_utm_epsg, is_projected_crs
 from autometashape.ipc.protocol import (
     IPC_COMPLETE,
     emit_ipc_event,
@@ -117,6 +118,38 @@ def infer_project_name(
     return "project"
 
 
+def _build_metric_ortho_projection(chunk):
+    """Build an OrthoProjection with projected metric UTM CRS when chunk CRS is geographic."""
+    if Metashape is None or not hasattr(Metashape, "OrthoProjection"):
+        return None
+    proj = Metashape.OrthoProjection()
+    target_crs = getattr(chunk, "crs", None)
+    if target_crs and not is_projected_crs(target_crs):
+        aligned_gps = [
+            c
+            for c in (getattr(chunk, "cameras", None) or [])
+            if getattr(c, "reference", None)
+            and getattr(c.reference, "location", None)
+            and getattr(c, "transform", None)
+            and getattr(c, "enabled", True)
+        ]
+        if aligned_gps:
+            avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
+            avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
+            if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
+                utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
+                try:
+                    target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+                except Exception:
+                    target_crs = chunk.crs
+    if target_crs:
+        try:
+            proj.crs = target_crs
+        except Exception:
+            pass
+    return proj
+
+
 def export_project_assets(
     project_path: str,
     output_dir: str = None,
@@ -130,6 +163,7 @@ def export_project_assets(
     point_cloud_format: str = "laz",
     export_dem: bool = False,
     export_orthomosaic: bool = False,
+    ortho_resolution: float = 0.05,
     export_report: bool = False,
     report_title: str = None,
     export_tiled_model: bool = False,
@@ -238,14 +272,31 @@ def export_project_assets(
     if not chunk:
         raise ValueError(f"Project '{project_path}' contains no active chunk!")
 
+    needs_mesh = any(
+        [
+            export_glb,
+            export_obj,
+            export_fbx,
+            export_ply,
+            export_dxf,
+            rebake_texture,
+            smooth_mesh,
+            bool(decimate_mesh and decimate_mesh > 0),
+            remove_lighting,
+            calibrate_colors,
+        ]
+    )
+
     if import_model_path and os.path.isfile(import_model_path):
         print(f"[Import] Importing 3D mesh model from: {import_model_path}", flush=True)
         chunk.importModel(path=import_model_path, format=Metashape.ModelFormat.ModelFormatOBJ)
         doc.save()
         chunk = doc.chunk
         print(f"[Import] Re-linked model saved to project: {project_path}", flush=True)
-    elif not chunk.model:
+    elif not chunk.model and needs_mesh:
         candidates = [
+            os.path.join(output_dir, f"{project_name}.obj"),
+            os.path.join(project_dir, f"{project_name}.obj"),
             os.path.join(output_dir, "model.obj"),
             os.path.join(project_dir, "model.obj"),
         ]
@@ -262,68 +313,69 @@ def export_project_assets(
         if not recovered:
             raise ValueError(f"Project '{project_path}' contains no reconstructed 3D mesh model!")
 
-    mesh_verts = len(chunk.model.vertices)
-    mesh_faces = len(chunk.model.faces)
-    emit_ipc_stage("mesh", f"Validating 3D Mesh Geometry ({mesh_verts:,} vertices, {mesh_faces:,} faces)")
-    print(f"[Model Info] Geometry: {mesh_verts:,} vertices, {mesh_faces:,} polygonal faces.", flush=True)
+    if chunk.model:
+        mesh_verts = len(chunk.model.vertices)
+        mesh_faces = len(chunk.model.faces)
+        emit_ipc_stage("mesh", f"Validating 3D Mesh Geometry ({mesh_verts:,} vertices, {mesh_faces:,} faces)")
+        print(f"[Model Info] Geometry: {mesh_verts:,} vertices, {mesh_faces:,} polygonal faces.", flush=True)
 
-    if smooth_mesh and chunk.model:
-        print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
-        chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
-        doc.save()
-
-    if decimate_mesh and chunk.model and decimate_mesh > 0:
-        print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
-        chunk.decimateModel(face_count=decimate_mesh)
-        doc.save()
-
-    current_pages = 0
-    if hasattr(chunk.model, "textures") and chunk.model.textures:
-        current_pages = len(chunk.model.textures)
-    elif hasattr(chunk.model, "texture") and chunk.model.texture():
-        current_pages = 1
-
-    if calibrate_colors or rebake_texture or current_pages == 0 or (remove_lighting and chunk.model):
-        emit_ipc_stage("texture", "Processing Texture Atlas & Delighting")
-
-    if calibrate_colors:
-        print("\n[Color Calibration] Executing radiometric calibration & white balance...", flush=True)
-        try:
-            chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
+        if smooth_mesh:
+            print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
+            chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
             doc.save()
-        except Exception as e_col:
-            print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
-    if rebake_texture or current_pages == 0:
-        print(
-            f"\n[Texture] Baking {texture_pages}x 8192x8192 (8K) Texture Atlas (Mosaic Blending, Fill Holes: {fill_holes}, Ghosting Filter: {ghosting_filter})...",
-            flush=True,
-        )
-        t_tex = time.time()
-        chunk.buildUV(
-            mapping_mode=Metashape.MappingMode.GenericMapping,
-            page_count=texture_pages,
-            texture_size=8192,
-        )
-        chunk.buildTexture(
-            blending_mode=Metashape.BlendingMode.MosaicBlending,
-            texture_size=8192,
-            fill_holes=fill_holes,
-            ghosting_filter=ghosting_filter,
-        )
-        print(f"  Texture baking completed in {(time.time() - t_tex) / 60:.2f} min.", flush=True)
-        doc.save()
-        chunk = doc.chunk
-        print(f"  Updated project saved: {project_path}", flush=True)
-
-    if remove_lighting and chunk.model:
-        print("\n[Delighting] Removing harsh ambient shadows and illumination...", flush=True)
-        try:
-            chunk.removeLighting(color_mode=delighting_color_mode)
+        if decimate_mesh and decimate_mesh > 0:
+            print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
+            chunk.decimateModel(face_count=decimate_mesh)
             doc.save()
-            print("  Texture delighting completed.", flush=True)
-        except Exception as e_lt:
-            print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
+
+        current_pages = 0
+        if hasattr(chunk.model, "textures") and chunk.model.textures:
+            current_pages = len(chunk.model.textures)
+        elif hasattr(chunk.model, "texture") and chunk.model.texture():
+            current_pages = 1
+
+        if calibrate_colors or rebake_texture or current_pages == 0 or remove_lighting:
+            emit_ipc_stage("texture", "Processing Texture Atlas & Delighting")
+
+        if calibrate_colors:
+            print("\n[Color Calibration] Executing radiometric calibration & white balance...", flush=True)
+            try:
+                chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
+                doc.save()
+            except Exception as e_col:
+                print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
+
+        if rebake_texture or current_pages == 0:
+            print(
+                f"\n[Texture] Baking {texture_pages}x 8192x8192 (8K) Texture Atlas (Mosaic Blending, Fill Holes: {fill_holes}, Ghosting Filter: {ghosting_filter})...",
+                flush=True,
+            )
+            t_tex = time.time()
+            chunk.buildUV(
+                mapping_mode=Metashape.MappingMode.GenericMapping,
+                page_count=texture_pages,
+                texture_size=8192,
+            )
+            chunk.buildTexture(
+                blending_mode=Metashape.BlendingMode.MosaicBlending,
+                texture_size=8192,
+                fill_holes=fill_holes,
+                ghosting_filter=ghosting_filter,
+            )
+            print(f"  Texture baking completed in {(time.time() - t_tex) / 60:.2f} min.", flush=True)
+            doc.save()
+            chunk = doc.chunk
+            print(f"  Updated project saved: {project_path}", flush=True)
+
+        if remove_lighting:
+            print("\n[Delighting] Removing harsh ambient shadows and illumination...", flush=True)
+            try:
+                chunk.removeLighting(color_mode=delighting_color_mode)
+                doc.save()
+                print("  Texture delighting completed.", flush=True)
+            except Exception as e_lt:
+                print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
 
     glb_out = os.path.join(output_dir, f"{project_name}.glb")
     obj_out = os.path.join(output_dir, f"{project_name}.obj")
@@ -403,7 +455,11 @@ def export_project_assets(
                     src_data = Metashape.DataSource.DepthMapsData
                 elif getattr(chunk, "model", None) is not None:
                     src_data = Metashape.DataSource.ModelData
-                chunk.buildDem(source_data=src_data)
+                dem_kwargs = {"source_data": src_data}
+                proj_dem = _build_metric_ortho_projection(chunk)
+                if proj_dem is not None:
+                    dem_kwargs["projection"] = proj_dem
+                chunk.buildDem(**dem_kwargs)
                 doc.save()
                 has_dem = getattr(chunk, "elevation", None) is not None
                 print("  [DEM] Elevation model built and saved successfully.", flush=True)
@@ -430,9 +486,11 @@ def export_project_assets(
     # 5. Optional Orthomosaic Export
     if export_orthomosaic:
         has_ortho = getattr(chunk, "orthomosaic", None) is not None
+        eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
         if not has_ortho:
+            res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
             print(
-                "\n[Orthomosaic] Project contains no pre-built orthomosaic. Generating on-demand before export...",
+                f"\n[Orthomosaic] Project contains no pre-built orthomosaic. Generating on-demand ({res_label}) before export...",
                 flush=True,
             )
             try:
@@ -442,7 +500,11 @@ def export_project_assets(
                     surf_data = Metashape.DataSource.ModelData
                 else:
                     surf_data = Metashape.DataSource.ElevationData
-                chunk.buildOrthomosaic(surface_data=surf_data)
+                ortho_kwargs = {"surface_data": surf_data, "resolution": eff_ortho_res}
+                proj_om = _build_metric_ortho_projection(chunk)
+                if proj_om is not None:
+                    ortho_kwargs["projection"] = proj_om
+                chunk.buildOrthomosaic(**ortho_kwargs)
                 doc.save()
                 has_ortho = getattr(chunk, "orthomosaic", None) is not None
                 print("  [Orthomosaic] Orthomosaic built and saved successfully.", flush=True)
@@ -451,18 +513,22 @@ def export_project_assets(
 
         if has_ortho:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
-            print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic to: {ortho_out}...", flush=True)
+            res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+            print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
             comp.tiff_big = True
-            chunk.exportRaster(
-                path=ortho_out,
-                source_data=Metashape.DataSource.OrthomosaicData,
-                image_format=Metashape.ImageFormat.ImageFormatTIFF,
-                image_compression=comp,
-                save_world=True,
-                save_alpha=True,
-            )
+            export_ortho_kwargs = {
+                "path": ortho_out,
+                "source_data": Metashape.DataSource.OrthomosaicData,
+                "image_format": Metashape.ImageFormat.ImageFormatTIFF,
+                "image_compression": comp,
+                "save_world": True,
+                "save_alpha": True,
+            }
+            if eff_ortho_res > 0:
+                export_ortho_kwargs["resolution"] = eff_ortho_res
+            chunk.exportRaster(**export_ortho_kwargs)
             print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)", flush=True)
         else:
             print("\n[Orthomosaic] Note: Project contains no orthomosaic; skipping export.", flush=True)
@@ -603,3 +669,8 @@ def export_project_assets(
 
     print("\n[SUCCESS] Production assets exported successfully!", flush=True)
     emit_ipc_event(IPC_COMPLETE)
+
+    try:
+        doc.clear()
+    except Exception:
+        pass

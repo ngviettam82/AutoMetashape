@@ -10,11 +10,43 @@ from __future__ import annotations
 import math
 import os
 import re
+import sys
 
 try:
     import Metashape
 except ImportError:
     Metashape = None
+
+
+def is_projected_crs(crs: object) -> bool:
+    """Return True if a Metashape CoordinateSystem is a projected metric CRS (e.g. UTM/VN-2000).
+
+    Metashape 2.2+ CoordinateSystem objects do not expose a ``.projcs`` attribute;
+    projected systems are identified by a ``PROJCS[...]`` WKT header.
+    """
+    if crs is None:
+        return False
+    wkt = getattr(crs, "wkt", None)
+    if isinstance(wkt, str) and wkt.strip():
+        return wkt.lstrip().upper().startswith("PROJCS")
+    # Fallback for mock objects in tests that define .projcs directly
+    return bool(getattr(crs, "projcs", None))
+
+
+def _is_same_or_subpath(child: str, parent: str) -> bool:
+    """Return True if ``child`` equals or is nested inside ``parent`` (boundary-safe)."""
+    if not child or not parent:
+        return False
+    try:
+        abs_c = os.path.normpath(os.path.abspath(child))
+        abs_p = os.path.normpath(os.path.abspath(parent))
+        if sys.platform == "win32":
+            abs_c = abs_c.lower()
+            abs_p = abs_p.lower()
+        return os.path.commonpath([abs_c, abs_p]) == abs_p
+    except ValueError:
+        return False
+
 
 # Comprehensive list of all image and camera RAW formats supported by Agisoft Metashape
 SUPPORTED_IMAGE_EXTS = (
@@ -128,7 +160,7 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "shutter": "mechanical",
         "focal_fixed": None,
     },
-    "l2": {
+    "zenmuse l2": {
         "name": "DJI Zenmuse L2 RGB",
         "sensor_w_mm": 17.3,
         "sensor_h_mm": 13.0,
@@ -160,6 +192,14 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "pixel_pitch_um": 1.72,
         "shutter": "rolling",
         "focal_fixed": 3.05,
+    },
+    "l2d-20c": {
+        "name": "DJI Mavic 3 / Classic / Pro Hasselblad (L2D-20c)",
+        "sensor_w_mm": 17.3,
+        "sensor_h_mm": 13.0,
+        "pixel_pitch_um": 3.28,
+        "shutter": "rolling",
+        "focal_fixed": 12.29,
     },
     "fc3582": {
         "name": "DJI Mavic 3 / Cine / Classic Hasselblad",
@@ -485,15 +525,32 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
                     shadow_counts.append(sum(hist[:20]) / total)
                     highlight_counts.append(sum(hist[235:]) / total)
             elif has_meta:
-                im = Metashape.Image().open(p)
+                try:
+                    im = Metashape.Image.open(p, datatype="U8", channels="RGB")
+                except Exception:
+                    im = Metashape.Image().open(p)
                 if im:
                     thumb = im.resize(256, 256)
                     if thumb:
                         raw = thumb.tostring()
-                        total = len(raw)
-                        if total > 0:
-                            shadow_counts.append(sum(1 for b in raw if b < 20) / total)
-                            highlight_counts.append(sum(1 for b in raw if b > 235) / total)
+                        if isinstance(raw, str):
+                            raw = raw.encode("latin1")
+                        total_bytes = len(raw)
+                        if total_bytes >= 3 and total_bytes % 3 == 0:
+                            n_px = total_bytes // 3
+                            sh_cnt = 0
+                            hi_cnt = 0
+                            for idx in range(0, total_bytes, 3):
+                                luma = (raw[idx] * 77 + raw[idx + 1] * 150 + raw[idx + 2] * 29) >> 8
+                                if luma < 20:
+                                    sh_cnt += 1
+                                elif luma > 235:
+                                    hi_cnt += 1
+                            shadow_counts.append(sh_cnt / n_px)
+                            highlight_counts.append(hi_cnt / n_px)
+                        elif total_bytes > 0:
+                            shadow_counts.append(sum(1 for b in raw if b < 20) / total_bytes)
+                            highlight_counts.append(sum(1 for b in raw if b > 235) / total_bytes)
         except Exception:
             pass
     if not shadow_counts:
@@ -531,7 +588,7 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
         if os.path.isdir(full_path):
             abs_sub = os.path.abspath(full_path)
             # Skip output dir and any 'model*' export dirs
-            if entry.lower().startswith("model") or (abs_output and abs_sub.startswith(abs_output)):
+            if entry.lower().startswith("model") or (abs_output and _is_same_or_subpath(abs_sub, abs_output)):
                 continue
             if entry.startswith("."):
                 continue
@@ -543,7 +600,7 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
                     for d in dirs
                     if not d.lower().startswith("model")
                     and not d.startswith(".")
-                    and not (abs_output and os.path.abspath(os.path.join(r, d)).startswith(abs_output))
+                    and not (abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
                 ]
                 for f in files:
                     if f.lower().endswith(supported_exts):
@@ -567,7 +624,7 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
                 for d in dirs
                 if not d.lower().startswith("model")
                 and not d.startswith(".")
-                and not (abs_output and os.path.abspath(os.path.join(r, d)).startswith(abs_output))
+                and not (abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
             ]
             for f in files:
                 if f.lower().endswith(supported_exts):
@@ -730,8 +787,10 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
             shutter = "rolling"
         elif any(s == "mechanical" for s in xmp_shutter_valid):
             shutter = "mechanical"
+        elif "l2d" in combined_name:
+            shutter = "rolling"
         elif primary_make.lower() == "dji":
-            if any(k in combined_name for k in ["fc6310", "fc3411", "p1", "x7", "x4s", "l2", "m3m"]):
+            if any(k in combined_name for k in ["fc6310", "fc3411", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
                 shutter = "mechanical"
             else:
                 shutter = "rolling"
@@ -749,7 +808,12 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
             flight_height_m = sum(valid_rel) / len(valid_rel)
     if flight_height_m is None and alts and len(alts) >= 2:
         alt_range = max(alts) - min(alts)
-        flight_height_m = max(alts) - min(alts) if alt_range > 10.0 else min(alts)
+        if alt_range > 10.0:
+            flight_height_m = alt_range
+        elif 5.0 <= min(alts) <= 400.0:
+            # Only treat MSL min(alts) as plausible AGL when near sea level; highland plateaus (e.g. 1500m MSL)
+            # must fall through to the safe default aerial AGL rather than distorting GSD/overlap.
+            flight_height_m = min(alts)
     if flight_height_m is None or flight_height_m < 5.0:
         flight_height_m = 75.0  # reasonable aerial flight default
 
@@ -772,16 +836,29 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
 
     relief_ratio = (alt_span_m / max(span_m, 1.0)) if span_m > 0 else 0.0
 
-    # Overlap estimation
+    # Overlap estimation using true consecutive image pairs (not strided by `step`)
     fwd_ov, lat_ov = None, None
-    if gsd_cm and len(coords) >= 2:
+    if gsd_cm and total_photos >= 2:
         ground_w_m = (gsd_cm * avg_w) / 100.0
         ground_h_m = (gsd_cm * avg_h) / 100.0
         baselines = []
-        for i in range(len(coords) - 1):
-            d = calculate_haversine_meters(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1])
-            if d > 0.1:
-                baselines.append(d)
+        if step == 1 and len(coords) >= 2:
+            for i in range(len(coords) - 1):
+                d = calculate_haversine_meters(coords[i][0], coords[i][1], coords[i + 1][0], coords[i + 1][1])
+                if d > 0.1:
+                    baselines.append(d)
+        else:
+            # Probe up to 15 true consecutive (i, i+1) pairs distributed across the dataset
+            pair_step = max(1, (total_photos - 1) // 15)
+            for idx in range(0, total_photos - 1, pair_step):
+                t1 = extract_image_telemetry(all_imgs[idx])
+                t2 = extract_image_telemetry(all_imgs[idx + 1])
+                if t1["has_gps"] and t2["has_gps"]:
+                    d = calculate_haversine_meters(t1["lat"], t1["lon"], t2["lat"], t2["lon"])
+                    if d > 0.1:
+                        baselines.append(d)
+                if len(baselines) >= 15:
+                    break
         if baselines:
             baselines.sort()
             med_b = baselines[len(baselines) // 2]
@@ -833,8 +910,9 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     custom_faces = 2000000
     texture_pages = 16
     build_orthomosaic = True
+    ortho_resolution = 0.05  # 5 cm/px (~25x lighter storage than 1 cm/px native GSD)
     build_dem = False
-    build_point_cloud = True
+    build_point_cloud = False
     classify_ground = False
     close_holes = False
     depth_filtering = "moderate"
@@ -846,7 +924,8 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
 
     align_quality = "high"
     keypoint_limit = 50000
-    tiepoint_limit = 25000
+    keypoint_limit_per_mpx = 2000
+    tiepoint_limit = 40000
     guided_matching = True
     adaptive_fitting = True
     filter_stationary_points = True
@@ -856,6 +935,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         "surface_type": surface_type,
         "align_quality": align_quality,
         "keypoint_limit": keypoint_limit,
+        "keypoint_limit_per_mpx": keypoint_limit_per_mpx,
         "tiepoint_limit": tiepoint_limit,
         "guided_matching": guided_matching,
         "adaptive_fitting": adaptive_fitting,
@@ -868,6 +948,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
         "texture_pages": texture_pages,
         "close_holes": close_holes,
         "build_orthomosaic": build_orthomosaic,
+        "ortho_resolution": ortho_resolution,
         "build_dem": build_dem,
         "build_point_cloud": build_point_cloud,
         "classify_ground": classify_ground,

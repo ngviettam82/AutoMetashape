@@ -424,7 +424,8 @@ def execute_usgs_gradual_selection(
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReconstructionUncertainty)
         vals = sorted(f.values)
         if vals:
-            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            lim_idx = min(len(vals) - 1, max(0, int(len(vals) * (1.0 - max_removal_ratio))))
+            lim = vals[lim_idx]
             eff_ru = max(ru_thresh, lim) if ru_thresh < lim else ru_thresh
         else:
             eff_ru = ru_thresh
@@ -455,7 +456,8 @@ def execute_usgs_gradual_selection(
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ProjectionAccuracy)
         vals = sorted(f.values)
         if vals:
-            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            lim_idx = min(len(vals) - 1, max(0, int(len(vals) * (1.0 - max_removal_ratio))))
+            lim = vals[lim_idx]
             eff_pa = max(pa_thresh, lim) if pa_thresh < lim else pa_thresh
         else:
             eff_pa = pa_thresh
@@ -486,7 +488,8 @@ def execute_usgs_gradual_selection(
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ReprojectionError)
         vals = sorted(f.values)
         if vals:
-            lim = vals[int(len(vals) * (1.0 - max_removal_ratio))]
+            lim_idx = min(len(vals) - 1, max(0, int(len(vals) * (1.0 - max_removal_ratio))))
+            lim = vals[lim_idx]
             eff_re = max(re_thresh, lim) if re_thresh < lim else re_thresh
         else:
             eff_re = re_thresh
