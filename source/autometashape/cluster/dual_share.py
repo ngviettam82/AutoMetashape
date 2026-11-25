@@ -198,6 +198,23 @@ def validate_dual_share_topology(
             f"Result folder '{norm_result}' is not located under Metashape worker root '{resolved_net_root}'."
         )
 
+    if norm_source and norm_result:
+        same_dir = (
+            norm_source.lower() == norm_result.lower()
+            if sys.platform == "win32"
+            else norm_source == norm_result
+        )
+        if same_dir:
+            warnings.append(
+                f"Data source folder and Result folder point to the same directory ('{norm_source}'). "
+                "Use two separate shared folders/SSDs to decouple read-only photo I/O from writable results."
+            )
+        elif is_subpath(norm_result, norm_source) or is_subpath(norm_source, norm_result):
+            warnings.append(
+                f"Data source folder ('{norm_source}') and Result folder ('{norm_result}') overlap on the same "
+                "directory tree. Separate shares/SSDs are recommended for maximum multi-SSD throughput."
+            )
+
     if norm_source and not is_unc_path(norm_source):
         msg = (
             f"Data source folder '{norm_source}' is a local path, not a UNC share (\\\\SERVER\\Share). "

@@ -1355,19 +1355,8 @@ def run_reconstruction(
                         os.remove(target_psx)
                     except Exception:
                         pass
-                if target_network_output and target_network_output != output_dir:
-                    net_f = get_psx_files_dir(os.path.join(target_network_output, f"{project_name}.psx"))
-                    if os.path.isdir(net_f):
-                        try:
-                            shutil.rmtree(net_f, ignore_errors=True)
-                        except Exception:
-                            pass
-                    net_p = os.path.join(target_network_output, f"{project_name}.psx")
-                    if os.path.isfile(net_p):
-                        try:
-                            os.remove(net_p)
-                        except Exception:
-                            pass
+                # Never delete target_network_output .psx/.files mid-run during local scratch staging;
+                # _sync_staging_to_central_share(replace_fresh_project=True) replaces them atomically on completion.
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
@@ -1710,10 +1699,7 @@ def run_reconstruction(
             has_tex = False
             if has_mesh and chunk.model is not None and not rebake_texture:
                 try:
-                    if hasattr(chunk.model, "textures"):
-                        has_tex = len(chunk.model.textures) == (texture_pages or 16)
-                    elif hasattr(chunk.model, "texture") and chunk.model.texture():
-                        has_tex = (texture_pages or 16) == 1
+                    has_tex = _get_model_texture_page_count(chunk.model) == (texture_pages or 16)
                 except Exception:
                     has_tex = False
 

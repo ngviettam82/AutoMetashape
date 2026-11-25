@@ -87,7 +87,7 @@ class TestDualShareTopology(unittest.TestCase):
             self.assertTrue(any("unreachable" in e.lower() or "not a directory" in e.lower() for e in report["errors"]))
 
     def test_validate_dual_share_topology_warns_when_source_equals_result(self) -> None:
-        """Verify using identical source and result shares emits a topology warning."""
+        """Verify using identical source and result shares emits an explicit same-directory warning even on UNC."""
         with tempfile.TemporaryDirectory() as same_dir:
             report = validate_dual_share_topology(
                 source_share=same_dir,
@@ -95,7 +95,29 @@ class TestDualShareTopology(unittest.TestCase):
                 min_headroom_gb=0.01,
             )
             self.assertTrue(report["valid"])
-            self.assertTrue(any("same" in w.lower() or "identical" in w.lower() for w in report["warnings"]))
+            self.assertTrue(any("same directory" in w.lower() for w in report["warnings"]))
+
+        # Also prove the warning fires for identical UNC shares where NO non-UNC warning exists
+        fake_usage = MagicMock(free=200 * (1024**3))
+        with (
+            patch("os.path.isdir", return_value=True),
+            patch("os.listdir", return_value=[]),
+            patch("os.makedirs"),
+            patch("tempfile.mkstemp", return_value=(99, r"\\SRV\Share\.probe")),
+            patch("os.close"),
+            patch("os.remove"),
+            patch("shutil.disk_usage", return_value=fake_usage),
+        ):
+            unc_report = validate_dual_share_topology(
+                source_share=r"\\SRV\Share",
+                result_share=r"\\SRV\Share",
+                min_headroom_gb=50.0,
+            )
+        self.assertTrue(unc_report["valid"])
+        self.assertTrue(
+            any("same directory" in w.lower() for w in unc_report["warnings"]),
+            msg=f"Expected explicit same-directory warning on UNC, got: {unc_report['warnings']}",
+        )
 
     def test_map_source_to_result_dir_preserves_project_subpath(self) -> None:
         """Verify project folder mapping mirrors relative hierarchy onto Result Share SSD #2."""
@@ -280,6 +302,46 @@ class TestDualShareTopology(unittest.TestCase):
                 result_network_root=os.path.normpath(os.path.abspath(res_root)),
             )
             mock_sub.assert_called_once()
+
+    def test_supervisor_cli_enables_expected_exports_for_local_dual_share(self) -> None:
+        """Verify cluster_supervisor CLI sets export_obj/export_ortho for local dual-share runs."""
+        from autometashape.cluster import supervisor as sup_mod
+
+        with tempfile.TemporaryDirectory() as src_root, tempfile.TemporaryDirectory() as res_root:
+            site_a = os.path.join(src_root, "Site_Local")
+            os.makedirs(site_a, exist_ok=True)
+            with open(os.path.join(site_a, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+
+            captured_jobs = []
+
+            def _fake_run_queue(self_sup, execute_fn=None, concurrent=None):
+                captured_jobs.extend(self_sup.queue)
+                return {"total_jobs": len(self_sup.queue), "completed_jobs": len(self_sup.queue), "jobs": []}
+
+            argv = [
+                "cluster_supervisor.py",
+                "--source-share",
+                src_root,
+                "--result-share",
+                res_root,
+                "--sequential",
+                "--min-headroom-gb",
+                "0.01",
+                "--no-reexec",
+            ]
+            with (
+                patch.object(sys, "argv", argv),
+                patch.object(sup_mod, "Metashape", object()),
+                patch.object(sup_mod.ClusterSupervisor, "run_queue", _fake_run_queue),
+            ):
+                rc = sup_mod.main()
+
+            self.assertEqual(rc, 0)
+            self.assertEqual(len(captured_jobs), 1)
+            self.assertTrue(captured_jobs[0].extra_args["export_obj"])
+            self.assertTrue(captured_jobs[0].extra_args["export_ortho"])
+            self.assertFalse(captured_jobs[0].extra_args["build_point_cloud"])
 
 
 if __name__ == "__main__":

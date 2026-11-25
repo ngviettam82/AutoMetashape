@@ -583,8 +583,8 @@ def update_remote_worker(
                     except Exception:
                         pass
 
-        # 5. Ensure maintenance project and stage update payload
-        rel_project = ensure_cluster_maintenance_project(shared_root)
+        # 5. Ensure per-worker maintenance project and stage update payload
+        rel_project = ensure_cluster_maintenance_project(shared_root, worker_slug=f"{node_hname}_{wid}")
         cluster_shared_dir = os.path.join(shared_root, ".cluster")
         stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url)
 

@@ -668,6 +668,7 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
         has_meta = False
 
     if has_meta:
+        temp_doc = None
         try:
             temp_doc = Metashape.Document()
             temp_chunk = temp_doc.addChunk()
@@ -718,6 +719,12 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
                     rel_alts.append(rel_alt_val)
         except Exception:
             has_meta = False
+        finally:
+            if temp_doc is not None and hasattr(temp_doc, "clear"):
+                try:
+                    temp_doc.clear()
+                except Exception:
+                    pass
 
     if not has_meta:
         for path in sampled:

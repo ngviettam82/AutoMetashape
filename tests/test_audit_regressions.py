@@ -816,6 +816,190 @@ class TestAuditRegressions(unittest.TestCase):
                 # Local staging directory must stay deleted (never recreated by IPC_COMPLETE)
                 self.assertFalse(os.path.exists(os.path.join(scratch_dir, "SiteStatus_local_stage")))
 
+    def test_cluster_monitor_skips_maintenance_batches_and_isolates_source_share(self) -> None:
+        """Verify cluster_monitor skips .cluster/ maintenance batches and never checks source_root for deliverables."""
+        with tempfile.TemporaryDirectory() as tmp_base:
+            src_root = os.path.join(tmp_base, "SSD1_Source")
+            res_root = os.path.join(tmp_base, "SSD2_Result")
+            src_site = os.path.join(src_root, "SiteA")
+            res_site = os.path.join(res_root, "SiteA")
+            maint_dir = os.path.join(res_root, ".cluster")
+            for d in (src_site, res_site, maint_dir):
+                os.makedirs(d, exist_ok=True)
+
+            # Raw source share contains ONLY raw photos (no deliverables)
+            with open(os.path.join(src_site, "DJI_0001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+
+            # Result share contains valid deliverables for SiteA
+            with open(os.path.join(res_site, "SiteA.obj"), "wb") as f:
+                f.write(b"v 0 0 0\n" * 200)
+            with open(os.path.join(res_site, "SiteA.mtl"), "w", encoding="utf-8") as f:
+                f.write("newmtl m0\n")
+            with open(os.path.join(res_site, "SiteA.png"), "wb") as f:
+                f.write(b"\x89PNG" + b"\x00" * 1024)
+            with open(os.path.join(res_site, "SiteA_orthomosaic.tif"), "wb") as f:
+                f.write(b"II*\x00" + b"\x00" * 1500)
+            with open(os.path.join(res_site, "SiteA_orthomosaic.prj"), "w", encoding="utf-8") as f:
+                f.write('PROJCS["WGS 84 / UTM zone 48N"]')
+            with open(os.path.join(res_site, "SiteA_orthomosaic.tfw"), "w", encoding="utf-8") as f:
+                f.write("0.05\n0\n0\n-0.05\n0\n0\n")
+
+            fake_client = MagicMock()
+            fake_client.workerList.return_value = {
+                "workers": [
+                    {
+                        "worker_id": 8,
+                        "hostname": "Admin-pc",
+                        "state": "ready",
+                        "memory_size": 64 * (1024**3),
+                        "resource_usage": {"cpu_usage": 0.1, "memory_usage": 0.2},
+                    }
+                ]
+            }
+            fake_client.batchList.return_value = {
+                "batches": [
+                    {"batch_id": 65, "path": ".cluster/maintenance_admin-pc_8.psx", "state": "completed"},
+                    {"batch_id": 71, "path": "SiteA/SiteA.psx", "state": "completed"},
+                ]
+            }
+            fake_ms = SimpleNamespace(NetworkClient=lambda: fake_client)
+
+            buf = io.StringIO()
+            with (
+                patch.object(monitor_mod, "Metashape", fake_ms),
+                patch.object(monitor_mod, "load_cluster_config", return_value={"root": res_root}),
+                redirect_stdout(buf),
+            ):
+                # Deliberately omit shared_root so result root comes from server_config.json while source_root is passed
+                data = monitor_mod.execute_audit(
+                    server_host="127.0.0.1:5840",
+                    shared_root="",
+                    source_root=src_root,
+                    min_headroom=0.01,
+                )
+
+            self.assertTrue(data["healthy"], msg=f"Unexpected monitor issues: {data['issues']}")
+            self.assertNotIn(65, data["deliverables"])
+            self.assertIn(71, data["deliverables"])
+            self.assertTrue(data["deliverables"][71]["intact"])
+
+    def test_no_resume_midrun_branch_never_deletes_shared_psx_stub(self) -> None:
+        """Verify --no-resume never deletes shared .psx/.files in the post-Document branch either."""
+        with tempfile.TemporaryDirectory() as tmp_root:
+            img_dir = os.path.join(tmp_root, "src_photos")
+            net_out = os.path.join(tmp_root, "shared_result")
+            scratch_dir = os.path.join(tmp_root, "nvme_scratch")
+            local_stage = os.path.join(scratch_dir, "SiteY_local_stage")
+            for d in (img_dir, net_out, scratch_dir, local_stage):
+                os.makedirs(d, exist_ok=True)
+            with open(os.path.join(img_dir, "IMG_0001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+
+            shared_psx = os.path.join(net_out, "SiteY.psx")
+            shared_files = os.path.join(net_out, "SiteY.files")
+            os.makedirs(shared_files, exist_ok=True)
+            with open(shared_psx, "w", encoding="utf-8") as f:
+                f.write("<document/>")
+            with open(os.path.join(shared_files, "project.zip"), "wb") as f:
+                f.write(b"PK\x05\x06" + b"\x00" * 18)
+
+            # Force a local file to exist at line 1338 by creating it inside fake Document()
+            def _make_doc():
+                with open(os.path.join(local_stage, "SiteY.psx"), "w", encoding="utf-8") as lf:
+                    lf.write("<local/>")
+                doc = MagicMock()
+                doc.addChunk.return_value = MagicMock()
+                return doc
+
+            fake_ms = SimpleNamespace(
+                Document=_make_doc,
+                app=SimpleNamespace(enumGPUDevices=lambda: []),
+            )
+            with (
+                patch.object(pipeline_mod, "Metashape", fake_ms),
+                patch.object(pipeline_mod, "check_scratch_disk_headroom", return_value=(True, 200.0)),
+                patch.object(
+                    pipeline_mod,
+                    "discover_image_subfolder_groups",
+                    side_effect=RuntimeError("SIMULATED_MIDRUN_CRASH"),
+                ),
+                patch("atexit.register"),
+            ):
+                with self.assertRaises(RuntimeError):
+                    pipeline_mod.run_reconstruction(
+                        images_dir=img_dir,
+                        output_dir=net_out,
+                        project_name="SiteY",
+                        resume=False,
+                        local_scratch_staging=True,
+                        scratch_dir=scratch_dir,
+                    )
+
+            self.assertTrue(os.path.isfile(shared_psx))
+            self.assertTrue(os.path.isdir(shared_files))
+
+    def test_supervisor_sequential_dual_share_filters_kwargs_and_respects_paused_workers(self) -> None:
+        """Verify sequential dual-share filters metadata kwargs cleanly and concurrent mode never unpauses workers."""
+        with tempfile.TemporaryDirectory() as tmp_base:
+            src_dir = os.path.join(tmp_base, "SSD1_Photos", "SiteZ")
+            res_dir = os.path.join(tmp_base, "SSD2_Results", "SiteZ")
+            os.makedirs(src_dir, exist_ok=True)
+            os.makedirs(res_dir, exist_ok=True)
+            with open(os.path.join(src_dir, "IMG_001.JPG"), "wb") as f:
+                f.write(b"\xff\xd8\xff\xd9")
+
+            captured_kwargs = {}
+
+            def _fake_run_recon(**kwargs):
+                captured_kwargs.update(kwargs)
+                os.makedirs(kwargs["output_dir"], exist_ok=True)
+                with open(os.path.join(kwargs["output_dir"], "SiteZ.obj"), "wb") as f:
+                    f.write(b"v 0 0 0\nf 1 1 1\n" * 200)
+                with open(os.path.join(kwargs["output_dir"], "SiteZ_orthomosaic.tif"), "wb") as f:
+                    f.write(b"II*\x00" + b"\x00" * 1500)
+
+            sup = sup_mod.ClusterSupervisor(min_headroom_gb=0.01, concurrent=False)
+            sup.add_job(
+                images_dir=src_dir,
+                output_dir=res_dir,
+                project_name="SiteZ",
+                extra_args={
+                    "source_share": os.path.dirname(src_dir),
+                    "result_share": os.path.dirname(res_dir),
+                    "network_path": os.path.dirname(res_dir),
+                    "network_enable": False,
+                    "local_scratch": True,
+                    "local_scratch_staging": True,
+                    "export_obj": True,
+                    "export_ortho": True,
+                    "ortho_resolution": 0.05,
+                },
+            )
+
+            with patch.object(pipeline_mod, "run_reconstruction", side_effect=_fake_run_recon, autospec=True):
+                summary = sup.run_queue()
+
+            self.assertEqual(summary["completed_jobs"], 1)
+            self.assertNotIn("source_share", captured_kwargs)
+            self.assertNotIn("result_share", captured_kwargs)
+            self.assertNotIn("local_scratch", captured_kwargs)
+            self.assertNotIn("network_path", captured_kwargs)
+            self.assertTrue(captured_kwargs["local_scratch_staging"])
+            self.assertTrue(captured_kwargs["export_obj"])
+            self.assertTrue(captured_kwargs["export_ortho"])
+
+            # Verify concurrent mode never overrides operator-paused workers
+            fake_client = MagicMock()
+            fake_client.workerList.return_value = {
+                "workers": [{"worker_id": 2, "hostname": "TamHuynh", "state": "ready", "paused": True}]
+            }
+            fake_ms = SimpleNamespace(NetworkClient=lambda: fake_client)
+            conc_sup = sup_mod.ClusterSupervisor(min_headroom_gb=0.01, concurrent=True)
+            with patch.object(sup_mod, "Metashape", fake_ms):
+                conc_sup.run_concurrent_queue()
+            fake_client.setWorkerPaused.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

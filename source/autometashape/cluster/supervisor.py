@@ -17,6 +17,7 @@ import inspect
 import json
 import os
 import shutil
+import subprocess
 import sys
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,7 +32,7 @@ from autometashape.cluster.dual_share import (
     is_subpath,
     validate_dual_share_topology,
 )
-from autometashape.cluster.hardware import extract_unc_root
+from autometashape.cluster.hardware import extract_unc_root, find_metashape_path
 from autometashape.cluster.orchestrator import (
     build_monolithic_runscript_task,
     evaluate_cluster_batch_info,
@@ -235,14 +236,42 @@ class ClusterSupervisor:
                 else:
                     from autometashape.core.pipeline import run_reconstruction
 
+                    sig_params = inspect.signature(run_reconstruction).parameters
+                    reserved_keys = {
+                        "images_dir",
+                        "output_dir",
+                        "project_name",
+                        "preset",
+                        "local_scratch_staging",
+                        "scratch_dir",
+                    }
+                    is_net = bool(job.extra_args.get("network_enable"))
+                    forward_kwargs = {
+                        k: v
+                        for k, v in job.extra_args.items()
+                        if k in sig_params and k not in reserved_keys
+                    }
+                    if not is_net:
+                        # Local sequential execution does not use Metashape Network Processing;
+                        # omitting network_path ensures pipeline.py runs local discrete GPU selection.
+                        forward_kwargs.pop("network_path", None)
+                        use_local_scratch = bool(
+                            job.extra_args.get(
+                                "local_scratch_staging",
+                                job.extra_args.get("local_scratch", True),
+                            )
+                        )
+                    else:
+                        use_local_scratch = False
+
                     run_reconstruction(
                         images_dir=job.images_dir,
                         output_dir=job.output_dir,
                         project_name=job.project_name,
                         preset=job.preset,
-                        local_scratch_staging=not bool(job.extra_args.get("network_enable")),
+                        local_scratch_staging=use_local_scratch,
                         scratch_dir=self.scratch_dir,
-                        **job.extra_args,
+                        **forward_kwargs,
                     )
             except Exception as exc:
                 err_msg = f"Reconstruction pipeline crashed: {exc}"
@@ -457,7 +486,7 @@ class ClusterSupervisor:
         except Exception as exc:
             raise RuntimeError(f"Failed to connect to cluster coordinator at {net_host}:{net_port}: {exc}") from exc
 
-        # Ensure paused online workers are resumed before multi-project dispatch
+        # Respect Operator Authority Gate: never auto-unpause paused workers; report passively if paused
         try:
             raw_w = net_client.workerList()
             w_list = (
@@ -465,15 +494,18 @@ class ClusterSupervisor:
                 if isinstance(raw_w, dict)
                 else (raw_w if isinstance(raw_w, (list, tuple)) else [])
             )
-            for w in w_list:
-                w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
-                w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
-                w_state = str(w.get("state", "") if isinstance(w, dict) else getattr(w, "state", "")).lower()
-                if w_paused and w_id is not None and w_state != "offline":
-                    try:
-                        net_client.setWorkerPaused(w_id, False)
-                    except Exception:
-                        pass
+            paused_names = [
+                str(w.get("hostname", w.get("worker_id")) if isinstance(w, dict) else getattr(w, "id", "?"))
+                for w in w_list
+                if (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                and str(w.get("state", "") if isinstance(w, dict) else getattr(w, "state", "")).lower() != "offline"
+            ]
+            if paused_names:
+                print(
+                    f"  [Cluster Supervisor] Notice: {len(paused_names)} paused online worker(s) left untouched "
+                    f"(Operator Authority Gate): {', '.join(paused_names)}",
+                    flush=True,
+                )
         except Exception:
             pass
 
@@ -928,6 +960,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         default="",
         help="Shared network root directory (UNC path, e.g. \\\\SERVER\\SharedMetashape)",
     )
+    parser.add_argument(
+        "--no-reexec",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     return parser
 
 
@@ -935,6 +972,20 @@ def main() -> int:
     """CLI entry point for supervisor."""
     parser = build_arg_parser()
     args = parser.parse_args()
+
+    # Plain Python Auto-Delegation into Agisoft Metashape Pro runtime
+    if Metashape is None and not getattr(args, "no_reexec", False):
+        ms_exe = find_metashape_path()
+        if ms_exe and os.path.isfile(ms_exe):
+            entry_script = os.path.abspath(sys.argv[0]) if sys.argv and os.path.isfile(sys.argv[0]) else os.path.abspath(__file__)
+            cmd = [ms_exe, "-r", entry_script] + sys.argv[1:] + ["--no-reexec"]
+            res = subprocess.run(cmd)
+            return res.returncode
+        print(
+            "[ERROR] Agisoft Metashape Pro executable not found. Run via 'metashape.exe -r'.",
+            file=sys.stderr,
+        )
+        return 1
 
     # Determine concurrency mode:
     # 1. Explicit --concurrent / --parallel-dispatch -> True
@@ -952,9 +1003,17 @@ def main() -> int:
         concurrent=is_concurrent,
     )
 
+    expected_set = set(args.expect) if args.expect else {"obj", "ortho"}
     extra_args: Dict[str, Any] = {
         "ortho_resolution": args.ortho_resolution,
-        "build_point_cloud": args.build_point_cloud,
+        "build_point_cloud": args.build_point_cloud or ("point_cloud" in expected_set),
+        "export_obj": "obj" in expected_set,
+        "export_ortho": "ortho" in expected_set,
+        "export_glb": "glb" in expected_set,
+        "export_dem": "dem" in expected_set,
+        "build_dem": "dem" in expected_set,
+        "export_point_cloud": "point_cloud" in expected_set,
+        "export_report": "report" in expected_set,
     }
     if args.network_enable:
         extra_args["network_enable"] = True

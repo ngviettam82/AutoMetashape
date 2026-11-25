@@ -106,20 +106,26 @@ def resolve_server_address(cli_server: str) -> str:
     return "127.0.0.1:5840"
 
 
+def _is_maintenance_batch_path(batch_path: str) -> bool:
+    """Return True if a batch path belongs to internal .cluster/ maintenance/updater tasks."""
+    norm = (batch_path or "").strip().replace("\\", "/").lstrip("/").lower()
+    return norm.startswith(".cluster/") or "/.cluster/" in norm
+
+
 def resolve_storage_paths(
     cli_root: str,
     batches: List[Dict[str, Any]],
     source_root: str = "",
 ) -> List[str]:
-    """Dynamically discover storage paths and UNC shares to audit."""
+    """Dynamically discover storage paths and UNC shares to audit.
+
+    Writable Result roots (explicit ``cli_root``, ``server_config.json`` root, and batch
+    UNC roots) always precede read-only ``source_root`` so deliverable and sidecar lookups
+    never accidentally resolve into the raw source photo share.
+    """
     paths: List[str] = []
     if cli_root.strip():
         paths.append(os.path.normpath(cli_root.strip()))
-
-    if source_root.strip():
-        norm_src = os.path.normpath(source_root.strip())
-        if norm_src not in paths:
-            paths.append(norm_src)
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("root") and os.path.normpath(cfg["root"]) not in paths:
@@ -134,6 +140,11 @@ def resolve_storage_paths(
                 share_root = f"\\\\{parts[2]}\\{parts[3]}"
                 if share_root not in paths:
                     paths.append(share_root)
+
+    if source_root.strip():
+        norm_src = os.path.normpath(source_root.strip())
+        if norm_src not in paths:
+            paths.append(norm_src)
 
     if not paths:
         # Default to local drive
@@ -349,19 +360,21 @@ def execute_audit(
     # 3. Headroom Audit
     storage_paths = resolve_storage_paths(shared_root, batches, source_root=source_root)
     headroom = audit_headroom(storage_paths)
-    # Only enforce writable headroom threshold on Result/non-read-only roots; if source_root is explicitly
-    # separate and read-only, we still report its free space without failing writable Result headroom.
+    # Only enforce writable headroom threshold and resolve deliverables/sidecars on Result roots;
+    # if source_root is explicitly separate and read-only, audit its free space without ever
+    # searching raw photo folders for deliverables or failing writable Result headroom.
     norm_source = os.path.normpath(source_root.strip()).lower() if source_root.strip() else ""
-    checked_headroom = {
-        p: gb for p, gb in headroom.items() if not norm_source or os.path.normpath(p).lower() != norm_source
-    }
+    result_storage_paths = [
+        p for p in storage_paths if not norm_source or os.path.normpath(p).lower() != norm_source
+    ] or list(storage_paths)
+    checked_headroom = {p: headroom[p] for p in result_storage_paths if p in headroom}
     headroom_ok = all(free_gb >= min_headroom for free_gb in (checked_headroom or headroom).values())
 
     # Filter active workers
     active_workers = [w for w in workers if str(w.get("state", "")).lower() != "offline"]
 
     # 4. Memory Allocation Faults Audit (passive post-mortem std::bad_alloc / OOM reporting)
-    allocation_faults = audit_memory_allocation_faults(batches, storage_paths)
+    allocation_faults = audit_memory_allocation_faults(batches, result_storage_paths)
     oom_batch_ids = {f["batch_id"] for f in allocation_faults}
 
     # Categorize batches
@@ -374,15 +387,17 @@ def execute_audit(
         if b.get("failed") or int(b.get("error_count", 0) or 0) > 0 or str(b.get("state", "")).lower() == "failed"
     ]
 
-    # 5. Deliverable Verification of Completed Batches
+    # 5. Deliverable Verification of Completed Photogrammetry Batches (skip internal .cluster/ maintenance batches)
     deliverable_results: Dict[int, Dict[str, Any]] = {}
     for b in completed_batches:
         bid = b.get("batch_id")
         bpath = b.get("path", "")
+        if _is_maintenance_batch_path(bpath):
+            continue
         pname = os.path.splitext(os.path.basename(bpath))[0]
-        # Resolve full path of result directory across storage roots
+        # Resolve full path of result directory strictly across Result storage roots
         rdir = ""
-        for sp in storage_paths:
+        for sp in result_storage_paths:
             candidate = os.path.normpath(os.path.join(sp, os.path.dirname(bpath)))
             if os.path.isdir(candidate):
                 rdir = candidate
@@ -491,8 +506,8 @@ def execute_audit(
             assigned_w = next((w.get("hostname") for w in active_workers if w.get("batch_id") == bid), "unassigned")
             stage = "executing"
             stage_desc = ""
-            # Inspect sidecar if present
-            for sp in storage_paths:
+            # Inspect sidecar strictly under Result storage roots
+            for sp in result_storage_paths:
                 sidecar_path = os.path.normpath(os.path.join(sp, os.path.dirname(bpath), "_autometashape_status.json"))
                 if os.path.isfile(sidecar_path):
                     try:
