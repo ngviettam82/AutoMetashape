@@ -99,7 +99,7 @@ On each remote worker node across the local network:
 ### 3. Local NVMe Scratch Staging Management
 During large-scale reconstructions (1,000+ to 10,000+ photos), intermediate scratch data (depth maps and octree meshing leaves) reaches 75–150+ GB.
 - **Default Staging**: Enabled by default (`--stage-local`).
-- **Dynamic Local NVMe Discovery**: The worker daemon automatically discovers the fastest fixed local non-system NVMe SSD with the highest free capacity (e.g., `D:\AutoMetashape_Scratch`), explicitly rejecting mapped SMB network drives (`DRIVE_REMOTE`), removable media, and optical drives via Win32 `GetDriveTypeW`.
+- **Dynamic Local NVMe Discovery**: The worker daemon automatically discovers the fastest internal fixed non-system NVMe/SATA drive with the highest free capacity (e.g., `D:\AutoMetashape_Scratch`), explicitly rejecting mapped SMB network drives (`DRIVE_REMOTE`), removable/optical media (`GetDriveTypeW`), and external USB/FireWire/SD/MMC SSD enclosures (`BusTypeUsb` via `IOCTL_STORAGE_QUERY_PROPERTY`).
 - **Headroom Fallback**: Requires $\ge 100\text{ GB}$ free space (configurable via `--min-scratch-free-gb`). Safely falls back to direct network storage if local space is insufficient.
 - **Atomic Deliverable Sync & Status Finalization**: Consolidated deliverables and project files are synchronized atomically to the Result Share, `_autometashape_status.json` is finalized to `status="completed"` (`progress=100.0`) after sync (both external shared `--status-file` and default staged sidecar), and local scratch is cleanly purged.
 - **Opt-Out**: Pass `--no-stage-local` to bypass local staging.

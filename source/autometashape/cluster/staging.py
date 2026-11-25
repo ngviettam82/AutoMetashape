@@ -11,6 +11,7 @@ import ctypes
 import os
 import shutil
 import string
+import struct
 import sys
 import tempfile
 
@@ -19,9 +20,113 @@ _WIN32_DRIVE_FIXED = 3
 _WIN32_DRIVE_REMOTE = 4
 _WIN32_DRIVE_CDROM = 5
 
+# Win32 IOCTL_STORAGE_QUERY_PROPERTY & STORAGE_BUS_TYPE constants (winioctl.h)
+_IOCTL_STORAGE_QUERY_PROPERTY = 0x002D1400
+_FILE_SHARE_READ_WRITE = 0x00000001 | 0x00000002
+_OPEN_EXISTING = 3
+_WIN32_BUS_TYPE_1394 = 4
+_WIN32_BUS_TYPE_USB = 7
+_WIN32_BUS_TYPE_SD = 12
+_WIN32_BUS_TYPE_MMC = 13
+_EXTERNAL_STORAGE_BUS_TYPES = frozenset(
+    {
+        _WIN32_BUS_TYPE_1394,
+        _WIN32_BUS_TYPE_USB,
+        _WIN32_BUS_TYPE_SD,
+        _WIN32_BUS_TYPE_MMC,
+    }
+)
+
+
+def _parse_storage_device_descriptor(raw: bytes) -> tuple[bool, int] | None:
+    """Parse ``(removable_media, bus_type)`` from a Win32 ``STORAGE_DEVICE_DESCRIPTOR`` buffer."""
+    if not raw or len(raw) < 32:
+        return None
+    removable_media = bool(raw[12])
+    bus_type = int(struct.unpack_from("<I", raw, 28)[0])
+    return removable_media, bus_type
+
+
+def _query_windows_drive_bus_info(drive_root: str) -> tuple[bool, int] | None:
+    """Query Win32 ``IOCTL_STORAGE_QUERY_PROPERTY`` for ``drive_root`` without admin privileges.
+
+    Returns ``(removable_media, bus_type)`` or ``None`` if unavailable (e.g. non-Windows or
+    mocked/virtual drive where the device handle cannot be opened).
+    """
+    if sys.platform != "win32":
+        return None
+    cleaned = (drive_root or "").strip()
+    if len(cleaned) < 2 or not cleaned[0].isalpha() or cleaned[1] != ":":
+        return None
+    try:
+        windll = getattr(ctypes, "windll", None)
+        kernel32 = getattr(windll, "kernel32", None)
+        if kernel32 is None or not hasattr(ctypes, "c_void_p"):
+            return None
+
+        device_path = rf"\\.\{cleaned[0].upper()}:"
+        create_file = kernel32.CreateFileW
+        device_io_control = kernel32.DeviceIoControl
+        close_handle = kernel32.CloseHandle
+
+        create_file.restype = ctypes.c_void_p
+        create_file.argtypes = [
+            ctypes.c_wchar_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+        ]
+        device_io_control.restype = ctypes.c_int
+        device_io_control.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.c_void_p,
+            ctypes.c_uint32,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_void_p,
+        ]
+        close_handle.argtypes = [ctypes.c_void_p]
+
+        invalid_handle = ctypes.c_void_p(-1).value
+        handle = create_file(device_path, 0, _FILE_SHARE_READ_WRITE, None, _OPEN_EXISTING, 0, None)
+        if not isinstance(handle, int) or handle in (0, invalid_handle):
+            return None
+
+        try:
+            query = struct.pack("<III", 0, 0, 0)  # StorageDeviceProperty, PropertyStandardQuery
+            out_buf = ctypes.create_string_buffer(1024)
+            bytes_ret = ctypes.c_uint32(0)
+            ok = device_io_control(
+                handle,
+                _IOCTL_STORAGE_QUERY_PROPERTY,
+                query,
+                len(query),
+                out_buf,
+                len(out_buf),
+                ctypes.byref(bytes_ret),
+                None,
+            )
+            if not ok or bytes_ret.value < 32:
+                return None
+            return _parse_storage_device_descriptor(out_buf.raw[: bytes_ret.value])
+        finally:
+            close_handle(handle)
+    except Exception:
+        return None
+
 
 def _is_fixed_local_windows_drive(drive_root: str) -> bool:
-    """Return True when ``drive_root`` is a fixed local volume (rejecting mapped SMB/USB/optical drives)."""
+    """Return True when ``drive_root`` is an internal fixed local volume.
+
+    Rejects mapped SMB shares (``DRIVE_REMOTE``), removable flash/optical media, and
+    external USB/FireWire/SD/MMC drives (such as external USB SSD/NVMe enclosures that
+    Windows reports as ``DRIVE_FIXED`` to ``GetDriveTypeW``).
+    """
     if sys.platform != "win32":
         return True
     try:
@@ -33,6 +138,14 @@ def _is_fixed_local_windows_drive(drive_root: str) -> bool:
         # Note: DRIVE_NO_ROOT_DIR (1) only occurs alongside os.path.exists()==True under mocked tests.
         if drive_type in (_WIN32_DRIVE_REMOVABLE, _WIN32_DRIVE_REMOTE, _WIN32_DRIVE_CDROM):
             return False
+
+        # External USB SSD/NVMe enclosures report DRIVE_FIXED (3) to GetDriveTypeW;
+        # inspect the physical storage bus type to exclude USB/1394/SD/MMC external disks.
+        bus_info = _query_windows_drive_bus_info(drive_root)
+        if bus_info is not None:
+            removable_media, bus_type = bus_info
+            if removable_media or bus_type in _EXTERNAL_STORAGE_BUS_TYPES:
+                return False
         return True
     except Exception:
         return True

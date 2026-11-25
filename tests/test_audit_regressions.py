@@ -305,7 +305,9 @@ class TestAuditRegressions(unittest.TestCase):
             self.assertTrue(os.path.exists(unrelated_lock))
 
     def test_staging_rejects_remote_smb_mapped_drives(self) -> None:
-        """Verify _is_fixed_local_windows_drive rejects DRIVE_REMOTE (4) and accepts DRIVE_FIXED (3)."""
+        """Verify _is_fixed_local_windows_drive rejects DRIVE_REMOTE (4) and external USB SSDs."""
+        import struct
+
         fake_kernel32 = MagicMock()
         fake_kernel32.GetDriveTypeW.side_effect = lambda root: 4 if root.upper().startswith("Z:") else 3
         fake_ctypes = SimpleNamespace(windll=SimpleNamespace(kernel32=fake_kernel32))
@@ -313,6 +315,54 @@ class TestAuditRegressions(unittest.TestCase):
         with patch.object(sys, "platform", "win32"), patch.object(staging_mod, "ctypes", fake_ctypes):
             self.assertFalse(staging_mod._is_fixed_local_windows_drive("Z:\\"))
             self.assertTrue(staging_mod._is_fixed_local_windows_drive("D:\\"))
+
+        # Verify STORAGE_DEVICE_DESCRIPTOR binary parser for NVMe (17) vs USB SSD (7)
+        buf_nvme = bytearray(40)
+        buf_nvme[12] = 0
+        struct.pack_into("<I", buf_nvme, 28, 17)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(bytes(buf_nvme)), (False, 17))
+
+        buf_usb = bytearray(40)
+        buf_usb[12] = 0
+        struct.pack_into("<I", buf_usb, 28, 7)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(bytes(buf_usb)), (False, 7))
+        self.assertIsNone(staging_mod._parse_storage_device_descriptor(b"short"))
+
+        # Verify external USB SSD reported as DRIVE_FIXED (3) is rejected while internal NVMe/SATA pass
+        with patch.object(sys, "platform", "win32"), patch.object(staging_mod, "ctypes", fake_ctypes):
+            with patch.object(staging_mod, "_query_windows_drive_bus_info", return_value=(False, 7)):
+                self.assertFalse(staging_mod._is_fixed_local_windows_drive("D:\\"))
+            with patch.object(staging_mod, "_query_windows_drive_bus_info", return_value=(False, 12)):
+                self.assertFalse(staging_mod._is_fixed_local_windows_drive("E:\\"))
+            with patch.object(staging_mod, "_query_windows_drive_bus_info", return_value=(True, 11)):
+                self.assertFalse(staging_mod._is_fixed_local_windows_drive("F:\\"))
+            with patch.object(staging_mod, "_query_windows_drive_bus_info", return_value=(False, 17)):
+                self.assertTrue(staging_mod._is_fixed_local_windows_drive("C:\\"))
+            with patch.object(staging_mod, "_query_windows_drive_bus_info", return_value=(False, 11)):
+                self.assertTrue(staging_mod._is_fixed_local_windows_drive("D:\\"))
+
+        # End-to-end: get_optimal_local_scratch_dir must skip external USB SSD D: (900 GB) and choose internal NVMe C:
+        def _fake_usage(path: str):
+            free_gb = 900 if path.upper().startswith("D:") else 400
+            return SimpleNamespace(total=1000 * (1024**3), used=100 * (1024**3), free=free_gb * (1024**3))
+
+        def _fake_bus(root: str):
+            return (False, 7) if root.upper().startswith("D:") else (False, 17)
+
+        with (
+            patch.object(sys, "platform", "win32"),
+            patch.object(staging_mod, "ctypes", fake_ctypes),
+            patch.object(staging_mod, "_query_windows_drive_bus_info", side_effect=_fake_bus),
+            patch.dict(os.environ, {"SystemDrive": "C:"}),
+            patch("os.path.exists", side_effect=lambda p: p.upper() in ("C:\\", "D:\\")),
+            patch("shutil.disk_usage", side_effect=_fake_usage),
+            patch("os.makedirs"),
+            patch("builtins.open", unittest.mock.mock_open()),
+            patch("os.path.isfile", return_value=True),
+            patch("os.remove"),
+        ):
+            chosen = staging_mod.get_optimal_local_scratch_dir(min_free_gb=100.0)
+            self.assertTrue(chosen.upper().startswith("C:\\"), msg=f"Expected internal C:, got {chosen}")
 
     def test_mavic_3_l2d_20c_stays_rolling_shutter_not_zenmuse_l2(self) -> None:
         """Verify Hasselblad Mavic 3 (L2D-20c) keeps rolling shutter while Zenmuse L2 gets mechanical."""
