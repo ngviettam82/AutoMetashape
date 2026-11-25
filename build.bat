@@ -8,6 +8,7 @@ cd /d "%~dp0"
 
 REM Detect Agisoft Metashape Python or system Python
 set "PYTHON_CMD="
+set "PYTHON_ARGS="
 if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_CMD=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
 ) else if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" (
@@ -36,7 +37,8 @@ if "%PYTHON_CMD%"=="" (
 if "%PYTHON_CMD%"=="" (
     py.exe -3 -c "import sys" >nul 2>nul
     if !ERRORLEVEL! equ 0 (
-        set "PYTHON_CMD=py.exe -3"
+        set "PYTHON_CMD=py.exe"
+        set "PYTHON_ARGS=-3"
     )
 )
 
@@ -46,14 +48,14 @@ if "!PYTHON_CMD!"=="" (
 )
 
 echo [BUILD] Validating agent skills...
-"!PYTHON_CMD!" tools/skills/cli.py check
+"!PYTHON_CMD!" %PYTHON_ARGS% tools/skills/cli.py check
 if !ERRORLEVEL! neq 0 (
     echo [ERROR] Skill validation failed.
     exit /b !ERRORLEVEL!
 )
 
 echo [BUILD] Running unit test suite...
-"!PYTHON_CMD!" -m unittest discover -s tests
+"!PYTHON_CMD!" %PYTHON_ARGS% -m unittest discover -s tests
 if !ERRORLEVEL! neq 0 (
     echo [ERROR] Unit test suite failed.
     exit /b !ERRORLEVEL!

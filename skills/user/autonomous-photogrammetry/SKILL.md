@@ -77,14 +77,17 @@ Resolve the operational mode based on user constraints:
 1. **Distributed Network Cluster Mode** (Recommended for multi-workstation environments):
    - Delegates node health and GPU discovery to [cluster-fleet-operations](../cluster-fleet-operations/SKILL.md).
    - Engages independent worker locking (`--network-independent-workers`) enforcing the offline monolithic local scratch process as the exclusive method (strictly zero stage-by-stage network fallback).
-   - Command pattern:
+   - Supports **Dual Shared Folder (Multi-SSD)** topologies (`--source-share` for read-only SSD #1 raw photos and `--result-share` for writable SSD #2 `.psx` + deliverables acting as Metashape `--root`):
      ```powershell
      python scripts/cluster_supervisor.py `
-       --scan-dir "\\CLUSTER_SHARE\Surveys" `
-       --output-root "\\CLUSTER_SHARE\Deliverables" `
+       --source-share "\\CLUSTER_SHARE\DataSSD_Surveys" `
+       --result-share "\\CLUSTER_SHARE\ResultSSD_Deliverables" `
+       --preset pro `
+       --ortho-resolution 0.05 `
        --network-enable `
        --network-host 192.168.1.100 `
        --network-independent-workers `
+       --concurrent `
        --min-headroom-gb 50.0
      ```
 
@@ -106,12 +109,12 @@ Before dispatching each dataset, the coordinator executes the storage watchdog:
 
 ### Phase 3: Autonomous Photogrammetry Reconstruction
 Each project executes using the standardized **Production Geomatics (`pro`)** preset:
-- High-accuracy camera alignment with guided matching and CMOS rolling shutter compensation.
-- Gentle gradual selection tie-point filtering and camera parameter re-optimization.
-- GPU MVS dense depth map stereopsis with moderate outlier filtering.
+- High-accuracy camera alignment (`keypoint_limit=50,000`, `tiepoint_limit=40,000`, `keypoint_limit_per_mpx=2,000`) with guided matching and sensor-aware shutter physics.
+- USGS 4-Pass gradual selection tie-point filtering and camera parameter re-optimization.
+- GPU MVS dense depth map stereopsis with moderate outlier filtering (dense point cloud disabled by default in `pro`; opt-in via `--build-point-cloud`).
 - 2,000,000 polygon arbitrary 3D surface mesh.
-- 16-page 8K ($8192\times 8192$) texture atlas baking with ghosting removal.
-- Digital Elevation Model (DEM) and True Orthomosaic generation.
+- 1:1 texel-budgeted 8K ($8192\times 8192$) texture atlas baking with ghosting removal.
+- True Orthomosaic built and exported at **5 cm/px (`0.05 m/px`)** by default (customizable via `--ortho-resolution`), plus optional DEM (`--build-dem`).
 
 ### Phase 4: Automated Deliverable Integrity Gate
 Upon pipeline completion, the coordinator verifies generated deliverables before marking success:

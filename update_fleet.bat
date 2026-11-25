@@ -11,6 +11,7 @@ set "UPDATER_PY=%SCRIPT_DIR%scripts\update_fleet.py"
 
 :: 1. Locate Metashape binary or bundled Python
 set "PYTHON_EXE="
+set "PYTHON_ARGS="
 
 if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
@@ -38,13 +39,14 @@ if "%PYTHON_EXE%"=="" (
 if "%PYTHON_EXE%"=="" (
     py.exe -3 -c "import sys" >nul 2>nul
     if !errorlevel! equ 0 (
-        set "PYTHON_EXE=py.exe -3"
+        set "PYTHON_EXE=py.exe"
+        set "PYTHON_ARGS=-3"
     )
 )
 
 :: 2. Launch Fleet Updater
 if not "%PYTHON_EXE%"=="" (
-    "%PYTHON_EXE%" "%UPDATER_PY%" %*
+    "%PYTHON_EXE%" %PYTHON_ARGS% "%UPDATER_PY%" %*
     set "EXIT_CODE=!errorlevel!"
     if !EXIT_CODE! neq 0 (
         echo.

@@ -46,21 +46,21 @@ if not "%ACTION_FLAG%"=="" (
     for /f "tokens=1,* delims= " %%a in ("%*") do set "FORWARD_ARGS=%%b"
 )
 
+:: Detect headless/non-interactive invocation so automated runs never block on pause
+set "IS_HEADLESS="
+for %%A in (%*) do (
+    if /i "%%~A"=="--non-interactive" set "IS_HEADLESS=1"
+    if /i "%%~A"=="--headless" set "IS_HEADLESS=1"
+)
+
 set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
 set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
 set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
 set "SERVER_PID_FILE=%TEMP%\autometashape_server.pid"
 
-echo [1/4] Terminating active Metashape worker processes...
-:: Graceful close first allowing Metashape to send network disconnect packet
-taskkill /IM metashape.exe >nul 2>&1
-if "%ACTION_FLAG%"=="--server" (
-    taskkill /IM metashape-server.exe >nul 2>&1
-)
-timeout /t 2 /nobreak >nul
-
-:: Terminate tracked worker Python process by PID
+echo [1/4] Stopping tracked AutoMetashape cluster processes (PID-isolated)...
+:: Terminate tracked worker Python process tree by PID (preserves unrelated interactive Metashape GUI sessions)
 if exist "%WORKER_PID_FILE%" (
     for /f "usebackq delims=" %%p in ("%WORKER_PID_FILE%") do (
         if not "%%p"=="" taskkill /F /T /PID %%p >nul 2>&1
@@ -68,7 +68,7 @@ if exist "%WORKER_PID_FILE%" (
     del /f /q "%WORKER_PID_FILE%" >nul 2>&1
 )
 
-:: Terminate tracked server Python process by PID only if updating server
+:: Terminate tracked server Python process tree by PID only if updating server
 if "%ACTION_FLAG%"=="--server" (
     if exist "%SERVER_PID_FILE%" (
         for /f "usebackq delims=" %%p in ("%SERVER_PID_FILE%") do (
@@ -78,29 +78,20 @@ if "%ACTION_FLAG%"=="--server" (
     )
 )
 
-:: Force kill binaries and windows
-taskkill /F /IM metashape.exe >nul 2>&1
-if "%ACTION_FLAG%"=="--server" (
-    taskkill /F /IM metashape-server.exe >nul 2>&1
-)
+:: Terminate AutoMetashape-owned launcher console windows and worker/server processes via command-line isolation
 taskkill /F /T /FI "WINDOWTITLE eq AutoMetashape Cluster Worker Node*" >nul 2>&1
 if "%ACTION_FLAG%"=="--server" (
     taskkill /F /T /FI "WINDOWTITLE eq AutoMetashape Cluster Server Daemon*" >nul 2>&1
 )
 
-:: Terminate Python processes running from Metashape Pro or AutoMetashape (unprivileged path check)
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$myPid = $PID; " ^
-    "Get-Process -Name python, py -ErrorAction SilentlyContinue | Where-Object { " ^
-    "    $_.Id -ne $myPid -and ($_.Path -like '*Metashape*' -or $_.Path -like '*AutoMetashape*' -or $_.MainWindowTitle -like '*AutoMetashape*' -or $_.MainWindowTitle -like '*Cluster Worker*') " ^
-    "} | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }" >nul 2>&1
-
-:: Also query CIM for command line matches if privileged
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$myPid = $PID; " ^
+    "$myPid = $PID; $stopServer = ('%ACTION_FLAG%' -eq '--server'); " ^
     "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object { " ^
-    "    $_.ProcessId -ne $myPid -and ($_.Name -like 'python*' -or $_.Name -eq 'py.exe') -and " ^
-    "    ($_.CommandLine -like '*launch_worker*' -or $_.CommandLine -like '*launch_server*') " ^
+    "    $_.ProcessId -ne $myPid -and ( " ^
+    "        ($_.Name -ieq 'metashape.exe' -and $_.CommandLine -like '*--worker*') -or " ^
+    "        ($stopServer -and $_.Name -ieq 'metashape-server.exe') -or " ^
+    "        (($_.Name -like 'python*' -or $_.Name -ieq 'py.exe') -and ($_.CommandLine -like '*launch_worker*' -or ($stopServer -and $_.CommandLine -like '*launch_server*'))) " ^
+    "    ) " ^
     "} | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }" >nul 2>&1
 timeout /t 1 /nobreak >nul
 
@@ -112,14 +103,14 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Failed to download latest AutoMetashape release from upstream: %REPO_ZIP_URL%
     echo [ERROR] Silent fallback is disabled. Please verify internet access and proxy settings.
-    pause
+    if not defined IS_HEADLESS pause
     exit /b 1
 )
 
 if not exist "%TEMP_ZIP%" (
     echo [ERROR] Downloaded package file missing: %TEMP_ZIP%
     echo [ERROR] Silent fallback is disabled.
-    pause
+    if not defined IS_HEADLESS pause
     exit /b 1
 )
 
@@ -129,7 +120,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "Expand-Archive -Path '%TEMP_ZIP%' -DestinationPath '%TEMP_EXTRACT%' -Force"
 if %ERRORLEVEL% neq 0 (
     echo [ERROR] Failed to extract archive.
-    pause
+    if not defined IS_HEADLESS pause
     exit /b 1
 )
 
@@ -147,7 +138,7 @@ if "!EXTRACT_SOURCE!"=="" (
 
 if "!EXTRACT_SOURCE!"=="" (
     echo [ERROR] Could not locate AutoMetashape source directory inside extracted archive.
-    pause
+    if not defined IS_HEADLESS pause
     exit /b 1
 )
 
@@ -159,7 +150,7 @@ set "CFG_BACKUP=%TEMP%\autometashape_worker_config_backup.json"
 if exist "%TARGET_DIR%\worker_config.json" copy /y "%TARGET_DIR%\worker_config.json" "%CFG_BACKUP%" >nul 2>&1
 
 :: Mirror directory: copies new files, overwrites changed/older files, prunes obsolete files, preserves configs and git history
-robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git .agents /XF worker_config.json server_config.json /W:1 /R:2 /NDL /NJH /NP
+robocopy "!EXTRACT_SOURCE!" "%TARGET_DIR%" /MIR /XD .git /XF worker_config.json server_config.json /W:1 /R:2 /NDL /NJH /NP
 set "ROBO_CODE=!ERRORLEVEL!"
 
 :: Ensure configuration is restored if it was missing from source
@@ -181,7 +172,7 @@ if !ROBO_CODE! GEQ 8 (
     echo   Python process, Metashape Pro, or code editor.
     echo   Please close running applications and re-run update.bat.
     echo =========================================================================
-    pause
+    if not defined IS_HEADLESS pause
     exit /b !ROBO_CODE!
 )
 

@@ -110,7 +110,7 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 
 2. **Camera Alignment & Radiometric Calibration**:
    - Matching Quality: Medium (`downscale=2`) for optimal memory scaling.
-   - Keypoint Limit: 40,000 (or 60,000 for $>30\text{MP}$); Tiepoint Limit: 25,000 tiepoints; Guided Matching enabled by default.
+   - Pro Preset Alignment Defaults: Keypoint Limit `50,000`, Tiepoint Limit `40,000`, Keypoint Limit per MPx `2,000` (preventing guided-matching RAM spikes), Guided Matching enabled by default.
    - Reference Preselection Mode (`--reference-preselection-mode estimated`): Configures camera pair matching using `ReferencePreselectionEstimated` by default, projecting estimated camera frustums onto terrain to robustly pair photos across multi-drone, multi-altitude, or oblique inspection flights without camera dropping.
    - Single-Chunk Default (`--multi-chunk disable`): Solves all images globally in one bundle adjustment to prevent false alignment or chunk-merging offsets.
    - Radiometric Calibration (`--calibrate-colors`): Performs camera color and white balance equalization across frames via `chunk.calibrateColors()`.
@@ -121,10 +121,10 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
    - `structure` (Iteratively Reweighted Least Squares): Computes the 3D line-of-sight intersection of all camera optical viewing axes.
    - `manual`: Saves project and pauses for manual region box positioning in Metashape Pro GUI.
 
-4. **GPU Depth Maps & Dense Point Cloud**:
+4. **GPU Depth Maps & Opt-In Dense Point Cloud**:
    - Computes dense per-pixel depth estimation using CUDA on NVIDIA GPUs.
-   - Dense Point Cloud (`buildPointCloud`): Fuses depth maps into a 3D point cloud with RGB vertex colors and confidence indices.
-   - Decoupled Geomatics Architecture: In-project generation (`--build-point-cloud`, `--build-dem`, `--ortho`) is strictly separated from disk file export (`--export-point-cloud`, `--export-dem`, `--export-ortho`), allowing point clouds and orthomosaics to remain permanently in the native `.psx` database without writing multi-gigabyte disk files unless explicitly requested.
+   - Dense Point Cloud (`--build-point-cloud`, **disabled by default in `pro` preset**): When explicitly opted in, fuses depth maps into a 3D point cloud with RGB vertex colors and confidence indices.
+   - Decoupled Geomatics Architecture: In-project generation (`--build-point-cloud`, `--build-dem`, `--ortho`) is strictly separated from disk file export (`--export-point-cloud`, `--export-dem`, `--export-ortho`), allowing deliverables to remain in the native `.psx` archive without writing multi-gigabyte disk files unless requested.
    - Slope-Adaptive Ground Point Classification (`--classify-ground`): Separates bare-earth topography from vegetation and structures using slope-adaptive parameters (`cell_size`, `max_angle`, `max_distance`).
    - AI Semantic Classification (`--classify-points`): Applies multi-class deep learning classification assigning points to ASPRS standard classes (Ground, Low Veg, High Veg, Building, Road, Car).
    - Point Cloud Export: Exports dense point clouds in `.laz`, `.las`, `.ply`, `.e57`, or `.xyz` and sparse tie points via `--export-tie-points`.
@@ -148,7 +148,7 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 8. **Elevation Models, Contours & Orthomosaics**:
    - Digital Elevation Model (DEM / DSM / DTM, `--build-dem`): Generated via `chunk.buildDem()`; exported as GeoTIFF with BigTIFF LZW compression (`dem.tif` + `dem.tfw`).
    - Topographic Contour Vectors (`--build-contours`, `--contour-interval 1.0`): Generates vector contour lines at user-specified elevation intervals (`chunk.buildContours()`); exported as ESRI Shapefile (`.shp`), AutoCAD (`.dxf`), GeoJSON (`.geojson`), or Google Earth (`.kml`).
-   - GeoTIFF Orthomosaic (`--ortho`): Generated via `chunk.buildOrthomosaic()` projected onto the surface mesh; exported as GeoTIFF with BigTIFF LZW compression and ESRI world file (`orthomosaic.tif` + `orthomosaic.tfw`).
+   - GeoTIFF Orthomosaic (`--ortho`, `--ortho-resolution 0.05`): Generated via `chunk.buildOrthomosaic()` at a standardized default of **5 cm/px (`0.05 m/px`)** (approx. 25x lighter than 1 cm/px) projected onto a metric CRS (UTM fallback for geographic chunks), and exported as GeoTIFF with BigTIFF LZW compression and ESRI world file (`orthomosaic.tif` + `orthomosaic.tfw`).
    - Executive PDF Quality & Calibration Report (`--export-report`): Generated via `chunk.exportReport()` documenting camera calibrations, tie-point statistics, reprojection error histograms, ground sampling distance (GSD), and survey overlap.
 
 ### 3. Multi-Project Sequential Batch Processing Protocol

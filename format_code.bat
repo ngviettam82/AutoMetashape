@@ -8,6 +8,7 @@ cd /d "%~dp0"
 
 REM Detect Agisoft Metashape Python or system Python
 set "PYTHON_CMD="
+set "PYTHON_ARGS="
 if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_CMD=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
 ) else if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" (
@@ -36,7 +37,8 @@ if "%PYTHON_CMD%"=="" (
 if "%PYTHON_CMD%"=="" (
     py.exe -3 -c "import sys" >nul 2>nul
     if !ERRORLEVEL! equ 0 (
-        set "PYTHON_CMD=py.exe -3"
+        set "PYTHON_CMD=py.exe"
+        set "PYTHON_ARGS=-3"
     )
 )
 
@@ -46,31 +48,52 @@ if "!PYTHON_CMD!"=="" (
 )
 
 echo [FORMAT] Checking licenses and formatting source code...
-"!PYTHON_CMD!" tools/check_licenses.py
+"!PYTHON_CMD!" %PYTHON_ARGS% tools/check_licenses.py
 if !ERRORLEVEL! neq 0 (
     echo [FORMAT] Inserting missing license headers...
-    "!PYTHON_CMD!" tools/add_license_headers.py
+    "!PYTHON_CMD!" %PYTHON_ARGS% tools/add_license_headers.py
+    "!PYTHON_CMD!" %PYTHON_ARGS% tools/check_licenses.py
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] License header validation failed.
+        exit /b !ERRORLEVEL!
+    )
 )
-set "RUFF_CMD="
+
+set "RUFF_EXE="
+set "RUFF_ARGS="
 where ruff >nul 2>nul
 if !ERRORLEVEL! equ 0 (
-    set "RUFF_CMD=ruff"
+    set "RUFF_EXE=ruff"
 ) else (
     python -m ruff --version >nul 2>nul
     if !ERRORLEVEL! equ 0 (
-        set "RUFF_CMD=python -m ruff"
+        set "RUFF_EXE=python"
+        set "RUFF_ARGS=-m ruff"
     ) else (
-        "!PYTHON_CMD!" -m ruff --version >nul 2>nul
+        "!PYTHON_CMD!" %PYTHON_ARGS% -m ruff --version >nul 2>nul
         if !ERRORLEVEL! equ 0 (
-            set "RUFF_CMD=!PYTHON_CMD! -m ruff"
+            set "RUFF_EXE=!PYTHON_CMD!"
+            set "RUFF_ARGS=%PYTHON_ARGS% -m ruff"
         )
     )
 )
-if defined RUFF_CMD (
+if defined RUFF_EXE (
     echo [FORMAT] Running ruff format...
-    !RUFF_CMD! format .
+    "!RUFF_EXE!" %RUFF_ARGS% format .
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] ruff format failed.
+        exit /b !ERRORLEVEL!
+    )
     echo [FORMAT] Running ruff check...
-    !RUFF_CMD! check .
+    "!RUFF_EXE!" %RUFF_ARGS% check .
+    if !ERRORLEVEL! neq 0 (
+        echo [ERROR] ruff check failed.
+        exit /b !ERRORLEVEL!
+    )
 )
 echo [FORMAT] Validating agent skills...
-"!PYTHON_CMD!" tools/skills/cli.py check
+"!PYTHON_CMD!" %PYTHON_ARGS% tools/skills/cli.py check
+if !ERRORLEVEL! neq 0 (
+    echo [ERROR] Skill validation failed.
+    exit /b !ERRORLEVEL!
+)

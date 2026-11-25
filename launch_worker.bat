@@ -13,6 +13,7 @@ set "LAUNCHER_PY=%SCRIPT_DIR%scripts\launch_worker.py"
 
 :: 1. Locate Python executable (prioritize Metashape Pro bundled Python)
 set "PYTHON_EXE="
+set "PYTHON_ARGS="
 
 if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" (
     set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
@@ -47,7 +48,8 @@ if "%PYTHON_EXE%"=="" (
 if "%PYTHON_EXE%"=="" (
     py.exe -3 -c "import sys" >nul 2>nul
     if !errorlevel! equ 0 (
-        set "PYTHON_EXE=py.exe -3"
+        set "PYTHON_EXE=py.exe"
+        set "PYTHON_ARGS=-3"
     )
 )
 
@@ -60,7 +62,7 @@ for %%A in (%*) do (
 
 :: 3. Launch Resilient Worker Script via Python (Strictly no unmanaged binary fallback)
 if not "%PYTHON_EXE%"=="" (
-    "%PYTHON_EXE%" "%LAUNCHER_PY%" %*
+    "%PYTHON_EXE%" %PYTHON_ARGS% "%LAUNCHER_PY%" %*
     set "LAUNCH_EXIT=!errorlevel!"
     if !LAUNCH_EXIT! neq 0 (
         echo.

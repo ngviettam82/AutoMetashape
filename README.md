@@ -9,7 +9,7 @@
 
 **AutoMetashape** is an autonomous, high-precision photogrammetry and aerial survey pipeline that transforms drone imagery and ground camera captures into millimeter-accurate 3D models (`.obj`, `.mtl`, `.glb`, `.fbx`, `.ply`), classified dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK), Digital Elevation Models (`dem.tif`), topographic contour vector maps (`.shp`, `.dxf`), GeoTIFF orthomosaics (`.tif`, `.tfw`), executive calibration reports (`report.pdf`), and native Agisoft Metashape projects (`.psx`) with **NVIDIA CUDA** GPU acceleration.
 
-Available both as an interactive desktop studio application (**AutoMetashape Studio**) and as a scriptable command-line interface.
+Available as a scriptable command-line engine, autonomous cluster supervisor, and browser telemetry dashboard.
 
 ---
 
@@ -70,11 +70,20 @@ python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --p
 
 #### Production Survey Recipes:
 ```powershell
-# Drone Survey with Dense Point Cloud, DEM, Contours & Cesium 3D Tiles:
+# Default Pro Preset (50K Keypoints, 40K Tiepoints, 2K/MPx, 5 cm/px Orthomosaic, Dense Cloud Opt-In):
+python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
+
+# Drone Survey with Opt-In Dense Point Cloud, DEM, Contours & Cesium 3D Tiles:
 python scripts/metashape_reconstruction.py \
     --images "C:/path/to/your/images" \
     --preset pro \
     --build-point-cloud --build-dem --build-contours --build-tiled-model
+
+# Dual Shared Folder (Multi-SSD) Cluster Batch (SSD #1 Read-Only Source -> SSD #2 Writable Results):
+python scripts/cluster_supervisor.py \
+    --source-share "\\SERVER\DataSSD_Photos" \
+    --result-share "\\SERVER\ResultSSD_Output" \
+    --network-enable --network-host 192.168.1.100 --network-independent-workers --concurrent
 
 # Building Facade with Coded Target Detection, Delighting & FBX Export:
 python scripts/metashape_reconstruction.py \
@@ -139,10 +148,16 @@ Recursively scans image folders and nested directories for all supported formats
 AutoMetashape runs as a lean, production-grade, headless engine orchestrated directly by AI Agents and CLI workflows:
 
 - **1-Click Resilient Worker Node (`launch_worker.bat`)**:
-  - Automatically loads server address and shared network root from `worker_config.json`.
+  - Automatically loads server address and shared Result network root (`--root`) plus optional read-only Data Source share (`--source-root`) from `worker_config.json`.
   - First-run interactive setup wizard with LAN auto-discovery.
   - Built-in pre-flight health diagnostics (Metashape executable discovery, TCP port 5840 reachability test, and Shared UNC storage access check).
   - Resilient auto-reconnect loop: automatically reconnects if the coordinator restarts or network drops temporarily.
+- **Dual Shared Folder (Multi-SSD) Topology**:
+  - Supports separating **Data Source Share** (SSD #1, read-only raw survey photos via `--source-share`) from **Result Share** (SSD #2, writable `.psx` + deliverables acting as Metashape `--root` via `--result-share`), doubling aggregate storage I/O bandwidth and protecting raw captures.
+- **Pro Production Defaults (`--preset pro`)**:
+  - `keypoint_limit = 50,000`, `tiepoint_limit = 40,000`, `keypoint_limit_per_mpx = 2,000` (eliminating guided-matching RAM explosions).
+  - Dense point cloud generation (`build_point_cloud`) is **disabled by default** in `pro` (explicit opt-in via `--build-point-cloud`).
+  - Orthomosaic build and export default to **5 cm/px (`--ortho-resolution 0.05`)** (~25x lighter storage than 1 cm/px).
 - **Atomic Monolithic `RunScript` Delegation & Exclusive Offline Execution**:
   - Independent project workflows (`--network-independent-workers`) are bundled into single-node network tasks (`workitem_count = 1`), eliminating worker hopping and LAN latency between stages.
   - The offline local scratch process is the **exclusive, mandatory execution method** for independent workers (zero stage-by-stage fallback to the network share).

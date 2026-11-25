@@ -874,178 +874,9 @@
 
   <script src="projects_data.js"></script>
   <script>
-    const DEFAULT_PROJECTS = [
-      {
-        id: "proj-1",
-        name: "Heritage Quarry Aerial Survey",
-        path: "D:\\Surveys\\2026_Quarry_BlockA",
-        sensor: "Zenmuse P1 35mm",
-        photos: 480,
-        aligned: 478,
-        gsd: "0.85",
-        faces: "12.4M",
-        status: "completed",
-        statusLabel: "Completed",
-        deliverables: "OBJ · TIFF · DEM · Ortho",
-        altitude: "85m AGL",
-        focal: "35.0 mm",
-        pitch: "-88.5°",
-        overlap: "80% / 70%",
-        relief: "62.4m",
-        reproj: "0.42 px",
-        shutter: "1/1000s @ f/5.6",
-        meshDefault: "12,410,290 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "4x 8192×8192 TIFF (1024 MB)",
-        selected: false
-      },
-      {
-        id: "proj-2",
-        name: "North Ridge Highway Corridor",
-        path: "D:\\Surveys\\2026_Highway_Sec4",
-        sensor: "Sony ILX-LR1 24mm",
-        photos: 820,
-        aligned: 816,
-        gsd: "1.12",
-        faces: "18.2M",
-        status: "completed",
-        statusLabel: "Completed",
-        deliverables: "OBJ · TIFF · Ortho",
-        altitude: "105m AGL",
-        focal: "24.0 mm",
-        pitch: "-90.0°",
-        overlap: "82% / 75%",
-        relief: "44.1m",
-        reproj: "0.48 px",
-        shutter: "1/1250s @ f/4.5",
-        meshDefault: "18,240,110 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "6x 8192×8192 TIFF (1536 MB)",
-        selected: false
-      },
-      {
-        id: "proj-3",
-        name: "Bridge Pier 04 Structural Scan",
-        path: "D:\\Surveys\\2026_Bridge_Pier4",
-        sensor: "FC6310R 8.8mm",
-        photos: 340,
-        aligned: 340,
-        gsd: "0.42",
-        faces: "8.6M",
-        status: "queued",
-        statusLabel: "Queued",
-        deliverables: "OBJ · TIFF",
-        altitude: "22m Orbit",
-        focal: "8.8 mm",
-        pitch: "-25.0°",
-        overlap: "85% / 80%",
-        relief: "18.6m",
-        reproj: "0.38 px",
-        shutter: "1/800s @ f/4.0",
-        meshDefault: "8,650,400 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "3x 8192×8192 TIFF (768 MB)",
-        selected: false
-      },
-      {
-        id: "proj-4",
-        name: "Urban Core Block 12 Cadastral",
-        path: "D:\\Surveys\\2026_Urban_Blk12",
-        sensor: "Phase One iXM-100",
-        photos: 1250,
-        aligned: 1248,
-        gsd: "0.68",
-        faces: "31.5M",
-        status: "processing",
-        statusLabel: "Aligning",
-        deliverables: "OBJ · TIFF · DEM · Ortho",
-        altitude: "120m AGL",
-        focal: "50.0 mm",
-        pitch: "-90.0°",
-        overlap: "80% / 75%",
-        relief: "52.0m",
-        reproj: "0.35 px",
-        shutter: "1/1600s @ f/5.6",
-        meshDefault: "31,520,000 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "8x 8192×8192 TIFF (2048 MB)",
-        selected: false
-      },
-      {
-        id: "proj-5",
-        name: "Industrial Refinery Unit 3 Asset Scan",
-        path: "D:\\Surveys\\2026_Refinery_U3",
-        sensor: "Zenmuse P1 50mm",
-        photos: 640,
-        aligned: 638,
-        gsd: "0.55",
-        faces: "16.8M",
-        status: "completed",
-        statusLabel: "Completed",
-        deliverables: "OBJ · TIFF · DEM",
-        altitude: "60m Orbit",
-        focal: "50.0 mm",
-        pitch: "-45.0°",
-        overlap: "85% / 80%",
-        relief: "38.5m",
-        reproj: "0.39 px",
-        shutter: "1/1000s @ f/5.6",
-        meshDefault: "16,800,000 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "5x 8192×8192 TIFF (1280 MB)",
-        selected: false
-      },
-      {
-        id: "proj-6",
-        name: "Coastal Cliff Erosion Monitoring",
-        path: "D:\\Surveys\\2026_Coast_Cliff",
-        sensor: "Sony A7R IV 28mm",
-        photos: 510,
-        aligned: 508,
-        gsd: "0.92",
-        faces: "14.1M",
-        status: "completed",
-        statusLabel: "Completed",
-        deliverables: "OBJ · TIFF · DEM · Ortho",
-        altitude: "90m AGL",
-        focal: "28.0 mm",
-        pitch: "-85.0°",
-        overlap: "80% / 75%",
-        relief: "75.2m",
-        reproj: "0.44 px",
-        shutter: "1/1250s @ f/5.6",
-        meshDefault: "14,100,000 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "4x 8192×8192 TIFF (1024 MB)",
-        selected: false
-      },
-      {
-        id: "proj-7",
-        name: "Substation High-Bay Thermal & RGB",
-        path: "D:\\Surveys\\2026_Substation_Bay1",
-        sensor: "Zenmuse H20T 13.5mm",
-        photos: 290,
-        aligned: 288,
-        gsd: "0.38",
-        faces: "7.2M",
-        status: "queued",
-        statusLabel: "Queued",
-        deliverables: "OBJ · TIFF",
-        altitude: "18m Inspection",
-        focal: "13.5 mm",
-        pitch: "-30.0°",
-        overlap: "85% / 80%",
-        relief: "12.0m",
-        reproj: "0.32 px",
-        shutter: "1/800s @ f/4.0",
-        meshDefault: "7,200,000 faces",
-        mesh5m: "5,000,000 faces",
-        texMem: "2x 8192×8192 TIFF (512 MB)",
-        selected: false
-      }
-    ];
+    const DEFAULT_PROJECTS = [];
 
-    const projects = (typeof window.SURVEY_PROJECTS !== 'undefined' && Array.isArray(window.SURVEY_PROJECTS) && window.SURVEY_PROJECTS.length > 0)
+    const projects = (typeof window.SURVEY_PROJECTS !== 'undefined' && Array.isArray(window.SURVEY_PROJECTS))
       ? window.SURVEY_PROJECTS
       : DEFAULT_PROJECTS;
 
@@ -1194,7 +1025,7 @@
             </div>
             <div style="font-size: 13px;">
               ${projects.length === 0
-                ? "Add drone survey project folders in AutoMetashape GUI or execute batch reconstructions to populate telemetry."
+                ? "Run scripts/cluster_supervisor.py or scripts/submit_cluster_batch.py to process datasets and populate projects_data.js telemetry."
                 : "No projects match the current filter or search criteria."}
             </div>
           </td>
@@ -1417,7 +1248,7 @@ You can launch Metashape Pro with this project directly.`);
     const btnScan = document.getElementById("btn-scan");
     if (btnScan) {
       btnScan.addEventListener("click", () => {
-        alert("To add survey projects and launch batch reconstructions:\n\n1. Launch AutoMetashape Studio:\n   python scripts/autometashape_gui.py\n2. Click '+ Add Project...' (hold Ctrl or Shift to select multiple project folders)\n3. Click 'Run Batch Reconstructions'\n\nTelemetry will automatically sync to this dashboard.");
+        alert("To add survey projects and launch cluster reconstructions:\n\n1. Submit datasets via the canonical Cluster Supervisor (single or dual-SSD shares):\n   python scripts/cluster_supervisor.py --source-share \"\\\\SERVER\\DataSSD\" --result-share \"\\\\SERVER\\ResultSSD\"\n2. Or submit an individual batch:\n   python scripts/submit_cluster_batch.py --images \"\\\\SERVER\\DataSSD\\SiteA\" --output \"\\\\SERVER\\ResultSSD\\SiteA\"\n3. Monitor live progress:\n   python scripts/cluster_monitor.py --result-share \"\\\\SERVER\\ResultSSD\"\n\nTelemetry automatically syncs to this dashboard via projects_data.js.");
       });
     }
 

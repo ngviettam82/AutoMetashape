@@ -153,10 +153,18 @@ The supervisor supports two distinct cluster operational architectures:
 ### 4. Multi-Dataset Queue Chaining & Discovery
 To process a sequence of survey datasets without human intervention:
 
-1. **Auto-Discovery from Date/Survey Root Folder**:
+1. **Auto-Discovery from Single or Dual Shared Folders (Multi-SSD)**:
    ```powershell
+   # Single share:
    python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\storage\101126" --output-root "\\CLUSTER_SHARE\storage\101126" `
        --preset pro --min-headroom-gb 50.0 --concurrent
+
+   # Dual-SSD topology (SSD #1 read-only Data Source -> SSD #2 writable Result Share as Metashape --root):
+   python scripts/cluster_supervisor.py `
+       --source-share "\\CLUSTER_SHARE\DataSSD\101126" `
+       --result-share "\\CLUSTER_SHARE\ResultSSD\101126" `
+       --preset pro --ortho-resolution 0.05 --min-headroom-gb 50.0 `
+       --network-enable --network-host 10.5.10.202 --network-independent-workers --concurrent
    ```
 
 2. **Construct a Queue Manifest (`queue.json`)**:
@@ -213,18 +221,24 @@ The unified chunk resolver (`resolve_checkpoint_chunk(doc)`) protects against `A
 When submitting a standalone or queued batch to the cluster, agents and operators must invoke `scripts/submit_cluster_batch.py` rather than composing ad-hoc Python scripts in chat or scratch directories.
 
 1. **Mandatory Physical Materialization Invariant**:
-   - `scripts/submit_cluster_batch.py` initializes the Metashape document, configures the canonical chunk, adds raw photos, and enforces `doc.save(psx_path)`:
+   - `scripts/submit_cluster_batch.py` verifies source image presence, materializes a valid `.psx` project stub on the Result Share, verifies `os.path.isfile(psx_path)`, releases locks via `doc.clear()`, and submits through idempotent `safe_create_cluster_batch()`:
      ```python
      doc.save(psx_path)
      assert os.path.isfile(psx_path), "Project file must exist on disk before dispatch"
+     doc.clear()
      ```
-   - This prevents worker failure modes where remote nodes claim a task whose project file has not yet been flushed or materialized to shared network storage.
-2. **Direct Storage Standard**:
+   - This prevents worker failure modes where remote nodes claim a task whose project file has not yet been flushed or materialized to shared network storage, and prevents `.psx` lock contention.
+2. **Dual-SSD & Direct Storage Standard**:
+   - Pass `--source-share` (SSD #1, raw photos) and `--result-share` (SSD #2, writable `.psx` + deliverables) to utilize two separate SSD shares without mixing I/O.
    - For datasets physically hosted on the current machine's storage, pass `--no-local-scratch-staging` to eliminate redundant local NVMe staging and disk exhaustion.
 3. **Execution**:
    ```powershell
-   python scripts/submit_cluster_batch.py --images "\\CLUSTER_SHARE\storage\Survey_0167" `
-       --output "\\CLUSTER_SHARE\storage\Survey_0167\Result" --priority 50
+   # Single-project dual-SSD submission (5 cm/px ortho, no dense point cloud in pro preset):
+   python scripts/submit_cluster_batch.py `
+       --images "\\CLUSTER_SHARE\DataSSD\Survey_0167" `
+       --output "\\CLUSTER_SHARE\ResultSSD\Survey_0167" `
+       --root "\\CLUSTER_SHARE\ResultSSD" `
+       --preset pro --ortho-resolution 0.05 --priority 50
    ```
 
 ### 8. Cluster Telemetry & The Operator Authority Gate
