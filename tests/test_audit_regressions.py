@@ -316,16 +316,19 @@ class TestAuditRegressions(unittest.TestCase):
             self.assertFalse(staging_mod._is_fixed_local_windows_drive("Z:\\"))
             self.assertTrue(staging_mod._is_fixed_local_windows_drive("D:\\"))
 
-        # Verify STORAGE_DEVICE_DESCRIPTOR binary parser for NVMe (17) vs USB SSD (7)
-        buf_nvme = bytearray(40)
-        buf_nvme[12] = 0
-        struct.pack_into("<I", buf_nvme, 28, 17)
-        self.assertEqual(staging_mod._parse_storage_device_descriptor(bytes(buf_nvme)), (False, 17))
+        # Verify STORAGE_DEVICE_DESCRIPTOR binary parser with realistic non-zero VendorIdOffset (offset 12)
+        # so reading offset 12 instead of offset 10 (RemovableMedia) fails immediately.
+        buf_scsi = struct.pack("<IIBBBBIIIII", 40, 64, 0, 0, 0, 1, 40, 48, 56, 60, 1)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(buf_scsi), (False, 1))
 
-        buf_usb = bytearray(40)
-        buf_usb[12] = 0
-        struct.pack_into("<I", buf_usb, 28, 7)
-        self.assertEqual(staging_mod._parse_storage_device_descriptor(bytes(buf_usb)), (False, 7))
+        buf_nvme = struct.pack("<IIBBBBIIIII", 40, 64, 0, 0, 0, 1, 0, 48, 56, 60, 17)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(buf_nvme), (False, 17))
+
+        buf_usb = struct.pack("<IIBBBBIIIII", 40, 64, 0, 0, 0, 1, 40, 48, 56, 60, 7)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(buf_usb), (False, 7))
+
+        buf_rem = struct.pack("<IIBBBBIIIII", 40, 64, 0, 0, 1, 0, 0, 48, 56, 60, 11)
+        self.assertEqual(staging_mod._parse_storage_device_descriptor(buf_rem), (True, 11))
         self.assertIsNone(staging_mod._parse_storage_device_descriptor(b"short"))
 
         # Verify external USB SSD reported as DRIVE_FIXED (3) is rejected while internal NVMe/SATA pass

@@ -46,17 +46,18 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             return any(norm.startswith(p) for p in ("C:\\", "D:\\", "E:\\"))
 
         with patch("sys.platform", "win32"):
-            with patch.dict(os.environ, {"SystemDrive": "C:"}):
-                with patch("shutil.disk_usage", side_effect=mock_disk_usage):
-                    with patch("os.path.exists", side_effect=mock_exists):
-                        with patch("os.makedirs"):
-                            with patch("builtins.open", unittest.mock.mock_open()):
-                                with patch("os.path.isfile", return_value=True):
-                                    with patch("os.remove"):
-                                        scratch_dir = cu.get_optimal_local_scratch_dir(min_free_gb=100.0)
-                                        # Must select D: drive (highest non-system capacity meeting threshold)
-                                        self.assertTrue(scratch_dir.upper().startswith("D:\\"))
-                                        self.assertIn("AutoMetashape_Scratch", scratch_dir)
+            with patch("autometashape.cluster.staging._is_fixed_local_windows_drive", return_value=True):
+                with patch.dict(os.environ, {"SystemDrive": "C:"}):
+                    with patch("shutil.disk_usage", side_effect=mock_disk_usage):
+                        with patch("os.path.exists", side_effect=mock_exists):
+                            with patch("os.makedirs"):
+                                with patch("builtins.open", unittest.mock.mock_open()):
+                                    with patch("os.path.isfile", return_value=True):
+                                        with patch("os.remove"):
+                                            scratch_dir = cu.get_optimal_local_scratch_dir(min_free_gb=100.0)
+                                            # Must select D: drive (highest non-system capacity meeting threshold)
+                                            self.assertTrue(scratch_dir.upper().startswith("D:\\"))
+                                            self.assertIn("AutoMetashape_Scratch", scratch_dir)
 
     def test_scratch_drive_fallback_to_system_drive_when_secondary_insufficient(self) -> None:
         """Verify get_optimal_local_scratch_dir falls back to system drive if secondary drives lack headroom."""
@@ -79,15 +80,16 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             return any(path.upper().startswith(p) for p in ("C:\\", "D:\\"))
 
         with patch("sys.platform", "win32"):
-            with patch.dict(os.environ, {"SystemDrive": "C:"}):
-                with patch("shutil.disk_usage", side_effect=mock_disk_usage):
-                    with patch("os.path.exists", side_effect=mock_exists):
-                        with patch("os.makedirs"):
-                            with patch("builtins.open", unittest.mock.mock_open()):
-                                with patch("os.path.isfile", return_value=True):
-                                    with patch("os.remove"):
-                                        scratch_dir = cu.get_optimal_local_scratch_dir(min_free_gb=100.0)
-                                        self.assertTrue(scratch_dir.upper().startswith("C:\\"))
+            with patch("autometashape.cluster.staging._is_fixed_local_windows_drive", return_value=True):
+                with patch.dict(os.environ, {"SystemDrive": "C:"}):
+                    with patch("shutil.disk_usage", side_effect=mock_disk_usage):
+                        with patch("os.path.exists", side_effect=mock_exists):
+                            with patch("os.makedirs"):
+                                with patch("builtins.open", unittest.mock.mock_open()):
+                                    with patch("os.path.isfile", return_value=True):
+                                        with patch("os.remove"):
+                                            scratch_dir = cu.get_optimal_local_scratch_dir(min_free_gb=100.0)
+                                            self.assertTrue(scratch_dir.upper().startswith("C:\\"))
 
     def test_sync_staged_project_to_network(self) -> None:
         """Verify sync_staged_project_to_network copies all files and directories then cleans up scratch."""

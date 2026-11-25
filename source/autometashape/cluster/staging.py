@@ -39,12 +39,21 @@ _EXTERNAL_STORAGE_BUS_TYPES = frozenset(
 
 
 def _parse_storage_device_descriptor(raw: bytes) -> tuple[bool, int] | None:
-    """Parse ``(removable_media, bus_type)`` from a Win32 ``STORAGE_DEVICE_DESCRIPTOR`` buffer."""
+    """Parse ``(removable_media, bus_type)`` from a Win32 ``STORAGE_DEVICE_DESCRIPTOR`` buffer.
+
+    Win32 ``STORAGE_DEVICE_DESCRIPTOR`` layout (``winioctl.h``):
+    - offset 0..7:   ``Version`` (DWORD), ``Size`` (DWORD)
+    - offset 8..11:  ``DeviceType`` (BYTE), ``DeviceTypeModifier`` (BYTE),
+                     ``RemovableMedia`` (BOOLEAN, offset 10), ``CommandQueueing`` (BOOLEAN)
+    - offset 12..27: ``VendorIdOffset``, ``ProductIdOffset``, ``ProductRevisionOffset``, ``SerialNumberOffset`` (DWORDs)
+    - offset 28..31: ``BusType`` (STORAGE_BUS_TYPE / DWORD)
+    """
     if not raw or len(raw) < 32:
         return None
-    removable_media = bool(raw[12])
-    bus_type = int(struct.unpack_from("<I", raw, 28)[0])
-    return removable_media, bus_type
+    _ver, _sz, _dt, _dtm, rem_media, _cq, _v_off, _p_off, _r_off, _s_off, bus_type = struct.unpack_from(
+        "<IIBBBBIIIII", raw, 0
+    )
+    return bool(rem_media), int(bus_type)
 
 
 def _query_windows_drive_bus_info(drive_root: str) -> tuple[bool, int] | None:
