@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import hashlib
 import json
 import os
 import shutil
@@ -23,7 +24,7 @@ except ImportError:
     Metashape = None
 
 from autometashape.cluster.dual_share import is_subpath, resolve_result_network_root
-from autometashape.cluster.hardware import extract_unc_root
+from autometashape.cluster.hardware import extract_unc_root, is_healthy_online_worker
 from autometashape.cluster.orchestrator import (
     ALIGN_DOWNSCALE_MAP,
     DEPTH_DOWNSCALE_MAP,
@@ -53,6 +54,7 @@ from autometashape.core.alignment_hygiene import (
     classify_and_quarantine_islands,
     find_unaligned_overlapping_groups,
     normalize_flight_takeoff_z0,
+    optimize_cameras_no_k4,
     sanitize_camera_gps,
     zero_unstable_lens_params,
 )
@@ -127,6 +129,70 @@ def _get_model_texture_page_count(model: Any) -> int:
         except TypeError:
             return 1
     return 1
+
+
+def _is_local_or_unreferenced_crs(crs: Any) -> bool:
+    """Return True if ``crs`` is None or a local/arbitrary engineering coordinate system."""
+    if crs is None:
+        return True
+    wkt = str(getattr(crs, "wkt", "") or "").upper()
+    name = str(getattr(crs, "name", "") or "").upper()
+    return "LOCAL_CS" in wkt or "LOCAL COORDINATES" in name
+
+
+def _is_metric_raster_crs(crs: Any) -> bool:
+    """Return True if ``crs`` uses linear metric units (projected CRS or LOCAL_CS)."""
+    if crs is None:
+        return True
+    return is_projected_crs(crs) or _is_local_or_unreferenced_crs(crs)
+
+
+def _select_metric_projection(chunk: Any, asset_label: str) -> tuple[Any, Any, bool]:
+    """Select a projected metric OrthoProjection for DEM/Orthomosaic generation.
+
+    Returns ``(proj, target_crs, is_metric)``. Uses median enabled GPS coordinates to avoid
+    outlier skew and leaves LOCAL_CS / unreferenced chunks untouched.
+    """
+    proj = Metashape.OrthoProjection()
+    target_crs = getattr(chunk, "crs", None)
+    if target_crs and not is_projected_crs(target_crs) and not _is_local_or_unreferenced_crs(target_crs):
+        lons: list[float] = []
+        lats: list[float] = []
+        for cam in getattr(chunk, "cameras", None) or []:
+            ref = getattr(cam, "reference", None)
+            loc = getattr(ref, "location", None) if ref is not None else None
+            if (
+                loc is not None
+                and getattr(ref, "enabled", True)
+                and getattr(cam, "transform", None)
+                and getattr(cam, "enabled", True)
+            ):
+                lon = float(loc.x)
+                lat = float(loc.y)
+                if -180.0 <= lon <= 180.0 and -90.0 <= lat <= 90.0 and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                    lons.append(lon)
+                    lats.append(lat)
+        if lons and lats:
+            lons.sort()
+            lats.sort()
+            med_lon = lons[len(lons) // 2]
+            med_lat = lats[len(lats) // 2]
+            utm_epsg = compute_utm_epsg(med_lon, med_lat)
+            try:
+                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+                print(
+                    f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) "
+                    f"for {asset_label} metric scale.",
+                    flush=True,
+                )
+            except Exception:
+                target_crs = chunk.crs
+    if target_crs:
+        try:
+            proj.crs = target_crs
+        except Exception:
+            pass
+    return proj, target_crs, _is_metric_raster_crs(target_crs)
 
 
 def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
@@ -223,7 +289,7 @@ def wait_for_user_resume(output_dir: str, psx_path: str) -> None:
     def _stdin_reader():
         try:
             line = sys.stdin.readline()
-            if line is not None:
+            if line:
                 resume_flag[0] = True
         except Exception:
             pass
@@ -310,11 +376,14 @@ def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
             max_count = count
             best_chunk = c
 
-    # 1. Match canonical label
-    prod_chunk = canonical_chunk
-    # 2. Fall back to chunk with highest count of aligned cameras (regardless of chunk count)
-    if prod_chunk is None:
-        prod_chunk = best_chunk or chunks[0]
+    # 1. Prefer canonical label ONLY if it actually holds aligned cameras (or no other chunk does)
+    if canonical_chunk is not None and (canonical_count >= 2 or max_count < 2):
+        prod_chunk = canonical_chunk
+        aligned_count = canonical_count
+    else:
+        # 2. Fall back to chunk with highest count of aligned cameras
+        prod_chunk = best_chunk or canonical_chunk or chunks[0]
+        aligned_count = max_count if best_chunk is not None else canonical_count
 
     if prod_chunk is not None and hasattr(doc, "chunk"):
         doc.chunk = prod_chunk
@@ -323,7 +392,6 @@ def resolve_checkpoint_chunk(doc: Any) -> tuple[Any, int, bool]:
     if chunk is None or not hasattr(chunk, "cameras") or not chunk.cameras:
         return None, 0, False
 
-    aligned_count = canonical_count if canonical_chunk is not None else max_count
     can_resume = aligned_count >= 2
     return chunk, aligned_count, can_resume
 
@@ -531,6 +599,8 @@ def run_reconstruction(
             output_dir = os.path.normpath(os.path.join(network_path, output_dir))
         if status_file and not os.path.isabs(status_file):
             status_file = os.path.normpath(os.path.join(network_path, status_file))
+        if import_reference and not os.path.isabs(import_reference):
+            import_reference = os.path.normpath(os.path.join(network_path, import_reference))
 
     if not project_name:
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
@@ -567,20 +637,16 @@ def run_reconstruction(
         local_scratch_staging = False
     local_staging_dir = None
     target_network_output = None
+    resolved_scratch = ""
     if local_scratch_staging:
         resolved_scratch = scratch_dir or get_optimal_local_scratch_dir(min_scratch_free_gb)
         has_space, free_gb = check_scratch_disk_headroom(resolved_scratch, min_scratch_free_gb)
 
-        is_already_in_scratch = bool(
-            resolved_scratch
-            and (
-                os.path.abspath(output_dir) == os.path.abspath(resolved_scratch)
-                or os.path.abspath(output_dir).startswith(os.path.abspath(resolved_scratch) + os.sep)
-            )
-        )
+        is_already_in_scratch = bool(resolved_scratch and is_subpath(output_dir, resolved_scratch))
         if has_space and resolved_scratch and not is_already_in_scratch:
             target_network_output = os.path.abspath(output_dir)
-            local_staging_dir = os.path.join(resolved_scratch, f"{project_name}_local_stage")
+            stage_hash = hashlib.sha256(os.path.normcase(target_network_output).encode("utf-8")).hexdigest()[:8]
+            local_staging_dir = os.path.join(resolved_scratch, f"{project_name}_{stage_hash}_{os.getpid()}_local_stage")
             os.makedirs(local_staging_dir, exist_ok=True)
             output_dir = local_staging_dir
             print("=========================================================================", flush=True)
@@ -612,6 +678,8 @@ def run_reconstruction(
                             f"{os.path.basename(net_files)}...",
                             flush=True,
                         )
+                        if os.path.isdir(local_files):
+                            shutil.rmtree(local_files, ignore_errors=True)
                         shutil.copytree(
                             net_files,
                             local_files,
@@ -666,9 +734,23 @@ def run_reconstruction(
 
     doc = None
     chunk = None
+    staging_checkpoint_saved = False
 
-    def _sync_staging_to_central_share(replace_fresh_project: bool = False) -> bool:
+    def _save_stage_checkpoint(target_path: str | None = None) -> Any:
+        nonlocal staging_checkpoint_saved
+        saved_chunk = save_checkpoint(doc, target_path or psx_out)
+        staging_checkpoint_saved = True
+        return saved_chunk
+
+    def _sync_staging_to_central_share(replace_fresh_project: bool = False, is_atexit: bool = False) -> bool:
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
+            if is_atexit and not staging_checkpoint_saved:
+                print(
+                    "  [Local Scratch Staging] Skipping atexit sync (no checkpoint saved; "
+                    "preserving central share untouched).",
+                    flush=True,
+                )
+                return True
             nonlocal doc, chunk
             if doc is not None:
                 try:
@@ -703,23 +785,31 @@ def run_reconstruction(
                     "to match shared .psx stub for cluster worker commit safety.",
                     flush=True,
                 )
-            # On completed fresh (--no-resume) runs, purge stale shared .files right before
-            # overwriting with the freshly built local .psx/.files pair. Early crashes (atexit,
-            # replace_fresh_project=False) leave the shared .psx stub untouched so Metashape Server
-            # never enters an io-error infinite retry loop.
-            if replace_fresh_project:
-                for old_p in (
-                    os.path.join(target_network_output, f"{project_name}.psx"),
-                    os.path.join(target_network_output, "building_reconstruction.psx"),
-                ):
-                    net_old_files = get_psx_files_dir(old_p)
-                    if os.path.isdir(net_old_files):
-                        try:
-                            shutil.rmtree(net_old_files, ignore_errors=True)
-                        except Exception:
-                            pass
+            # sync_staged_project_to_network() performs atomic sibling staging for .files and writes
+            # .psx last, so we NEVER pre-delete target_network_output/<project>.files before copying.
+            had_local_files = os.path.isdir(os.path.join(local_staging_dir, f"{project_name}.files"))
             sync_ok = sync_staged_project_to_network(local_staging_dir, target_network_output)
             if sync_ok:
+                if replace_fresh_project and not had_local_files:
+                    net_stale_files = get_psx_files_dir(os.path.join(target_network_output, f"{project_name}.psx"))
+                    if os.path.isdir(net_stale_files):
+                        try:
+                            shutil.rmtree(net_stale_files, ignore_errors=True)
+                        except Exception:
+                            pass
+                if replace_fresh_project and project_name != "building_reconstruction":
+                    old_legacy = os.path.join(target_network_output, "building_reconstruction.psx")
+                    old_legacy_files = get_psx_files_dir(old_legacy)
+                    if os.path.isdir(old_legacy_files):
+                        try:
+                            shutil.rmtree(old_legacy_files, ignore_errors=True)
+                        except Exception:
+                            pass
+                    if os.path.isfile(old_legacy):
+                        try:
+                            os.remove(old_legacy)
+                        except Exception:
+                            pass
                 if status_file and is_subpath(status_file, local_staging_dir):
                     rel_status = os.path.relpath(status_file, local_staging_dir)
                     set_active_status_file(os.path.join(target_network_output, rel_status))
@@ -741,7 +831,7 @@ def run_reconstruction(
         return True
 
     if local_staging_dir:
-        atexit.register(_sync_staging_to_central_share)
+        atexit.register(_sync_staging_to_central_share, False, True)
 
     # -----------------------------------------------------------------------
     # Pro Photogrammetry Survey Physics & Telemetry Resolution
@@ -758,7 +848,7 @@ def run_reconstruction(
 
     if is_auto:
         try:
-            survey_physics = analyze_survey_physics(images_dir, output_dir=output_dir)
+            survey_physics = analyze_survey_physics(images_dir, output_dir=target_network_output or output_dir)
             pro_plan = derive_pro_photogrammetry_plan(survey_physics)
             print_pro_engineering_report(survey_physics, pro_plan)
 
@@ -887,58 +977,55 @@ def run_reconstruction(
     print(f"  Execution Mode:     {'RESUME CHECKPOINT (DEFAULT)' if resume else 'RESTART FROM SCRATCH'}")
     print("=========================================================================", flush=True)
 
-    # Enable all available discrete high-performance GPUs (NVIDIA, AMD Radeon, Intel Arc), excluding integrated graphics
+    # Enable all available discrete high-performance GPUs (NVIDIA, AMD Radeon, Intel Arc A/B), excluding iGPUs
+    from autometashape.cluster.hardware import compute_discrete_gpu_mask
+
     gpus = (
         Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
     )
-    discrete_mask = 0
-    active_gpu_names = []
-    for i, g in enumerate(gpus):
-        name = g.get("name", "").lower()
-        vendor = g.get("vendor", "").lower()
-        # Exclude integrated graphics (Intel UHD/HD, AMD APU Radeon)
-        is_igpu = any(
-            ig in name
-            for ig in (
-                "intel(r) graphics",
-                "intel(r) hd",
-                "intel(r) uhd",
-                "intel(r) iris",
-                "radeon(tm) graphics",
-                "radeon graphics",
-            )
-        )
-        if is_igpu:
-            continue
-        # Include discrete compute devices (NVIDIA, discrete AMD Radeon, discrete Intel Arc)
-        is_discrete = any(
-            k in vendor or k in name
-            for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc", "arc(tm)")
-        )
-        if is_discrete:
-            discrete_mask |= 1 << i
-            active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
+    discrete_mask, selected_gpu_devs = compute_discrete_gpu_mask(list(gpus))
+    active_gpu_names = [
+        f"{d['name']} ({d['mem_mb'] / 1024:.1f} GB VRAM)" if d.get("mem_mb") else d["name"] for d in selected_gpu_devs
+    ]
 
-    # When running in network worker mode, omit setting gpu_mask so the server dynamically orchestrates hardware
+    # When running in network worker mode, respect explicit operator overrides (AUTOMETASHAPE_EXPLICIT_GPU_MASK)
+    # while self-healing poisoned gpu_mask==0 (e.g. interrupted CPU fallback in HKCU Registry) or 0xFFFFFFFF (iGPU).
     is_network_worker = any("--worker" in arg.lower() for arg in sys.argv) or (
         bool(network_path) and not network_enable
     )
+    explicit_worker_mask = os.environ.get("AUTOMETASHAPE_EXPLICIT_GPU_MASK", "").strip()
     if not is_network_worker:
         if discrete_mask:
             Metashape.app.gpu_mask = discrete_mask
             print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
-        elif gpus and not any(
-            any(
-                ig in g.get("name", "").lower()
-                for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "radeon(tm) graphics")
-            )
-            for g in gpus
-        ):
-            Metashape.app.gpu_mask = (1 << len(gpus)) - 1
-            print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
         else:
             Metashape.app.gpu_mask = 0
             print("[Hardware] Running on CPU.", flush=True)
+    elif explicit_worker_mask:
+        print(
+            f"[Hardware] Network worker execution: honoring explicit operator GPU mask ({explicit_worker_mask}).",
+            flush=True,
+        )
+    elif discrete_mask > 0:
+        cur_mask = getattr(Metashape.app, "gpu_mask", None)
+        if cur_mask in (0, 0xFFFFFFFF, -1, None):
+            try:
+                Metashape.app.gpu_mask = discrete_mask
+                reason = "self-healed from 0" if cur_mask == 0 else "dynamic discrete bitmask"
+                print(
+                    f"[Hardware] Network worker GPU ({reason}): {', '.join(active_gpu_names)} (Mask: {discrete_mask})",
+                    flush=True,
+                )
+            except Exception:
+                print(
+                    "[Hardware] Network worker execution: honoring server/engine dynamic GPU orchestration.",
+                    flush=True,
+                )
+        else:
+            print(
+                f"[Hardware] Network worker execution: honoring active GPU bitmask ({cur_mask}).",
+                flush=True,
+            )
     else:
         print("[Hardware] Network worker execution: honoring server/engine dynamic GPU orchestration.", flush=True)
 
@@ -976,7 +1063,8 @@ def run_reconstruction(
                     active_cluster_workers = [
                         w
                         for w in workers
-                        if not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
+                        if is_healthy_online_worker(w)
+                        and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
                     ]
                     print("  [Network Cluster] Connected to server successfully!", flush=True)
                     print(
@@ -1120,6 +1208,7 @@ def run_reconstruction(
         if not cluster_enabled or net_client is None:
             return False
 
+        active_batch_id: int | None = None
         try:
             rel_psx = get_cluster_rel_path()
             if stage_key:
@@ -1147,17 +1236,37 @@ def run_reconstruction(
                 pass
             w_limit = None
             batch_id, was_attached = safe_create_cluster_batch(
-                net_client, rel_psx, net_tasks, worker_limit=w_limit, force_fresh=False
+                net_client,
+                rel_psx,
+                net_tasks,
+                worker_limit=w_limit,
+                force_fresh=False,
+                shared_root=network_path or "",
+                ticket_project_name=project_name,
+                ticket_rel_output_dir=os.path.dirname(rel_psx),
             )
+            active_batch_id = batch_id
             if was_attached:
                 print(f"  [Cluster] Attached to existing batch #{batch_id} for '{task_desc}'", flush=True)
 
             t_task_start = time.time()
             last_progress = -1.0
             last_log_time = 0.0
+            consec_rpc_errs = 0
             while True:
                 time.sleep(1.0)
-                b_info = net_client.batchInfo(batch_id)
+                try:
+                    b_info = net_client.batchInfo(batch_id)
+                    consec_rpc_errs = 0
+                except Exception as e_rpc:
+                    consec_rpc_errs += 1
+                    if consec_rpc_errs >= 5:
+                        raise RuntimeError(f"Lost connection polling batch #{batch_id}: {e_rpc}") from e_rpc
+                    print(
+                        f"  [Cluster Warning] Transient batchInfo error ({consec_rpc_errs}/5): {e_rpc}",
+                        flush=True,
+                    )
+                    continue
                 tasks_info = b_info.get("tasks", [])
                 if tasks_info:
                     total_prog = sum(t.get("progress", 0.0) for t in tasks_info) / len(tasks_info)
@@ -1186,6 +1295,7 @@ def run_reconstruction(
 
                 b_status, b_success, b_err = evaluate_cluster_batch_info(b_info)
                 if b_success:
+                    active_batch_id = None
                     elapsed_min = (time.time() - t_task_start) / 60.0
                     print(
                         f"  [Cluster] [OK] Task '{task_desc}' finished on cluster in {elapsed_min:.2f} min!", flush=True
@@ -1198,6 +1308,7 @@ def run_reconstruction(
                             net_client.abortBatch(batch_id)
                         except Exception:
                             pass
+                    active_batch_id = None
                     err_str = b_err or "unknown cluster error"
                     print(f"  [Cluster] [ERROR] Task '{task_desc}' {b_status}: {err_str}", flush=True)
 
@@ -1249,6 +1360,7 @@ def run_reconstruction(
                                 for w in w_list
                                 if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
                                 != failed_w_id
+                                and is_healthy_online_worker(w)
                                 and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
                             ]
 
@@ -1263,21 +1375,37 @@ def run_reconstruction(
                                     net_tasks,
                                     worker_limit=None,
                                     force_fresh=True,
+                                    shared_root=network_path or "",
+                                    ticket_project_name=project_name,
+                                    ticket_rel_output_dir=os.path.dirname(rel_psx),
                                 )
+                                active_batch_id = retry_batch_id
 
                                 retry_ok = False
+                                retry_rpc_errs = 0
                                 while True:
                                     time.sleep(1.0)
-                                    rb_info = net_client.batchInfo(retry_batch_id)
+                                    try:
+                                        rb_info = net_client.batchInfo(retry_batch_id)
+                                        retry_rpc_errs = 0
+                                    except Exception as e_rrpc:
+                                        retry_rpc_errs += 1
+                                        if retry_rpc_errs >= 5:
+                                            raise RuntimeError(
+                                                f"Lost connection polling retry batch #{retry_batch_id}: {e_rrpc}"
+                                            ) from e_rrpc
+                                        continue
                                     rb_status, rb_success, rb_err = evaluate_cluster_batch_info(rb_info)
                                     if rb_success:
                                         print(
                                             f"  [Cluster] [OK] Task '{task_desc}' successfully finished on another cluster worker!",
                                             flush=True,
                                         )
+                                        active_batch_id = None
                                         retry_ok = True
                                         break
                                     elif rb_status in ("failed", "aborted"):
+                                        active_batch_id = None
                                         break
 
                                 if retry_ok:
@@ -1301,6 +1429,11 @@ def run_reconstruction(
             return True
 
         except Exception as e_dispatch:
+            if active_batch_id is not None:
+                try:
+                    net_client.abortBatch(active_batch_id)
+                except Exception:
+                    pass
             print(
                 f"  [Cluster] [WARNING] Cluster dispatch exception: {e_dispatch}. Falling back to local execution...",
                 flush=True,
@@ -1342,6 +1475,10 @@ def run_reconstruction(
                         f"  Existing project has insufficient aligned cameras ({aligned_count}). Restarting from Step 1.",
                         flush=True,
                     )
+                try:
+                    doc.clear()
+                except Exception:
+                    pass
                 doc = Metashape.Document()
                 chunk = doc.addChunk()
                 chunk.label = "Production_Reconstruction"
@@ -1358,6 +1495,10 @@ def run_reconstruction(
                 resumed = True
         except Exception as e:
             print(f"  Failed to load checkpoint ({e}). Starting fresh project.", flush=True)
+            try:
+                doc.clear()
+            except Exception:
+                pass
             doc = Metashape.Document()
             chunk = doc.addChunk()
             chunk.label = "Production_Reconstruction"
@@ -1393,7 +1534,7 @@ def run_reconstruction(
     hygiene_z0_info: dict[str, Any] = {"skipped": True, "anchor_z0": None}
     if not resumed:
         # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
-        groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
+        groups = discover_image_subfolder_groups(images_dir, output_dir=target_network_output or output_dir)
         total_photos = sum(len(imgs) for imgs in groups.values())
         if total_photos == 0:
             raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
@@ -1610,6 +1751,12 @@ def run_reconstruction(
             doc.chunk = doc.chunks[-1]
             chunk = doc.chunk
             chunk.label = "Production_Reconstruction"
+            for old_c in list(created_chunks):
+                if old_c != chunk:
+                    try:
+                        doc.remove(old_c)
+                    except Exception:
+                        pass
             try:
                 chunk.updateTransform()
             except Exception:
@@ -1807,8 +1954,12 @@ def run_reconstruction(
                     custom_faces=custom_faces,
                     texture_pages=texture_pages,
                     crop_method=crop_method,
+                    crop_padding=crop_padding,
+                    min_quality=min_quality,
+                    disable_quality_filter=disable_quality_filter,
                     texture_format=texture_format,
                     ortho_resolution=ortho_resolution,
+                    ortho_cull_faces=ortho_cull_faces,
                     align_photos=m_align,
                     build_depth_maps=m_depth,
                     build_mesh=m_mesh,
@@ -1827,13 +1978,27 @@ def run_reconstruction(
                     point_cloud_format=point_cloud_format,
                     export_tie_points=export_tie_points,
                     export_report=export_report,
+                    report_title=report_title,
                     resume=m_resume,
                     guided_matching=guided_matching,
+                    filter_stationary_points=filter_stationary_points,
+                    adaptive_fitting=adaptive_fitting,
+                    reference_preselection_mode=reference_preselection_mode,
+                    alignment_hygiene=alignment_hygiene,
+                    icp_bridge=icp_bridge,
                     local_scratch=worker_local_scratch_pref,
+                    scratch_dir=scratch_dir,
+                    min_scratch_free_gb=min_scratch_free_gb,
                     network_path=network_path,
                     surface_type=surface_type,
                     rolling_shutter=rolling_shutter,
+                    close_holes=close_holes,
+                    fill_holes=fill_holes,
+                    ghosting_filter=ghosting_filter,
+                    rebake_texture=rebake_texture,
                     filter_tiepoints=filter_tiepoints,
+                    points_spacing=points_spacing,
+                    filter_point_confidence=filter_point_confidence,
                     build_contours=build_contours,
                     contour_interval=contour_interval,
                     contours_format=contours_format,
@@ -1956,7 +2121,14 @@ def run_reconstruction(
                 )
 
                 batch_id, was_attached = safe_create_cluster_batch(
-                    net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
+                    net_client,
+                    rel_psx,
+                    [net_task],
+                    worker_limit=1,
+                    force_fresh=False,
+                    shared_root=network_path or "",
+                    ticket_project_name=project_name,
+                    ticket_rel_output_dir=os.path.dirname(rel_psx),
                 )
                 if was_attached:
                     print(
@@ -2000,10 +2172,12 @@ def run_reconstruction(
                     emit_ipc_event(f"@@AUTOMETASHAPE_UNIFIED_FAIL:{batch_id}:{failed_worker_id or 'unknown'}@@")
 
                     # Tier 1 Handoff / Resume: Re-dispatch RunScript task with resume=True to another cluster node
+                    paused_failed_worker = False
                     try:
                         if failed_worker_id is not None:
                             try:
                                 net_client.setWorkerPaused(failed_worker_id, True)
+                                paused_failed_worker = True
                             except Exception:
                                 pass
 
@@ -2018,8 +2192,8 @@ def run_reconstruction(
                             for w in w_list
                             if (w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None))
                             != failed_worker_id
+                            and is_healthy_online_worker(w)
                             and not (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
-                            and str(w.get("state", "") if isinstance(w, dict) else "").lower() != "offline"
                         ]
 
                         if other_workers:
@@ -2034,16 +2208,39 @@ def run_reconstruction(
                                 m_resume=True,
                             )
                             handoff_batch_id, _ = safe_create_cluster_batch(
-                                net_client, rel_psx, [handoff_net_task], worker_limit=1, force_fresh=True
+                                net_client,
+                                rel_psx,
+                                [handoff_net_task],
+                                worker_limit=1,
+                                force_fresh=True,
+                                shared_root=network_path or "",
+                                ticket_project_name=project_name,
+                                ticket_rel_output_dir=os.path.dirname(rel_psx),
                             )
                             print(
                                 f"  [Cluster] Created Handoff Continuation Monolithic Batch ID={handoff_batch_id} for another worker.",
                                 flush=True,
                             )
 
-                            if failed_worker_id is not None:
+                            # Wait briefly for a healthy sibling worker to claim the handoff batch before
+                            # unpausing the failed worker (prevents the failed node from re-claiming it).
+                            if paused_failed_worker:
+                                claim_deadline = time.time() + 5.0
+                                while time.time() < claim_deadline:
+                                    try:
+                                        hb_check = net_client.batchInfo(handoff_batch_id)
+                                        hb_state = str(hb_check.get("state", "")).lower()
+                                        hb_tasks = hb_check.get("tasks", []) if isinstance(hb_check, dict) else []
+                                        if hb_state in ("inprogress", "running") or any(
+                                            t.get("worker_id") is not None for t in hb_tasks if isinstance(t, dict)
+                                        ):
+                                            break
+                                    except Exception:
+                                        break
+                                    time.sleep(0.5)
                                 try:
                                     net_client.setWorkerPaused(failed_worker_id, False)
+                                    paused_failed_worker = False
                                     print(
                                         f"  [Cluster] Worker {failed_worker_id} unpaused and freed to process the next project in the queue.",
                                         flush=True,
@@ -2105,6 +2302,9 @@ def run_reconstruction(
                                         [scratch_net_task],
                                         worker_limit=1,
                                         force_fresh=True,
+                                        shared_root=network_path or "",
+                                        ticket_project_name=project_name,
+                                        ticket_rel_output_dir=os.path.dirname(rel_psx),
                                     )
                                     print(
                                         f"  [Cluster] Created Fresh Scratch Monolithic Batch ID={scratch_batch_id} on clean worker node.",
@@ -2128,17 +2328,24 @@ def run_reconstruction(
                                         )
                                 except Exception as e_scratch:
                                     print(f"  [Cluster Recovery] Scratch restart failed: {e_scratch}", flush=True)
-                        elif failed_worker_id is not None:
+                    except Exception as e_failover:
+                        print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
+                    finally:
+                        if paused_failed_worker and failed_worker_id is not None:
                             try:
                                 net_client.setWorkerPaused(failed_worker_id, False)
                             except Exception:
                                 pass
-                    except Exception as e_failover:
-                        print(f"  [Cluster] [ERROR] Failed to execute failover: {e_failover}", flush=True)
 
             if unified_succeeded:
                 _safe_reopen()
                 chunk = doc.chunk
+                try:
+                    doc.clear()
+                except Exception:
+                    pass
+                doc = None
+                chunk = None
                 total_time = (time.time() - t_start) / 60.0
                 print(f"\n[SUCCESS] Entire pipeline finished in {total_time:.2f} minutes!", flush=True)
                 emit_ipc_event(IPC_COMPLETE)
@@ -2298,6 +2505,7 @@ def run_reconstruction(
                             rolling_shutter=bool(rolling_shutter),
                             filter_stationary_points=filter_stationary_points,
                             guided_matching=guided_matching,
+                            scratch_root=resolved_scratch or None,
                         )
                     elif audit_res.get("bridge_candidates"):
                         # If ICP bridge is explicitly disabled, quarantine unbridged overlapping islands cleanly
@@ -2308,10 +2516,17 @@ def run_reconstruction(
                                 if cam is not None:
                                     cam.transform = None
                                     cam.enabled = False
+                        try:
+                            optimize_cameras_no_k4(chunk, tiepoint_covariance=True)
+                        except Exception as e_opt_q:
+                            print(
+                                f"  [Alignment Hygiene] Post-quarantine optimization warning: {e_opt_q}",
+                                flush=True,
+                            )
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
-            chunk = save_checkpoint(doc, psx_out)
+            chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             wait_for_user_resume(output_dir, psx_out)
             _safe_reopen()
@@ -2338,7 +2553,7 @@ def run_reconstruction(
                     auto_crop_camera_gps_square(chunk, padding=crop_padding)
                 else:
                     auto_crop_to_main_structure(chunk, padding=crop_padding)
-                chunk = save_checkpoint(doc, psx_out)
+                chunk = _save_stage_checkpoint(psx_out)
                 print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
                 if pause_after_crop:
                     wait_for_user_resume(output_dir, psx_out)
@@ -2346,7 +2561,7 @@ def run_reconstruction(
                     chunk = doc.chunk
         else:
             print("  [Auto-Crop] Cropping disabled; using default full-scene bounding box.", flush=True)
-            chunk = save_checkpoint(doc, psx_out)
+            chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved alignment checkpoint to: {psx_out}", flush=True)
             if pause_after_crop:
                 wait_for_user_resume(output_dir, psx_out)
@@ -2407,7 +2622,7 @@ def run_reconstruction(
                     reuse_depth=False,
                 )
             print(f"  Depth maps completed in {(time.time() - t_depth) / 60:.2f} min.", flush=True)
-            chunk = save_checkpoint(doc, psx_out)
+            chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
     # Step 4b: Dense Point Cloud Generation & Classification
@@ -2505,7 +2720,7 @@ def run_reconstruction(
                 chunk.point_cloud.classifyPoints()
                 print("  Multiclass point classification completed.", flush=True)
 
-            chunk = save_checkpoint(doc, psx_out)
+            chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved dense point cloud checkpoint to: {psx_out}", flush=True)
 
     # Step 5: High-Precision Arbitrary Surface Meshing
@@ -2513,7 +2728,7 @@ def run_reconstruction(
         print("\n[INFO] 3D Surface Meshing skipped by workflow selection.", flush=True)
     else:
         chunk = doc.chunk
-        if chunk.model is None:
+        if resume and chunk.model is None:
             cand_obj = os.path.join(output_dir, f"{project_name}.obj")
             cand_obj_legacy = os.path.join(output_dir, "model.obj")
             target_obj = (
@@ -2522,7 +2737,7 @@ def run_reconstruction(
             if target_obj:
                 print(f"\n[Auto-Recover] Found existing 3D mesh model on disk: {target_obj}. Re-linking...", flush=True)
                 chunk.importModel(path=target_obj, format=Metashape.ModelFormat.ModelFormatOBJ)
-                chunk = save_checkpoint(doc, psx_out)
+                chunk = _save_stage_checkpoint(psx_out)
                 print(
                     f"  Successfully re-linked 3D model into project chunk ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).",
                     flush=True,
@@ -2586,6 +2801,7 @@ def run_reconstruction(
                     print(f"\n[WARNING] GPU meshing encountered driver exception: {e}", flush=True)
                     print("  [Fallback] Retrying surface meshing on CPU (all threads)...", flush=True)
                     orig_gpu_mask = Metashape.app.gpu_mask
+                    restore_mask = orig_gpu_mask if orig_gpu_mask else discrete_mask
                     try:
                         Metashape.app.gpu_mask = 0
                         chunk.buildModel(
@@ -2598,7 +2814,7 @@ def run_reconstruction(
                         )
                         print("  [Fallback] CPU surface meshing succeeded!", flush=True)
                     finally:
-                        Metashape.app.gpu_mask = orig_gpu_mask
+                        Metashape.app.gpu_mask = restore_mask
                         print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
             if close_holes and chunk.model:
                 chunk.model.closeHoles(level=30)
@@ -2616,7 +2832,7 @@ def run_reconstruction(
                 f"  Mesh completed in {(time.time() - t_mesh) / 60:.2f} min! Geometry: {mesh_verts:,} vertices, {mesh_faces:,} faces.",
                 flush=True,
             )
-            chunk = save_checkpoint(doc, psx_out)
+            chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved mesh model checkpoint to: {psx_out}", flush=True)
 
     # Step 6: Multi-Page 8K Photogrammetric Texture Atlas
@@ -2712,7 +2928,7 @@ def run_reconstruction(
                 print("  Texture delighting completed.", flush=True)
             except Exception as e_lt:
                 print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
-        chunk = save_checkpoint(doc, psx_out)
+        chunk = _save_stage_checkpoint(psx_out)
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Step 6b: Hierarchical 3D Tiled Model (LOD / Cesium 3D Tiles)
@@ -2748,7 +2964,7 @@ def run_reconstruction(
                         source_data=Metashape.DataSource.DepthMapsData,
                     )
                 print(f"  3D Tiled model completed in {(time.time() - t_tile) / 60:.2f} min.", flush=True)
-                chunk = save_checkpoint(doc, psx_out)
+                chunk = _save_stage_checkpoint(psx_out)
             else:
                 print("\n[6b/7] Reusing existing 3D Tiled Model from checkpoint.", flush=True)
 
@@ -2780,30 +2996,7 @@ def run_reconstruction(
                 emit_ipc_stage("dem", "Building Digital Elevation Model (DEM/DSM)")
                 print("\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
                 t_dem = time.time()
-                proj = Metashape.OrthoProjection()
-                target_crs = chunk.crs
-                if chunk.crs and not is_projected_crs(chunk.crs):
-                    aligned_gps = [
-                        c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
-                    ]
-                    if aligned_gps:
-                        avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
-                        avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
-                        if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
-                            utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
-                            try:
-                                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
-                                print(
-                                    f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for DEM metric scale.",
-                                    flush=True,
-                                )
-                            except Exception:
-                                target_crs = chunk.crs
-                if target_crs:
-                    try:
-                        proj.crs = target_crs
-                    except Exception:
-                        pass
+                proj, target_crs, _ = _select_metric_projection(chunk, "DEM")
                 dem_source = (
                     Metashape.DataSource.PointCloudData
                     if _has_dense_points(chunk)
@@ -2832,7 +3025,7 @@ def run_reconstruction(
                         projection=proj,
                     )
                 print(f"  [7b/7] DEM generation completed in {(time.time() - t_dem) / 60:.2f} min.", flush=True)
-                chunk = save_checkpoint(doc, psx_out)
+                chunk = _save_stage_checkpoint(psx_out)
                 print(f"  [7b/7] [CHECKPOINT] Saved DEM inside project: {psx_out}", flush=True)
             else:
                 emit_ipc_stage("dem", "Reusing existing Digital Elevation Model from checkpoint")
@@ -2865,7 +3058,7 @@ def run_reconstruction(
             print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
 
     # Step 7b2: Topographic Contour Vectors
-    if build_contours and (getattr(chunk, "elevation", None) is not None or build_dem):
+    if build_contours and getattr(chunk, "elevation", None) is not None:
         try:
             print(f"\n[7b2/7] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
             t_cnt = time.time()
@@ -2895,6 +3088,9 @@ def run_reconstruction(
     # Step 7c: Orthomosaic Generation & GeoTIFF Export
     ortho_exported_locally = False
     eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
+    ortho_crs_is_metric = _is_metric_raster_crs(
+        getattr(getattr(chunk, "orthomosaic", None), "crs", None) or getattr(chunk, "crs", None)
+    )
     if build_orthomosaic:
         try:
             has_ortho = chunk.orthomosaic is not None
@@ -2906,34 +3102,12 @@ def run_reconstruction(
                     flush=True,
                 )
                 t_ortho = time.time()
-                proj = Metashape.OrthoProjection()
-                target_crs = chunk.crs
-                if chunk.crs and not is_projected_crs(chunk.crs):
-                    aligned_gps = [
-                        c for c in chunk.cameras if c.reference and c.reference.location and c.transform and c.enabled
-                    ]
-                    if aligned_gps:
-                        avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
-                        avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
-                        if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
-                            utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
-                            try:
-                                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
-                                print(
-                                    f"  [Geodesy] Selected Projected Metric CRS: {target_crs.name} (EPSG:{utm_epsg}) for Orthomosaic metric scale.",
-                                    flush=True,
-                                )
-                            except Exception:
-                                target_crs = chunk.crs
-                if target_crs:
-                    try:
-                        proj.crs = target_crs
-                    except Exception:
-                        pass
+                proj, target_crs, ortho_crs_is_metric = _select_metric_projection(chunk, "Orthomosaic")
+                applied_ortho_res = eff_ortho_res if (eff_ortho_res > 0 and ortho_crs_is_metric) else 0.0
                 ortho_computed = False
                 surf_data = (
                     Metashape.DataSource.ElevationData
-                    if (build_dem or (chunk and getattr(chunk, "elevation", None) is not None))
+                    if (chunk and getattr(chunk, "elevation", None) is not None)
                     else Metashape.DataSource.ModelData
                 )
                 if cluster_enabled:
@@ -2946,8 +3120,8 @@ def run_reconstruction(
                         t_om.ghosting_filter = ghosting_filter
                         t_om.cull_faces = ortho_cull_faces
                         t_om.projection = proj
-                        if eff_ortho_res > 0:
-                            t_om.resolution = eff_ortho_res
+                        if applied_ortho_res > 0:
+                            t_om.resolution = applied_ortho_res
                         ortho_desc = (
                             "Generating True Orthomosaic from Elevation Surface (DEM)"
                             if surf_data == Metashape.DataSource.ElevationData
@@ -2971,13 +3145,13 @@ def run_reconstruction(
                         ghosting_filter=ghosting_filter,
                         cull_faces=ortho_cull_faces,
                         projection=proj,
-                        resolution=eff_ortho_res,
+                        resolution=applied_ortho_res,
                     )
                 print(
                     f"  [7c/7] Orthomosaic generation completed in {(time.time() - t_ortho) / 60:.2f} min ({chunk.orthomosaic.width}x{chunk.orthomosaic.height} px).",
                     flush=True,
                 )
-                chunk = save_checkpoint(doc, psx_out)
+                chunk = _save_stage_checkpoint(psx_out)
                 print(f"  [7c/7] [CHECKPOINT] Saved orthomosaic inside project: {psx_out}", flush=True)
             else:
                 emit_ipc_stage(
@@ -2991,7 +3165,9 @@ def run_reconstruction(
 
             if (not cluster_enabled) and export_ortho:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
-                res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+                res_label = (
+                    f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and ortho_crs_is_metric) else "native GSD"
+                )
                 print(f"\n[7c/7] [EXPORT] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)
                 comp = Metashape.ImageCompression()
                 comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -3004,7 +3180,7 @@ def run_reconstruction(
                     "save_world": True,
                     "save_alpha": True,
                 }
-                if eff_ortho_res > 0:
+                if eff_ortho_res > 0 and ortho_crs_is_metric:
                     ortho_export_kwargs["resolution"] = eff_ortho_res
                 chunk.exportRaster(**ortho_export_kwargs)
                 print(
@@ -3122,7 +3298,7 @@ def run_reconstruction(
                 t_ortho.image_compression = comp
                 t_ortho.save_world = True
                 t_ortho.save_alpha = True
-                if eff_ortho_res > 0:
+                if eff_ortho_res > 0 and ortho_crs_is_metric:
                     t_ortho.resolution = eff_ortho_res
                 t_ortho.path = get_cluster_export_path(ortho_out)
                 export_tasks.append(t_ortho)
@@ -3248,7 +3424,7 @@ def run_reconstruction(
                 "save_world": True,
                 "save_alpha": True,
             }
-            if eff_ortho_res > 0:
+            if eff_ortho_res > 0 and ortho_crs_is_metric:
                 fb_ortho_kwargs["resolution"] = eff_ortho_res
             chunk.exportRaster(**fb_ortho_kwargs)
             print(
@@ -3384,7 +3560,7 @@ def run_reconstruction(
         except Exception as e_rep:
             print(f"  [7e/7] [WARNING] PDF Report export encountered an issue: {e_rep}. Continuing...", flush=True)
 
-    chunk = save_checkpoint(doc, psx_out)
+    chunk = _save_stage_checkpoint(psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
 
     # Clean up obsolete building_reconstruction.psx if present to ensure single project-named file
@@ -3412,7 +3588,7 @@ def run_reconstruction(
             atexit.unregister(_sync_staging_to_central_share)
         except Exception:
             pass
-        sync_ok = _sync_staging_to_central_share(replace_fresh_project=not resume)
+        sync_ok = _sync_staging_to_central_share(replace_fresh_project=not resume, is_atexit=False)
         if not sync_ok:
             raise RuntimeError(
                 f"[Local Scratch Staging] Failed to synchronize staged deliverables from '{local_staging_dir}' "

@@ -65,6 +65,11 @@ else:
     }
 
 
+_EXPORT_SUBDIR_NAMES = frozenset(
+    {"model", "models", "model_export", "model_output", "export", "exports", "output", "outputs", "result", "results"}
+)
+
+
 def infer_project_name(
     images_dir: str | None = None,
     output_dir: str | None = None,
@@ -76,7 +81,7 @@ def infer_project_name(
         if base and base.lower() != "building_reconstruction":
             return base
         parent = os.path.basename(os.path.dirname(os.path.abspath(project_file)))
-        if parent.lower().startswith("model") or parent.lower() in ("export", "exports", "output", "outputs"):
+        if parent.lower() in _EXPORT_SUBDIR_NAMES:
             grandparent = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(project_file))))
             if grandparent:
                 return grandparent
@@ -108,14 +113,38 @@ def infer_project_name(
     if output_dir:
         abs_out = os.path.abspath(output_dir)
         base = os.path.basename(abs_out)
-        if (
-            base.lower().startswith("model") or base.lower() in ("export", "exports", "output", "outputs")
-        ) and os.path.dirname(abs_out):
+        if base.lower() in _EXPORT_SUBDIR_NAMES and os.path.dirname(abs_out):
             base = os.path.basename(os.path.dirname(abs_out))
         if base and base not in (".", "/", "\\"):
             return base
 
     return "project"
+
+
+def _is_local_or_unreferenced_crs(crs) -> bool:
+    """Return True when ``crs`` is None or a local/non-georeferenced coordinate system."""
+    if crs is None:
+        return True
+    wkt = str(getattr(crs, "wkt", "") or "").upper()
+    return "LOCAL_CS" in wkt
+
+
+def _infer_model_format_from_path(model_path: str):
+    """Infer Metashape ModelFormat enum from mesh file extension (defaulting to OBJ)."""
+    if Metashape is None or not hasattr(Metashape, "ModelFormat"):
+        return None
+    ext = os.path.splitext(model_path)[1].lower()
+    mapping = {
+        ".obj": getattr(Metashape.ModelFormat, "ModelFormatOBJ", None),
+        ".fbx": getattr(Metashape.ModelFormat, "ModelFormatFBX", None),
+        ".ply": getattr(Metashape.ModelFormat, "ModelFormatPLY", None),
+        ".glb": getattr(Metashape.ModelFormat, "ModelFormatGLTF", None),
+        ".gltf": getattr(Metashape.ModelFormat, "ModelFormatGLTF", None),
+        ".dxf": getattr(Metashape.ModelFormat, "ModelFormatDXF", None),
+        ".stl": getattr(Metashape.ModelFormat, "ModelFormatSTL", None),
+        ".3ds": getattr(Metashape.ModelFormat, "ModelFormat3DS", None),
+    }
+    return mapping.get(ext) or getattr(Metashape.ModelFormat, "ModelFormatOBJ", None)
 
 
 def _build_metric_ortho_projection(chunk):
@@ -124,24 +153,40 @@ def _build_metric_ortho_projection(chunk):
         return None
     proj = Metashape.OrthoProjection()
     target_crs = getattr(chunk, "crs", None)
+    if _is_local_or_unreferenced_crs(target_crs):
+        if target_crs is not None:
+            try:
+                proj.crs = target_crs
+            except Exception:
+                pass
+        return proj
     if target_crs and not is_projected_crs(target_crs):
-        aligned_gps = [
-            c
-            for c in (getattr(chunk, "cameras", None) or [])
-            if getattr(c, "reference", None)
-            and getattr(c.reference, "location", None)
-            and getattr(c, "transform", None)
-            and getattr(c, "enabled", True)
-        ]
-        if aligned_gps:
-            avg_lon = sum(c.reference.location.x for c in aligned_gps) / len(aligned_gps)
-            avg_lat = sum(c.reference.location.y for c in aligned_gps) / len(aligned_gps)
-            if abs(avg_lat) > 0.001 or abs(avg_lon) > 0.001:
-                utm_epsg = compute_utm_epsg(avg_lon, avg_lat)
-                try:
-                    target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
-                except Exception:
-                    target_crs = chunk.crs
+        lons: list[float] = []
+        lats: list[float] = []
+        for c in getattr(chunk, "cameras", None) or []:
+            ref = getattr(c, "reference", None)
+            if (
+                ref is None
+                or not getattr(ref, "enabled", True)
+                or getattr(ref, "location", None) is None
+                or not getattr(c, "transform", None)
+                or not getattr(c, "enabled", True)
+            ):
+                continue
+            lon, lat = float(ref.location.x), float(ref.location.y)
+            if (abs(lon) > 1e-4 or abs(lat) > 1e-4) and abs(lon) <= 180.0 and abs(lat) <= 90.0:
+                lons.append(lon)
+                lats.append(lat)
+        if lons:
+            lons.sort()
+            lats.sort()
+            med_lon = lons[len(lons) // 2]
+            med_lat = lats[len(lats) // 2]
+            utm_epsg = compute_utm_epsg(med_lon, med_lat)
+            try:
+                target_crs = Metashape.CoordinateSystem(f"EPSG::{utm_epsg}")
+            except Exception:
+                target_crs = chunk.crs
     if target_crs:
         try:
             proj.crs = target_crs
@@ -224,49 +269,33 @@ def export_project_assets(
     except Exception:
         pass
 
+    from autometashape.cluster.hardware import compute_discrete_gpu_mask
+
     gpus = (
         Metashape.app.enumGPUDevices() if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices") else []
     )
-    discrete_mask = 0
-    active_gpu_names = []
-    for i, g in enumerate(gpus):
-        name = g.get("name", "").lower()
-        vendor = g.get("vendor", "").lower()
-        is_igpu = any(
-            ig in name
-            for ig in (
-                "intel(r) graphics",
-                "intel(r) hd",
-                "intel(r) uhd",
-                "intel(r) iris",
-                "radeon(tm) graphics",
-                "radeon graphics",
-            )
-        )
-        if is_igpu:
-            continue
-        is_discrete = any(
-            k in vendor or k in name
-            for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc", "arc(tm)")
-        )
-        if is_discrete:
-            discrete_mask |= 1 << i
-            active_gpu_names.append(f"{g['name']} ({g['mem_size'] / (1024**3):.1f} GB VRAM)")
+    discrete_mask, selected_gpu_devs = compute_discrete_gpu_mask(list(gpus))
+    active_gpu_names = [
+        f"{d['name']} ({d['mem_mb'] / 1024:.1f} GB VRAM)" if d.get("mem_mb") else d["name"] for d in selected_gpu_devs
+    ]
 
     is_network_worker = any("--worker" in arg.lower() for arg in sys.argv)
+    explicit_worker_mask = os.environ.get("AUTOMETASHAPE_EXPLICIT_GPU_MASK", "").strip()
     if not is_network_worker:
         if discrete_mask:
             Metashape.app.gpu_mask = discrete_mask
             print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
-        elif gpus and not any(
-            any(
-                ig in g.get("name", "").lower()
-                for ig in ("intel(r) graphics", "intel(r) hd", "intel(r) uhd", "radeon(tm) graphics")
-            )
-            for g in gpus
-        ):
-            Metashape.app.gpu_mask = (1 << len(gpus)) - 1
-            print(f"[Hardware] GPU: {gpus[0]['name']} ({gpus[0]['mem_size'] / (1024**3):.1f} GB VRAM)", flush=True)
+    elif not explicit_worker_mask and discrete_mask > 0:
+        cur_mask = getattr(Metashape.app, "gpu_mask", None)
+        if cur_mask in (0, 0xFFFFFFFF, -1, None):
+            try:
+                Metashape.app.gpu_mask = discrete_mask
+                print(
+                    f"[Hardware] Network worker GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})",
+                    flush=True,
+                )
+            except Exception:
+                pass
 
     chunk = doc.chunk
     if not chunk:
@@ -289,7 +318,8 @@ def export_project_assets(
 
     if import_model_path and os.path.isfile(import_model_path):
         print(f"[Import] Importing 3D mesh model from: {import_model_path}", flush=True)
-        chunk.importModel(path=import_model_path, format=Metashape.ModelFormat.ModelFormatOBJ)
+        imp_fmt = _infer_model_format_from_path(import_model_path)
+        chunk.importModel(path=import_model_path, format=imp_fmt)
         doc.save()
         chunk = doc.chunk
         print(f"[Import] Re-linked model saved to project: {project_path}", flush=True)
@@ -323,11 +353,13 @@ def export_project_assets(
             print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
             chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
             doc.save()
+            chunk = doc.chunk
 
         if decimate_mesh and decimate_mesh > 0:
             print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
             chunk.decimateModel(face_count=decimate_mesh)
             doc.save()
+            chunk = doc.chunk
 
         current_pages = 0
         if hasattr(chunk.model, "textures") and chunk.model.textures:
@@ -343,6 +375,7 @@ def export_project_assets(
             try:
                 chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
                 doc.save()
+                chunk = doc.chunk
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
@@ -373,6 +406,7 @@ def export_project_assets(
             try:
                 chunk.removeLighting(color_mode=delighting_color_mode)
                 doc.save()
+                chunk = doc.chunk
                 print("  Texture delighting completed.", flush=True)
             except Exception as e_lt:
                 print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
@@ -461,6 +495,7 @@ def export_project_assets(
                     dem_kwargs["projection"] = proj_dem
                 chunk.buildDem(**dem_kwargs)
                 doc.save()
+                chunk = doc.chunk
                 has_dem = getattr(chunk, "elevation", None) is not None
                 print("  [DEM] Elevation model built and saved successfully.", flush=True)
             except Exception as e_dem_build:
@@ -487,8 +522,13 @@ def export_project_assets(
     if export_orthomosaic:
         has_ortho = getattr(chunk, "orthomosaic", None) is not None
         eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
+        proj_om = _build_metric_ortho_projection(chunk)
+        proj_om_crs = getattr(proj_om, "crs", None) if proj_om is not None else getattr(chunk, "crs", None)
+        ortho_crs_is_metric = is_projected_crs(proj_om_crs) or _is_local_or_unreferenced_crs(proj_om_crs)
         if not has_ortho:
-            res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+            res_label = (
+                f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and ortho_crs_is_metric) else "native GSD"
+            )
             print(
                 f"\n[Orthomosaic] Project contains no pre-built orthomosaic. Generating on-demand ({res_label}) before export...",
                 flush=True,
@@ -500,12 +540,14 @@ def export_project_assets(
                     surf_data = Metashape.DataSource.ModelData
                 else:
                     surf_data = Metashape.DataSource.ElevationData
-                ortho_kwargs = {"surface_data": surf_data, "resolution": eff_ortho_res}
-                proj_om = _build_metric_ortho_projection(chunk)
+                ortho_kwargs = {"surface_data": surf_data}
+                if eff_ortho_res > 0 and ortho_crs_is_metric:
+                    ortho_kwargs["resolution"] = eff_ortho_res
                 if proj_om is not None:
                     ortho_kwargs["projection"] = proj_om
                 chunk.buildOrthomosaic(**ortho_kwargs)
                 doc.save()
+                chunk = doc.chunk
                 has_ortho = getattr(chunk, "orthomosaic", None) is not None
                 print("  [Orthomosaic] Orthomosaic built and saved successfully.", flush=True)
             except Exception as e_ortho_build:
@@ -513,7 +555,10 @@ def export_project_assets(
 
         if has_ortho:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
-            res_label = f"{eff_ortho_res * 100:.1f} cm/px" if eff_ortho_res > 0 else "native GSD"
+            om_obj = getattr(chunk, "orthomosaic", None)
+            om_crs = getattr(om_obj, "crs", None) or proj_om_crs
+            om_is_metric = is_projected_crs(om_crs) or _is_local_or_unreferenced_crs(om_crs)
+            res_label = f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and om_is_metric) else "native GSD"
             print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
             comp.tiff_compression = Metashape.ImageCompression.TiffCompression.TiffCompressionLZW
@@ -526,7 +571,7 @@ def export_project_assets(
                 "save_world": True,
                 "save_alpha": True,
             }
-            if eff_ortho_res > 0:
+            if eff_ortho_res > 0 and om_is_metric:
                 export_ortho_kwargs["resolution"] = eff_ortho_res
             chunk.exportRaster(**export_ortho_kwargs)
             print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)", flush=True)
@@ -589,8 +634,14 @@ def export_project_assets(
             has_tiled = getattr(chunk, "tiled_model", None) is not None
             if not has_tiled:
                 print(f"\n[Tiled Model] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
-                chunk.buildTiledModel(tile_size=tile_size, source_data=Metashape.DataSource.DepthMapsData)
+                tile_src = (
+                    Metashape.DataSource.DepthMapsData
+                    if getattr(chunk, "depth_maps", None) is not None
+                    else Metashape.DataSource.ModelData
+                )
+                chunk.buildTiledModel(tile_size=tile_size, source_data=tile_src)
                 doc.save()
+                chunk = doc.chunk
 
             tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(
                 tiled_model_format.lower(),
@@ -632,6 +683,7 @@ def export_project_assets(
                     dem_kwargs["projection"] = proj_dem
                 chunk.buildDem(**dem_kwargs)
                 doc.save()
+                chunk = doc.chunk
                 has_dem = getattr(chunk, "elevation", None) is not None
             except Exception as e_dem_cnt:
                 print(f"  [WARNING] Could not build DEM for contours: {e_dem_cnt}", flush=True)

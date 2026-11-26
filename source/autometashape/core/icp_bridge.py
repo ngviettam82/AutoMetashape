@@ -392,7 +392,11 @@ def _clean_bridge_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k.upper() not in ("PYTHONPATH", "PYTHONHOME")}
     path_key = next((k for k in env if k.upper() == "PATH"), None)
     if path_key:
-        filtered = [seg for seg in env[path_key].split(os.pathsep) if seg and "metashape" not in seg.lower()]
+        filtered = [
+            seg
+            for seg in env[path_key].split(os.pathsep)
+            if seg and not any(tok in seg.lower() for tok in ("agisoft", "metashape pro", "metashape-pro"))
+        ]
         env[path_key] = os.pathsep.join(filtered)
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONUTF8"] = "1"
@@ -497,13 +501,16 @@ def ensure_bridge_runtime(
         marker_file = os.path.join(target_dir, ".provisioned_sha256")
 
         if os.path.isfile(target_py):
-            marker_ok = True
-            if expected_sha and os.path.isfile(marker_file):
-                try:
-                    with open(marker_file, "r", encoding="utf-8") as mf:
-                        marker_ok = mf.read().strip().lower() == expected_sha
-                except OSError:
-                    marker_ok = False
+            if expected_sha:
+                marker_ok = False
+                if os.path.isfile(marker_file):
+                    try:
+                        with open(marker_file, "r", encoding="utf-8") as mf:
+                            marker_ok = mf.read().strip().lower() == expected_sha
+                    except OSError:
+                        marker_ok = False
+            else:
+                marker_ok = True
             if marker_ok and _verify_bridge_python(target_py):
                 return target_py
 
@@ -567,19 +574,30 @@ def ensure_bridge_runtime(
             print(f"  [ICP Runtime] [WARNING] Provisioning failed ({exc}).", flush=True)
             shutil.rmtree(stage_dir, ignore_errors=True)
 
-    # 3. Fallback: any already-cached verified runtime in local cache_base
+    # 3. Fallback: any already-cached verified runtime in local cache_base (cross-platform)
     if os.path.isdir(cache_base):
         for entry in sorted(os.listdir(cache_base), reverse=True):
             if entry.startswith(f"{_DEFAULT_RUNTIME_DIRNAME}_v"):
-                cand = os.path.join(cache_base, entry, "python.exe")
-                if _verify_bridge_python(cand):
-                    return cand
+                for py_sub in ("python.exe", os.path.join("bin", "python3"), os.path.join("bin", "python")):
+                    cand = os.path.join(cache_base, entry, py_sub)
+                    if _verify_bridge_python(cand):
+                        return cand
 
-    # 4. Developer workstation fallback (.agents/bridge_venv)
+    # 4. Developer / standalone workstation fallback (.agents/bridge_venv or system Python with Open3D)
     repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", ".."))
-    dev_py = os.path.join(repo_root, ".agents", "bridge_venv", "Scripts", "python.exe")
-    if _verify_bridge_python(dev_py):
-        return dev_py
+    for dev_py in (
+        os.path.join(repo_root, ".agents", "bridge_venv", "Scripts", "python.exe"),
+        os.path.join(repo_root, ".agents", "bridge_venv", "bin", "python3"),
+        os.path.join(repo_root, ".agents", "bridge_venv", "bin", "python"),
+    ):
+        if _verify_bridge_python(dev_py):
+            return dev_py
+
+    for cmd_name in ("python3", "python"):
+        sys_py = shutil.which(cmd_name)
+        if sys_py and "agisoft" not in sys_py.lower() and "metashape" not in sys_py.lower():
+            if _verify_bridge_python(sys_py):
+                return sys_py
 
     return None
 
@@ -656,6 +674,9 @@ def _compute_island_utm_frame(
     aligned = [c for c in island_chunk.cameras if c.transform and c.enabled]
     if not aligned or island_chunk.transform is None or island_chunk.transform.matrix is None:
         return None
+    main_crs = getattr(main_chunk, "crs", None)
+    if main_crs is None or "LOCAL_CS" in str(getattr(main_crs, "wkt", "") or "").upper():
+        return None
     t_isl = island_chunk.transform.matrix
     ecefs = [t_isl.mulp(c.center) for c in aligned]
     n = len(ecefs)
@@ -666,12 +687,17 @@ def _compute_island_utm_frame(
             sum(p.z for p in ecefs) / n,
         ]
     )
-    origin_wgs = main_chunk.crs.project(origin_ecef)
-    epsg = compute_utm_epsg(float(origin_wgs.x), float(origin_wgs.y))
-    utm_crs = Metashape.CoordinateSystem(f"EPSG::{epsg}")
-    origin_utm = utm_crs.project(origin_ecef)
-    shift_xyz = (round(float(origin_utm.x), 1), round(float(origin_utm.y), 1), round(float(origin_utm.z), 1))
-    return utm_crs, shift_xyz, epsg
+    try:
+        # Always project ECEF via EPSG::4326 so projected main_chunk CRS (e.g. UTM/VN-2000) never corrupts lon/lat
+        wgs84 = Metashape.CoordinateSystem("EPSG::4326")
+        origin_wgs = wgs84.project(origin_ecef)
+        epsg = compute_utm_epsg(float(origin_wgs.x), float(origin_wgs.y))
+        utm_crs = Metashape.CoordinateSystem(f"EPSG::{epsg}")
+        origin_utm = utm_crs.project(origin_ecef)
+        shift_xyz = (round(float(origin_utm.x), 1), round(float(origin_utm.y), 1), round(float(origin_utm.z), 1))
+        return utm_crs, shift_xyz, epsg
+    except Exception:
+        return None
 
 
 def _merge_chunks_preserve_poses(doc: Any, chunk_keys: list[int]) -> Any:
@@ -695,6 +721,7 @@ def bridge_disconnected_islands(
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
     icp_timeout_s: float = 300.0,
+    scratch_root: str = "",
 ) -> tuple[Any, dict[str, Any]]:
     """Register disconnected overlapping islands and unaligned close-range clusters via CPU Open3D ICP.
 
@@ -788,9 +815,11 @@ def bridge_disconnected_islands(
     bridged_cam_paths: set[str] = set()
     island_reports: list[dict[str, Any]] = []
 
-    # Strictly outside local_staging_dir / output_dir so staging sync never uploads temp PLYs
-    _cleanup_stale_icp_temp_dirs(max_age_hours=24.0)
-    tmp_icp_dir = tempfile.mkdtemp(prefix="autometashape_icp_")
+    # Strictly outside local_staging_dir / output_dir so staging sync never uploads temp PLYs;
+    # prefer fast NVMe scratch_root over C:\%TEMP% to avoid OS-drive spill on large multi-building projects.
+    icp_temp_base = scratch_root if (scratch_root and os.path.isdir(scratch_root)) else None
+    _cleanup_stale_icp_temp_dirs(max_age_hours=24.0, temp_root=icp_temp_base)
+    tmp_icp_dir = tempfile.mkdtemp(prefix="autometashape_icp_", dir=icp_temp_base)
     try:
         # 1. Build clean isolated main Mission chunk (only main_island + kept_distant)
         ch_main = orig_chunk.copy()
@@ -868,6 +897,11 @@ def bridge_disconnected_islands(
         for idx, paths in enumerate(rescue_photo_groups, 1):
             ch_res = doc.addChunk()
             ch_res.label = f"_ICP_Rescue_{idx}"
+            if getattr(orig_chunk, "crs", None) is not None:
+                try:
+                    ch_res.crs = orig_chunk.crs
+                except Exception:
+                    pass
             temp_chunks.append(ch_res)
             ch_res.addPhotos(paths)
             # Keep rolling shutter disabled on close-range rescue orbits to prevent scale collapse
@@ -1017,10 +1051,29 @@ def bridge_disconnected_islands(
 
         # 4. Merge accepted islands with ch_main (or keep clean ch_main alone) and clean up temp chunks
         if accepted_chunks:
+            # Capture main block's ground-to-sky region before mergeChunks(merge_tiepoints=False) wipes tie points
+            saved_main_region = None
+            try:
+                if getattr(ch_main, "region", None) is not None:
+                    saved_main_region = (
+                        Metashape.Vector(ch_main.region.center),
+                        Metashape.Vector(ch_main.region.size),
+                        Metashape.Matrix(ch_main.region.rot),
+                    )
+            except Exception:
+                saved_main_region = None
+
             merge_keys = [ch_main.key] + [c.key for c in accepted_chunks]
             merged = _merge_chunks_preserve_poses(doc, merge_keys)
             merged.label = "Production_Reconstruction"
             _clear_stage0_dense_assets(merged)
+            if saved_main_region is not None and getattr(merged, "region", None) is not None:
+                try:
+                    reg = merged.region
+                    reg.center, reg.size, reg.rot = saved_main_region
+                    merged.region = reg
+                except Exception:
+                    pass
 
             # Disable noisy GPS reference on bridged island cameras so ICP-locked poses are never disturbed
             disabled_gps = 0

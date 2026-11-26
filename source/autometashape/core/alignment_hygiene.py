@@ -20,7 +20,7 @@ import os
 from collections import defaultdict, deque
 from typing import Any
 
-from autometashape.core.telemetry import calculate_haversine_meters
+from autometashape.core.telemetry import calculate_haversine_meters, is_projected_crs
 
 try:
     import Metashape
@@ -28,6 +28,16 @@ except ImportError:
     Metashape = None
 
 _RTK_FIXED_FLAGS = {"50", "50.0"}
+
+
+def _is_metric_crs(crs: Any) -> bool:
+    """Return True if ``crs`` uses linear meter coordinates (projected CRS or LOCAL_CS) rather than degrees."""
+    if crs is None:
+        return False
+    if is_projected_crs(crs):
+        return True
+    wkt = str(getattr(crs, "wkt", "") or "").upper()
+    return "LOCAL_CS" in wkt
 
 
 def get_camera_meta(meta: Any, key: str, default: Any = None) -> Any:
@@ -118,8 +128,11 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
     """Disable Null-Island (0, 0), non-finite, and > max_jump_m GPS outlier references.
 
     Camera photos remain enabled for visual matching; only their corrupted GPS prior is disabled.
+    Handles both geographic (WGS84 degrees) and projected/local (meter) coordinate systems cleanly.
     """
     cameras = getattr(chunk, "cameras", None) or []
+    crs = getattr(chunk, "crs", None)
+    metric_crs = _is_metric_crs(crs)
     null_disabled = 0
     outlier_disabled = 0
     valid_cams: list[tuple[Any, float, float]] = []
@@ -131,34 +144,39 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
         loc = getattr(ref, "location", None)
         if loc is None:
             continue
-        lon = _parse_float(getattr(loc, "x", None))
-        lat = _parse_float(getattr(loc, "y", None))
-        alt = _parse_float(getattr(loc, "z", None))
-        is_invalid = (
-            lon is None
-            or lat is None
-            or alt is None
-            or (abs(lon) < 1e-4 and abs(lat) < 1e-4)
-            or abs(lon) > 180.0
-            or abs(lat) > 90.0
-        )
+        x_val = _parse_float(getattr(loc, "x", None))
+        y_val = _parse_float(getattr(loc, "y", None))
+        z_val = _parse_float(getattr(loc, "z", None))
+        if metric_crs:
+            is_invalid = x_val is None or y_val is None or z_val is None
+        else:
+            is_invalid = (
+                x_val is None
+                or y_val is None
+                or z_val is None
+                or (abs(x_val) < 1e-4 and abs(y_val) < 1e-4)
+                or abs(x_val) > 180.0
+                or abs(y_val) > 90.0
+            )
         if is_invalid:
             ref.enabled = False
             null_disabled += 1
         else:
-            valid_cams.append((cam, lon, lat))
+            valid_cams.append((cam, x_val, y_val))
 
     if len(valid_cams) >= 3 and max_jump_m > 0.0:
-        med_lon = _median([x[1] for x in valid_cams])
-        med_lat = _median([x[2] for x in valid_cams])
+        med_x = _median([x[1] for x in valid_cams])
+        med_y = _median([x[2] for x in valid_cams])
         kept: list[tuple[Any, float, float]] = []
-        for cam, lon, lat in valid_cams:
-            dist_m = calculate_haversine_meters(med_lat, med_lon, lat, lon)
+        for cam, xv, yv in valid_cams:
+            dist_m = (
+                math.hypot(xv - med_x, yv - med_y) if metric_crs else calculate_haversine_meters(med_y, med_x, yv, xv)
+            )
             if dist_m > max_jump_m:
                 cam.reference.enabled = False
                 outlier_disabled += 1
             else:
-                kept.append((cam, lon, lat))
+                kept.append((cam, xv, yv))
         valid_cams = kept
 
     if null_disabled or outlier_disabled:
@@ -177,9 +195,11 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
 
 
 def _is_rtk_fixed_survey(cameras: list[Any]) -> bool:
-    """Return True if at least half of RTK-tagged cameras report RTK Fixed (flag 50)."""
+    """Return True if cameras represent an RTK/PPK high-precision survey (DJI or vendor-agnostic)."""
     rtk_tagged = 0
     rtk_fixed = 0
+    high_prec_acc = 0
+    acc_checked = 0
     for cam in cameras:
         photo = getattr(cam, "photo", None)
         meta = getattr(photo, "meta", None) if photo else None
@@ -188,7 +208,20 @@ def _is_rtk_fixed_survey(cameras: list[Any]) -> bool:
             rtk_tagged += 1
             if str(flag).strip() in _RTK_FIXED_FLAGS:
                 rtk_fixed += 1
-    return rtk_tagged >= 5 and (rtk_fixed / rtk_tagged) >= 0.5
+        ref = getattr(cam, "reference", None)
+        acc = getattr(ref, "accuracy", None) if ref is not None else None
+        if acc is not None:
+            ax = _parse_float(getattr(acc, "x", None))
+            az = _parse_float(getattr(acc, "z", None))
+            if ax is not None and az is not None:
+                acc_checked += 1
+                if ax <= 0.5 and az <= 1.0:
+                    high_prec_acc += 1
+    if rtk_tagged >= 5 and (rtk_fixed / rtk_tagged) >= 0.5:
+        return True
+    if acc_checked >= 5 and (high_prec_acc / acc_checked) >= 0.5:
+        return True
+    return False
 
 
 def _camera_session_id(cam: Any) -> tuple[str, str]:
@@ -342,18 +375,22 @@ def compute_camera_gps_residual(chunk: Any, camera: Any) -> tuple[float, float] 
         ref_loc = ref.location
         est = crs.project(matrix.mulp(camera.center))
         dz = float(est.z - ref_loc.z)
-        dlat = float(est.y - ref_loc.y) * 111320.0
-        dlon = float(est.x - ref_loc.x) * 111320.0 * math.cos(math.radians(float(ref_loc.y)))
-        return dz, math.hypot(dlat, dlon)
+        if _is_metric_crs(crs):
+            dxy = math.hypot(float(est.x - ref_loc.x), float(est.y - ref_loc.y))
+        else:
+            dlat = float(est.y - ref_loc.y) * 111320.0
+            dlon = float(est.x - ref_loc.x) * 111320.0 * math.cos(math.radians(float(ref_loc.y)))
+            dxy = math.hypot(dlat, dlon)
+        return dz, dxy
     except Exception:
         return None
 
 
 def build_tie_point_islands(chunk: Any, edge_min: int = 15, max_track_len: int = 40) -> list[list[int]]:
-    """Build exact camera connectivity islands from shared tie-point tracks.
+    """Build exact camera connectivity islands from shared valid tie-point tracks.
 
-    Two aligned, enabled cameras are connected only when they share at least ``edge_min`` tie
-    tracks. Never relies on ``len(chunk.components)`` which masks weakly/unconnected sub-blocks.
+    Two aligned, enabled cameras are connected only when they share at least ``edge_min`` valid
+    tie tracks. Never relies on ``len(chunk.components)`` which masks weakly/unconnected sub-blocks.
     """
     aligned = [c for c in (getattr(chunk, "cameras", None) or []) if getattr(c, "transform", None) and c.enabled]
     if not aligned:
@@ -362,6 +399,17 @@ def build_tie_point_islands(chunk: Any, edge_min: int = 15, max_track_len: int =
     adj: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
     tie_points = getattr(chunk, "tie_points", None)
     if tie_points is not None:
+        # Filter to valid triangulated tie points when available (excludes pruned outliers & 2D-only tracks)
+        valid_tids: set[int] | None = None
+        raw_pts = getattr(tie_points, "points", None)
+        if raw_pts is not None:
+            try:
+                vset = {p.track_id for p in raw_pts if getattr(p, "valid", True)}
+                if vset or len(raw_pts) > 0:
+                    valid_tids = vset
+            except Exception:
+                valid_tids = None
+
         projs = getattr(tie_points, "projections", None)
         if projs is not None:
             track_cams: dict[int, list[int]] = defaultdict(list)
@@ -373,6 +421,8 @@ def build_tie_point_islands(chunk: Any, edge_min: int = 15, max_track_len: int =
                 seen_tracks: set[int] = set()
                 for pr in cam_projs:
                     tid = pr.track_id
+                    if valid_tids is not None and tid not in valid_tids:
+                        continue
                     if tid not in seen_tracks:
                         seen_tracks.add(tid)
                         track_cams[tid].append(cam.key)
@@ -386,6 +436,18 @@ def build_tie_point_islands(chunk: Any, edge_min: int = 15, max_track_len: int =
                             kj = ckeys[j]
                             adj_i[kj] += 1
                             adj[kj][ki] += 1
+                elif n_k > max_track_len:
+                    # Preserve dense close-range / monument connectivity in O(n_k) without O(n_k^2) blowup
+                    ordered = sorted(ckeys)
+                    window = min(6, n_k - 1)
+                    for i in range(n_k):
+                        ki = ordered[i]
+                        adj_i = adj[ki]
+                        for step in range(1, window + 1):
+                            kj = ordered[(i + step) % n_k]
+                            if kj != ki:
+                                adj_i[kj] += 1
+                                adj[kj][ki] += 1
 
     visited: set[int] = set()
     islands: list[list[int]] = []
@@ -408,41 +470,50 @@ def build_tie_point_islands(chunk: Any, edge_min: int = 15, max_track_len: int =
     return islands
 
 
-def _cam_xy_meters(cam: Any, ref_lon: float, ref_lat: float) -> tuple[float, float] | None:
-    """Convert a camera's GPS reference into approximate local East/North meters."""
+def _cam_xy_meters(cam: Any, ref_x: float, ref_y: float, metric_crs: bool = False) -> tuple[float, float] | None:
+    """Convert a camera's reference into approximate local East/North meters."""
     ref = getattr(cam, "reference", None)
     if ref is None or not getattr(ref, "enabled", True) or getattr(ref, "location", None) is None:
         return None
     loc = ref.location
-    lon = _parse_float(getattr(loc, "x", None))
-    lat = _parse_float(getattr(loc, "y", None))
-    if lon is None or lat is None or (abs(lon) < 1e-4 and abs(lat) < 1e-4):
+    xv = _parse_float(getattr(loc, "x", None))
+    yv = _parse_float(getattr(loc, "y", None))
+    if xv is None or yv is None:
         return None
-    cos_lat = math.cos(math.radians(ref_lat))
-    return ((lon - ref_lon) * 111320.0 * cos_lat, (lat - ref_lat) * 111320.0)
+    if metric_crs:
+        return (xv - ref_x, yv - ref_y)
+    if abs(xv) < 1e-4 and abs(yv) < 1e-4:
+        return None
+    cos_lat = math.cos(math.radians(ref_y))
+    return ((xv - ref_x) * 111320.0 * cos_lat, (yv - ref_y) * 111320.0)
 
 
 def _compute_main_xy_bounds(
     cams: list[Any],
+    metric_crs: bool = False,
 ) -> tuple[float, float, float, float, float, float] | None:
-    """Return ``(ref_lon, ref_lat, min_x, max_x, min_y, max_y)`` for valid GPS cameras."""
+    """Return ``(ref_x, ref_y, min_x, max_x, min_y, max_y)`` for valid referenced cameras."""
     coords: list[tuple[float, float]] = []
     for cam in cams:
         ref = getattr(cam, "reference", None)
         if ref is None or not getattr(ref, "enabled", True) or getattr(ref, "location", None) is None:
             continue
-        lon = _parse_float(getattr(ref.location, "x", None))
-        lat = _parse_float(getattr(ref.location, "y", None))
-        if lon is not None and lat is not None and not (abs(lon) < 1e-4 and abs(lat) < 1e-4):
-            coords.append((lon, lat))
+        xv = _parse_float(getattr(ref.location, "x", None))
+        yv = _parse_float(getattr(ref.location, "y", None))
+        if xv is not None and yv is not None and (metric_crs or not (abs(xv) < 1e-4 and abs(yv) < 1e-4)):
+            coords.append((xv, yv))
     if len(coords) < 2:
         return None
-    ref_lon = _median([c[0] for c in coords])
-    ref_lat = _median([c[1] for c in coords])
-    cos_lat = math.cos(math.radians(ref_lat))
-    xs = [(lon - ref_lon) * 111320.0 * cos_lat for lon, _ in coords]
-    ys = [(lat - ref_lat) * 111320.0 for _, lat in coords]
-    return (ref_lon, ref_lat, min(xs), max(xs), min(ys), max(ys))
+    ref_x = _median([c[0] for c in coords])
+    ref_y = _median([c[1] for c in coords])
+    if metric_crs:
+        xs = [x - ref_x for x, _ in coords]
+        ys = [y - ref_y for _, y in coords]
+    else:
+        cos_lat = math.cos(math.radians(ref_y))
+        xs = [(lon - ref_x) * 111320.0 * cos_lat for lon, _ in coords]
+        ys = [(lat - ref_y) * 111320.0 for _, lat in coords]
+    return (ref_x, ref_y, min(xs), max(xs), min(ys), max(ys))
 
 
 def classify_and_quarantine_islands(
@@ -475,9 +546,10 @@ def classify_and_quarantine_islands(
             "spike_keys": [],
         }
 
+    metric_crs = _is_metric_crs(getattr(chunk, "crs", None))
     main_keys = list(islands[0])
     main_cams = [by_key[k] for k in main_keys if k in by_key]
-    main_bounds = _compute_main_xy_bounds(main_cams)
+    main_bounds = _compute_main_xy_bounds(main_cams, metric_crs=metric_crs)
 
     print(
         f"  [Tie-Graph Audit] Detected {len(islands)} tie-point island(s) (edge>={edge_min}): "
@@ -519,7 +591,7 @@ def classify_and_quarantine_islands(
             gps_checked = 0
             gps_inside = 0
             for k in comp:
-                xy = _cam_xy_meters(by_key[k], ref_lon, ref_lat)
+                xy = _cam_xy_meters(by_key[k], ref_lon, ref_lat, metric_crs=metric_crs)
                 if xy is None:
                     continue
                 gps_checked += 1
@@ -629,8 +701,9 @@ def find_unaligned_overlapping_groups(
     by_key = {c.key: c for c in cameras}
     excl = excluded_keys or set()
 
+    metric_crs = _is_metric_crs(getattr(chunk, "crs", None))
     main_cams = [by_key[k] for k in main_keys if k in by_key]
-    main_bounds = _compute_main_xy_bounds(main_cams)
+    main_bounds = _compute_main_xy_bounds(main_cams, metric_crs=metric_crs)
     if main_bounds is None:
         return []
     ref_lon, ref_lat, min_x, max_x, min_y, max_y = main_bounds
@@ -655,7 +728,7 @@ def find_unaligned_overlapping_groups(
         f_tot = folder_total.get(folder, 0)
         if f_tot > 0 and (folder_in_main.get(folder, 0) / f_tot) >= max_folder_aligned_ratio:
             continue
-        xy = _cam_xy_meters(cam, ref_lon, ref_lat)
+        xy = _cam_xy_meters(cam, ref_lon, ref_lat, metric_crs=metric_crs)
         if xy is None:
             continue
         if (min_x - overlap_margin_m) <= xy[0] <= (max_x + overlap_margin_m) and (min_y - overlap_margin_m) <= xy[

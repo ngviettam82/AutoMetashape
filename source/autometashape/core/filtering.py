@@ -326,9 +326,46 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)
         med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
         flight_height = abs(med_cam_z - med_pz)
+        min_z = min(all_zs)
+        max_z = max(all_zs)
+        span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))
+        mid_z = (min_z + max_z) * 0.5
     else:
-        all_zs = inlier_zs
-        flight_height = 0.0
+        # Preserve original vertical center & span when tie points are empty (e.g. post-ICP mergeChunks)
+        # so the bounding box never shifts up to drone flight altitude and slices off the ground/building.
+        orig_mid_z = None
+        orig_span_z = None
+        try:
+            raw_mid = (rot_t * chunk.region.center).z
+            raw_span = chunk.region.size.z
+            if isinstance(raw_mid, (int, float)) and isinstance(raw_span, (int, float)):
+                orig_mid_z = float(raw_mid)
+                orig_span_z = float(raw_span)
+        except Exception:
+            pass
+        if orig_mid_z is not None and orig_span_z is not None and orig_span_z > 0.0:
+            orig_z_min = orig_mid_z - 0.5 * orig_span_z
+            orig_z_max = orig_mid_z + 0.5 * orig_span_z
+            all_zs = inlier_zs + [orig_z_min, orig_z_max]
+            med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
+            flight_height = max(0.0, abs(med_cam_z - orig_mid_z))
+            min_z = min(all_zs)
+            max_z = max(all_zs)
+            span_z = max(orig_span_z, (max_z - min_z) * (1.0 + 2.0 * padding))
+            mid_z = (min_z + max_z) * 0.5
+        else:
+            flight_height = 0.0
+            min_z = min(inlier_zs)
+            max_z = max(inlier_zs)
+            fallback_span = (max_z - min_z) * (1.0 + 2.0 * padding)
+            raw_size_z = getattr(getattr(chunk, "region", None), "size", None)
+            size_z_val = getattr(raw_size_z, "z", None)
+            span_z = (
+                max(float(size_z_val), fallback_span)
+                if isinstance(size_z_val, (int, float))
+                else max(10.0, fallback_span)
+            )
+            mid_z = (min_z + max_z) * 0.5
 
     fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0
     margin_x = max(span_x * padding, fov_margin)
@@ -343,11 +380,6 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     sin_t = math.sin(best_theta)
     mid_x = mid_rx * cos_t - mid_ry * sin_t
     mid_y = mid_rx * sin_t + mid_ry * cos_t
-
-    min_z = min(all_zs)
-    max_z = max(all_zs)
-    span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))
-    mid_z = (min_z + max_z) * 0.5
 
     Rz = Metashape.Matrix(
         [

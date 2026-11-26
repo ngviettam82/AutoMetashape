@@ -15,12 +15,17 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import struct
 import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 
 def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, List[str]]:
-    """Validates Wavefront OBJ model integrity, vertex definitions, and MTL texture linking."""
+    """Validates Wavefront OBJ model integrity, vertex/face definitions, and MTL texture linking.
+
+    Uses O(1) header+tail seek reads on large OBJ files (100-500 MB) to verify ``mtllib``,
+    ``v `` vertices, and ``f `` polygons in milliseconds over SMB without streaming millions of lines.
+    """
     errors: List[str] = []
     if not os.path.isfile(obj_path):
         return False, [f"OBJ file not found: {obj_path}"]
@@ -34,24 +39,50 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
     mtl_filenames: List[str] = []
     base_dir = os.path.dirname(os.path.abspath(obj_path))
 
-    try:
-        with open(obj_path, "r", encoding="utf-8", errors="ignore") as f:
-            for line_idx, line in enumerate(f):
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if stripped.startswith("v "):
-                    has_vertex = True
-                elif stripped.startswith("f "):
-                    has_face = True
-                elif stripped.startswith("mtllib "):
-                    parts = stripped.split(None, 1)
-                    if len(parts) > 1:
-                        mtl_filenames.append(parts[1].strip())
+    def _scan_text_block(text: str) -> None:
+        nonlocal has_vertex, has_face
+        for line in text.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.startswith("v "):
+                has_vertex = True
+            elif stripped.startswith("f "):
+                has_face = True
+            elif stripped.startswith("mtllib "):
+                parts = stripped.split(None, 1)
+                if len(parts) > 1:
+                    mtl = parts[1].strip()
+                    if mtl not in mtl_filenames:
+                        mtl_filenames.append(mtl)
 
-                # Quick short-circuit check for large OBJ files
-                if line_idx > 50000 and has_vertex and has_face:
-                    break
+    try:
+        window = 65536
+        with open(obj_path, "rb") as bf:
+            head_bytes = bf.read(window)
+            _scan_text_block(head_bytes.decode("utf-8", errors="ignore"))
+            if size > window and (not has_face or not has_vertex):
+                bf.seek(max(0, size - window))
+                tail_bytes = bf.read(window)
+                _scan_text_block(tail_bytes.decode("utf-8", errors="ignore"))
+
+        # Full fallback scan only if head+tail did not contain both vertex and face lines
+        if not (has_vertex and has_face) and size > 2 * window:
+            with open(obj_path, "r", encoding="utf-8", errors="ignore") as f:
+                for line in f:
+                    stripped = line.strip()
+                    if not stripped or stripped.startswith("#"):
+                        continue
+                    if stripped.startswith("v "):
+                        has_vertex = True
+                    elif stripped.startswith("f "):
+                        has_face = True
+                    elif stripped.startswith("mtllib "):
+                        parts = stripped.split(None, 1)
+                        if len(parts) > 1 and parts[1].strip() not in mtl_filenames:
+                            mtl_filenames.append(parts[1].strip())
+                    if has_vertex and has_face:
+                        break
     except Exception as exc:
         return False, [f"Failed to read OBJ file: {exc}"]
 
@@ -87,7 +118,7 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
 
 
 def verify_glb_model(glb_path: str, min_size_bytes: int = 1000) -> Tuple[bool, List[str]]:
-    """Validates Binary glTF (.glb) container structure and binary header magic."""
+    """Validates Binary glTF (.glb) container structure, binary header magic, and declared byte length."""
     if not os.path.isfile(glb_path):
         return False, [f"GLB file not found: {glb_path}"]
 
@@ -97,9 +128,14 @@ def verify_glb_model(glb_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
 
     try:
         with open(glb_path, "rb") as f:
-            magic = f.read(4)
-            if magic != b"glTF":
-                return False, [f"Invalid GLB magic header: expected b'glTF', got {magic!r}"]
+            hdr = f.read(12)
+            if len(hdr) < 12 or hdr[:4] != b"glTF":
+                return False, [f"Invalid GLB magic header: expected b'glTF', got {hdr[:4]!r}"]
+            declared_len = struct.unpack("<I", hdr[8:12])[0]
+            if declared_len > 0 and declared_len != size:
+                return False, [
+                    f"Truncated/corrupted GLB container: header declares {declared_len} bytes, file is {size} bytes"
+                ]
     except Exception as exc:
         return False, [f"Failed to read GLB binary header: {exc}"]
 
@@ -206,17 +242,35 @@ def verify_project_deliverables(
     warnings: List[str] = []
     assets_checked: Dict[str, Any] = {}
 
-    # Gather files in deliverables directory
-    all_files = os.listdir(deliverables_dir)
+    # Gather sorted files in deliverables directory for deterministic verification
+    all_files = sorted(os.listdir(deliverables_dir))
+
+    def _prefer_project_match(candidates: List[str]) -> str:
+        if project_name and candidates:
+            pref = project_name.lower()
+            named = [f for f in candidates if f.lower().startswith(pref)]
+            if named:
+                return named[0]
+        return candidates[0]
+
+    # Collect texture filenames referenced by MTL libraries so TIFF textures are never misclassified as DEM/Ortho
+    mtl_referenced_tifs: set[str] = set()
+    for mf_name in (f for f in all_files if f.lower().endswith(".mtl")):
+        try:
+            with open(os.path.join(deliverables_dir, mf_name), "r", encoding="utf-8", errors="ignore") as mf:
+                for mline in mf:
+                    ms = mline.strip()
+                    if ms.startswith("map_Kd "):
+                        parts = ms.split(None, 1)
+                        if len(parts) > 1:
+                            mtl_referenced_tifs.add(os.path.basename(parts[1].strip()).lower())
+        except Exception:
+            pass
 
     # 1. 3D Model: OBJ + MTL
     obj_files = [f for f in all_files if f.lower().endswith(".obj")]
     if obj_files:
-        target_obj = obj_files[0]
-        if project_name:
-            named_objs = [f for f in obj_files if f.lower().startswith(project_name.lower())]
-            if named_objs:
-                target_obj = named_objs[0]
+        target_obj = _prefer_project_match(obj_files)
         obj_full = os.path.join(deliverables_dir, target_obj)
         ok, errs = verify_obj_model(obj_full)
         assets_checked["obj"] = {
@@ -234,11 +288,7 @@ def verify_project_deliverables(
     # 2. 3D Model: GLB
     glb_files = [f for f in all_files if f.lower().endswith(".glb")]
     if glb_files:
-        target_glb = glb_files[0]
-        if project_name:
-            named_glbs = [f for f in glb_files if f.lower().startswith(project_name.lower())]
-            if named_glbs:
-                target_glb = named_glbs[0]
+        target_glb = _prefer_project_match(glb_files)
         glb_full = os.path.join(deliverables_dir, target_glb)
         ok, errs = verify_glb_model(glb_full)
         assets_checked["glb"] = {
@@ -253,16 +303,29 @@ def verify_project_deliverables(
     elif expected_assets and "glb" in expected_assets:
         errors.append("Expected binary GLB model not found in deliverables directory.")
 
-    # 3. Elevation & Orthomosaic (GeoTIFF)
-    tif_files = [f for f in all_files if f.lower().endswith((".tif", ".tiff"))]
-    dem_files = [f for f in tif_files if "dem" in f.lower() or "dsm" in f.lower() or "elevation" in f.lower()]
-    ortho_files = [f for f in tif_files if "ortho" in f.lower()]
+    # 3. Elevation & Orthomosaic (GeoTIFF — exclude MTL textures and prefer canonical _dem/_orthomosaic suffixes)
+    tif_files = [f for f in all_files if f.lower().endswith((".tif", ".tiff")) and f.lower() not in mtl_referenced_tifs]
+    dem_files = [f for f in tif_files if f.lower().endswith(("_dem.tif", "_dem.tiff", "_dsm.tif", "_dsm.tiff"))]
+    if not dem_files:
+        dem_files = [
+            f
+            for f in tif_files
+            if ("_dem" in f.lower() or "_dsm" in f.lower() or "elevation" in f.lower() or f.lower().startswith("dem"))
+        ]
+    ortho_files = [
+        f
+        for f in tif_files
+        if f.lower().endswith(("_orthomosaic.tif", "_orthomosaic.tiff", "_ortho.tif", "_ortho.tiff"))
+    ]
+    if not ortho_files:
+        ortho_files = [f for f in tif_files if "_ortho" in f.lower() or f.lower().startswith("ortho")]
 
     if dem_files:
-        dem_full = os.path.join(deliverables_dir, dem_files[0])
+        target_dem = _prefer_project_match(dem_files)
+        dem_full = os.path.join(deliverables_dir, target_dem)
         ok, errs = verify_geotiff(dem_full)
         assets_checked["dem"] = {
-            "filename": dem_files[0],
+            "filename": target_dem,
             "path": dem_full,
             "size_bytes": os.path.getsize(dem_full),
             "status": "PASS" if ok else "FAIL",
@@ -274,10 +337,11 @@ def verify_project_deliverables(
         errors.append("Expected GeoTIFF DEM file not found in deliverables directory.")
 
     if ortho_files:
-        ortho_full = os.path.join(deliverables_dir, ortho_files[0])
+        target_ortho = _prefer_project_match(ortho_files)
+        ortho_full = os.path.join(deliverables_dir, target_ortho)
         ok, errs = verify_geotiff(ortho_full)
         assets_checked["ortho"] = {
-            "filename": ortho_files[0],
+            "filename": target_ortho,
             "path": ortho_full,
             "size_bytes": os.path.getsize(ortho_full),
             "status": "PASS" if ok else "FAIL",
@@ -288,15 +352,17 @@ def verify_project_deliverables(
     elif expected_assets and "ortho" in expected_assets:
         errors.append("Expected GeoTIFF Orthomosaic file not found in deliverables directory.")
 
-    # 4. Dense Point Cloud
-    cloud_files = [f for f in all_files if f.lower().endswith((".laz", ".las", ".ply"))]
-    # Filter out OBJ companion PLY meshes if present
-    dense_clouds = [f for f in cloud_files if not f.lower().endswith("_mesh.ply")]
+    # 4. Dense Point Cloud (exclude _mesh.ply and _tie_points.ply; support .e57 and .xyz)
+    cloud_files = [f for f in all_files if f.lower().endswith((".laz", ".las", ".ply", ".e57", ".xyz"))]
+    dense_clouds = [
+        f for f in cloud_files if not f.lower().endswith("_mesh.ply") and not f.lower().endswith("_tie_points.ply")
+    ]
     if dense_clouds:
-        cloud_full = os.path.join(deliverables_dir, dense_clouds[0])
+        target_cloud = _prefer_project_match(dense_clouds)
+        cloud_full = os.path.join(deliverables_dir, target_cloud)
         ok, errs = verify_point_cloud(cloud_full)
         assets_checked["point_cloud"] = {
-            "filename": dense_clouds[0],
+            "filename": target_cloud,
             "path": cloud_full,
             "size_bytes": os.path.getsize(cloud_full),
             "status": "PASS" if ok else "FAIL",
@@ -310,10 +376,11 @@ def verify_project_deliverables(
     # 5. Quality PDF Report
     pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
     if pdf_files:
-        pdf_full = os.path.join(deliverables_dir, pdf_files[0])
+        target_pdf = _prefer_project_match(pdf_files)
+        pdf_full = os.path.join(deliverables_dir, target_pdf)
         ok, errs = verify_pdf_report(pdf_full)
         assets_checked["report"] = {
-            "filename": pdf_files[0],
+            "filename": target_pdf,
             "path": pdf_full,
             "size_bytes": os.path.getsize(pdf_full),
             "status": "PASS" if ok else "FAIL",

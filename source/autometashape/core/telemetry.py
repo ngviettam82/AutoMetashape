@@ -292,6 +292,14 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "shutter": "mechanical",
         "focal_fixed": None,
     },
+    "l1d-20c": {
+        "name": "DJI Mavic 2 Pro (Hasselblad L1D-20c)",
+        "sensor_w_mm": 13.2,
+        "sensor_h_mm": 8.8,
+        "pixel_pitch_um": 2.41,
+        "shutter": "rolling",
+        "focal_fixed": 10.26,
+    },
     "hasselblad": {
         "name": "Hasselblad Aerial Medium Format",
         "sensor_w_mm": 43.8,
@@ -351,7 +359,7 @@ def parse_xmp_telemetry(img_path: str) -> dict:
     res = {"relative_alt": None, "shutter_type": None, "gimbal_pitch": None}
     try:
         with open(img_path, "rb") as f:
-            head = f.read(65536)
+            head = f.read(262144)
             start = head.find(b"<x:xmpmeta")
             if start != -1:
                 end = head.find(b"</x:xmpmeta>", start)
@@ -486,11 +494,18 @@ def extract_image_telemetry(img_path: str) -> dict:
 
                     if alt_val is not None:
                         try:
-                            meta["alt"] = float(alt_val)
+                            alt_f = float(alt_val)
+                            alt_ref = gps_ifd.get(5, 0)
+                            if alt_ref in (1, b"\x01"):
+                                alt_f = -abs(alt_f)
+                            meta["alt"] = alt_f
                         except Exception:
                             pass
+    except Exception:
+        pass
 
-        # Fast probe for DJI relative altitude
+    # Fast XMP probe works even inside Metashape bundled Python where PIL is not installed
+    try:
         xmp_data = parse_xmp_telemetry(img_path)
         meta["relative_alt"] = xmp_data.get("relative_alt")
         meta["xmp_shutter"] = xmp_data.get("shutter_type")
@@ -597,10 +612,13 @@ def _dir_matches_exclude_patterns(dir_name: str, patterns: tuple[str, ...]) -> b
     return any(pat in low for pat in patterns)
 
 
+_IGNORED_SURVEY_DIR_NAMES = frozenset({"model", "models", "model_export", "model_output"})
+
+
 def _is_ignored_survey_dir(dir_name: str) -> bool:
     """Return True if a directory is an export, hidden, or Metashape project asset (.files) folder."""
     low = dir_name.lower()
-    return low.startswith("model") or dir_name.startswith(".") or low.endswith(".files")
+    return low in _IGNORED_SURVEY_DIR_NAMES or dir_name.startswith(".") or low.endswith(".files")
 
 
 def _file_edge_hash(path: str, chunk_bytes: int = 4096) -> str:
@@ -918,8 +936,8 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
             sensor_w_mm = 13.2  # 1-inch sensor standard fallback
             sensor_h_mm = 8.8
         pixel_pitch_um = (sensor_w_mm / avg_w) * 1000.0
-        # Robust physical shutter determination:
-        xmp_shutters = [extract_image_telemetry(p).get("xmp_shutter") for p in sampled[:10]]
+        # Robust physical shutter determination (direct XMP read works without PIL):
+        xmp_shutters = [parse_xmp_telemetry(p).get("shutter_type") for p in sampled[:10]]
         xmp_shutter_valid = [s for s in xmp_shutters if s]
         if any(s == "electronic" for s in xmp_shutter_valid):
             shutter = "rolling"
@@ -1044,7 +1062,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
 
     survey_category = "oblique_architecture" if (has_gps and relief_ratio >= 0.08) else "production_geomatics"
     surface_type = "arbitrary"
-    crop_method = "gps-square"
+    crop_method = "gps-square" if has_gps else "structure"
     custom_faces = 2000000
     texture_pages = 16
     build_orthomosaic = True
