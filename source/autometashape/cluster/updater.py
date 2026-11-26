@@ -645,7 +645,7 @@ def update_remote_worker(
             if not target_ready:
                 if shared_root and os.path.isdir(shared_root) and node_hname:
                     try:
-                        dispatch_abort_signal(node_name=str(node_hname), batch_id=target_bid, root_path=shared_root)
+                        dispatch_abort_signal(node_name=str(node_hname), batch_id=target_bid, shared_root=shared_root)
                     except Exception:
                         pass
                 if hasattr(client, "quitWorker"):
@@ -890,7 +890,9 @@ def update_all_workers_parallel(
                     bhname = str(bw.get("hostname", "")).strip()
                     if shared_root and bhname:
                         try:
-                            dispatch_abort_signal(node_name=bhname, batch_id=bw.get("batch_id"), root_path=shared_root)
+                            dispatch_abort_signal(
+                                node_name=bhname, batch_id=bw.get("batch_id"), shared_root=shared_root
+                            )
                         except Exception:
                             pass
                     if hasattr(client, "quitWorker") and bwid is not None:
