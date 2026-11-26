@@ -641,8 +641,13 @@ def update_remote_worker(
                 if target_ready:
                     break
 
-            # If still not ready after abort signal, force-terminate worker process via quitWorker for auto-reconnect
+            # If still not ready after abort signal, send watchdog .abort signal + quitWorker for auto-reconnect
             if not target_ready:
+                if shared_root and os.path.isdir(shared_root) and node_hname:
+                    try:
+                        dispatch_abort_signal(node_name=str(node_hname), batch_id=target_bid, root_path=shared_root)
+                    except Exception:
+                        pass
                 if hasattr(client, "quitWorker"):
                     try:
                         client.quitWorker(wid)
