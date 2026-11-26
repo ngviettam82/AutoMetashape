@@ -72,6 +72,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     abort_p.add_argument("--demote-priority", type=int, default=-100, help="Priority to assign after abort")
     abort_p.add_argument("--server", type=str, default="", help="Cluster server host")
 
+    # Command: pause-worker
+    pw_p = subparsers.add_parser("pause-worker", help="Pause one or more cluster workers by ID or hostname")
+    pw_p.add_argument("--worker-id", type=int, default=None, help="Specific worker ID to pause")
+    pw_p.add_argument("--hostname", type=str, default="", help="Pause all online workers matching hostname")
+    pw_p.add_argument("--server", type=str, default="", help="Cluster server host")
+
+    # Command: unpause-worker
+    uw_p = subparsers.add_parser("unpause-worker", help="Unpause one or more cluster workers by ID or hostname")
+    uw_p.add_argument("--worker-id", type=int, default=None, help="Specific worker ID to unpause")
+    uw_p.add_argument("--hostname", type=str, default="", help="Unpause all online workers matching hostname")
+    uw_p.add_argument("--server", type=str, default="", help="Cluster server host")
+
+    # Command: clear-worker (disconnect stale/aborted ghost worker records)
+    cw_p = subparsers.add_parser("clear-worker", help="Disconnect a stale/aborted worker ID on the server")
+    cw_p.add_argument("--worker-id", type=int, required=True, help="Worker ID to abort/quit on the server")
+    cw_p.add_argument("--only-aborted", action="store_true", help="Safety guard: refuse unless worker.aborted is True")
+    cw_p.add_argument("--server", type=str, default="", help="Cluster server host")
+
     parser.add_argument("--no-reexec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -174,6 +192,55 @@ def cmd_abort(client: Any, batch_id: int, demote_priority: int) -> int:
     return 0
 
 
+def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = None, hostname: str = "") -> int:
+    """Pause or unpause cluster workers matching worker_id or hostname."""
+    if worker_id is None and not hostname.strip():
+        print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
+        return 1
+    w_resp = client.workerList() or {}
+    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
+    target_host = hostname.strip().lower()
+    matched = []
+    for w in workers:
+        wid = w.get("worker_id")
+        whost = str(w.get("hostname", "")).strip().lower()
+        if worker_id is not None and wid == worker_id:
+            matched.append((wid, w.get("hostname", "")))
+        elif target_host and whost == target_host:
+            matched.append((wid, w.get("hostname", "")))
+    if not matched:
+        print(f"[WARNING] No online worker matched worker_id={worker_id} hostname='{hostname}'.")
+        return 1
+    verb = "Pausing" if paused else "Unpausing"
+    for wid, wname in matched:
+        print(f"{verb} worker #{wid} ({wname})...", flush=True)
+        client.setWorkerPaused(wid, paused)
+        print(f"[OK] Worker #{wid} ({wname}) paused={paused}.")
+    return 0
+
+
+def cmd_clear_worker(client: Any, worker_id: int, only_aborted: bool = False) -> int:
+    """Disconnect a stale or aborted worker record on the server."""
+    w_resp = client.workerList() or {}
+    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
+    target = next((w for w in workers if w.get("worker_id") == worker_id), None)
+    if target is None:
+        print(f"[INFO] Worker #{worker_id} is not in server workerList.")
+        return 0
+    if only_aborted and not target.get("aborted"):
+        print(f"[REFUSED] Worker #{worker_id} ({target.get('hostname')}) is not marked aborted.", file=sys.stderr)
+        return 1
+    print(f"Clearing worker #{worker_id} ({target.get('hostname')}, batch={target.get('batch_id')})...", flush=True)
+    for fn_name in ("abortWorker", "quitWorker"):
+        if hasattr(client, fn_name):
+            try:
+                getattr(client, fn_name)(worker_id)
+                print(f"  [OK] {fn_name}({worker_id}) dispatched.")
+            except Exception as e:
+                print(f"  [Notice] {fn_name}({worker_id}): {e}")
+    return 0
+
+
 def main() -> int:
     """CLI entry point for queue management."""
     parser = build_arg_parser()
@@ -205,6 +272,12 @@ def main() -> int:
             return cmd_unpause(client, args.batch)
         elif args.command == "abort":
             return cmd_abort(client, args.batch, args.demote_priority)
+        elif args.command == "pause-worker":
+            return cmd_set_worker_paused(client, True, worker_id=args.worker_id, hostname=args.hostname)
+        elif args.command == "unpause-worker":
+            return cmd_set_worker_paused(client, False, worker_id=args.worker_id, hostname=args.hostname)
+        elif args.command == "clear-worker":
+            return cmd_clear_worker(client, args.worker_id, only_aborted=args.only_aborted)
         return 0
     except Exception as e:
         print(f"[FATAL ERROR] Queue operation '{args.command}' failed: {e}", file=sys.stderr, flush=True)
