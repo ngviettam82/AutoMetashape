@@ -121,8 +121,10 @@ def run_icp(
     s_min = src_pts.min(axis=0)
     s_max = src_pts.max(axis=0)
     s_ctr = 0.5 * (s_min + s_max)
-    crop_min = np.array([s_min[0] - crop_xy_margin, s_min[1] - crop_xy_margin, s_min[2] - crop_z_margin])
-    crop_max = np.array([s_max[0] + crop_xy_margin, s_max[1] + crop_xy_margin, s_max[2] + crop_z_margin])
+    # Use a wide +/-45 m Z crop initially so non-DJI flights lacking RelativeAltitude XMP still overlap in ROI
+    eff_z_margin = max(crop_z_margin, 45.0)
+    crop_min = np.array([s_min[0] - crop_xy_margin, s_min[1] - crop_xy_margin, s_min[2] - eff_z_margin])
+    crop_max = np.array([s_max[0] + crop_xy_margin, s_max[1] + crop_xy_margin, s_max[2] + eff_z_margin])
     bbox = o3d.geometry.AxisAlignedBoundingBox(crop_min, crop_max)
     tgt_crop = tgt_full.crop(bbox)
     print(f"[ICP] Cropped Target around ROI: {len(tgt_crop.points):,} pts", flush=True)
@@ -193,7 +195,24 @@ def run_icp(
 
     yaw_grid = np.arange(-search_yaw_deg, search_yaw_deg + 0.1, 5.0)
     xy_grid = np.arange(-search_xy_m, search_xy_m + 0.1, 2.0)
-    z_grid = np.arange(-search_z_m, search_z_m + 0.1, 1.5)
+
+    # Auto-detect large vertical barometer drift (> 4m) when XMP RelativeAltitude was unavailable
+    xy_mask = (
+        (tgt_c[:, 0] >= s_min[0] - 5.0)
+        & (tgt_c[:, 0] <= s_max[0] + 5.0)
+        & (tgt_c[:, 1] >= s_min[1] - 5.0)
+        & (tgt_c[:, 1] <= s_max[1] + 5.0)
+    )
+    dz_center = 0.0
+    if int(np.sum(xy_mask)) >= 50:
+        dz_est = float(np.median(tgt_c[xy_mask, 2]) - np.median(src_c[:, 2]))
+        if 4.0 < abs(dz_est) <= 40.0:
+            dz_center = round(dz_est / 1.5) * 1.5
+            print(
+                f"[ICP] Detected large vertical Z offset ({dz_est:+.1f}m); centering coarse Z search at {dz_center:+.1f}m.",
+                flush=True,
+            )
+    z_grid = np.arange(dz_center - search_z_m, dz_center + search_z_m + 0.1, 1.5)
 
     for dyaw in yaw_grid:
         rz_mat = _rot_z(float(dyaw))

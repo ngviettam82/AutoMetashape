@@ -92,7 +92,7 @@ if defined RUFF_EXE (
     )
 ) else (
     echo [WARN] ruff not found in PATH or Python environment; skipping ruff format/check.
-    echo [WARN] Install ruff ("pip install ruff") to mirror GitHub Actions Lint ^& Format checks locally.
+    echo [WARN] Install ruff ^("pip install ruff"^) to mirror GitHub Actions Lint and Format checks locally.
 )
 echo [FORMAT] Validating agent skills...
 "!PYTHON_CMD!" %PYTHON_ARGS% tools/skills/cli.py check

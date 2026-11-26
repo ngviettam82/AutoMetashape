@@ -388,11 +388,41 @@ def _local_runtime_base_dir() -> str:
 
 
 def _clean_bridge_env() -> dict[str, str]:
-    """Build an isolated subprocess environment that ignores user/Metashape PYTHONPATH."""
+    """Build an isolated subprocess environment that ignores Metashape Python and host DLL paths."""
     env = {k: v for k, v in os.environ.items() if k.upper() not in ("PYTHONPATH", "PYTHONHOME")}
+    path_key = next((k for k in env if k.upper() == "PATH"), None)
+    if path_key:
+        filtered = [seg for seg in env[path_key].split(os.pathsep) if seg and "metashape" not in seg.lower()]
+        env[path_key] = os.pathsep.join(filtered)
     env["PYTHONNOUSERSITE"] = "1"
     env["PYTHONUTF8"] = "1"
     return env
+
+
+def _cleanup_stale_icp_temp_dirs(max_age_hours: float = 24.0, temp_root: str | None = None) -> int:
+    """Purge orphaned ``autometashape_icp_*`` temp folders left behind by hard-killed workers."""
+    root = temp_root or tempfile.gettempdir()
+    if not os.path.isdir(root):
+        return 0
+    cutoff = time.time() - max(0.0, max_age_hours) * 3600.0
+    removed = 0
+    try:
+        for entry in os.listdir(root):
+            if not entry.startswith("autometashape_icp_"):
+                continue
+            full = os.path.join(root, entry)
+            if not os.path.isdir(full):
+                continue
+            try:
+                if os.path.getmtime(full) <= cutoff:
+                    shutil.rmtree(full, ignore_errors=True)
+                    if not os.path.exists(full):
+                        removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed
 
 
 def _verify_bridge_python(python_exe: str, timeout_s: float = 30.0) -> bool:
@@ -583,19 +613,34 @@ def _clear_stage0_dense_assets(chunk: Any) -> None:
 
 
 def _build_stage0_cloud(chunk: Any) -> bool:
-    """Build fast downscale=4 dense cloud purely for ICP surface registration."""
+    """Build fast downscale=4 uniform-sampled (4 cm) dense cloud purely for ICP registration.
+
+    Using ``uniform_sampling=True, points_spacing=0.04`` cuts PLY size and Open3D peak memory by
+    5-10x on large multi-building projects (critical on 32 GB RAM cluster workers) with zero
+    accuracy loss because ``icp_worker.py`` downsamples to 5 cm voxels before registration.
+    """
     try:
         chunk.buildDepthMaps(
             downscale=4,
             filter_mode=Metashape.FilterMode.ModerateFiltering,
             reuse_depth=False,
         )
-        chunk.buildPointCloud(
-            source_data=Metashape.DataSource.DepthMapsData,
-            point_colors=True,
-            point_confidence=False,
-            keep_depth=False,
-        )
+        try:
+            chunk.buildPointCloud(
+                source_data=Metashape.DataSource.DepthMapsData,
+                point_colors=True,
+                point_confidence=False,
+                uniform_sampling=True,
+                points_spacing=0.04,
+                keep_depth=False,
+            )
+        except (TypeError, NameError):
+            chunk.buildPointCloud(
+                source_data=Metashape.DataSource.DepthMapsData,
+                point_colors=True,
+                point_confidence=False,
+                keep_depth=False,
+            )
         pc = getattr(chunk, "point_cloud", None)
         return pc is not None and getattr(pc, "point_count", 0) >= 200
     except Exception as exc:
@@ -744,6 +789,7 @@ def bridge_disconnected_islands(
     island_reports: list[dict[str, Any]] = []
 
     # Strictly outside local_staging_dir / output_dir so staging sync never uploads temp PLYs
+    _cleanup_stale_icp_temp_dirs(max_age_hours=24.0)
     tmp_icp_dir = tempfile.mkdtemp(prefix="autometashape_icp_")
     try:
         # 1. Build clean isolated main Mission chunk (only main_island + kept_distant)

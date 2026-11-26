@@ -186,6 +186,74 @@ class TestIcpBridge(unittest.TestCase):
                     self.assertIsNone(ib.ensure_bridge_runtime())
                     self.assertFalse(os.path.exists(os.path.join(cache_bad, "bridge_runtime_v1.0.0")))
 
+    def test_clean_bridge_env_strips_pythonpath_and_metashape_dirs(self) -> None:
+        """Verify bridge subprocess env removes PYTHONPATH/PYTHONHOME and Metashape DLL paths."""
+        fake_path = os.pathsep.join(
+            [
+                r"C:\Program Files\Agisoft\Metashape Pro",
+                r"C:\Program Files\Agisoft\Metashape Pro\python",
+                r"C:\Windows\System32",
+            ]
+        )
+        with patch.dict(
+            os.environ,
+            {
+                "PYTHONPATH": "/bad/path",
+                "PYTHONHOME": "/bad/home",
+                "PATH": fake_path,
+            },
+            clear=False,
+        ):
+            env = ib._clean_bridge_env()
+        self.assertNotIn("PYTHONPATH", env)
+        self.assertNotIn("PYTHONHOME", env)
+        self.assertEqual(env["PYTHONNOUSERSITE"], "1")
+        path_val = env.get("PATH") or env.get("Path") or ""
+        self.assertNotIn("metashape", path_val.lower())
+        self.assertIn("System32", path_val)
+
+    def test_cleanup_stale_icp_temp_dirs_removes_only_expired_orphans(self) -> None:
+        """Verify stale autometashape_icp_* temp dirs are purged while active/unrelated dirs stay."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stale = os.path.join(tmp, "autometashape_icp_old123")
+            fresh = os.path.join(tmp, "autometashape_icp_new456")
+            other = os.path.join(tmp, "unrelated_old_dir")
+            for d in (stale, fresh, other):
+                os.makedirs(d, exist_ok=True)
+            old_ts = os.path.getmtime(stale) - 48 * 3600
+            os.utime(stale, (old_ts, old_ts))
+            os.utime(other, (old_ts, old_ts))
+
+            removed = ib._cleanup_stale_icp_temp_dirs(max_age_hours=24.0, temp_root=tmp)
+            self.assertEqual(removed, 1)
+            self.assertFalse(os.path.exists(stale))
+            self.assertTrue(os.path.exists(fresh))
+            self.assertTrue(os.path.exists(other))
+
+    def test_build_stage0_cloud_uses_4cm_uniform_sampling_for_32gb_ram_safety(self) -> None:
+        """Verify Stage-0 dense cloud enables 4 cm uniform sampling to protect 32 GB RAM workers."""
+        pc_kwargs: dict = {}
+
+        class _Chunk:
+            label = "test"
+            point_cloud = SimpleNamespace(point_count=5000)
+
+            def buildDepthMaps(self, **kw) -> None:
+                self.depth_kw = kw
+
+            def buildPointCloud(self, **kw) -> None:
+                pc_kwargs.update(kw)
+
+        fake_ms = SimpleNamespace(
+            FilterMode=SimpleNamespace(ModerateFiltering=2),
+            DataSource=SimpleNamespace(DepthMapsData=1),
+        )
+        with patch.object(ib, "Metashape", fake_ms):
+            ok = ib._build_stage0_cloud(_Chunk())
+        self.assertTrue(ok)
+        self.assertTrue(pc_kwargs["uniform_sampling"])
+        self.assertAlmostEqual(pc_kwargs["points_spacing"], 0.04)
+
     def test_bridge_fast_path_skips_when_no_candidates(self) -> None:
         """Verify zero-overhead fast path when all cameras belong to one coherent block."""
         chunk = SimpleNamespace(label="Production_Reconstruction")
