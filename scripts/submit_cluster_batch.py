@@ -16,6 +16,7 @@ import argparse
 import os
 import subprocess
 import sys
+import time
 from typing import Any, List, Optional
 
 try:
@@ -390,23 +391,33 @@ def submit_batch(
         # Metashape Server retains aborted ghost RunScript batch keys until server restart.
         # Materialize an alternate dispatch stub in the same output dir while keeping
         # --output and --project-name unchanged so final deliverables still write to <proj>.psx.
-        stub_psx = os.path.join(norm_output, f"_dispatch_{proj_name}.psx")
-        print(
-            f"  [Recovery] Server retains stale aborted batch key for '{rel_psx}'; "
-            f"dispatching via alternate stub '{stub_psx}'...",
-            flush=True,
-        )
-        stub_doc = Metashape.Document()
-        try:
-            stub_doc.addChunk().label = "Dispatch_Stub"
-            stub_doc.save(stub_psx)
-        finally:
+        stub_candidates = [
+            os.path.join(norm_output, f"_dispatch_{proj_name}.psx"),
+            os.path.join(norm_output, f"_dispatch_{proj_name}_{int(time.time())}.psx"),
+        ]
+        batch_id, attached_existing = -1, False
+        for stub_idx, stub_psx in enumerate(stub_candidates):
+            print(
+                f"  [Recovery] Server retains stale aborted batch key for '{rel_psx}'; "
+                f"dispatching via alternate stub '{stub_psx}'...",
+                flush=True,
+            )
+            stub_doc = Metashape.Document()
             try:
-                stub_doc.clear()
-            except Exception:
-                pass
-        rel_stub = get_cluster_relative_path(stub_psx, resolved_root)
-        batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_stub, [net_task])
+                stub_doc.addChunk().label = "Dispatch_Stub"
+                stub_doc.save(stub_psx)
+            finally:
+                try:
+                    stub_doc.clear()
+                except Exception:
+                    pass
+            rel_stub = get_cluster_relative_path(stub_psx, resolved_root)
+            try:
+                batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_stub, [net_task])
+                break
+            except Exception as e_stub_dup:
+                if "duplicate batch" not in str(e_stub_dup).lower() or stub_idx == len(stub_candidates) - 1:
+                    raise
     if attached_existing:
         print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
     else:
