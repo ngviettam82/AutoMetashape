@@ -171,10 +171,12 @@ def build_cluster_gradual_selection_tasks(
     t3.criterion = Metashape.TiePoints.Criterion.ReprojectionError
     t3.threshold = max_reproj_error
     o3 = Metashape.Tasks.OptimizeCameras()
-    o3.fit_f = o3.fit_cx = o3.fit_cy = o3.fit_b1 = o3.fit_b2 = True
-    o3.fit_k1 = o3.fit_k2 = o3.fit_k3 = o3.fit_k4 = True
+    o3.fit_f = o3.fit_cx = o3.fit_cy = True
+    o3.fit_b1 = o3.fit_b2 = False
+    o3.fit_k1 = o3.fit_k2 = o3.fit_k3 = True
+    o3.fit_k4 = False
     o3.fit_p1 = o3.fit_p2 = True
-    o3.adaptive_fitting = True
+    o3.adaptive_fitting = False
     o3.tiepoint_covariance = True
     tasks.extend([t3, o3])
 
@@ -183,10 +185,12 @@ def build_cluster_gradual_selection_tasks(
     t4.criterion = Metashape.TiePoints.Criterion.ImageCount
     t4.threshold = max(1, min_rays - 1)
     o4 = Metashape.Tasks.OptimizeCameras()
-    o4.fit_f = o4.fit_cx = o4.fit_cy = o4.fit_b1 = o4.fit_b2 = True
-    o4.fit_k1 = o4.fit_k2 = o4.fit_k3 = o4.fit_k4 = True
+    o4.fit_f = o4.fit_cx = o4.fit_cy = True
+    o4.fit_b1 = o4.fit_b2 = False
+    o4.fit_k1 = o4.fit_k2 = o4.fit_k3 = True
+    o4.fit_k4 = False
     o4.fit_p1 = o4.fit_p2 = True
-    o4.adaptive_fitting = True
+    o4.adaptive_fitting = False
     o4.tiepoint_covariance = True
     tasks.extend([t4, o4])
 
@@ -369,6 +373,7 @@ def build_monolithic_runscript_task(
     smooth_mesh: bool = False,
     smooth_strength: float = 3.0,
     decimate_mesh: int | None = None,
+    exclude_folders: list[str] | tuple[str, ...] | str | None = None,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
@@ -538,6 +543,58 @@ def build_monolithic_runscript_task(
 
     cmd_args = subprocess.list2cmdline(worker_args)
     arg_tokens = repr(worker_args)
+
+    excl_tokens: list[str] = []
+    if exclude_folders:
+        if isinstance(exclude_folders, str):
+            excl_tokens = [tok.strip().lower() for tok in exclude_folders.split(",") if tok.strip()]
+        else:
+            for item in exclude_folders:
+                excl_tokens.extend(tok.strip().lower() for tok in str(item).split(",") if tok.strip())
+
+    if excl_tokens:
+        excl_csv = ",".join(excl_tokens)
+        exclude_setup_code = f"""os.environ["AUTOMETASHAPE_EXCLUDE_FOLDERS"] = {excl_csv!r}
+import inspect as _am_ins
+import autometashape.core.telemetry as _am_tel
+if "exclude_folders" not in _am_ins.signature(_am_tel.discover_image_subfolder_groups).parameters:
+    _am_orig_disc = getattr(_am_tel, "_orig_discover_image_subfolder_groups", _am_tel.discover_image_subfolder_groups)
+    _am_tel._orig_discover_image_subfolder_groups = _am_orig_disc
+    def _am_filtered_disc(images_dir, output_dir=None):
+        _res = _am_orig_disc(images_dir, output_dir=output_dir)
+        _raw = os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS", "")
+        _pats = tuple(p.strip().lower() for p in _raw.split(",") if p.strip())
+        if not _pats:
+            return _res
+        _out = {{}}
+        _skipped_imgs = 0
+        for _g, _paths in _res.items():
+            if any(p in _g.lower() for p in _pats):
+                _skipped_imgs += len(_paths)
+                continue
+            _kept = []
+            for _fp in _paths:
+                try:
+                    _rel_dir = os.path.relpath(os.path.dirname(_fp), images_dir).replace("\\\\", "/")
+                except Exception:
+                    _rel_dir = os.path.dirname(_fp).replace("\\\\", "/")
+                _segs = [s.lower() for s in _rel_dir.split("/") if s and s != "."]
+                if any(any(p in seg for p in _pats) for seg in _segs):
+                    _skipped_imgs += 1
+                    continue
+                _kept.append(_fp)
+            if _kept:
+                _out[_g] = _kept
+        if _skipped_imgs:
+            print(f"  [Ingest Filter] Excluded {{_skipped_imgs}} image(s) matching {{list(_pats)}}.", flush=True)
+        return _out
+    _am_tel.discover_image_subfolder_groups = _am_filtered_disc
+    if "autometashape.core.pipeline" in sys.modules:
+        sys.modules["autometashape.core.pipeline"].discover_image_subfolder_groups = _am_filtered_disc
+"""
+    else:
+        exclude_setup_code = 'os.environ.pop("AUTOMETASHAPE_EXCLUDE_FOLDERS", None)\n'
+
     bootstrap_code = f"""import os, runpy, sys
 
 user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
@@ -548,7 +605,7 @@ if not os.path.isfile(script_path):
     raise FileNotFoundError(f"[Worker] Local AutoMetashape script not found: {{script_path}}")
 if source_dir not in sys.path:
     sys.path.insert(0, source_dir)
-sys.argv = [script_path] + {arg_tokens}
+{exclude_setup_code}sys.argv = [script_path] + {arg_tokens}
 runpy.run_path(script_path, run_name="__main__")
 """
 

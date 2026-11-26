@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 import os
 import re
@@ -177,6 +178,14 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "focal_fixed": 12.29,
     },
     # DJI Consumer Drones (CMOS Electronic Rolling Shutter)
+    "fc9113": {
+        "name": "DJI Air 3S Wide (FC9113)",
+        "sensor_w_mm": 13.2,
+        "sensor_h_mm": 8.8,
+        "pixel_pitch_um": 2.40,
+        "shutter": "rolling",
+        "focal_fixed": 6.72,
+    },
     "fc9589": {
         "name": "DJI Mini 4 / Neo / Consumer Payload (FC9589)",
         "sensor_w_mm": 10.08,
@@ -564,10 +573,115 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
     }
 
 
-def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> dict:
+def parse_exclude_folder_patterns(exclude_folders: str | list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
+    """Normalize comma-separated or sequence folder-exclusion patterns into lowercase tokens."""
+    if exclude_folders is None:
+        raw = os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS", "")
+        if not raw.strip():
+            return ()
+        items = raw.split(",")
+    elif isinstance(exclude_folders, str):
+        items = exclude_folders.split(",")
+    else:
+        items = []
+        for entry in exclude_folders:
+            items.extend(str(entry).split(","))
+    return tuple(tok.strip().lower() for tok in items if tok and tok.strip())
+
+
+def _dir_matches_exclude_patterns(dir_name: str, patterns: tuple[str, ...]) -> bool:
+    """Return True if a directory name matches any case-insensitive exclusion pattern."""
+    if not patterns:
+        return False
+    low = dir_name.lower()
+    return any(pat in low for pat in patterns)
+
+
+def _is_ignored_survey_dir(dir_name: str) -> bool:
+    """Return True if a directory is an export, hidden, or Metashape project asset (.files) folder."""
+    low = dir_name.lower()
+    return low.startswith("model") or dir_name.startswith(".") or low.endswith(".files")
+
+
+def _file_edge_hash(path: str, chunk_bytes: int = 4096) -> str:
+    """Compute a fast SHA-256 fingerprint from the first and last 4 KB of an image file."""
+    h = hashlib.sha256()
+    size = os.path.getsize(path)
+    with open(path, "rb") as f:
+        h.update(f.read(chunk_bytes))
+        if size > chunk_bytes:
+            f.seek(max(0, size - chunk_bytes))
+            h.update(f.read(chunk_bytes))
+    return h.hexdigest()
+
+
+def deduplicate_photo_groups(groups: dict[str, list[str]]) -> tuple[dict[str, list[str]], int]:
+    """Remove exact duplicate image copies across subfolders without modifying files on disk.
+
+    Detects copies sharing identical filename (case-insensitive), byte size, and edge content hash
+    (e.g. duplicate backup folders inside raw UAV project directories) while preserving distinct
+    captures that merely share a filename like ``DJI_0001.JPG``.
+    """
+    seen_by_name_size: dict[tuple[str, int], list[str]] = {}
+    edge_hashes: dict[str, str] = {}
+    deduped: dict[str, list[str]] = {}
+    removed_count = 0
+
+    for grp_name, paths in groups.items():
+        kept: list[str] = []
+        for path in paths:
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                kept.append(path)
+                continue
+            key = (os.path.basename(path).lower(), size)
+            prior_paths = seen_by_name_size.get(key)
+            if not prior_paths:
+                seen_by_name_size[key] = [path]
+                kept.append(path)
+                continue
+
+            try:
+                cur_hash = _file_edge_hash(path)
+                is_dup = False
+                for prior in prior_paths:
+                    if prior not in edge_hashes:
+                        edge_hashes[prior] = _file_edge_hash(prior)
+                    if edge_hashes[prior] == cur_hash:
+                        is_dup = True
+                        break
+                if is_dup:
+                    removed_count += 1
+                    continue
+                edge_hashes[path] = cur_hash
+                prior_paths.append(path)
+                kept.append(path)
+            except OSError:
+                kept.append(path)
+        if kept:
+            deduped[grp_name] = kept
+
+    if removed_count > 0:
+        print(
+            f"  [Ingest Hygiene] Deduplicated {removed_count:,} exact duplicate image copy/copies "
+            "(raw files on disk untouched).",
+            flush=True,
+        )
+    return deduped, removed_count
+
+
+def discover_image_subfolder_groups(
+    images_dir: str,
+    output_dir: str = None,
+    exclude_folders: str | list[str] | tuple[str, ...] | None = None,
+    deduplicate: bool = True,
+) -> dict:
     """Discovers images grouped by immediate subfolders under images_dir.
 
-    Excludes output directory, subfolders named 'model*', and hidden directories.
+    Excludes output directory, subfolders named 'model*', hidden directories, stray Metashape
+    ``*.files`` asset directories, and any subfolder matching ``exclude_folders`` (or
+    ``AUTOMETASHAPE_EXCLUDE_FOLDERS`` env var). Optionally deduplicates exact duplicate copies.
     If multiple image-bearing subfolders are found (e.g. multi-drone or multi-flight captures),
     returns a dictionary mapping folder names to their list of image filepaths.
     If images only reside at the root level or in a single subfolder, returns a dictionary
@@ -575,6 +689,8 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
     """
     supported_exts = SUPPORTED_IMAGE_EXTS
     abs_output = os.path.abspath(output_dir) if output_dir else None
+    exclude_patterns = parse_exclude_folder_patterns(exclude_folders)
+    excluded_dirs: list[str] = []
     groups = {}
     root_images = []
 
@@ -587,21 +703,26 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
         full_path = os.path.join(images_dir, entry)
         if os.path.isdir(full_path):
             abs_sub = os.path.abspath(full_path)
-            # Skip output dir and any 'model*' export dirs
-            if entry.lower().startswith("model") or (abs_output and _is_same_or_subpath(abs_sub, abs_output)):
+            # Skip output dir, hidden dirs, '*.files' Metashape asset dirs, and 'model*' export dirs
+            if _is_ignored_survey_dir(entry) or (abs_output and _is_same_or_subpath(abs_sub, abs_output)):
                 continue
-            if entry.startswith("."):
+            if _dir_matches_exclude_patterns(entry, exclude_patterns):
+                excluded_dirs.append(entry)
                 continue
 
             sub_imgs = []
             for r, dirs, files in os.walk(full_path):
-                dirs[:] = [
-                    d
-                    for d in dirs
-                    if not d.lower().startswith("model")
-                    and not d.startswith(".")
-                    and not (abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
-                ]
+                kept_dirs = []
+                for d in dirs:
+                    if _is_ignored_survey_dir(d) or (
+                        abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output)
+                    ):
+                        continue
+                    if _dir_matches_exclude_patterns(d, exclude_patterns):
+                        excluded_dirs.append(os.path.relpath(os.path.join(r, d), images_dir).replace("\\", "/"))
+                        continue
+                    kept_dirs.append(d)
+                dirs[:] = kept_dirs
                 for f in files:
                     if f.lower().endswith(supported_exts):
                         sub_imgs.append(os.path.join(r, f))
@@ -610,20 +731,27 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
         elif os.path.isfile(full_path) and entry.lower().endswith(supported_exts):
             root_images.append(full_path)
 
+    if excluded_dirs:
+        print(
+            f"  [Ingest Filter] Excluded {len(excluded_dirs)} subfolder(s) matching {list(exclude_patterns)}: "
+            f"{', '.join(sorted(set(excluded_dirs)))}",
+            flush=True,
+        )
+
     if root_images:
         if groups:
             groups["Root_Photos"] = sorted(root_images)
         else:
             groups["Main"] = sorted(root_images)
 
-    if not groups:
+    if not groups and not excluded_dirs:
         all_imgs = []
         for r, dirs, files in os.walk(images_dir):
             dirs[:] = [
                 d
                 for d in dirs
-                if not d.lower().startswith("model")
-                and not d.startswith(".")
+                if not _is_ignored_survey_dir(d)
+                and not _dir_matches_exclude_patterns(d, exclude_patterns)
                 and not (abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
             ]
             for f in files:
@@ -631,6 +759,9 @@ def discover_image_subfolder_groups(images_dir: str, output_dir: str = None) -> 
                     all_imgs.append(os.path.join(r, f))
         if all_imgs:
             groups["Main"] = sorted(all_imgs)
+
+    if deduplicate and groups:
+        groups, _ = deduplicate_photo_groups(groups)
 
     return groups
 
@@ -934,7 +1065,7 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     keypoint_limit_per_mpx = 2000
     tiepoint_limit = 40000
     guided_matching = True
-    adaptive_fitting = True
+    adaptive_fitting = False
     filter_stationary_points = True
 
     return {

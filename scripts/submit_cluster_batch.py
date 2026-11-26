@@ -179,6 +179,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable guided matching during photo alignment to reduce RAM usage on large datasets",
     )
     parser.add_argument(
+        "--exclude-folders",
+        type=str,
+        default="",
+        help="Comma-separated case-insensitive subfolder patterns to exclude from ingestion (e.g. 'manual,cổng')",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -186,12 +192,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def find_photos_in_directory(images_dir: str) -> List[str]:
-    """Recursively search for supported image files in images_dir."""
+def find_photos_in_directory(images_dir: str, exclude_folders: str = "") -> List[str]:
+    """Recursively search for supported image files in images_dir, skipping excluded folders."""
     photos: List[str] = []
     if not os.path.isdir(images_dir):
         return photos
-    for root, _, files in os.walk(images_dir):
+    excl_pats = tuple(tok.strip().lower() for tok in (exclude_folders or "").split(",") if tok.strip())
+    for root, dirs, files in os.walk(images_dir):
+        if excl_pats:
+            dirs[:] = [d for d in dirs if not any(p in d.lower() for p in excl_pats)]
         for f in sorted(files):
             ext = os.path.splitext(f)[1].lower()
             if ext in IMAGE_EXTENSIONS:
@@ -254,6 +263,7 @@ def submit_batch(
     keypoint_limit_per_mpx: Optional[int] = None,
     tiepoint_limit: Optional[int] = None,
     build_point_cloud: Optional[bool] = None,
+    exclude_folders: str = "",
 ) -> int:
     """Create project, guarantee physical doc.save materialization, and submit cluster batch."""
     if Metashape is None:
@@ -301,10 +311,13 @@ def submit_batch(
             print(f"[OK] Checkpoint verified with {len(doc.chunks)} chunk(s).", flush=True)
         else:
             print("\n[INGEST] Verifying raw survey images...", flush=True)
-            photos = find_photos_in_directory(norm_images)
+            photos = find_photos_in_directory(norm_images, exclude_folders=exclude_folders)
             if not photos:
                 raise ValueError(f"No supported image files found under: {norm_images}")
-            print(f"  Verified {len(photos)} photos in source folder (deferred ingest on worker).", flush=True)
+            excl_note = f" (excluding folders: {exclude_folders})" if exclude_folders.strip() else ""
+            print(
+                f"  Verified {len(photos)} photos in source folder{excl_note} (deferred ingest on worker).", flush=True
+            )
 
             chunk = doc.addChunk()
             chunk.label = "Production_Reconstruction"
@@ -350,6 +363,8 @@ def submit_batch(
         task_kwargs["tiepoint_limit"] = tiepoint_limit
     if build_point_cloud is not None:
         task_kwargs["build_point_cloud"] = build_point_cloud
+    if exclude_folders and exclude_folders.strip():
+        task_kwargs["exclude_folders"] = exclude_folders.strip()
 
     res_task = build_monolithic_runscript_task(**task_kwargs)
     net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
@@ -367,7 +382,31 @@ def submit_batch(
 
     # Submit batch via idempotent safe_create_cluster_batch (deduplicates & rejects zombie error batches)
     print(f"  Submitting batch for '{rel_psx}'...", flush=True)
-    batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_psx, [net_task])
+    try:
+        batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_psx, [net_task])
+    except Exception as e_dup:
+        if "duplicate batch" not in str(e_dup).lower():
+            raise
+        # Metashape Server retains aborted ghost RunScript batch keys until server restart.
+        # Materialize an alternate dispatch stub in the same output dir while keeping
+        # --output and --project-name unchanged so final deliverables still write to <proj>.psx.
+        stub_psx = os.path.join(norm_output, f"_dispatch_{proj_name}.psx")
+        print(
+            f"  [Recovery] Server retains stale aborted batch key for '{rel_psx}'; "
+            f"dispatching via alternate stub '{stub_psx}'...",
+            flush=True,
+        )
+        stub_doc = Metashape.Document()
+        try:
+            stub_doc.addChunk().label = "Dispatch_Stub"
+            stub_doc.save(stub_psx)
+        finally:
+            try:
+                stub_doc.clear()
+            except Exception:
+                pass
+        rel_stub = get_cluster_relative_path(stub_psx, resolved_root)
+        batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_stub, [net_task])
     if attached_existing:
         print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
     else:
@@ -467,6 +506,7 @@ def main() -> int:
                     keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
                     tiepoint_limit=args.tiepoint_limit,
                     build_point_cloud=args.build_point_cloud,
+                    exclude_folders=args.exclude_folders,
                 )
                 if bid > 0:
                     submitted_ids.append(bid)
@@ -494,6 +534,7 @@ def main() -> int:
             keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
             tiepoint_limit=args.tiepoint_limit,
             build_point_cloud=args.build_point_cloud,
+            exclude_folders=args.exclude_folders,
         )
         return 0 if batch_id > 0 else 1
     except Exception as e:

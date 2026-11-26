@@ -494,23 +494,33 @@ def execute_usgs_gradual_selection(
         else:
             eff_re = re_thresh
         f.removePoints(eff_re)
+        for s in getattr(chunk, "sensors", None) or []:
+            cal = getattr(s, "calibration", None)
+            if cal is not None:
+                try:
+                    cal.k4 = 0.0
+                    cal.b1 = 0.0
+                    cal.b2 = 0.0
+                    s.calibration = cal
+                except Exception:
+                    pass
         chunk.optimizeCameras(
             fit_f=True,
             fit_cx=True,
             fit_cy=True,
-            fit_b1=True,
-            fit_b2=True,
+            fit_b1=False,
+            fit_b2=False,
             fit_k1=True,
             fit_k2=True,
             fit_k3=True,
-            fit_k4=True,
+            fit_k4=False,
             fit_p1=True,
             fit_p2=True,
-            adaptive_fitting=True,
+            adaptive_fitting=False,
             tiepoint_covariance=True,
         )
         print(
-            f"  [Pass 3/4] Reprojection Error (RE <= {eff_re:.2f} px): Pruned residual outliers; optimized complete polynomial lens model (k4, b1, b2, adaptive).",
+            f"  [Pass 3/4] Reprojection Error (RE <= {eff_re:.2f} px): Pruned residual outliers; optimized stable lens model (f, cx, cy, k1..k3, p1, p2; k4/b1/b2 locked).",
             flush=True,
         )
     except Exception as e:
@@ -522,23 +532,33 @@ def execute_usgs_gradual_selection(
         if min_rays > 1:
             f.selectPoints(min_rays - 1)
             chunk.tie_points.removeSelectedPoints()
+        for s in getattr(chunk, "sensors", None) or []:
+            cal = getattr(s, "calibration", None)
+            if cal is not None:
+                try:
+                    cal.k4 = 0.0
+                    cal.b1 = 0.0
+                    cal.b2 = 0.0
+                    s.calibration = cal
+                except Exception:
+                    pass
         chunk.optimizeCameras(
             fit_f=True,
             fit_cx=True,
             fit_cy=True,
-            fit_b1=True,
-            fit_b2=True,
+            fit_b1=False,
+            fit_b2=False,
             fit_k1=True,
             fit_k2=True,
             fit_k3=True,
-            fit_k4=True,
+            fit_k4=False,
             fit_p1=True,
             fit_p2=True,
-            adaptive_fitting=True,
+            adaptive_fitting=False,
             tiepoint_covariance=True,
         )
         print(
-            f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Preserved structural multi-view rays; locked in bundle adjustment.",
+            f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Preserved structural multi-view rays; locked in stable bundle adjustment (k4/b1/b2 locked).",
             flush=True,
         )
     except Exception as e:

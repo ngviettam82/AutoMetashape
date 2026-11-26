@@ -86,8 +86,10 @@ if not _DELEGATED:
     import autometashape.cluster.hardware as _hardware_mod
     import autometashape.cluster.orchestrator as _orchestrator_mod
     import autometashape.cluster.staging as _staging_mod
+    import autometashape.core.alignment_hygiene as _hygiene_mod
     import autometashape.core.export as _export_mod
     import autometashape.core.filtering as _filtering_mod
+    import autometashape.core.icp_bridge as _icp_bridge_mod
     import autometashape.core.pipeline as _pipeline_mod
     import autometashape.core.telemetry as _telemetry_mod
     import autometashape.ipc.protocol as _ipc_mod
@@ -171,6 +173,8 @@ def _sync_state() -> None:
     _pipeline_mod.Metashape = Metashape
     _orchestrator_mod.Metashape = Metashape
     _filtering_mod.Metashape = Metashape
+    _hygiene_mod.Metashape = Metashape
+    _icp_bridge_mod.Metashape = Metashape
     _export_mod.Metashape = Metashape
     _ipc_mod._ACTIVE_STATUS_FILE = _ACTIVE_STATUS_FILE
 
@@ -333,6 +337,8 @@ if __name__ == "__main__" and not _DELEGATED:
                 filter_stationary_points=args.filter_stationary_points,
                 adaptive_fitting=args.adaptive_fitting,
                 filter_tiepoints=args.filter_tiepoints,
+                alignment_hygiene=getattr(args, "alignment_hygiene", True),
+                icp_bridge=getattr(args, "icp_bridge", True),
                 rolling_shutter=args.rolling_shutter,
                 close_holes=args.close_holes,
                 fill_holes=args.fill_holes,

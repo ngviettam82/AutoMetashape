@@ -47,6 +47,13 @@ from autometashape.cluster.staging import (
     get_psx_files_dir,
     sync_staged_project_to_network,
 )
+from autometashape.core.alignment_hygiene import (
+    classify_and_quarantine_islands,
+    find_unaligned_overlapping_groups,
+    normalize_flight_takeoff_z0,
+    sanitize_camera_gps,
+    zero_unstable_lens_params,
+)
 from autometashape.core.export import infer_project_name
 from autometashape.core.filtering import (
     auto_crop_camera_gps_square,
@@ -54,6 +61,7 @@ from autometashape.core.filtering import (
     filter_image_quality,
     filter_tie_points,
 )
+from autometashape.core.icp_bridge import bridge_disconnected_islands
 from autometashape.core.telemetry import (
     analyze_survey_physics,
     compute_utm_epsg,
@@ -331,9 +339,11 @@ def run_reconstruction(
     tiepoint_limit: int | None = None,
     filter_stationary_points: bool = True,
     guided_matching: bool = True,
-    adaptive_fitting: bool = True,
+    adaptive_fitting: bool = False,
     reference_preselection_mode: str = "estimated",
     filter_tiepoints: bool = True,
+    alignment_hygiene: bool = True,
+    icp_bridge: bool = True,
     depth_quality: str = "high",
     depth_filtering: str | None = None,
     custom_faces: int = None,
@@ -1361,6 +1371,7 @@ def run_reconstruction(
         chunk.label = "Production_Reconstruction"
 
     use_multi_chunk = False
+    hygiene_z0_info: dict[str, Any] = {"skipped": True, "anchor_z0": None}
     if not resumed:
         # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
         groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
@@ -1420,6 +1431,10 @@ def run_reconstruction(
                         f"  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation on '{sub_chunk.label}'.",
                         flush=True,
                     )
+
+                if alignment_hygiene:
+                    sanitize_camera_gps(sub_chunk)
+                    normalize_flight_takeoff_z0(sub_chunk)
 
                 created_chunks.append(sub_chunk)
 
@@ -1626,6 +1641,12 @@ def run_reconstruction(
                 for s in chunk.sensors:
                     s.rolling_shutter = Metashape.Shutter.Model.Regularized
                 print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
+
+            if alignment_hygiene:
+                sanitize_camera_gps(chunk)
+                hygiene_z0_info = normalize_flight_takeoff_z0(chunk)
+            else:
+                hygiene_z0_info = {"skipped": True, "anchor_z0": None}
 
             if import_reference and os.path.isfile(import_reference):
                 print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
@@ -2206,6 +2227,9 @@ def run_reconstruction(
                         s.rolling_shutter = Metashape.Shutter.Model.Regularized
                     print("  [Rolling Shutter] Enabled Regularized CMOS rolling shutter compensation.", flush=True)
 
+                if not adaptive_fitting:
+                    zero_unstable_lens_params(chunk)
+
                 if filter_tiepoints:
                     cleaned_on_cluster = False
                     if cluster_enabled:
@@ -2232,6 +2256,39 @@ def run_reconstruction(
                         "  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).",
                         flush=True,
                     )
+
+                if alignment_hygiene and not cluster_enabled:
+                    audit_res = classify_and_quarantine_islands(chunk)
+                    if icp_bridge:
+                        unaligned_groups = find_unaligned_overlapping_groups(
+                            chunk,
+                            main_keys=set(audit_res.get("main_island") or []),
+                            excluded_keys=set(audit_res.get("quarantined_keys") or []),
+                        )
+                        chunk, _icp_stats = bridge_disconnected_islands(
+                            doc=doc,
+                            chunk=chunk,
+                            audit_result=audit_res,
+                            unaligned_groups=unaligned_groups,
+                            anchor_z0=hygiene_z0_info.get("anchor_z0"),
+                            network_path=network_path,
+                            images_dir=images_dir,
+                            output_dir=target_network_output or output_dir,
+                            psx_out=psx_out,
+                            align_downscale=align_downscale,
+                            rolling_shutter=bool(rolling_shutter),
+                            filter_stationary_points=filter_stationary_points,
+                            guided_matching=guided_matching,
+                        )
+                    elif audit_res.get("bridge_candidates"):
+                        # If ICP bridge is explicitly disabled, quarantine unbridged overlapping islands cleanly
+                        by_key = {c.key: c for c in chunk.cameras}
+                        for comp in audit_res["bridge_candidates"]:
+                            for k in comp:
+                                cam = by_key.get(k)
+                                if cam is not None:
+                                    cam.transform = None
+                                    cam.enabled = False
 
         if crop_method == "manual":
             print("\n[3b/7] Manual Bounding Box Crop selected: Auto-crop skipped.", flush=True)
@@ -3508,11 +3565,35 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable stationary tie point exclusion (default: stationary points are excluded)",
     )
     parser.add_argument(
+        "--adaptive-fitting",
+        dest="adaptive_fitting",
+        action="store_true",
+        default=False,
+        help="Enable adaptive camera model fitting (default: disabled to prevent k4 radial distortion blowup)",
+    )
+    parser.add_argument(
         "--no-adaptive-fitting",
         dest="adaptive_fitting",
         action="store_false",
+        help="Disable adaptive camera model fitting (default)",
+    )
+    parser.add_argument(
+        "--alignment-hygiene",
+        action=argparse.BooleanOptionalAction,
         default=True,
-        help="Disable adaptive camera model fitting (default: enabled)",
+        help=(
+            "Enable pre-alignment GPS sanitization, TakeoffZ0 barometer normalization, and "
+            "tie-graph rogue-island quarantine (default: True)"
+        ),
+    )
+    parser.add_argument(
+        "--icp-bridge",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Enable zero-neural CPU Open3D Sim(3) ICP bridging for disconnected overlapping "
+            "flight islands with Pre-MVS Quality Gate (default: True)"
+        ),
     )
     parser.add_argument(
         "--filter-tiepoints",
