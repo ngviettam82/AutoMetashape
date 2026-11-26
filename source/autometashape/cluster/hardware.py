@@ -7,21 +7,69 @@
 
 from __future__ import annotations
 
+import ctypes
+import json
 import os
+import re
 import shutil
 import socket
 import string
 import subprocess
 import sys
+import tempfile
 from typing import Any
+
+
+def _is_fixed_local_drive_fast(drive_letter: str) -> bool:
+    """Return True if ``drive_letter`` is a fixed local Windows drive without touching SMB/network I/O."""
+    if sys.platform != "win32":
+        return True
+    try:
+        windll = getattr(ctypes, "windll", None)
+        kernel32 = getattr(windll, "kernel32", None)
+        if kernel32 is None:
+            return True
+        # DRIVE_FIXED = 3; rejects DRIVE_NO_ROOT_DIR (1), DRIVE_REMOVABLE (2), DRIVE_REMOTE (4), DRIVE_CDROM (5)
+        return int(kernel32.GetDriveTypeW(f"{drive_letter.upper()}:\\")) == 3
+    except Exception:
+        return True
+
+
+def get_local_hostname() -> str:
+    """Return the local host machine name cross-platform (Windows, Linux, macOS)."""
+    name = (os.environ.get("COMPUTERNAME") or "").strip()
+    if name:
+        return name
+    try:
+        host = socket.gethostname().strip()
+        if host:
+            return host
+    except Exception:
+        pass
+    return "unknown"
+
+
+def is_healthy_online_worker(worker: Any) -> bool:
+    """Return True if a Metashape Server worker record is online and not marked aborted."""
+    if not isinstance(worker, dict):
+        return False
+    state = str(worker.get("state", "")).strip().lower()
+    return state != "offline" and not bool(worker.get("aborted"))
 
 
 def find_metashape_path() -> str | None:
     """Locate Agisoft Metashape Pro executable dynamically across platforms."""
     # 1. Bundled relative to current Python if running inside Metashape's embedded Python
-    candidate = os.path.normpath(os.path.join(os.path.dirname(sys.executable), "..", "metashape.exe"))
-    if os.path.isfile(candidate):
-        return candidate
+    py_dir = os.path.dirname(sys.executable)
+    for rel_cand in (
+        os.path.join(py_dir, "..", "metashape.exe"),
+        os.path.join(py_dir, "..", "metashape"),
+        os.path.join(py_dir, "..", "..", "metashape"),
+        os.path.join(py_dir, "..", "..", "metashape.sh"),
+    ):
+        candidate = os.path.normpath(rel_cand)
+        if os.path.isfile(candidate):
+            return candidate
 
     # 2. Check system PATH
     for name in ("metashape", "metashape.exe", "photoscan", "photoscan.exe"):
@@ -49,8 +97,10 @@ def find_metashape_path() -> str | None:
                     if os.path.isfile(full_p):
                         return full_p
 
-        # Dynamic drive scanning (checks mounted drive letters without assuming C:)
+        # Dynamic drive scanning (check GetDriveTypeW first to avoid 15-30s SMB hangs on offline shares)
         for drive in string.ascii_uppercase:
+            if not _is_fixed_local_drive_fast(drive):
+                continue
             for sub in (
                 rf"{drive}:\Program Files\Agisoft\Metashape Pro\metashape.exe",
                 rf"{drive}:\Program Files (x86)\Agisoft\Metashape Pro\metashape.exe",
@@ -65,7 +115,12 @@ def find_metashape_path() -> str | None:
             return cand
     else:
         # Linux standard locations
-        for cand in ("/opt/metashape-pro/metashape.sh", "/usr/local/bin/metashape", "/usr/bin/metashape"):
+        for cand in (
+            "/opt/metashape-pro/metashape.sh",
+            "/opt/metashape-pro/metashape",
+            "/usr/local/bin/metashape",
+            "/usr/bin/metashape",
+        ):
             if os.path.isfile(cand):
                 return cand
 
@@ -94,13 +149,20 @@ def find_metashape_python_path(metashape_exe: str | None = None) -> str | None:
             os.environ.get("PROGRAMFILES"),
             os.environ.get("ProgramW6432"),
             os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
         ]:
             if base:
-                cand = os.path.join(base, "Agisoft", "Metashape Pro", "python", "python.exe")
-                if os.path.isfile(cand):
-                    return cand
+                for sub in (
+                    os.path.join("Agisoft", "Metashape Pro", "python", "python.exe"),
+                    os.path.join("Programs", "Agisoft", "Metashape Pro", "python", "python.exe"),
+                ):
+                    cand = os.path.join(base, sub)
+                    if os.path.isfile(cand):
+                        return cand
 
         for drive in string.ascii_uppercase:
+            if not _is_fixed_local_drive_fast(drive):
+                continue
             for sub in (
                 rf"{drive}:\Program Files\Agisoft\Metashape Pro\python\python.exe",
                 rf"{drive}:\Program Files (x86)\Agisoft\Metashape Pro\python\python.exe",
@@ -135,11 +197,37 @@ def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
             os.environ.get("PROGRAMFILES"),
             os.environ.get("ProgramW6432"),
             os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
         ]:
             if base:
-                cand = os.path.join(base, "Agisoft", "Metashape Pro", "metashape-server.exe")
-                if os.path.isfile(cand):
-                    return cand
+                for sub in (
+                    os.path.join("Agisoft", "Metashape Pro", "metashape-server.exe"),
+                    os.path.join("Programs", "Agisoft", "Metashape Pro", "metashape-server.exe"),
+                ):
+                    cand = os.path.join(base, sub)
+                    if os.path.isfile(cand):
+                        return cand
+        for drive in string.ascii_uppercase:
+            if not _is_fixed_local_drive_fast(drive):
+                continue
+            for sub in (
+                rf"{drive}:\Program Files\Agisoft\Metashape Pro\metashape-server.exe",
+                rf"{drive}:\Agisoft\Metashape Pro\metashape-server.exe",
+            ):
+                if os.path.isfile(sub):
+                    return sub
+    elif sys.platform == "darwin":
+        cand = "/Applications/MetashapePro.app/Contents/MacOS/metashape-server"
+        if os.path.isfile(cand):
+            return cand
+    else:
+        for cand in (
+            "/opt/metashape-pro/metashape-server",
+            "/usr/local/bin/metashape-server",
+            "/usr/bin/metashape-server",
+        ):
+            if os.path.isfile(cand):
+                return cand
 
     return None
 
@@ -163,11 +251,33 @@ def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
             os.environ.get("PROGRAMFILES"),
             os.environ.get("ProgramW6432"),
             os.environ.get("PROGRAMFILES(X86)"),
+            os.environ.get("LOCALAPPDATA"),
         ]:
             if base:
-                cand = os.path.join(base, "Agisoft", "Metashape Pro", "monitor.exe")
-                if os.path.isfile(cand):
-                    return cand
+                for sub in (
+                    os.path.join("Agisoft", "Metashape Pro", "monitor.exe"),
+                    os.path.join("Programs", "Agisoft", "Metashape Pro", "monitor.exe"),
+                ):
+                    cand = os.path.join(base, sub)
+                    if os.path.isfile(cand):
+                        return cand
+        for drive in string.ascii_uppercase:
+            if not _is_fixed_local_drive_fast(drive):
+                continue
+            for sub in (
+                rf"{drive}:\Program Files\Agisoft\Metashape Pro\monitor.exe",
+                rf"{drive}:\Agisoft\Metashape Pro\monitor.exe",
+            ):
+                if os.path.isfile(sub):
+                    return sub
+    elif sys.platform == "darwin":
+        cand = "/Applications/MetashapePro.app/Contents/MacOS/monitor"
+        if os.path.isfile(cand):
+            return cand
+    else:
+        for cand in ("/opt/metashape-pro/monitor", "/usr/local/bin/monitor"):
+            if os.path.isfile(cand):
+                return cand
 
     return None
 
@@ -177,31 +287,56 @@ def get_primary_lan_ip() -> str:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
+        ip = s.getsockname()[0]
+        if ip and not ip.startswith("127."):
+            return ip
     except Exception:
         pass
     finally:
         s.close()
 
-    # Airgapped / offline LAN fallback: inspect hostname IP resolution
+    # Airgapped / offline LAN fallback: inspect hostname IP resolution across all IPv4 addresses
     try:
         host_name = socket.gethostname()
         ip = socket.gethostbyname(host_name)
         if ip and not ip.startswith("127."):
             return ip
+        for res in socket.getaddrinfo(host_name, None, socket.AF_INET):
+            cand = res[4][0]
+            if cand and not cand.startswith("127."):
+                return cand
     except Exception:
         pass
 
     return "127.0.0.1"
 
 
+_AMD_IGPU_RE = re.compile(r"\b(?:610m|660m|680m|740m|760m|780m|880m|890m)\b")
+_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc(?:\(tm\))?\s+(?:[ab]\d{3}|pro)\b")
+
+
 def is_integrated_gpu(name: str) -> bool:
-    """Return True if GPU device name matches known integrated graphics (Intel iGPU, AMD APU)."""
-    lower = name.lower()
+    """Return True if GPU device name matches integrated graphics or software renderers."""
+    lower = (name or "").strip().lower()
+    if not lower:
+        return False
+    # Software / virtual renderers
+    if any(sw in lower for sw in ("microsoft basic render", "llvmpipe", "swiftshader", "softpipe")):
+        return True
+    # Discrete Intel Arc A-series / B-series / Pro GPUs are NOT integrated
+    if _INTEL_DISCRETE_ARC_RE.search(lower):
+        return False
+    # Integrated Intel Arc Graphics (Core Ultra laptop/desktop iGPU without A###/B###/Pro model)
+    if "intel" in lower and "arc" in lower:
+        return True
+    # Integrated AMD Ryzen mobile/desktop APUs (610M/680M/780M/890M, Vega, generic Radeon Graphics)
+    if "radeon" in lower and _AMD_IGPU_RE.search(lower):
+        return True
     return any(
         ig in lower
         for ig in (
             "intel(r) graphics",
+            "intel graphics",
             "intel(r) hd",
             "intel(r) uhd",
             "intel(r) iris",
@@ -210,6 +345,145 @@ def is_integrated_gpu(name: str) -> bool:
             "vega",
         )
     )
+
+
+def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dict[str, Any]]]:
+    """Compute Metashape's exact discrete GPU bitmask from an ordered ``enumGPUDevices()`` list.
+
+    Excludes integrated graphics (Intel UHD/HD/Iris/Core Ultra Arc iGPU, AMD Ryzen APUs) and
+    software renderers while selecting all discrete NVIDIA, AMD Radeon RX/Pro, and Intel Arc A/B
+    GPUs using their exact Metashape device index (``1 << i``). Falls back to Apple Silicon or
+    non-integrated compute devices when no PCIe discrete GPU is present.
+
+    Returns:
+        Tuple of ``(bitmask: int, selected_devices: list[dict])``.
+    """
+    if not gpus:
+        return 0, []
+
+    discrete_mask = 0
+    selected: list[dict[str, Any]] = []
+    non_igpu_fallback: list[tuple[int, dict[str, Any]]] = []
+
+    for i, g in enumerate(gpus):
+        if not isinstance(g, dict):
+            continue
+        raw_name = str(g.get("name", f"GPU {i}")).strip()
+        name_low = raw_name.lower()
+        vendor_low = str(g.get("vendor", "")).strip().lower()
+        mem_bytes = int(g.get("mem_size", 0) or 0)
+        mem_mb = mem_bytes // (1024 * 1024) if mem_bytes > 0 else int(g.get("mem_mb", 0) or 0)
+
+        if is_integrated_gpu(raw_name):
+            continue
+
+        entry = {"index": i, "name": raw_name, "mem_mb": mem_mb}
+        non_igpu_fallback.append((i, entry))
+
+        is_discrete = any(
+            k in vendor_low or k in name_low
+            for k in (
+                "nvidia",
+                "geforce",
+                "rtx",
+                "gtx",
+                "quadro",
+                "tesla",
+                "radeon",
+                "firepro",
+                "instinct",
+                "intel arc",
+                "arc(tm)",
+                "apple",
+            )
+        )
+        if is_discrete:
+            discrete_mask |= 1 << i
+            selected.append(entry)
+
+    if discrete_mask > 0:
+        return discrete_mask, selected
+
+    # Fallback: if there are non-integrated GPUs whose vendor string is unrecognized, enable them
+    if non_igpu_fallback:
+        fb_mask = 0
+        fb_devs: list[dict[str, Any]] = []
+        for idx, entry in non_igpu_fallback:
+            fb_mask |= 1 << idx
+            fb_devs.append(entry)
+        return fb_mask, fb_devs
+
+    return 0, []
+
+
+def probe_metashape_gpu_mask(
+    metashape_exe: str | None = None,
+    timeout: float = 15.0,
+) -> tuple[int | None, list[dict[str, Any]]]:
+    """Query Metashape Pro's native ``enumGPUDevices()`` to compute the exact discrete ``--gpu-mask``.
+
+    CRITICAL: Never derive Metashape's ``--gpu-mask`` bit indices from ``nvidia-smi`` or WMI because
+    Metashape enumerates OpenCL/Vulkan iGPUs (e.g. Intel Graphics at index 0) alongside CUDA GPUs
+    (e.g. RTX 5080 at index 1 -> mask 2). Probing ``Metashape.app.enumGPUDevices()`` guarantees
+    100% index parity with ``metashape --worker --gpu-mask``.
+
+    Returns:
+        Tuple of ``(bitmask_or_None, selected_devices)``. Returns ``(None, [])`` if Metashape cannot
+        be probed (allowing safe fallback without guessing wrong indices).
+    """
+    # 1. Fast path: already running inside Metashape embedded Python
+    try:
+        import Metashape
+
+        if hasattr(Metashape, "app") and hasattr(Metashape.app, "enumGPUDevices"):
+            raw_gpus = Metashape.app.enumGPUDevices() or []
+            mask, devs = compute_discrete_gpu_mask(list(raw_gpus))
+            return mask, devs
+    except Exception:
+        pass
+
+    # 2. Subprocess probe via metashape -r (used by launch_worker.py under standalone python.exe)
+    exe = metashape_exe or find_metashape_path()
+    if not exe or not os.path.isfile(exe):
+        return None, []
+
+    probe_code = (
+        "import json, Metashape\n"
+        "gpus = Metashape.app.enumGPUDevices() if hasattr(Metashape, 'app') and hasattr(Metashape.app, 'enumGPUDevices') else []\n"
+        "print('===AM_GPUS_START===')\n"
+        "print(json.dumps(list(gpus), default=str))\n"
+        "print('===AM_GPUS_END===')\n"
+    )
+    tmp_path = ""
+    try:
+        fd, tmp_path = tempfile.mkstemp(prefix="_am_gpu_probe_", suffix=".py")
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(probe_code)
+        res = subprocess.run(
+            [exe, "-r", tmp_path],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        stdout = res.stdout or ""
+        s_tok = "===AM_GPUS_START==="
+        e_tok = "===AM_GPUS_END==="
+        if s_tok in stdout and e_tok in stdout:
+            payload = stdout.split(s_tok, 1)[1].split(e_tok, 1)[0].strip()
+            raw_gpus = json.loads(payload)
+            if isinstance(raw_gpus, list):
+                mask, devs = compute_discrete_gpu_mask(raw_gpus)
+                return mask, devs
+    except Exception:
+        pass
+    finally:
+        if tmp_path and os.path.isfile(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+
+    return None, []
 
 
 def detect_gpu_devices() -> list[dict[str, Any]]:
@@ -309,14 +583,15 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
 
 def generate_worker_bat_content(
     host: str | None = None,
-    port: str = "5840",
+    port: str | int = "5840",
     root_path: str = "",
     cpu_enable: int = 1,
     gpu_mask: str | int | None = None,
 ) -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
     target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
-    target_port = port.strip() or "5840"
+    target_port = str(port).strip() if port is not None else "5840"
+    target_port = target_port or "5840"
     target_root = root_path.strip()
 
     if target_root:

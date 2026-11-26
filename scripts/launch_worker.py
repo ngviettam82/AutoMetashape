@@ -44,9 +44,13 @@ def record_worker_pid() -> None:
 
 
 def clear_worker_pid() -> None:
-    """Remove worker PID tracking file on clean exit."""
+    """Remove worker PID tracking file on clean exit if it belongs to this process."""
     try:
         if os.path.isfile(PID_FILE_PATH):
+            with open(PID_FILE_PATH, "r", encoding="utf-8") as f:
+                recorded = f.read().strip()
+            if recorded and recorded != str(os.getpid()):
+                return
             os.remove(PID_FILE_PATH)
     except Exception:
         pass
@@ -70,10 +74,9 @@ def reexec_supervisor(target_dir: str) -> None:
     sys.stderr.flush()
     clear_worker_pid()
     if sys.platform == "win32":
-        # Windows wexecv does not quote arguments containing spaces, which causes
-        # 'C:\Program: can't open file...' crash when py_exe or path has spaces.
-        quoted_cmd = [f'"{c}"' if " " in c and not (c.startswith('"') and c.endswith('"')) else c for c in cmd]
-        os.execv(py_exe, quoted_cmd)
+        # Avoid Windows _wexecv (which detaches from parent .bat/Task Scheduler and mangles trailing backslashes)
+        res = subprocess.run(cmd)
+        sys.exit(res.returncode)
     else:
         os.execv(py_exe, cmd)
 
@@ -218,15 +221,10 @@ def run_interactive_wizard(
 
 def main() -> int:
     """Main worker launcher entrypoint with pre-flight diagnostics and reconnect loop."""
-    record_worker_pid()
-    cleanup_stale_worker_processes()
-    try:
-        return _run_worker_lifecycle()
-    finally:
-        clear_worker_pid()
+    return _run_worker_lifecycle(manage_pid=True)
 
 
-def _run_worker_lifecycle() -> int:
+def _run_worker_lifecycle(manage_pid: bool = False) -> int:
     """Execute worker configuration resolution, pre-flight diagnostics, and resilient execution loop."""
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args()
@@ -235,6 +233,17 @@ def _run_worker_lifecycle() -> int:
         if cleaned:
             print(f"[NOTICE] Ignoring unrecognized worker arguments: {' '.join(cleaned)}")
 
+    if manage_pid:
+        record_worker_pid()
+    try:
+        return _execute_worker_lifecycle(args)
+    finally:
+        if manage_pid:
+            clear_worker_pid()
+
+
+def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
+    """Run configuration resolution, GPU bitmask probing, pre-flight checks, and supervisor loop."""
     # 1. Resolve headless / non-interactive execution mode
     is_tty = sys.stdin.isatty() if hasattr(sys.stdin, "isatty") else False
     is_headless = args.non_interactive or not is_tty
@@ -268,13 +277,13 @@ def _run_worker_lifecycle() -> int:
 
     # Dynamic Hardware Discovery & GPU Mask Resolution:
     # 1. CLI Override: --gpu-mask <val> takes top priority.
-    #    - If val is "auto", "default", "none", "": native discovery (omit --gpu-mask).
-    #    - Otherwise (e.g. "2", "3", "0"): explicit manual override passed to Metashape.
+    #    - If val is "auto", "default", "none", "": dynamic discrete bitmask computed via Metashape probe.
+    #    - Otherwise (e.g. "0", "1", "2", "3"): explicit manual override passed to Metashape.
     # 2. Saved Config: worker_config.json
-    #    - If val is legacy "1" or "auto": purge from config, use native discovery.
-    #    - If val is custom (e.g. "2", "0", "3"): respect as saved override.
-    # 3. Default: Native discovery (omit --gpu-mask), allowing Metashape Pro's native
-    #    C++ engine to benchmark hardware, bypass iGPUs, and auto-select discrete GPUs.
+    #    - If val is "auto", "none", "default", "": purge non-override sentinel, use dynamic probe.
+    #    - If val is explicit numeric override (e.g. "0", "1", "2", "3"): respect as saved override.
+    # 3. Default: Probe Metashape's native enumGPUDevices() to compute the exact discrete GPU bitmask
+    #    (skipping Intel & AMD iGPUs and immune to poisoned HKCU Registry gpu_mask=0).
     explicit_gpu_mask = None
     is_manual_override = False
     if args.gpu_mask is not None:
@@ -284,13 +293,16 @@ def _run_worker_lifecycle() -> int:
             is_manual_override = True
     elif "gpu_mask" in saved_config:
         raw_cfg = str(saved_config["gpu_mask"]).strip()
-        if raw_cfg.lower() in ("1", "auto", "none", "default", ""):
+        is_legacy_auto_one = raw_cfg == "1" and not bool(saved_config.get("gpu_mask_explicit"))
+        if raw_cfg.lower() in ("auto", "none", "default", "") or is_legacy_auto_one:
             saved_config.pop("gpu_mask", None)
+            saved_config.pop("gpu_mask_explicit", None)
         else:
             explicit_gpu_mask = raw_cfg
             is_manual_override = True
 
     # 3. Interactive Wizard or Headless Error Handling
+    should_auto_persist = True
     if not host or not root_path or args.interactive:
         if is_headless:
             print(
@@ -311,6 +323,7 @@ def _run_worker_lifecycle() -> int:
             default_cpu=cpu_enable,
             default_gpu=suggested_gpu,
         )
+        should_auto_persist = should_save
         if target_gpu_mask and target_gpu_mask.lower() not in ("auto", "default", "none", ""):
             explicit_gpu_mask = target_gpu_mask
             is_manual_override = True
@@ -327,24 +340,29 @@ def _run_worker_lifecycle() -> int:
             }
             if explicit_gpu_mask is not None:
                 conf_data["gpu_mask"] = explicit_gpu_mask
+                conf_data["gpu_mask_explicit"] = True
             saved_file = cu.save_cluster_config(conf_data, config_path)
             print(f"[OK] Configuration saved to: {saved_file}\n")
 
-    # 4. Auto-persist valid configuration to Documents\AutoMetashape\worker_config.json if missing/incomplete
-    if host and root_path:
+    # 4. Auto-persist valid configuration to target config_path if missing/incomplete (respecting wizard decline)
+    if host and root_path and should_auto_persist:
         target_cfg_paths = [config_path]
-        doc_dir = os.path.join(os.path.expanduser("~"), "Documents", "AutoMetashape")
-        doc_cfg = os.path.join(doc_dir, cu.DEFAULT_WORKER_CONFIG_FILENAME)
-        if doc_cfg not in target_cfg_paths:
-            target_cfg_paths.append(doc_cfg)
+        if not args.config:
+            doc_dir = os.path.join(os.path.expanduser("~"), "Documents", "AutoMetashape")
+            doc_cfg = os.path.join(doc_dir, cu.DEFAULT_WORKER_CONFIG_FILENAME)
+            if os.path.isdir(doc_dir) and doc_cfg not in target_cfg_paths:
+                target_cfg_paths.append(doc_cfg)
 
         for target_cfg in target_cfg_paths:
             existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
-            # Auto-purge legacy hardcoded gpu_mask ("1" or "auto") from pre-existing worker_config.json if not explicitly passed
+            # Purge legacy auto-written "gpu_mask": "1" (without gpu_mask_explicit) or sentinel values
+            # so older worker installations automatically upgrade to dynamic Metashape GPU probing.
             if "gpu_mask" in existing_cfg and args.gpu_mask is None:
                 val = str(existing_cfg.get("gpu_mask", "")).strip().lower()
-                if val in ("1", "auto", "none", "default", ""):
+                is_legacy_one = val == "1" and not bool(existing_cfg.get("gpu_mask_explicit"))
+                if val in ("auto", "none", "default", "") or is_legacy_one:
                     existing_cfg.pop("gpu_mask", None)
+                    existing_cfg.pop("gpu_mask_explicit", None)
                     try:
                         cu.save_cluster_config(existing_cfg, target_cfg)
                     except Exception:
@@ -365,6 +383,7 @@ def _run_worker_lifecycle() -> int:
                 # STRICT INVARIANT: Only persist gpu_mask if explicitly configured with a non-auto override
                 if explicit_gpu_mask is not None:
                     persist_data["gpu_mask"] = explicit_gpu_mask
+                    persist_data["gpu_mask_explicit"] = True
                 try:
                     saved_p = cu.save_cluster_config(persist_data, target_cfg)
                     print(f"[OK] Auto-persisted worker configuration to: {saved_p}")
@@ -378,18 +397,26 @@ def _run_worker_lifecycle() -> int:
         print("Please verify Metashape Professional is installed and accessible.", file=sys.stderr)
         return 1
 
-    # Resolve active GPU mask and display diagnostics
-    # STRICT INVARIANT: Only pass --gpu-mask when explicitly requested via CLI.
-    # When omitted, Metashape Pro's native C++ engine benchmarks devices at startup,
-    # skips integrated Intel iGPUs, and auto-selects discrete NVIDIA GPUs (reporting correct mask).
+    # Resolve active GPU mask via Metashape's native enumGPUDevices() (immune to poisoned HKCU Registry & iGPUs)
     if is_manual_override and explicit_gpu_mask is not None:
         active_gpu_mask = explicit_gpu_mask
         override_src = "via CLI" if args.gpu_mask is not None else "via Config"
         gpu_display_label = f"{explicit_gpu_mask} (Manual Override {override_src})"
     else:
-        active_gpu_mask = None
-        detected_label = f" ({len(detected_gpu_names)} discrete GPU(s) detected)" if detected_gpu_names else ""
-        gpu_display_label = f"Auto (Metashape native hardware benchmark & auto-selection){detected_label}"
+        probed_mask, probed_devs = cu.probe_metashape_gpu_mask(ms_exe)
+        if probed_mask is not None:
+            active_gpu_mask = str(probed_mask)
+            if probed_devs:
+                dev_labels = [
+                    f"{d['name']} ({d['mem_mb'] / 1024:.1f} GB)" if d.get("mem_mb") else d["name"] for d in probed_devs
+                ]
+                gpu_display_label = f"{active_gpu_mask} (Dynamic Discrete GPU: {', '.join(dev_labels)})"
+            else:
+                gpu_display_label = "0 (Dynamic Probe: No discrete GPU detected — CPU mode)"
+        else:
+            active_gpu_mask = None
+            detected_label = f" ({len(detected_gpu_names)} discrete GPU(s) detected)" if detected_gpu_names else ""
+            gpu_display_label = f"Auto (Metashape probe fallback){detected_label}"
 
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
@@ -444,9 +471,7 @@ def _run_worker_lifecycle() -> int:
         "--cpu-enable",
         str(cpu_enable),
     ]
-    # STRICT INVARIANT: Only append --gpu-mask if explicitly specified via CLI.
-    # When omitted, Metashape Pro native engine benchmarks hardware, skips Intel iGPUs,
-    # and automatically selects discrete NVIDIA GPUs.
+    # Pass explicit discrete GPU bitmask (computed dynamically via Metashape enumGPUDevices or manual override)
     if active_gpu_mask is not None:
         worker_cmd.extend(["--gpu-mask", active_gpu_mask])
 
@@ -466,6 +491,10 @@ def _run_worker_lifecycle() -> int:
 
     worker_env = os.environ.copy()
     worker_env["AUTOMETASHAPE_DIR"] = target_dir
+    if is_manual_override and explicit_gpu_mask is not None:
+        worker_env["AUTOMETASHAPE_EXPLICIT_GPU_MASK"] = explicit_gpu_mask
+    else:
+        worker_env.pop("AUTOMETASHAPE_EXPLICIT_GPU_MASK", None)
     while True:
         proc = None
         try:
@@ -478,13 +507,13 @@ def _run_worker_lifecycle() -> int:
                 abort_sig = cu.check_abort_signal(target_dir=target_dir, root_path=root_path)
                 if abort_sig is not None:
                     batch_id = abort_sig.get("batch_id", "unknown")
-                    sig_node = abort_sig.get("node_name") or os.environ.get("COMPUTERNAME", "unknown")
+                    sig_node = abort_sig.get("node_name") or cu.get_local_hostname()
                     print(
                         f"\n[SUPERVISOR] Abort signal detected for worker '{sig_node}' (Target Batch: {batch_id}). "
                         "Forcibly terminating stuck child process...",
                         flush=True,
                     )
-                    # 1. Kill child metashape.exe process immediately
+                    # 1. Kill child metashape.exe process tree immediately
                     cu.kill_worker_process(proc)
                     aborted_by_supervisor = True
 
@@ -537,14 +566,7 @@ def _run_worker_lifecycle() -> int:
             time.sleep(reconnect_delay)
         finally:
             if proc and proc.poll() is None:
-                try:
-                    proc.terminate()
-                    proc.wait(timeout=2)
-                except Exception:
-                    try:
-                        proc.kill()
-                    except Exception:
-                        pass
+                cu.kill_worker_process(proc)
 
 
 if __name__ == "__main__":

@@ -32,7 +32,11 @@ from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
 )
-from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
+from autometashape.cluster.hardware import (
+    find_metashape_path,
+    get_primary_lan_ip,
+    is_healthy_online_worker,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -90,6 +94,15 @@ def build_arg_parser() -> argparse.ArgumentParser:
     cw_p.add_argument("--only-aborted", action="store_true", help="Safety guard: refuse unless worker.aborted is True")
     cw_p.add_argument("--server", type=str, default="", help="Cluster server host")
 
+    # Command: set-worker-gpu-mask
+    gpu_p = subparsers.add_parser("set-worker-gpu-mask", help="Update live GPU bitmask for an online cluster worker")
+    gpu_p.add_argument("--worker-id", type=int, default=None, help="Specific worker ID to update")
+    gpu_p.add_argument("--hostname", type=str, default="", help="Update all healthy online workers matching hostname")
+    gpu_p.add_argument(
+        "--gpu-mask", type=int, required=True, help="Integer GPU bitmask (e.g. 2 for GPU1, 3 for GPU0+1)"
+    )
+    gpu_p.add_argument("--server", type=str, default="", help="Cluster server host")
+
     parser.add_argument("--no-reexec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
@@ -115,7 +128,7 @@ def resolve_server_address(cli_server: str) -> str:
 def connect_client(server_str: str) -> Any:
     """Connect to Metashape NetworkClient."""
     resolved = resolve_server_address(server_str)
-    srv_ip, srv_port_str = resolved.split(":")
+    srv_ip, srv_port_str = resolved.rsplit(":", 1)
     client = Metashape.NetworkClient()
     client.connect(srv_ip, int(srv_port_str))
     return client
@@ -206,7 +219,7 @@ def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = Non
         whost = str(w.get("hostname", "")).strip().lower()
         if worker_id is not None and wid == worker_id:
             matched.append((wid, w.get("hostname", "")))
-        elif target_host and whost == target_host:
+        elif target_host and whost == target_host and is_healthy_online_worker(w):
             matched.append((wid, w.get("hostname", "")))
     if not matched:
         print(f"[WARNING] No online worker matched worker_id={worker_id} hostname='{hostname}'.")
@@ -238,6 +251,37 @@ def cmd_clear_worker(client: Any, worker_id: int, only_aborted: bool = False) ->
                 print(f"  [OK] {fn_name}({worker_id}) dispatched.")
             except Exception as e:
                 print(f"  [Notice] {fn_name}({worker_id}): {e}")
+    return 0
+
+
+def cmd_set_worker_gpu_mask(
+    client: Any,
+    gpu_mask: int,
+    worker_id: int | None = None,
+    hostname: str = "",
+) -> int:
+    """Set live GPU bitmask on healthy online workers matching worker_id or hostname."""
+    if worker_id is None and not hostname.strip():
+        print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
+        return 1
+    w_resp = client.workerList() or {}
+    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
+    target_host = hostname.strip().lower()
+    matched = []
+    for w in workers:
+        wid = w.get("worker_id")
+        whost = str(w.get("hostname", "")).strip().lower()
+        if worker_id is not None and wid == worker_id:
+            matched.append((wid, w.get("hostname", "")))
+        elif target_host and whost == target_host and is_healthy_online_worker(w):
+            matched.append((wid, w.get("hostname", "")))
+    if not matched:
+        print(f"[WARNING] No online worker matched worker_id={worker_id} hostname='{hostname}'.")
+        return 1
+    for wid, wname in matched:
+        print(f"Setting GPU mask of worker #{wid} ({wname}) to {gpu_mask} (0x{gpu_mask:X})...", flush=True)
+        client.setWorkerGpuMask(wid, gpu_mask)
+        print(f"[OK] Worker #{wid} ({wname}) gpu_mask={gpu_mask}.")
     return 0
 
 
@@ -278,6 +322,8 @@ def main() -> int:
             return cmd_set_worker_paused(client, False, worker_id=args.worker_id, hostname=args.hostname)
         elif args.command == "clear-worker":
             return cmd_clear_worker(client, args.worker_id, only_aborted=args.only_aborted)
+        elif args.command == "set-worker-gpu-mask":
+            return cmd_set_worker_gpu_mask(client, args.gpu_mask, worker_id=args.worker_id, hostname=args.hostname)
         return 0
     except Exception as e:
         print(f"[FATAL ERROR] Queue operation '{args.command}' failed: {e}", file=sys.stderr, flush=True)
