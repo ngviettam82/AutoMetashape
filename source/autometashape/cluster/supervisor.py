@@ -949,9 +949,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--network-independent-workers",
-        action="store_true",
-        default=False,
-        help="Lock each project to an independent worker executing exclusively via offline local scratch process",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Lock each cluster project to 1 dedicated independent worker executing exclusively via "
+            "the offline monolithic local NVMe scratch process (worker_limit=1, default: True). "
+            "Pass --no-network-independent-workers for centralized stage-by-stage mode."
+        ),
     )
     parser.add_argument(
         "--network-path",
@@ -990,11 +994,11 @@ def main() -> int:
     # Determine concurrency mode:
     # 1. Explicit --concurrent / --parallel-dispatch -> True
     # 2. Explicit --no-concurrent / --sequential -> False
-    # 3. Default: True if --network-independent-workers is active, otherwise False
+    # 3. Default: True when --network-enable and --network-independent-workers (default: True) are active
     is_concurrent = False
     if args.concurrent is not None:
         is_concurrent = args.concurrent
-    elif args.network_independent_workers:
+    elif args.network_enable and args.network_independent_workers:
         is_concurrent = True
 
     supervisor = ClusterSupervisor(

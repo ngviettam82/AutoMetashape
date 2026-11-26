@@ -96,13 +96,15 @@ On each remote worker node across the local network:
    - **Native Multi-GPU Discovery**: When `--gpu-mask` is omitted or `"Auto"` (default), Metashape Pro dynamically discovers, benchmarks, and engages all discrete GPUs natively, bypassing integrated graphics.
    - **Auto-Reconnect Daemon**: Automatically reconnects every 10s if the coordinator restarts or network fluctuates.
 
-### 3. Local NVMe Scratch Staging Management
+### 3. Local NVMe Scratch Staging & Independent Project Defaults
 During large-scale reconstructions (1,000+ to 10,000+ photos), intermediate scratch data (depth maps and octree meshing leaves) reaches 75–150+ GB.
-- **Default Staging**: Enabled by default (`--stage-local`).
+- **Canonical Cluster Defaults (Both Enabled by Default)**:
+  - **Independent Project Mode (`--network-independent-workers`, `worker_limit=1`)**: Enabled by default across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py --network-enable` (opt out via `--no-network-independent-workers`). Each project runs atomically on 1 dedicated worker with zero worker hopping.
+  - **Local NVMe Scratch Staging (`--local-scratch-staging` / `--stage-local`)**: Enabled by default so every worker computes locally on internal NVMe instead of saturating SMB shares (opt out via `--no-local-scratch-staging` only for standalone host-local runs).
 - **Dynamic Local NVMe Discovery**: The worker daemon automatically discovers the fastest internal fixed non-system NVMe/SATA drive with the highest free capacity (e.g., `D:\AutoMetashape_Scratch`), explicitly rejecting mapped SMB network drives (`DRIVE_REMOTE`), removable/optical media (`GetDriveTypeW`), and external USB/FireWire/SD/MMC SSD enclosures (`BusTypeUsb` via `IOCTL_STORAGE_QUERY_PROPERTY`).
 - **Headroom Fallback**: Requires $\ge 100\text{ GB}$ free space (configurable via `--min-scratch-free-gb`). Safely falls back to direct network storage if local space is insufficient.
-- **Atomic Deliverable Sync & Status Finalization**: Consolidated deliverables and project files are synchronized atomically to the Result Share, `_autometashape_status.json` is finalized to `status="completed"` (`progress=100.0`) after sync (both external shared `--status-file` and default staged sidecar), and local scratch is cleanly purged.
-- **Opt-Out**: Pass `--no-stage-local` to bypass local staging.
+- **Staged PSX Chunk-ID Reconciliation & Atomic Deliverable Sync**: Before replacing `.files/` on the shared Result Share, `reconcile_staged_psx_chunk_id()` aligns single ICP-merged chunk folders (e.g. `3/` or `1/`) to the shared stub's chunk ID (`0/`) inside `project.zip/doc.xml` so Metashape Worker's post-`RunScript` commit never triggers `Can't open file: .../0/chunk.zip`. Deliverables and project files then sync atomically to the Result Share, `_autometashape_status.json` is finalized to `status="completed"` (`progress=100.0`), and local scratch is purged cleanly.
+- **Opt-Out**: Pass `--no-stage-local` / `--no-local-scratch-staging` to bypass local staging on standalone host-local jobs.
 
 ### 3b. Portable Offline Open3D Bridge Runtime Provisioning (`.cluster/bridge_runtime/`)
 To support the Zero-Neural CPU Open3D Sim(3) ICP Bridge (`source/autometashape/core/icp_bridge.py` + `icp_worker.py`) on bare worker nodes that have **no system Python, no PyTorch, no CUDA toolkit, no admin rights, and no internet access**:

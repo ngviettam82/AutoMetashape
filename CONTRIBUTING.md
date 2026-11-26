@@ -90,8 +90,9 @@ All human contributors and autonomous agents managing Agisoft Metashape distribu
 - **The Priority Thrashing Flaw**: Never implement client-side worker rejection by checking `COMPUTERNAME` inside batch execution scripts (e.g., `sys.exit(2)` if not the target node).
 - In Metashape Server's priority queue, an idle worker will immediately re-request work and the server will re-dispatch the same highest-priority batch, creating an infinite, high-frequency claim-and-yield loop that starves all other cluster jobs.
 
-### 6.6 Direct Storage Standard on Host Nodes
-- When processing datasets residing on the local storage or shared drive of the current physical machine, pass `--no-local-scratch-staging`. Redundant local staging from a host UNC share to a local folder on the same machine wastes I/O bandwidth, risks disk exhaustion, and bypasses existing checkpoints.
+### 6.6 Independent Project & Local NVMe Scratch Default Standard
+- **Cluster Default (`worker_limit=1` + `--local-scratch-staging`)**: All cluster batch dispatches (`scripts/submit_cluster_batch.py`, `scripts/cluster_supervisor.py`, `scripts/metashape_reconstruction.py --network-enable`) default to **Independent Project Mode** (`--network-independent-workers`, `worker_limit=1`) combined with **Local NVMe Scratch Staging** (`--local-scratch-staging`) so every worker processes locally on internal NVMe and syncs reconciled deliverables atomically back to shared storage.
+- **Direct Storage Override (Standalone Host-Only)**: Only pass `--no-local-scratch-staging` when running standalone/local reconstruction exclusively on the machine physically hosting the dataset (never on shared multi-worker cluster queues where remote workers may claim the batch).
 
 ### 6.7 Default Parameter & Zero-Neural Alignment Invariants
 - Never dynamically downscale photogrammetry parameters (such as keypoint limits, tiepoint limits, or guided matching) based on photo count heuristics. Pipeline configurations remain default, canonical, and uncompromised.

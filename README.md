@@ -166,9 +166,9 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
   - `keypoint_limit = 50,000`, `tiepoint_limit = 40,000`, `keypoint_limit_per_mpx = 2,000` (eliminating guided-matching RAM explosions).
   - Dense point cloud generation (`build_point_cloud`) is **disabled by default** in `pro` (explicit opt-in via `--build-point-cloud`).
   - Orthomosaic build and export default to **5 cm/px (`--ortho-resolution 0.05`)** (~25x lighter storage than 1 cm/px).
-- **Atomic Monolithic `RunScript` Delegation & Exclusive Offline Execution**:
-  - Independent project workflows (`--network-independent-workers`) are bundled into single-node network tasks (`workitem_count = 1`), eliminating worker hopping and LAN latency between stages.
-  - The offline local scratch process is the **exclusive, mandatory execution method** for independent workers (zero stage-by-stage fallback to the network share).
+- **Atomic Monolithic `RunScript` Delegation & Exclusive Offline Execution (Default)**:
+  - Independent project mode (`--network-independent-workers`, **enabled by default**, `worker_limit = 1`) and **Local NVMe Scratch Staging (`--local-scratch-staging`, enabled by default)** are the canonical cluster defaults across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py` (opt out via `--no-network-independent-workers` or `--no-local-scratch-staging`).
+  - Each project runs atomically on 1 dedicated worker using local NVMe scratch with zero worker hopping and zero inter-worker LAN traffic, reconciling staged PSX chunk IDs (`reconcile_staged_psx_chunk_id`) before syncing deliverables back to shared storage.
   - Intermediate checkpoints saved to `.files` for instant resumption (`--resume`).
 - **Autonomous AI Agent Skill Protocol**:
   - Managed via [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md) for 1-hour automated progress audits and self-healing dropped network workers.

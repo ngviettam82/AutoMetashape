@@ -147,14 +147,14 @@ The supervisor supports two distinct cluster operational architectures:
       --preset pro --ortho-resolution 0.05 --sequential
   ```
 
-#### Mode 2: Independent Project Mode (`--concurrent` / `--parallel-dispatch`)
-- **Behavior**: All queued dataset projects are submitted to the Metashape Server scheduler simultaneously as atomic monolithic batches locked to 1 dedicated worker node (`worker_limit=1`). Each assigned worker stages project data into its local NVMe scratch volume and executes the complete pipeline independently with zero inter-worker network synchronization overhead.
-- **Default Behavior**: When `--network-independent-workers` is enabled, concurrent dispatch is active by default.
+#### Mode 2: Independent Project Mode + Local NVMe Scratch (Default for Cluster)
+- **Behavior**: All queued dataset projects are submitted to the Metashape Server scheduler simultaneously as atomic monolithic batches locked to 1 dedicated worker node (`worker_limit=1`, `--network-independent-workers` **default: True**). Each assigned worker stages project data into its local NVMe scratch volume (`--local-scratch-staging` **default: True**), reconciles staged PSX chunk IDs before sync (`reconcile_staged_psx_chunk_id`), and executes the complete pipeline independently with zero inter-worker network synchronization overhead.
+- **Default Behavior**: Active automatically whenever `--network-enable` is passed (and always default in `scripts/submit_cluster_batch.py`). Pass `--no-network-independent-workers --sequential` only when explicitly requesting legacy centralized stage-by-stage distribution.
 - **Best For**: Daily drone batches consisting of multiple small-to-medium datasets (e.g., 500-1,500 photos each) where running $N$ projects simultaneously on $N$ GPUs yields maximum total throughput.
 - **Invocation**:
   ```powershell
   python scripts/cluster_supervisor.py --scan-dir "\\ctuav\catp\101126" --output-root "\\ctuav\catp\101126" `
-      --network-enable --network-host 10.5.10.202 --network-independent-workers --concurrent
+      --network-enable --network-host 10.5.10.202
   ```
 
 ### 4. Multi-Dataset Queue Chaining & Discovery
@@ -235,9 +235,10 @@ When submitting a standalone or queued batch to the cluster, agents and operator
      doc.clear()
      ```
    - This prevents worker failure modes where remote nodes claim a task whose project file has not yet been flushed or materialized to shared network storage, and prevents `.psx` lock contention.
-2. **Dual-SSD, Subfolder Exclusion & Alternate Dispatch Stub Recovery**:
+2. **Independent Project + Local NVMe Scratch Defaults, Dual-SSD & Alternate Dispatch Stub Recovery**:
+   - **Canonical Defaults**: `scripts/submit_cluster_batch.py` defaults to **Independent Project Mode** (`--worker-limit 1`, atomic monolithic `RunScript`) and **Local NVMe Scratch Staging** (`local_scratch=True`), with `--preset pro`, `--ortho-resolution 0.05`, fresh start (`resume=False`), and all folders included (no `--exclude-folders`, natively bridging `Manual/` via alignment hygiene + Open3D ICP).
    - Pass `--source-share` (SSD #1, raw photos) and `--result-share` (SSD #2, writable `.psx` + deliverables) to utilize two separate SSD shares without mixing I/O.
-   - For datasets physically hosted on the current machine's storage, pass `--no-local-scratch-staging` to eliminate redundant local NVMe staging and disk exhaustion.
+   - Only pass `--no-local-scratch-staging` for standalone/host-pinned runs where remote workers will never claim the batch.
    - Optional `--exclude-folders "pat1,pat2"` filters named subfolders out of ingestion (with automatic legacy worker shim in `build_monolithic_runscript_task` so older workers ignore unknown flags safely). Note that close-range `Manual` orbits are natively bridged by default via Zero-Neural Alignment Hygiene & Open3D ICP and do not need exclusion unless explicitly requested by the operator.
    - **Timestamped Alternate Dispatch Stub Fallback**: When re-submitting a project whose `.psx` key is still cached on Metashape Server as a previously aborted batch (`Duplicate batch`), `submit_cluster_batch.py` automatically materializes a fresh `<project>_dispatch_<timestamp>.psx` stub while keeping the final target output directory unchanged.
 3. **Execution**:

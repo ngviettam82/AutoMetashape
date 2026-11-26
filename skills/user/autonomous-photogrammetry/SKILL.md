@@ -76,7 +76,7 @@ Resolve the operational mode based on user constraints:
 
 1. **Distributed Network Cluster Mode** (Recommended for multi-workstation environments):
    - Delegates node health and GPU discovery to [cluster-fleet-operations](../cluster-fleet-operations/SKILL.md).
-   - Engages independent worker locking (`--network-independent-workers`) enforcing the offline monolithic local scratch process as the exclusive method (strictly zero stage-by-stage network fallback).
+   - **Independent Project Mode (`--network-independent-workers`, `worker_limit=1`) & Local NVMe Scratch Staging (`--local-scratch-staging`) are ENABLED BY DEFAULT** across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py --network-enable` (strictly zero stage-by-stage fallback unless `--no-network-independent-workers` is passed).
    - Supports **Dual Shared Folder (Multi-SSD)** topologies (`--source-share` for read-only SSD #1 raw photos and `--result-share` for writable SSD #2 `.psx` + deliverables acting as Metashape `--root`):
      ```powershell
      python scripts/cluster_supervisor.py `
@@ -86,8 +86,6 @@ Resolve the operational mode based on user constraints:
        --ortho-resolution 0.05 `
        --network-enable `
        --network-host 192.168.1.100 `
-       --network-independent-workers `
-       --concurrent `
        --min-headroom-gb 50.0
      ```
 

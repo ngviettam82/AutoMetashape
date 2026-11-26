@@ -332,17 +332,18 @@ For massive multi-flight photogrammetry reconstructions running on the cluster (
 > * **STRICTLY PROHIBITED**: The agent must **NEVER** autonomously rewrite, mutate, refactor, or modify core reconstruction code, pipeline scripts, or algorithm presets during monitoring runs.
 > * **User Intent Invariant**: All code modifications and pipeline rewrites strictly require explicit user instructions and authorization.
 
-#### 5.8 Local NVMe Scratch Staging Architecture (Default Mode)
+#### 5.8 Independent Project Mode & Local NVMe Scratch Staging (Default Mode)
 During large-scale reconstructions, Metashape Pro generates massive out-of-core scratch data (depth maps,
-point clouds, and octree meshing leaves reaching 75–150+ GB). To eliminate SMB network congestion:
-- **Default Staging**: Local scratch staging (`--stage-local` / `--local-scratch-staging`) is **enabled by default**.
-- **Dynamic NVMe Discovery**: The worker daemon automatically discovers the fastest non-system NVMe SSD with the
+point clouds, and octree meshing leaves reaching 75–150+ GB). To eliminate SMB network congestion and worker hopping:
+- **Independent Project Default (`--network-independent-workers`, `worker_limit=1`)**: Enabled by default across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py --network-enable` (opt out via `--no-network-independent-workers` for centralized stage-by-stage distribution). Each project runs atomically on 1 dedicated worker.
+- **Local NVMe Scratch Staging Default (`--stage-local` / `--local-scratch-staging`)**: Enabled by default so every worker processes locally on internal NVMe.
+- **Dynamic NVMe Discovery**: The worker daemon automatically discovers the fastest internal fixed non-system NVMe SSD with the
   highest free capacity (e.g. `D:\AutoMetashape_Scratch`).
 - **Resilient Headroom Fallback**: If local SSD headroom is below the threshold (default 100 GB via
   `--min-scratch-free-gb`), execution safely falls back to direct network storage output.
-- **Atomic Deliverable Sync & Completion Status**: Upon task completion, consolidated deliverables, models, textures, and project files are synchronized atomically to the Result Share, `_autometashape_status.json` records `status="completed"` (`progress=100.0`), and local scratch is cleanly purged.
+- **Staged PSX Chunk-ID Reconciliation & Atomic Deliverable Sync**: Before replacing `.files/` on the Result Share, `reconcile_staged_psx_chunk_id()` aligns single ICP-merged chunk folders (e.g. `3/` → `0/`) with the shared `.psx` stub so Metashape Worker exits cleanly with zero post-sync `io-error` retries. Deliverables, models, textures, and project files then synchronize atomically to the Result Share, `_autometashape_status.json` records `status="completed"` (`progress=100.0`), and local scratch is cleanly purged.
 - **Dual Shared Folder (Multi-SSD) Topology**: Supports splitting read-only raw survey photos (`--source-share`, SSD #1) from writable `.psx` checkpoints and deliverables (`--result-share`, SSD #2 as Metashape `--root`) across both distributed cluster and local sequential supervisor runs.
-- **Opt-Out Override**: To bypass local staging and write directly to network storage, pass `--no-stage-local` (or `--no-local-scratch-staging`).
+- **Opt-Out Override**: To bypass local staging on standalone host-local runs, pass `--no-stage-local` (or `--no-local-scratch-staging`).
 
 #### 5.9 Submitting Distributed Reconstructions & Pipelined Export Overlap
 Dispatch autonomous reconstruction to the active cluster:

@@ -414,7 +414,7 @@ def run_reconstruction(
     network_host: str = "127.0.0.1",
     network_port: int = 5840,
     network_path: str = "",
-    network_independent_workers: bool = False,
+    network_independent_workers: bool = True,
     project_name: str | None = None,
     status_file: str | None = None,
     local_scratch_staging: bool = True,
@@ -565,8 +565,6 @@ def run_reconstruction(
         # Coordinator must save directly to shared network storage (output_dir) so all
         # worker nodes can access the project checkpoint over UNC.
         local_scratch_staging = False
-    elif network_independent_workers:
-        local_scratch_staging = True
     local_staging_dir = None
     target_network_output = None
     if local_scratch_staging:
@@ -3975,11 +3973,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--network-port", type=int, default=5840, help="Metashape server port (default: 5840)")
     parser.add_argument(
         "--network-independent-workers",
-        action="store_true",
-        default=False,
+        action=argparse.BooleanOptionalAction,
+        default=True,
         help=(
-            "Lock each project to an independent worker executing exclusively via the offline monolithic "
-            "local scratch process (worker_limit=1, zero stage-by-stage network fallback)"
+            "Lock each cluster project to 1 dedicated independent worker executing exclusively via "
+            "the offline monolithic local NVMe scratch process (worker_limit=1, default: True). "
+            "Pass --no-network-independent-workers for legacy centralized stage-by-stage distribution."
         ),
     )
     parser.add_argument(
