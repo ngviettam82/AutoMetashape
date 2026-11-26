@@ -1051,8 +1051,9 @@ def bridge_disconnected_islands(
 
         # 4. Merge accepted islands with ch_main (or keep clean ch_main alone) and clean up temp chunks
         if accepted_chunks:
-            # Capture main block's ground-to-sky region before mergeChunks(merge_tiepoints=False) wipes tie points
+            # Capture main block's ground-to-sky region AND transform before mergeChunks(merge_tiepoints=False)
             saved_main_region = None
+            saved_main_matrix = None
             try:
                 if getattr(ch_main, "region", None) is not None:
                     saved_main_region = (
@@ -1060,8 +1061,11 @@ def bridge_disconnected_islands(
                         Metashape.Vector(ch_main.region.size),
                         Metashape.Matrix(ch_main.region.rot),
                     )
+                if getattr(ch_main, "transform", None) is not None and ch_main.transform.matrix is not None:
+                    saved_main_matrix = Metashape.Matrix(ch_main.transform.matrix)
             except Exception:
                 saved_main_region = None
+                saved_main_matrix = None
 
             merge_keys = [ch_main.key] + [c.key for c in accepted_chunks]
             merged = _merge_chunks_preserve_poses(doc, merge_keys)
@@ -1069,8 +1073,25 @@ def bridge_disconnected_islands(
             _clear_stage0_dense_assets(merged)
             if saved_main_region is not None and getattr(merged, "region", None) is not None:
                 try:
+                    old_center, old_size, old_rot = saved_main_region
+                    merged_mat = (
+                        merged.transform.matrix
+                        if getattr(merged, "transform", None) is not None and merged.transform.matrix is not None
+                        else None
+                    )
+                    if saved_main_matrix is not None and merged_mat is not None:
+                        t_rel = merged_mat.inv() * saved_main_matrix
+                        scale_rel = t_rel.scale()
+                        new_center = t_rel.mulp(old_center)
+                        rot_rel = t_rel.rotation()
+                        new_rot = rot_rel * old_rot
+                        new_size = old_size * scale_rel
+                    else:
+                        new_center, new_size, new_rot = old_center, old_size, old_rot
                     reg = merged.region
-                    reg.center, reg.size, reg.rot = saved_main_region
+                    reg.center = new_center
+                    reg.size = new_size
+                    reg.rot = new_rot
                     merged.region = reg
                 except Exception:
                     pass

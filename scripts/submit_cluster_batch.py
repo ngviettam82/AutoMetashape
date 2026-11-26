@@ -44,6 +44,7 @@ from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_
 from autometashape.cluster.orchestrator import (
     _norm_cluster_path,
     build_monolithic_runscript_task,
+    resolve_batch_canonical_path,
     safe_create_cluster_batch,
 )
 from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
@@ -321,30 +322,42 @@ def submit_batch(
     net_client = Metashape.NetworkClient()
     net_client.connect(server_ip, server_port)
 
-    if not force:
-        norm_target = _norm_cluster_path(rel_psx)
-        try:
-            raw_b = net_client.batchList() or {}
-            existing_batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else []
-            for b in existing_batches:
-                if _norm_cluster_path(b.get("path")) != norm_target:
-                    continue
-                b_state = str(b.get("state", "")).lower()
-                b_err = int(b.get("error_count") or 0)
-                if (
-                    b_state in ("inprogress", "running", "submitted", "pending", "queued")
-                    and not (b.get("failed") or b.get("aborted"))
-                    and b_err == 0
-                ):
-                    bid = int(b.get("batch_id"))
-                    print(
-                        f"  [OK] Project '{proj_name}' already has healthy active Batch #{bid} ({b_state}); "
-                        "attaching safely without overwriting .psx (pass --force to replace).",
-                        flush=True,
-                    )
-                    return bid
-        except Exception:
-            pass
+    norm_target = _norm_cluster_path(rel_psx)
+    try:
+        raw_b = net_client.batchList() or {}
+        existing_batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else []
+        for b in existing_batches:
+            b_raw_path = b.get("path")
+            b_canon_path = resolve_batch_canonical_path(b_raw_path, resolved_root)
+            if _norm_cluster_path(b_raw_path) != norm_target and _norm_cluster_path(b_canon_path) != norm_target:
+                continue
+            b_state = str(b.get("state", "")).lower()
+            b_err = int(b.get("error_count") or 0)
+            is_active = b_state in ("inprogress", "running", "submitted", "pending", "queued") and not (
+                b.get("failed") or b.get("aborted")
+            )
+            if not force and is_active and b_err == 0:
+                bid = int(b.get("batch_id"))
+                print(
+                    f"  [OK] Project '{proj_name}' already has healthy active Batch #{bid} ({b_state}); "
+                    "attaching safely without overwriting .psx (pass --force to replace).",
+                    flush=True,
+                )
+                return bid
+            if force and is_active and b.get("batch_id") is not None:
+                # Abort active canonical or hidden-ticket batch BEFORE saving fresh .psx stub
+                bid_abort = int(b.get("batch_id"))
+                if b.get("paused") and hasattr(net_client, "setBatchPaused"):
+                    try:
+                        net_client.setBatchPaused(bid_abort, False)
+                    except Exception:
+                        pass
+                try:
+                    net_client.abortBatch(bid_abort)
+                except Exception:
+                    pass
+    except Exception:
+        pass
 
     # -------------------------------------------------------------------------
     # MANDATORY ARCHITECTURAL INVARIANT: PHYSICAL PROJECT MATERIALIZATION

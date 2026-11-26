@@ -281,11 +281,16 @@ def export_project_assets(
 
     is_network_worker = any("--worker" in arg.lower() for arg in sys.argv)
     explicit_worker_mask = os.environ.get("AUTOMETASHAPE_EXPLICIT_GPU_MASK", "").strip()
-    if not is_network_worker:
+    if explicit_worker_mask:
+        print(
+            f"[Hardware] Honoring explicit operator GPU mask ({explicit_worker_mask}).",
+            flush=True,
+        )
+    elif not is_network_worker:
         if discrete_mask:
             Metashape.app.gpu_mask = discrete_mask
             print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
-    elif not explicit_worker_mask and discrete_mask > 0:
+    elif discrete_mask > 0:
         cur_mask = getattr(Metashape.app, "gpu_mask", None)
         if cur_mask in (0, 0xFFFFFFFF, -1, None):
             try:
@@ -556,7 +561,11 @@ def export_project_assets(
         if has_ortho:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             om_obj = getattr(chunk, "orthomosaic", None)
-            om_crs = getattr(om_obj, "crs", None) or proj_om_crs
+            om_crs = (
+                getattr(om_obj, "crs", None)
+                or getattr(getattr(om_obj, "projection", None), "crs", None)
+                or getattr(chunk, "crs", None)
+            )
             om_is_metric = is_projected_crs(om_crs) or _is_local_or_unreferenced_crs(om_crs)
             res_label = f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and om_is_metric) else "native GSD"
             print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)

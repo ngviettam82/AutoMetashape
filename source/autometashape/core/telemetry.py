@@ -1004,17 +1004,45 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
                 if d > 0.1:
                     baselines.append(d)
         else:
-            # Probe up to 15 true consecutive (i, i+1) pairs distributed across the dataset
+            # Probe up to 15 true consecutive (i, i+1) pairs distributed across the dataset.
+            # When running inside Metashape Pro (where PIL is absent), read pair GPS via Metashape API.
             pair_step = max(1, (total_photos - 1) // 15)
-            for idx in range(0, total_photos - 1, pair_step):
-                t1 = extract_image_telemetry(all_imgs[idx])
-                t2 = extract_image_telemetry(all_imgs[idx + 1])
-                if t1["has_gps"] and t2["has_gps"]:
-                    d = calculate_haversine_meters(t1["lat"], t1["lon"], t2["lat"], t2["lon"])
-                    if d > 0.1:
-                        baselines.append(d)
-                if len(baselines) >= 15:
-                    break
+            pair_indices = list(range(0, total_photos - 1, pair_step))[:15]
+            if has_meta and pair_indices:
+                pair_doc = None
+                try:
+                    pair_paths: list[str] = []
+                    for idx in pair_indices:
+                        pair_paths.append(all_imgs[idx])
+                        pair_paths.append(all_imgs[idx + 1])
+                    pair_doc = Metashape.Document()
+                    pair_chunk = pair_doc.addChunk()
+                    pair_chunk.addPhotos(pair_paths)
+                    cams = pair_chunk.cameras
+                    for p_i in range(0, len(cams) - 1, 2):
+                        l1 = getattr(getattr(cams[p_i], "reference", None), "location", None)
+                        l2 = getattr(getattr(cams[p_i + 1], "reference", None), "location", None)
+                        if l1 is not None and l2 is not None:
+                            if (abs(l1.y) > 0.001 or abs(l1.x) > 0.001) and (abs(l2.y) > 0.001 or abs(l2.x) > 0.001):
+                                d = calculate_haversine_meters(l1.y, l1.x, l2.y, l2.x)
+                                if d > 0.1:
+                                    baselines.append(d)
+                except Exception:
+                    pass
+                finally:
+                    if pair_doc is not None:
+                        try:
+                            pair_doc.clear()
+                        except Exception:
+                            pass
+            if not baselines:
+                for idx in pair_indices:
+                    t1 = extract_image_telemetry(all_imgs[idx])
+                    t2 = extract_image_telemetry(all_imgs[idx + 1])
+                    if t1["has_gps"] and t2["has_gps"]:
+                        d = calculate_haversine_meters(t1["lat"], t1["lon"], t2["lat"], t2["lon"])
+                        if d > 0.1:
+                            baselines.append(d)
         if baselines:
             baselines.sort()
             med_b = baselines[len(baselines) // 2]

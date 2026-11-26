@@ -355,12 +355,18 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
 
         for target_cfg in target_cfg_paths:
             existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
-            # Purge legacy auto-written "gpu_mask": "1" (without gpu_mask_explicit) or sentinel values
-            # so older worker installations automatically upgrade to dynamic Metashape GPU probing.
-            if "gpu_mask" in existing_cfg and args.gpu_mask is None:
+            # Purge legacy auto-written "gpu_mask": "1" (without gpu_mask_explicit), sentinel values,
+            # or an existing saved override when the operator explicitly passes --gpu-mask auto.
+            cli_requested_auto = args.gpu_mask is not None and str(args.gpu_mask).strip().lower() in (
+                "auto",
+                "none",
+                "default",
+                "",
+            )
+            if "gpu_mask" in existing_cfg and (args.gpu_mask is None or cli_requested_auto):
                 val = str(existing_cfg.get("gpu_mask", "")).strip().lower()
                 is_legacy_one = val == "1" and not bool(existing_cfg.get("gpu_mask_explicit"))
-                if val in ("auto", "none", "default", "") or is_legacy_one:
+                if cli_requested_auto or val in ("auto", "none", "default", "") or is_legacy_one:
                     existing_cfg.pop("gpu_mask", None)
                     existing_cfg.pop("gpu_mask_explicit", None)
                     try:
@@ -498,6 +504,14 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
     while True:
         proc = None
         try:
+            # If boot-time GPU probe transiently failed in Auto mode, retry before spawning worker
+            if not is_manual_override and active_gpu_mask is None:
+                retry_mask, _ = cu.probe_metashape_gpu_mask(ms_exe)
+                if retry_mask is not None:
+                    active_gpu_mask = str(retry_mask)
+                    if "--gpu-mask" not in worker_cmd:
+                        worker_cmd.extend(["--gpu-mask", active_gpu_mask])
+                    print(f"[Hardware] Dynamic GPU probe recovered on reconnect: --gpu-mask {active_gpu_mask}")
             start_t = time.time()
             proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=target_dir)
 

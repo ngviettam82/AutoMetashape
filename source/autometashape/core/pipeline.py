@@ -744,14 +744,22 @@ def run_reconstruction(
 
     def _sync_staging_to_central_share(replace_fresh_project: bool = False, is_atexit: bool = False) -> bool:
         if target_network_output and local_staging_dir and os.path.isdir(local_staging_dir):
+            nonlocal doc, chunk
             if is_atexit and not staging_checkpoint_saved:
                 print(
                     "  [Local Scratch Staging] Skipping atexit sync (no checkpoint saved; "
-                    "preserving central share untouched).",
+                    "preserving central share untouched and cleaning local NVMe scratch).",
                     flush=True,
                 )
+                if doc is not None:
+                    try:
+                        doc.clear()
+                    except Exception:
+                        pass
+                    doc = None
+                    chunk = None
+                shutil.rmtree(local_staging_dir, ignore_errors=True)
                 return True
-            nonlocal doc, chunk
             if doc is not None:
                 try:
                     doc.clear()
@@ -994,18 +1002,18 @@ def run_reconstruction(
         bool(network_path) and not network_enable
     )
     explicit_worker_mask = os.environ.get("AUTOMETASHAPE_EXPLICIT_GPU_MASK", "").strip()
-    if not is_network_worker:
+    if explicit_worker_mask:
+        print(
+            f"[Hardware] Honoring explicit operator GPU mask ({explicit_worker_mask}).",
+            flush=True,
+        )
+    elif not is_network_worker:
         if discrete_mask:
             Metashape.app.gpu_mask = discrete_mask
             print(f"[Hardware] GPU: {', '.join(active_gpu_names)} (Mask: {discrete_mask})", flush=True)
         else:
             Metashape.app.gpu_mask = 0
             print("[Hardware] Running on CPU.", flush=True)
-    elif explicit_worker_mask:
-        print(
-            f"[Hardware] Network worker execution: honoring explicit operator GPU mask ({explicit_worker_mask}).",
-            flush=True,
-        )
     elif discrete_mask > 0:
         cur_mask = getattr(Metashape.app, "gpu_mask", None)
         if cur_mask in (0, 0xFFFFFFFF, -1, None):
@@ -3088,8 +3096,11 @@ def run_reconstruction(
     # Step 7c: Orthomosaic Generation & GeoTIFF Export
     ortho_exported_locally = False
     eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
+    existing_om = getattr(chunk, "orthomosaic", None)
     ortho_crs_is_metric = _is_metric_raster_crs(
-        getattr(getattr(chunk, "orthomosaic", None), "crs", None) or getattr(chunk, "crs", None)
+        getattr(existing_om, "crs", None)
+        or getattr(getattr(existing_om, "projection", None), "crs", None)
+        or getattr(chunk, "crs", None)
     )
     if build_orthomosaic:
         try:
@@ -3764,6 +3775,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-filter-stationary",
+        "--no-filter-stationary-points",
         dest="filter_stationary_points",
         action="store_false",
         default=True,
@@ -3969,6 +3981,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Perform multiclass AI semantic point cloud classification",
     )
     parser.add_argument(
+        "--points-spacing",
+        type=float,
+        default=0.02,
+        help="Uniform dense point cloud sampling spacing in meters (default: 0.02)",
+    )
+    parser.add_argument(
         "--filter-point-confidence", type=int, default=None, help="Filter points with confidence below threshold"
     )
     # DEM / Elevation Options
@@ -4032,6 +4050,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.05,
         help="Orthomosaic pixel size in meters for build and GeoTIFF export (default: 0.05 = 5 cm/px; 0 = native GSD)",
+    )
+    parser.add_argument(
+        "--no-ortho-cull-faces",
+        dest="ortho_cull_faces",
+        action="store_false",
+        default=True,
+        help="Disable back-face culling during orthomosaic projection (default: culling enabled)",
     )
     # Quality Report Options
     parser.add_argument(

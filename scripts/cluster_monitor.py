@@ -128,15 +128,28 @@ def _resolve_batch_project_target(
     storage_paths: List[str],
 ) -> Tuple[str, str]:
     """Resolve canonical ``(project_name, result_dir)`` for a batch path, supporting tickets & legacy stubs."""
-    norm = (batch_path or "").strip().replace("\\", "/")
+    raw = (batch_path or "").strip()
+    norm = raw.replace("\\", "/")
+    is_abs_or_unc = raw.startswith("\\\\") or norm.startswith("//") or os.path.isabs(raw)
     rel_clean = norm.lstrip("/")
 
     # 1. Hidden .cluster/tickets/<stem>.psx -> read sibling <stem>.ticket.json metadata
     if rel_clean.lower().startswith(".cluster/tickets/") or "/.cluster/tickets/" in rel_clean.lower():
         stem = os.path.splitext(os.path.basename(rel_clean))[0]
         rel_dir = os.path.dirname(rel_clean)
+        meta_candidates: List[Tuple[str, str]] = []
+        if is_abs_or_unc:
+            abs_dir = os.path.dirname(os.path.normpath(raw))
+            meta_candidates.append(
+                (os.path.dirname(os.path.dirname(abs_dir)), os.path.join(abs_dir, f"{stem}.ticket.json"))
+            )
         for sp in storage_paths:
-            meta_p = os.path.normpath(os.path.join(sp, rel_dir, f"{stem}.ticket.json"))
+            meta_candidates.append(
+                (sp, os.path.normpath(os.path.join(sp, ".cluster", "tickets", f"{stem}.ticket.json")))
+            )
+            if rel_dir and not is_abs_or_unc:
+                meta_candidates.append((sp, os.path.normpath(os.path.join(sp, rel_dir, f"{stem}.ticket.json"))))
+        for base_sp, meta_p in meta_candidates:
             if os.path.isfile(meta_p):
                 try:
                     with open(meta_p, "r", encoding="utf-8") as mf:
@@ -144,14 +157,21 @@ def _resolve_batch_project_target(
                     pname = str(meta.get("project_name") or "").strip()
                     rel_out = str(meta.get("rel_output_dir") or "").replace("\\", "/").strip("/")
                     if pname:
-                        rdir = os.path.normpath(os.path.join(sp, rel_out)) if rel_out else ""
+                        rdir = os.path.normpath(os.path.join(base_sp, rel_out)) if (rel_out and base_sp) else ""
                         return pname, rdir
                 except Exception:
                     pass
+        # Never fall through to .cluster/tickets/ as a deliverables directory when sidecar is absent
+        return stem, ""
 
     raw_stem = os.path.splitext(os.path.basename(rel_clean))[0]
     m_leg = _LEGACY_DISPATCH_RE.match(raw_stem)
     pname = m_leg.group(1) if m_leg else raw_stem
+
+    if is_abs_or_unc:
+        cand_abs = os.path.dirname(os.path.normpath(raw))
+        if os.path.isdir(cand_abs):
+            return pname, cand_abs
 
     rel_parent = os.path.dirname(rel_clean).lstrip("/")
     for sp in storage_paths:

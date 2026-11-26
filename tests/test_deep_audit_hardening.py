@@ -40,12 +40,17 @@ from autometashape.cluster.hardware import (  # noqa: E402
 )
 from autometashape.cluster.orchestrator import (  # noqa: E402
     CLUSTER_TICKETS_REL_DIR,
+    build_monolithic_runscript_task,
     cleanup_stale_dispatch_tickets,
     create_hidden_dispatch_ticket,
     safe_create_cluster_batch,
 )
 from autometashape.cluster.supervisor import check_storage_headroom  # noqa: E402
-from autometashape.cluster.updater import generate_worker_updater_code, update_remote_worker  # noqa: E402
+from autometashape.cluster.updater import (  # noqa: E402
+    generate_worker_updater_code,
+    mirror_directory_with_prune,
+    update_remote_worker,
+)
 from autometashape.core import filtering as filtering_mod  # noqa: E402
 from autometashape.core import pipeline as pipeline_mod  # noqa: E402
 from autometashape.core.alignment_hygiene import (  # noqa: E402
@@ -696,6 +701,121 @@ class TestCoreAndClusterSafetyHardening(unittest.TestCase):
                     f.write(b"\xff\xd8\xff\xd9")
             jobs = discover_dual_share_projects(src_root, res_root)
             self.assertEqual([j.project_name for j in jobs], ["ModelHouse"])
+
+    def test_monolithic_runscript_flags_100pct_compatible_with_pipeline_arg_parser(self) -> None:
+        """Every CLI flag emitted by build_monolithic_runscript_task MUST parse cleanly in pipeline.py."""
+        import ast
+
+        from autometashape.cluster import orchestrator as orch_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir, patch.object(orch_mod, "Metashape", None):
+            img_dir = os.path.join(tmpdir, "images")
+            out_dir = os.path.join(tmpdir, "output")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
+            task, _, _ = build_monolithic_runscript_task(
+                images_dir=img_dir,
+                output_dir=out_dir,
+                project_name="ParitySite",
+                preset="pro",
+                alignment_hygiene=False,
+                icp_bridge=False,
+                adaptive_fitting=True,
+                filter_stationary_points=False,
+                reference_preselection_mode="source",
+                min_quality=0.6,
+                disable_quality_filter=True,
+                crop_padding=0.1,
+                close_holes=False,
+                fill_holes=False,
+                ghosting_filter=False,
+                rebake_texture=True,
+                points_spacing=0.04,
+                filter_point_confidence=3,
+                ortho_cull_faces=False,
+                report_title="Audit Report",
+                scratch_dir=tmpdir,
+                min_scratch_free_gb=80.0,
+            )
+            argv_line = next(
+                line for line in str(task.code).splitlines() if line.startswith("sys.argv = [script_path] + ")
+            )
+            tokens = ast.literal_eval(argv_line.split(" + ", 1)[1])
+            parsed = pipeline_mod.build_arg_parser().parse_args(tokens)
+            self.assertAlmostEqual(parsed.points_spacing, 0.04)
+            self.assertEqual(parsed.filter_point_confidence, 3)
+            self.assertFalse(parsed.filter_stationary_points)
+            self.assertFalse(parsed.ortho_cull_faces)
+            self.assertFalse(parsed.alignment_hygiene)
+            self.assertFalse(parsed.icp_bridge)
+            self.assertTrue(parsed.adaptive_fitting)
+            self.assertTrue(parsed.rebake_texture)
+
+    def test_gpu_igpu_variants_ticket_dedup_and_mirror_protections(self) -> None:
+        """Defend non-(R) Intel iGPU, mobile Arc, RX Vega, ticket re-attach, and mirror .agents/case safety."""
+        self.assertTrue(is_integrated_gpu("Intel UHD Graphics 770"))
+        self.assertTrue(is_integrated_gpu("Intel Iris Xe Graphics"))
+        self.assertTrue(is_integrated_gpu("AMD Radeon(TM) 860M Graphics"))
+        self.assertFalse(is_integrated_gpu("Intel(R) Arc(TM) A770M Graphics"))
+        self.assertFalse(is_integrated_gpu("AMD Radeon RX Vega 64"))
+
+        # Active hidden ticket batch must be matched for re-attach (preventing double-worker collision)
+        with tempfile.TemporaryDirectory() as shared_root:
+            ticket_rel = create_hidden_dispatch_ticket(
+                shared_root,
+                "Khảo Sát A",
+                rel_output_dir="Result/SiteA",
+                canonical_rel_psx="Result/SiteA/SiteA.psx",
+            )
+            # ASCII-only slug invariant
+            self.assertTrue(ticket_rel.isascii())
+
+            mock_net = MagicMock()
+            mock_net.findBatch.return_value = -1
+            mock_net.batchList.return_value = {"batches": [{"batch_id": 88, "path": ticket_rel, "state": "inprogress"}]}
+            bid, attached = safe_create_cluster_batch(
+                mock_net,
+                "Result/SiteA/SiteA.psx",
+                [MagicMock()],
+                force_fresh=False,
+                shared_root=shared_root,
+            )
+            self.assertEqual((bid, attached), (88, True))
+            mock_net.createBatch.assert_not_called()
+
+            # Protected ticket survives cleanup even when older than retention threshold
+            tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
+            old_ts = time.time() - (20 * 86400)
+            for fn in os.listdir(tickets_dir):
+                os.utime(os.path.join(tickets_dir, fn), (old_ts, old_ts))
+            removed = cleanup_stale_dispatch_tickets(shared_root, max_age_hours=24.0, protected_paths={ticket_rel})
+            self.assertEqual(removed, 0)
+
+            # Missing .ticket.json sidecar must NEVER resolve to .cluster/tickets/ as deliverables dir
+            m_name, m_dir = monitor_mod._resolve_batch_project_target(
+                ".cluster/tickets/orphan_12345.psx", [shared_root]
+            )
+            self.assertEqual(m_name, "orphan_12345")
+            self.assertEqual(m_dir, "")
+
+        # Mirror must preserve .agents/ and .abort_pending, and prune obsolete .github/ files
+        with tempfile.TemporaryDirectory() as src_dir, tempfile.TemporaryDirectory() as dst_dir:
+            os.makedirs(os.path.join(src_dir, "scripts"), exist_ok=True)
+            with open(os.path.join(src_dir, "scripts", "launch_worker.py"), "w", encoding="utf-8") as f:
+                f.write("# fresh\n")
+            os.makedirs(os.path.join(dst_dir, ".agents", "notes"), exist_ok=True)
+            os.makedirs(os.path.join(dst_dir, ".github"), exist_ok=True)
+            with open(os.path.join(dst_dir, ".agents", "notes", "keep.txt"), "w", encoding="utf-8") as f:
+                f.write("keep")
+            with open(os.path.join(dst_dir, ".abort_pending"), "w", encoding="utf-8") as f:
+                f.write("{}")
+            with open(os.path.join(dst_dir, ".github", "old_workflow.yml"), "w", encoding="utf-8") as f:
+                f.write("stale")
+
+            mirror_directory_with_prune(src_dir, dst_dir)
+            self.assertTrue(os.path.isfile(os.path.join(dst_dir, ".agents", "notes", "keep.txt")))
+            self.assertTrue(os.path.isfile(os.path.join(dst_dir, ".abort_pending")))
+            self.assertFalse(os.path.isfile(os.path.join(dst_dir, ".github", "old_workflow.yml")))
 
 
 if __name__ == "__main__":

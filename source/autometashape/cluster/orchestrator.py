@@ -394,7 +394,7 @@ def build_monolithic_runscript_task(
     ghosting_filter: bool | None = None,
     rebake_texture: bool = False,
     points_spacing: float | None = None,
-    filter_point_confidence: bool | None = None,
+    filter_point_confidence: int | None = None,
     ortho_cull_faces: bool | None = None,
     report_title: str | None = None,
     scratch_dir: str | None = None,
@@ -469,7 +469,7 @@ def build_monolithic_runscript_task(
     elif adaptive_fitting is False:
         worker_args.append("--no-adaptive-fitting")
     if filter_stationary_points is False:
-        worker_args.append("--no-filter-stationary-points")
+        worker_args.append("--no-filter-stationary")
     if reference_preselection_mode:
         worker_args.extend(["--reference-preselection-mode", reference_preselection_mode])
     if min_quality is not None:
@@ -490,8 +490,12 @@ def build_monolithic_runscript_task(
         worker_args.append("--rebake-texture")
     if points_spacing is not None:
         worker_args.extend(["--points-spacing", str(points_spacing)])
-    if filter_point_confidence is False:
-        worker_args.append("--no-filter-point-confidence")
+    if (
+        isinstance(filter_point_confidence, int)
+        and not isinstance(filter_point_confidence, bool)
+        and filter_point_confidence > 0
+    ):
+        worker_args.extend(["--filter-point-confidence", str(filter_point_confidence)])
     if ortho_cull_faces is False:
         worker_args.append("--no-ortho-cull-faces")
     if report_title:
@@ -1103,17 +1107,59 @@ CLUSTER_TICKETS_REL_DIR = ".cluster/tickets"
 
 def _slugify_ticket_name(project_name: str) -> str:
     """Convert a project name into an ASCII filesystem-safe slug for hidden cluster tickets."""
-    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(project_name or "project").strip())
+    import unicodedata
+
+    normalized = unicodedata.normalize("NFKD", str(project_name or "project").strip())
+    cleaned = "".join(ch if (ch.isascii() and (ch.isalnum() or ch in ("-", "_"))) else "_" for ch in normalized)
     return (cleaned.strip("_") or "project")[:80]
 
 
-def cleanup_stale_dispatch_tickets(shared_root: str, max_age_hours: float = 24.0) -> int:
-    """Prune old ephemeral ticket files under ``<shared_root>/.cluster/tickets/``."""
+def resolve_batch_canonical_path(batch_path: str | None, shared_root: str = "") -> str:
+    """Resolve a cluster batch path to its canonical project path (unwrapping hidden ``.cluster/tickets/``)."""
+    raw = str(batch_path or "").strip()
+    if not raw:
+        return ""
+    norm = raw.replace("\\", "/")
+    low = norm.lower()
+    if (low.startswith(f"{CLUSTER_TICKETS_REL_DIR}/") or f"/{CLUSTER_TICKETS_REL_DIR}/" in low) and shared_root:
+        stem = os.path.splitext(os.path.basename(norm))[0]
+        rel_dir = os.path.dirname(norm.lstrip("/"))
+        meta_candidates = [os.path.join(shared_root, CLUSTER_TICKETS_REL_DIR, f"{stem}.ticket.json")]
+        if rel_dir:
+            meta_candidates.insert(0, os.path.join(shared_root, rel_dir, f"{stem}.ticket.json"))
+        for meta_p in meta_candidates:
+            if os.path.isfile(meta_p):
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                    canon = str(meta.get("canonical_rel_psx") or "").strip()
+                    if canon:
+                        return canon
+                    rel_out = str(meta.get("rel_output_dir") or "").replace("\\", "/").strip("/")
+                    pname = str(meta.get("project_name") or "").strip()
+                    if rel_out and pname:
+                        return f"{rel_out}/{pname}.psx"
+                except Exception:
+                    pass
+    return raw
+
+
+def cleanup_stale_dispatch_tickets(
+    shared_root: str,
+    max_age_hours: float = 168.0,
+    protected_paths: set[str] | None = None,
+) -> int:
+    """Prune old unreferenced ephemeral ticket files under ``<shared_root>/.cluster/tickets/``."""
     if not shared_root:
         return 0
     tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
     if not os.path.isdir(tickets_dir):
         return 0
+    protected_stems: set[str] = set()
+    for p in protected_paths or set():
+        base = os.path.basename(str(p or "").replace("\\", "/"))
+        if base:
+            protected_stems.add(os.path.splitext(base)[0].lower())
     cutoff = time.time() - max(0.0, max_age_hours) * 3600.0
     removed = 0
     try:
@@ -1121,6 +1167,9 @@ def cleanup_stale_dispatch_tickets(shared_root: str, max_age_hours: float = 24.0
 
         for entry in os.listdir(tickets_dir):
             full = os.path.join(tickets_dir, entry)
+            stem = entry[:-12] if entry.lower().endswith(".ticket.json") else os.path.splitext(entry)[0]
+            if stem.lower() in protected_stems:
+                continue
             try:
                 if os.path.getmtime(full) > cutoff:
                     continue
@@ -1141,6 +1190,8 @@ def create_hidden_dispatch_ticket(
     shared_root: str,
     project_name: str,
     rel_output_dir: str = "",
+    canonical_rel_psx: str = "",
+    protected_paths: set[str] | None = None,
 ) -> str:
     """Materialize a minimal hidden scheduler ticket under ``.cluster/tickets/`` (never in ``Result/``).
 
@@ -1152,7 +1203,7 @@ def create_hidden_dispatch_ticket(
     Returns:
         Cluster-relative POSIX path to the hidden ticket ``.psx`` (e.g. ``.cluster/tickets/<slug>_<ts>.psx``).
     """
-    cleanup_stale_dispatch_tickets(shared_root)
+    cleanup_stale_dispatch_tickets(shared_root, protected_paths=protected_paths)
     tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
     os.makedirs(tickets_dir, exist_ok=True)
     slug = _slugify_ticket_name(project_name)
@@ -1204,6 +1255,7 @@ def create_hidden_dispatch_ticket(
                 {
                     "project_name": project_name,
                     "rel_output_dir": rel_output_dir.replace("\\", "/").strip("/"),
+                    "canonical_rel_psx": canonical_rel_psx.replace("\\", "/").lstrip("/"),
                     "created_at": time.time(),
                 },
                 mf,
@@ -1278,6 +1330,7 @@ def safe_create_cluster_batch(
         except Exception:
             pass
 
+    known_batch_paths: set[str] = set()
     try:
         raw_b = net_client.batchList()
         batches = (
@@ -1285,7 +1338,10 @@ def safe_create_cluster_batch(
         )
         for b in batches:
             b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
-            if _norm_cluster_path(b_path) == norm_target:
+            if b_path:
+                known_batch_paths.add(str(b_path))
+            canon_b_path = resolve_batch_canonical_path(b_path, shared_root)
+            if _norm_cluster_path(b_path) == norm_target or _norm_cluster_path(canon_b_path) == norm_target:
                 b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
                 b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
                 b_err_cnt = int((b.get("error_count") if isinstance(b, dict) else 0) or 0)
@@ -1323,7 +1379,10 @@ def safe_create_cluster_batch(
                 )
                 for b in batches:
                     b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
-                    if _norm_cluster_path(b_path) == norm_target:
+                    if b_path:
+                        known_batch_paths.add(str(b_path))
+                    canon_b_path = resolve_batch_canonical_path(b_path, shared_root)
+                    if _norm_cluster_path(b_path) == norm_target or _norm_cluster_path(canon_b_path) == norm_target:
                         b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
                         b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
                         b_paused = bool(isinstance(b, dict) and b.get("paused"))
@@ -1356,6 +1415,8 @@ def safe_create_cluster_batch(
                             shared_root=shared_root,
                             project_name=proj_label,
                             rel_output_dir=rel_out,
+                            canonical_rel_psx=rel_psx,
+                            protected_paths=known_batch_paths,
                         )
                         print(
                             f"  [Cluster Recovery] Server holds stale aborted key for '{rel_psx}'; "

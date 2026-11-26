@@ -462,7 +462,11 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
                     old_d = f"{d_path}.sync_old_{os.getpid()}"
                     if os.path.exists(tmp_d):
                         shutil.rmtree(tmp_d, ignore_errors=True)
-                    shutil.copytree(s_path, tmp_d, dirs_exist_ok=True, ignore=ignore_transient)
+                    try:
+                        shutil.copytree(s_path, tmp_d, dirs_exist_ok=True, ignore=ignore_transient)
+                    except Exception:
+                        shutil.rmtree(tmp_d, ignore_errors=True)
+                        raise
                     try:
                         if os.path.isdir(d_path):
                             if os.path.exists(old_d):
@@ -472,14 +476,12 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
                         if os.path.isdir(old_d):
                             shutil.rmtree(old_d, ignore_errors=True)
                     except OSError:
-                        # Fallback if Windows SMB lock prevents directory rename
-                        shutil.copytree(tmp_d, d_path, dirs_exist_ok=True)
+                        # Fallback if Windows SMB lock prevents directory rename: copy directly from
+                        # local NVMe s_path (never SMB->SMB from tmp_d) and purge temp/old siblings.
                         shutil.rmtree(tmp_d, ignore_errors=True)
-                        if os.path.isdir(old_d) and not os.path.isdir(d_path):
-                            try:
-                                os.rename(old_d, d_path)
-                            except OSError:
-                                pass
+                        shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
+                        if os.path.isdir(old_d):
+                            shutil.rmtree(old_d, ignore_errors=True)
                 else:
                     shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
             else:

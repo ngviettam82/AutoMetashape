@@ -311,8 +311,9 @@ def get_primary_lan_ip() -> str:
     return "127.0.0.1"
 
 
-_AMD_IGPU_RE = re.compile(r"\b(?:610m|660m|680m|740m|760m|780m|880m|890m)\b")
-_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc(?:\(tm\))?\s+(?:[ab]\d{3}|pro)\b")
+_AMD_IGPU_RE = re.compile(r"\b(?:610m|660m|680m|740m|760m|780m|820m|840m|860m|880m|890m)\b")
+_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc(?:\(tm\))?\s+(?:[ab]\d{3}m?|pro)\b")
+_INTEL_IGPU_RE = re.compile(r"\bintel(?:\(r\))?\s+(?:uhd|hd|iris)\b")
 
 
 def is_integrated_gpu(name: str) -> bool:
@@ -323,13 +324,18 @@ def is_integrated_gpu(name: str) -> bool:
     # Software / virtual renderers
     if any(sw in lower for sw in ("microsoft basic render", "llvmpipe", "swiftshader", "softpipe")):
         return True
-    # Discrete Intel Arc A-series / B-series / Pro GPUs are NOT integrated
+    # Discrete Intel Arc A-series / B-series / mobile M / Pro GPUs are NOT integrated
     if _INTEL_DISCRETE_ARC_RE.search(lower):
         return False
     # Integrated Intel Arc Graphics (Core Ultra laptop/desktop iGPU without A###/B###/Pro model)
     if "intel" in lower and "arc" in lower:
         return True
-    # Integrated AMD Ryzen mobile/desktop APUs (610M/680M/780M/890M, Vega, generic Radeon Graphics)
+    if _INTEL_IGPU_RE.search(lower):
+        return True
+    # Discrete AMD RX Vega / Radeon Pro Vega / Vega Frontier are NOT integrated
+    if any(dv in lower for dv in ("rx vega", "pro vega", "vega frontier")):
+        return False
+    # Integrated AMD Ryzen mobile/desktop APUs (610M-890M, Vega iGPU, generic Radeon Graphics)
     if "radeon" in lower and _AMD_IGPU_RE.search(lower):
         return True
     return any(
@@ -337,9 +343,6 @@ def is_integrated_gpu(name: str) -> bool:
         for ig in (
             "intel(r) graphics",
             "intel graphics",
-            "intel(r) hd",
-            "intel(r) uhd",
-            "intel(r) iris",
             "radeon(tm) graphics",
             "radeon graphics",
             "vega",
@@ -418,7 +421,7 @@ def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dic
 
 def probe_metashape_gpu_mask(
     metashape_exe: str | None = None,
-    timeout: float = 15.0,
+    timeout: float = 30.0,
 ) -> tuple[int | None, list[dict[str, Any]]]:
     """Query Metashape Pro's native ``enumGPUDevices()`` to compute the exact discrete ``--gpu-mask``.
 
@@ -459,10 +462,19 @@ def probe_metashape_gpu_mask(
         fd, tmp_path = tempfile.mkstemp(prefix="_am_gpu_probe_", suffix=".py")
         with os.fdopen(fd, "w", encoding="utf-8") as fh:
             fh.write(probe_code)
+        probe_cmd = [exe]
+        probe_env = os.environ.copy()
+        if sys.platform.startswith("linux") and not probe_env.get("DISPLAY"):
+            probe_cmd.extend(["-platform", "offscreen"])
+            probe_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+        probe_cmd.extend(["-r", tmp_path])
         res = subprocess.run(
-            [exe, "-r", tmp_path],
+            probe_cmd,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=probe_env,
             timeout=timeout,
         )
         stdout = res.stdout or ""

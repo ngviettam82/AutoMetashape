@@ -7,8 +7,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import sys
 import tempfile
 import time
 import zipfile
@@ -19,11 +21,26 @@ except ImportError:
     Metashape = None
 
 
+from autometashape.cluster.abort import dispatch_abort_signal
 from autometashape.cluster.hardware import get_local_hostname, is_healthy_online_worker
 
 DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 CLUSTER_MAINTENANCE_REL_PATH = ".cluster/maintenance.psx"
 UPDATE_SIGNAL_FILENAME = ".update_pending"
+_PROTECTED_TOP_DIRS = frozenset({".git", ".cluster", ".venv", ".agents", ".idea", ".vscode"})
+_PROTECTED_SIGNAL_FILES = frozenset({".update_pending", ".abort_pending"})
+
+
+def _copy2_with_retry(src_file: str, dst_file: str, retries: int = 3) -> None:
+    """Copy a file with brief retries on Windows PermissionError (e.g. AV scanner locks)."""
+    for attempt in range(retries):
+        try:
+            shutil.copy2(src_file, dst_file)
+            return
+        except PermissionError:
+            if attempt >= retries - 1:
+                raise
+            time.sleep(0.25 * (attempt + 1))
 
 
 def mirror_directory_with_prune(
@@ -35,8 +52,8 @@ def mirror_directory_with_prune(
 
     Strictly preserves:
     - Machine-local configs (worker_config.json, server_config.json, .gitignore)
-    - Runtime logs (*.log), PIDs (*.pid), and flags (*.flag, *.pending)
-    - Subsystems (.cluster/, .git/, .venv/, .idea/, .vscode/, __pycache__/)
+    - Runtime logs (*.log), PIDs (*.pid), and flags (*.flag, *.pending, .update_pending, .abort_pending)
+    - Subsystems (.cluster/, .git/, .venv/, .agents/, .idea/, .vscode/)
 
     Returns:
         tuple of (copied_file_count, pruned_file_count)
@@ -49,7 +66,7 @@ def mirror_directory_with_prune(
         }
 
     os.makedirs(dest_dir, exist_ok=True)
-    src_rel_files = set()
+    src_rel_files_norm: set[str] = set()
     copied = 0
     pruned = 0
 
@@ -58,13 +75,13 @@ def mirror_directory_with_prune(
         for f in files:
             src_file = os.path.join(root, f)
             rel = os.path.relpath(src_file, src_dir)
-            src_rel_files.add(rel)
+            src_rel_files_norm.add(os.path.normcase(rel))
             dst_file = os.path.join(dest_dir, rel)
             os.makedirs(os.path.dirname(dst_file), exist_ok=True)
             # Never overwrite machine-local config if it already exists
             if f in protected_names and os.path.isfile(dst_file):
                 continue
-            shutil.copy2(src_file, dst_file)
+            _copy2_with_retry(src_file, dst_file)
             copied += 1
 
     # 2. Walk dest_dir and prune obsolete repository files
@@ -72,13 +89,16 @@ def mirror_directory_with_prune(
         for f in files:
             dst_file = os.path.join(root, f)
             rel = os.path.relpath(dst_file, dest_dir)
-            if f in protected_names:
+            parts = rel.replace("\\", "/").split("/")
+            if f in protected_names or f in _PROTECTED_SIGNAL_FILES:
                 continue
-            if any(rel.startswith(pfx) for pfx in (".git", ".cluster", ".venv", ".idea", ".vscode", "__pycache__")):
+            if parts and parts[0] in _PROTECTED_TOP_DIRS:
+                continue
+            if "__pycache__" in parts:
                 continue
             if f.endswith((".log", ".pid", ".flag", ".pending")):
                 continue
-            if rel not in src_rel_files:
+            if os.path.normcase(rel) not in src_rel_files_norm:
                 try:
                     os.remove(dst_file)
                     pruned += 1
@@ -89,7 +109,8 @@ def mirror_directory_with_prune(
         for d in dirs:
             dir_path = os.path.join(root, d)
             rel_d = os.path.relpath(dir_path, dest_dir)
-            if any(rel_d.startswith(pfx) for pfx in (".git", ".cluster", ".venv", ".idea", ".vscode")):
+            d_parts = rel_d.replace("\\", "/").split("/")
+            if d_parts and d_parts[0] in _PROTECTED_TOP_DIRS:
                 continue
             try:
                 if os.path.exists(dir_path) and not os.listdir(dir_path):
@@ -152,16 +173,18 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
 
     try:
         acquired = False
-        # 1. Prefer shared LAN payload cache
+        # 1. Prefer shared LAN payload cache (verify ZIP integrity before accepting)
         if shared_cluster_dir and os.path.isdir(shared_cluster_dir):
             lan_zip = os.path.join(shared_cluster_dir, "update_payload.zip")
             if os.path.isfile(lan_zip) and os.path.getsize(lan_zip) > 1024:
                 try:
                     shutil.copy2(lan_zip, zip_path)
                     if os.path.isfile(zip_path) and os.path.getsize(zip_path) > 1024:
-                        acquired = True
+                        with zipfile.ZipFile(zip_path, "r") as zf:
+                            if zf.testzip() is None:
+                                acquired = True
                 except Exception:
-                    pass
+                    acquired = False
 
         # 2. Fallback to direct URL download
         if not acquired:
@@ -172,12 +195,10 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
                 shutil.copyfileobj(resp, out_f)
 
         # 3. Extract zip
-        import zipfile
-
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
 
-        # 4. Resolve extracted root
+        # 4. Resolve extracted root and verify payload structure before pruning target_dir
         src_dir = extract_dir
         for d in os.listdir(extract_dir):
             cand = os.path.join(extract_dir, d)
@@ -187,6 +208,13 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
             ):
                 src_dir = cand
                 break
+
+        if not (
+            os.path.isfile(os.path.join(src_dir, "scripts", "launch_worker.py"))
+            or os.path.isfile(os.path.join(src_dir, "pyproject.toml"))
+            or os.path.isfile(os.path.join(src_dir, "launch_worker.bat"))
+        ):
+            raise RuntimeError(f"Extracted update archive at '{src_dir}' does not resemble an AutoMetashape repository")
 
         # 5. Mirror with prune
         mirror_directory_with_prune(src_dir, target_dir)
@@ -199,7 +227,8 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
                 pass
         return True
 
-    except Exception:
+    except Exception as exc:
+        print(f"[SUPERVISOR ERROR] Codebase update failed: {exc}", file=sys.stderr, flush=True)
         # Clear flag on error to prevent infinite restart loop
         if os.path.isfile(flag_path):
             try:
@@ -291,7 +320,11 @@ if not written:
 """
 
 
-def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_ARCHIVE_URL) -> str:
+def stage_cluster_update_payload(
+    shared_root: str,
+    repo_url: str = DEFAULT_REPO_ARCHIVE_URL,
+    force_refresh: bool = False,
+) -> str:
     """Stages or caches the repository update archive zip on shared storage so workers can update over LAN.
 
     Returns:
@@ -302,13 +335,22 @@ def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_
     cluster_dir = os.path.join(shared_root, ".cluster")
     os.makedirs(cluster_dir, exist_ok=True)
     payload_zip = os.path.join(cluster_dir, "update_payload.zip")
+    payload_meta = os.path.join(cluster_dir, "update_payload.meta.json")
 
-    # If payload is older than 5 minutes or missing, download fresh copy from repo_url
+    # Reuse cache only when not force-refreshing, repo_url matches, and 0 <= age < 300s
     needs_download = True
-    if os.path.isfile(payload_zip):
+    if not force_refresh and os.path.isfile(payload_zip):
         try:
             age = time.time() - os.path.getmtime(payload_zip)
-            if age < 300.0 and os.path.getsize(payload_zip) > 1024:
+            cached_url = ""
+            if os.path.isfile(payload_meta):
+                with open(payload_meta, "r", encoding="utf-8") as mf:
+                    cached_url = str((json.load(mf) or {}).get("repo_url", ""))
+            if (
+                0.0 <= age < 300.0
+                and os.path.getsize(payload_zip) > 1024
+                and (not cached_url or cached_url == repo_url)
+            ):
                 needs_download = False
         except Exception:
             pass
@@ -327,7 +369,19 @@ def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_
                 if bad is not None:
                     raise zipfile.BadZipFile(f"Corrupt entry in archive: {bad}")
             os.replace(tmp_zip, payload_zip)
-        except Exception:
+            tmp_meta = f"{payload_meta}.tmp.{os.getpid()}"
+            try:
+                with open(tmp_meta, "w", encoding="utf-8") as mf:
+                    json.dump({"repo_url": repo_url, "staged_at": time.time()}, mf, indent=2)
+                os.replace(tmp_meta, payload_meta)
+            except OSError:
+                pass
+        except Exception as exc:
+            print(
+                f"[WARNING] Failed to refresh shared update payload from {repo_url}: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
             if os.path.isfile(tmp_zip):
                 try:
                     os.remove(tmp_zip)
@@ -627,10 +681,10 @@ def update_remote_worker(
                 except Exception:
                     pass
 
-        # 5. Ensure per-worker maintenance project and stage update payload
+        # 5. Ensure per-worker maintenance project and stage fresh update payload
         rel_project = ensure_cluster_maintenance_project(shared_root, worker_slug=f"{node_hname}_{wid}")
         cluster_shared_dir = os.path.join(shared_root, ".cluster")
-        stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url)
+        stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url, force_refresh=True)
 
         # 6. Build RunScript task locked to target worker's hostname and shared LAN cache
         task = Metashape.Tasks.RunScript()
@@ -694,7 +748,7 @@ def update_remote_worker(
 
         if not batch_done:
             # Abort the timed-out batch on the cluster server so it does not linger in the queue
-            if hasattr(client, "abortBatch") and batch_id:
+            if hasattr(client, "abortBatch") and batch_id is not None:
                 try:
                     client.abortBatch(batch_id)
                 except Exception:
@@ -715,14 +769,13 @@ def update_remote_worker(
         result["success"] = True
 
         # 9. Graceful restart via quitWorker: worker supervisor will detect .update_pending,
-        # mirror code with Git-parity, and re-execute fresh process image.
+        # mirror code with Git-parity, and re-execute fresh process image (including GPU probe).
         if restart:
             try:
                 client.quitWorker(wid)
-                # Await auto-reconnect (10s reconnect window + 25s buffer)
-                reconnect_deadline = time.time() + 35.0
+                reconnect_deadline = time.time() + max(60.0, timeout)
                 reconnected = False
-                target_host_ip = str(result["hostaddr"]).split(":")[0].strip() if result.get("hostaddr") else ""
+                target_host_ip = _extract_host_ip(str(result.get("hostaddr") or ""))
                 while time.time() < reconnect_deadline:
                     time.sleep(poll_interval)
                     current_workers = list_online_workers(client)
@@ -786,11 +839,11 @@ def update_all_workers_parallel(
     if not workers:
         return []
 
-    # 1. Stage update payload once
-    stage_cluster_update_payload(shared_root, repo_url)
+    # 1. Stage fresh update payload once
+    stage_cluster_update_payload(shared_root, repo_url, force_refresh=True)
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
 
-    # 2. If force mode, pause queued and abort active tasks on busy workers
+    # 2. If force mode, pause queued batches and abort active tasks on busy workers
     paused_existing_batches = []
     if force:
         if hasattr(client, "batchList"):
@@ -804,7 +857,7 @@ def update_all_workers_parallel(
                             if hasattr(client, "setBatchPaused"):
                                 client.setBatchPaused(bid, True)
                                 paused_existing_batches.append(bid)
-                        elif bstate in ("inprogress", "running", "active"):
+                        elif bstate in ("inprogress", "running", "active") and not b.get("aborted"):
                             if b.get("paused") and hasattr(client, "setBatchPaused"):
                                 client.setBatchPaused(bid, False)
                             if hasattr(client, "abortBatch"):
@@ -812,15 +865,53 @@ def update_all_workers_parallel(
             except Exception:
                 pass
 
-        # Await workers to transition to ready
-        t0 = time.time()
-        while time.time() - t0 < 10.0:
-            time.sleep(1.0)
-            fresh = list_online_workers(client)
-            if all(str(w.get("state", "")).lower() in ("ready", "") for w in fresh):
-                break
+        # Await workers to transition to ready (only poll if any worker was busy)
+        if any(str(w.get("state", "")).lower() not in ("ready", "") for w in workers):
+            t0 = time.time()
+            while time.time() - t0 < 10.0:
+                time.sleep(1.0)
+                fresh = list_online_workers(client)
+                if fresh and all(str(w.get("state", "")).lower() in ("ready", "") for w in fresh):
+                    workers = fresh
+                    break
 
-    # 3. Record original pause state across fleet so we isolate each node cleanly during signal dispatch
+            # Workers blocked inside C++ RunScript ignore abortBatch; force clean watchdog/quitWorker reboot
+            still_busy = [
+                w for w in list_online_workers(client) if str(w.get("state", "")).lower() not in ("ready", "")
+            ]
+            if still_busy:
+                for bw in still_busy:
+                    bwid = bw.get("worker_id")
+                    bhname = str(bw.get("hostname", "")).strip()
+                    if shared_root and bhname:
+                        try:
+                            dispatch_abort_signal(node_name=bhname, batch_id=bw.get("batch_id"), root_path=shared_root)
+                        except Exception:
+                            pass
+                    if hasattr(client, "quitWorker") and bwid is not None:
+                        try:
+                            client.quitWorker(bwid)
+                        except Exception:
+                            pass
+                reboot_deadline = time.time() + 35.0
+                expected_names = {str(w.get("hostname", "")).strip().lower() for w in workers if w.get("hostname")}
+                while time.time() < reboot_deadline:
+                    time.sleep(min(poll_interval, 2.0))
+                    fresh = list_online_workers(client)
+                    ready_names = {
+                        str(w.get("hostname", "")).strip().lower()
+                        for w in fresh
+                        if str(w.get("state", "")).lower() in ("ready", "")
+                    }
+                    if fresh and expected_names and expected_names.issubset(ready_names):
+                        workers = fresh
+                        break
+                else:
+                    refreshed = list_online_workers(client)
+                    if refreshed:
+                        workers = refreshed
+
+    # 3. Record original pause state across refreshed fleet so we isolate each node cleanly during signal dispatch
     orig_worker_paused: dict[int | str, bool] = {
         w.get("worker_id"): bool(w.get("paused", False)) for w in workers if w.get("worker_id") is not None
     }
@@ -945,16 +1036,16 @@ def update_all_workers_parallel(
                             nr["log"] = f.read()
                     except Exception:
                         pass
-                if restart and hasattr(client, "quitWorker") and nr.get("worker_id"):
+                if restart and hasattr(client, "quitWorker") and nr.get("worker_id") is not None:
                     try:
                         client.quitWorker(nr["worker_id"])
                         relaunching_nodes.append(nr)
                     except Exception as e_quit:
                         nr["error"] = f"Update succeeded but quitWorker failed: {e_quit}"
 
-        # 6. Await parallel reconnection
+        # 6. Await parallel reconnection (budget allows ZIP mirror + Metashape GPU probe on startup)
         if relaunching_nodes:
-            reconnect_deadline = time.time() + 35.0
+            reconnect_deadline = time.time() + max(60.0, timeout)
             while time.time() < reconnect_deadline:
                 time.sleep(poll_interval)
                 current_workers = list_online_workers(client)
@@ -963,7 +1054,7 @@ def update_all_workers_parallel(
                         continue
                     old_wid = nr.get("worker_id")
                     target_hname = str(nr.get("hostname", "")).strip().lower()
-                    target_ip = str(nr.get("hostaddr", "")).split(":")[0].strip()
+                    target_ip = _extract_host_ip(str(nr.get("hostaddr") or ""))
 
                     for cw in current_workers:
                         cw_id = cw.get("worker_id")
