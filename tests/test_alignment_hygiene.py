@@ -62,6 +62,7 @@ class _FakeCamera:
         enabled: bool = True,
         ref_enabled: bool = True,
         meta: dict[str, object] | None = None,
+        sensor: object | None = None,
     ) -> None:
         self.key = key
         self.label = label
@@ -74,6 +75,7 @@ class _FakeCamera:
         )
         self.reference = SimpleNamespace(enabled=ref_enabled, location=_Vec(lon, lat, alt))
         self.photo = SimpleNamespace(path=path, meta=_MetaNoGet(meta or {}))
+        self.sensor = sensor
 
 
 class _IdentityMatrix:
@@ -456,6 +458,218 @@ class TestAlignmentHygiene(unittest.TestCase):
         chunk = SimpleNamespace(cameras=main_cams + mission_leftovers + bldg_1 + bldg_2 + far_out)
         groups = ah.find_unaligned_overlapping_groups(chunk, main_keys={1, 2}, min_cams=12, cluster_radius_m=80.0)
         self.assertEqual([len(g) for g in groups], [16, 14])
+
+    def test_normalize_takeoff_z0_flat_mixed_folder_simultaneous_drones_and_idempotency(self) -> None:
+        """Verify two simultaneous drones mixed in one flat folder normalize cleanly and idempotently."""
+        cams = []
+        # Interleave Drone A (z0=52.6m, RA=75m) and Drone B (z0=57.2m, RA=10m) in the EXACT same flat folder!
+        for i in range(6):
+            cams.append(
+                _FakeCamera(
+                    i * 2,
+                    f"flat_{i * 2}",
+                    os.path.join("/proj", "Photos", f"img_{i * 2:03d}.jpg"),
+                    106.6,
+                    10.77,
+                    127.6,
+                    meta={"DJI/AbsoluteAltitude": "+127.6", "DJI/RelativeAltitude": "+75.0"},
+                )
+            )
+            cams.append(
+                _FakeCamera(
+                    i * 2 + 1,
+                    f"flat_{i * 2 + 1}",
+                    os.path.join("/proj", "Photos", f"img_{i * 2 + 1:03d}.jpg"),
+                    106.6,
+                    10.77,
+                    67.2,
+                    meta={"DJI/AbsoluteAltitude": "+67.2", "DJI/RelativeAltitude": "+10.0"},
+                )
+            )
+        chunk = SimpleNamespace(cameras=cams, camera_location_accuracy=None)
+        with patch.object(ah, "Metashape", None):
+            info1 = ah.normalize_flight_takeoff_z0(chunk)
+            # Re-run a second time to verify exact idempotency (no double-shift!)
+            info2 = ah.normalize_flight_takeoff_z0(chunk, anchor_z0_override=info1["anchor_z0"])
+
+        self.assertEqual(len(info1["shifts"]), 2)
+        self.assertAlmostEqual(info1["anchor_z0"], 52.6, places=2)
+        self.assertAlmostEqual(info2["anchor_z0"], 52.6, places=2)
+        for i in range(6):
+            self.assertAlmostEqual(cams[i * 2].reference.location.z, 127.6, places=2)
+            self.assertAlmostEqual(cams[i * 2 + 1].reference.location.z, 62.6, places=2)  # 52.6 + 10.0
+
+    def test_find_unaligned_groups_flat_mixed_folder_zoom_split_and_rejects_stationary_pad(self) -> None:
+        """Verify flat-folder rescue separates 1x vs 2x zoom sensors and rejects stationary landing pads."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        s_2x = SimpleNamespace(key=1, calibration=SimpleNamespace(f=5910.0), focal_length=6.72)
+        s_1x = SimpleNamespace(key=0, calibration=SimpleNamespace(f=2970.0), focal_length=6.72)
+
+        def _cam(key: int, dx_m: float, dy_m: float, ra: float, aligned: bool, sensor: object) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / math.cos(math.radians(base_lat))
+            lat = base_lat + dy_m * deg_m
+            return _FakeCamera(
+                key,
+                f"img_{key}",
+                os.path.join("/p", "MixedFlat", f"img_{key}.jpg"),
+                lon,
+                lat,
+                50.0 + ra,
+                aligned=aligned,
+                meta={"DJI/AbsoluteAltitude": str(50.0 + ra), "DJI/RelativeAltitude": str(ra)},
+                sensor=sensor,
+            )
+
+        # 40 aligned 2x Mission cameras + 14 unaligned 2x edge dropouts (same zoom/alt/z0 -> 74% aligned -> skip!)
+        main_2x = [_cam(i, (i % 10) * 20.0 - 100.0, (i // 10) * 20.0 - 40.0, 75.0, True, s_2x) for i in range(40)]
+        drop_2x = [_cam(100 + i, -40.0 + i * 2.0, 10.0, 75.0, False, s_2x) for i in range(14)]
+        # 16 unaligned 1x zoom cameras in the EXACT same flat folder, same z0=50m, even same altitude band (75m)!
+        zoom_1x_orbit = [_cam(200 + i, 20.0 + i * 2.0, -10.0, 75.0, False, s_1x) for i in range(16)]
+        # 18 stationary landing-pad photos (RA=0.0m, <0.5m span, different alt band -> must be rejected by motion!)
+        pad_stack = [_cam(300 + i, 0.01 * i, 0.0, 0.0, False, s_1x) for i in range(18)]
+
+        chunk = SimpleNamespace(cameras=main_2x + drop_2x + zoom_1x_orbit + pad_stack)
+        groups = ah.find_unaligned_overlapping_groups(
+            chunk,
+            main_keys={c.key for c in main_2x},
+            min_cams=12,
+            cluster_radius_m=80.0,
+        )
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sorted(groups[0]), sorted(c.key for c in zoom_1x_orbit))
+
+    def test_tie_graph_cuts_fragile_single_edge_zoom_hinge_but_preserves_uniform_corridor(self) -> None:
+        """Verify 1-edge zoom/altitude hinge is cut for ICP while same-regime corridor waist stays unified."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        s_2x = SimpleNamespace(key=1, calibration=SimpleNamespace(f=5910.0), focal_length=6.72)
+        s_1x = SimpleNamespace(key=0, calibration=SimpleNamespace(f=2970.0), focal_length=6.72)
+
+        def _make_cam(key: int, dx_m: float, ra: float, sensor: object) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / math.cos(math.radians(base_lat))
+            return _FakeCamera(
+                key,
+                f"c_{key}",
+                f"/p/c_{key}.jpg",
+                lon,
+                base_lat,
+                50.0 + ra,
+                meta={"DJI/AbsoluteAltitude": str(50.0 + ra), "DJI/RelativeAltitude": str(ra)},
+                sensor=sensor,
+            )
+
+        def _make_dense_ring(group: list[_FakeCamera], projs: dict, start_tid: int, shared: int = 20) -> int:
+            tid = start_tid
+            n = len(group)
+            for i in range(n):
+                for step in (1, 2):
+                    j = (i + step) % n
+                    for _ in range(shared):
+                        projs[group[i]].append(SimpleNamespace(track_id=tid))
+                        projs[group[j]].append(SimpleNamespace(track_id=tid))
+                        tid += 1
+            return tid
+
+        # Case A: 20 aerial 2x (75m) hinged by ONE 22-track edge to 15 Manual 1x (10m) -> MUST CUT!
+        aer = [_make_cam(i, float(i * 5), 75.0, s_2x) for i in range(20)]
+        man = [_make_cam(100 + i, float(i * 2), 10.0, s_1x) for i in range(15)]
+        projs_a: dict[_FakeCamera, list[SimpleNamespace]] = {c: [] for c in aer + man}
+        tid = _make_dense_ring(aer, projs_a, 1)
+        tid = _make_dense_ring(man, projs_a, tid)
+        for _ in range(22):
+            projs_a[aer[0]].append(SimpleNamespace(track_id=tid))
+            projs_a[man[0]].append(SimpleNamespace(track_id=tid))
+            tid += 1
+        pts_a = [SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)]
+        chunk_a = SimpleNamespace(
+            cameras=aer + man,
+            crs=_IdentityCrs(),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(projections=projs_a, points=pts_a),
+        )
+        islands_a = ah.build_tie_point_islands(chunk_a, edge_min=15, cut_weak_hinges=True, min_bridge_cams=12)
+        self.assertEqual([len(x) for x in islands_a], [20, 15])
+
+        # Case B: Same-zoom same-altitude corridor waist (15 West <-> 15 East, 1 edge) -> MUST STAY UNIFIED!
+        west = [_make_cam(i, float(i * 5), 75.0, s_2x) for i in range(15)]
+        east = [_make_cam(100 + i, float(80 + i * 5), 75.0, s_2x) for i in range(15)]
+        projs_b: dict[_FakeCamera, list[SimpleNamespace]] = {c: [] for c in west + east}
+        tid = _make_dense_ring(west, projs_b, 1)
+        tid = _make_dense_ring(east, projs_b, tid)
+        for _ in range(22):
+            projs_b[west[-1]].append(SimpleNamespace(track_id=tid))
+            projs_b[east[0]].append(SimpleNamespace(track_id=tid))
+            tid += 1
+        pts_b = [SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)]
+        chunk_b = SimpleNamespace(
+            cameras=west + east,
+            crs=_IdentityCrs(),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(projections=projs_b, points=pts_b),
+        )
+        islands_b = ah.build_tie_point_islands(chunk_b, edge_min=15, cut_weak_hinges=True, min_bridge_cams=12)
+        self.assertEqual([len(x) for x in islands_b], [30])
+
+    def test_main_block_neighbor_continuity_protects_smooth_drift_but_quarantines_spikes(self) -> None:
+        """Verify smooth multi-battery drift (-7.6m Z / 10.3m XY) is preserved while isolated spikes quarantine."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cams: list[_FakeCamera] = []
+        projs: dict[_FakeCamera, list[SimpleNamespace]] = {}
+
+        def _add(key: int, dx_m: float, dz_err: float, dxy_err: float) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / math.cos(math.radians(base_lat))
+            est_lat = base_lat + dxy_err * deg_m
+            c = _FakeCamera(key, f"c_{key}", f"/p/c_{key}.jpg", lon, base_lat, 80.0, lon, est_lat, 80.0 + dz_err)
+            cams.append(c)
+            projs[c] = []
+            return c
+
+        # 20 healthy core cameras (dZ=+0.2m, dXY=1.0m)
+        core = [_add(i, float(i * 5), 0.2, 1.0) for i in range(20)]
+        # 8 smoothly drifting flight-strip cameras (gradual transition to dZ=-7.6m, dXY=10.3m, neighbor diff < 2m)
+        smooth_strip = [
+            _add(100 + i, 100.0 + i * 5.0, -1.0 * (i + 1) if i < 7 else -7.6, 2.0 + 1.2 * i) for i in range(8)
+        ]
+        # 1 genuine local spike connected directly to core[5] (dZ=+12.5m vs neighbor +0.2m)
+        local_spike = _add(200, 25.0, 12.5, 1.0)
+        # 1 catastrophic teleport connected to smooth_strip[-1] (dZ=+28.0m)
+        catastrophic = _add(201, 140.0, 28.0, 1.0)
+
+        tid = 1
+        chain = core + smooth_strip
+        for i in range(len(chain) - 1):
+            for _ in range(20):
+                projs[chain[i]].append(SimpleNamespace(track_id=tid))
+                projs[chain[i + 1]].append(SimpleNamespace(track_id=tid))
+                tid += 1
+        # Connect smooth_strip with multiple edges so it isn't a 1-bridge
+        for i in range(len(chain) - 2):
+            for _ in range(20):
+                projs[chain[i]].append(SimpleNamespace(track_id=tid))
+                projs[chain[i + 2]].append(SimpleNamespace(track_id=tid))
+                tid += 1
+        for spike_cam, anchor_cam in ((local_spike, core[5]), (catastrophic, smooth_strip[-1])):
+            for _ in range(20):
+                projs[spike_cam].append(SimpleNamespace(track_id=tid))
+                projs[anchor_cam].append(SimpleNamespace(track_id=tid))
+                tid += 1
+
+        pts = [SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)]
+        chunk = SimpleNamespace(
+            cameras=cams,
+            sensors=[],
+            crs=_IdentityCrs(),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(projections=projs, points=pts),
+            optimizeCameras=lambda **_kw: None,
+        )
+        res = ah.classify_and_quarantine_islands(chunk, edge_min=15, reoptimize=False)
+        self.assertEqual(sorted(res["spike_keys"]), [200, 201])
+        for c in smooth_strip:
+            self.assertTrue(c.enabled)
+            self.assertIsNotNone(c.transform)
 
 
 if __name__ == "__main__":
