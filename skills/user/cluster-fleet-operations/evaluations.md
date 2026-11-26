@@ -62,3 +62,21 @@ This evaluation suite defines benchmark scenarios to verify that autonomous agen
   - Hardcoded drive letter (e.g., hardcoded `D:\` without checking existence or space).
   - Out-of-disk unhandled exception (Win32 Error 112).
   - Scratch files abandoned after task completion.
+
+---
+
+### Scenario 4: Zero-Dependency Offline Open3D Bridge Runtime Provisioning on Bare Worker
+
+- **User Query**: *"Run a mixed-altitude `Mission + Manual` reconstruction on a remote cluster worker that only has Agisoft Metashape Pro installed (no system Python, no PyTorch, no internet) and verify offline Open3D ICP bridge auto-provisioning."*
+- **Expected Agent Action**:
+  1. Verify `<root>/.cluster/bridge_runtime/manifest.json` and the SHA-256-verified `bridge_runtime_win_amd64_v1.zip` exist on the shared cluster root.
+  2. Dispatch the project normally without installing system Python or pip packages on the worker.
+  3. Confirm `icp_bridge.py` auto-provisions the runtime once into `%LOCALAPPDATA%\AutoMetashape\bridge_runtime_v<version>`, strips Metashape directories from `PATH`, writes temporary Stage-0 PLY files strictly to `%TEMP%\autometashape_icp_*` (outside `local_staging_dir`), and removes them upon completion.
+- **Pass Criteria**:
+  - SHA-256 checksum matches `manifest.json` before extraction.
+  - CPU Open3D ICP subprocess completes cleanly with zero DLL/OpenMP collisions and zero internet access.
+  - Zero temporary PLY files leak into `local_staging_dir` or the shared Result Share.
+- **Fail Criteria**:
+  - Attempting `pip install` or requiring system Python/CUDA/PyTorch on the worker.
+  - Loading Metashape's conflicting DLLs from `PATH` inside the Open3D worker subprocess.
+  - Syncing temporary Stage-0 PLY clouds back to the NAS Result Share.

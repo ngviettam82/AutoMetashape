@@ -235,9 +235,11 @@ When submitting a standalone or queued batch to the cluster, agents and operator
      doc.clear()
      ```
    - This prevents worker failure modes where remote nodes claim a task whose project file has not yet been flushed or materialized to shared network storage, and prevents `.psx` lock contention.
-2. **Dual-SSD & Direct Storage Standard**:
+2. **Dual-SSD, Subfolder Exclusion & Alternate Dispatch Stub Recovery**:
    - Pass `--source-share` (SSD #1, raw photos) and `--result-share` (SSD #2, writable `.psx` + deliverables) to utilize two separate SSD shares without mixing I/O.
    - For datasets physically hosted on the current machine's storage, pass `--no-local-scratch-staging` to eliminate redundant local NVMe staging and disk exhaustion.
+   - Optional `--exclude-folders "pat1,pat2"` filters named subfolders out of ingestion (with automatic legacy worker shim in `build_monolithic_runscript_task` so older workers ignore unknown flags safely). Note that close-range `Manual` orbits are natively bridged by default via Zero-Neural Alignment Hygiene & Open3D ICP and do not need exclusion unless explicitly requested by the operator.
+   - **Timestamped Alternate Dispatch Stub Fallback**: When re-submitting a project whose `.psx` key is still cached on Metashape Server as a previously aborted batch (`Duplicate batch`), `submit_cluster_batch.py` automatically materializes a fresh `<project>_dispatch_<timestamp>.psx` stub while keeping the final target output directory unchanged.
 3. **Execution**:
    ```powershell
    # Single-project dual-SSD submission (5 cm/px ortho, no dense point cloud in pro preset):
@@ -282,6 +284,13 @@ When submitting a standalone or queued batch to the cluster, agents and operator
 
    # Abort a batch upon operator direction
    python scripts/manage_queue.py abort --batch 58 --demote-priority -100
+
+   # Pause / Unpause specific cluster worker(s) by hostname or worker ID
+   python scripts/manage_queue.py pause-worker --hostname CTUAV
+   python scripts/manage_queue.py unpause-worker --hostname CTUAV
+
+   # Disconnect a stale aborted ghost worker record safely
+   python scripts/manage_queue.py clear-worker --worker-id 14 --only-aborted
    ```
 
 4. **Anti-Patterns & Prohibitions**:
@@ -304,7 +313,7 @@ Verify that supervisor components, canonical scripts, and deliverable validators
 
 ```powershell
 # 1. Run unit test suite
-python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py tests/test_cluster_dispatch.py tests/test_dual_share.py tests/test_audit_regressions.py
+python -m unittest tests/test_verification.py tests/test_supervisor.py tests/test_checkpoint_loader.py tests/test_worker_abort.py tests/test_cluster_dispatch.py tests/test_dual_share.py tests/test_audit_regressions.py tests/test_exclude_folders.py
 
 # 2. Run skills validation
 python tools/skills/cli.py check

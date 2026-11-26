@@ -77,9 +77,9 @@ All human contributors and autonomous agents managing Agisoft Metashape distribu
 ### 6.4 Action-as-Code: Canonical Script Standard
 - **Ban on Ad-Hoc Freehand Scripting**: Agents must never author improvised Python scripts in chat or scratch folders to manipulate the cluster queue or submit tasks.
 - All cluster operations must strictly use the canonical, battle-tested utilities under `scripts/`:
-  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation.
+  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation, optional `--exclude-folders` (with legacy worker shim), and timestamped alternate stub recovery when Metashape Server retains stale aborted batch keys.
   - `scripts/cluster_monitor.py`: Autonomous read-only telemetry, headroom audit, and deliverable verification.
-  - `scripts/manage_queue.py`: Operator-directed queue manipulation (list, pause, unpause, set-priority, abort).
+  - `scripts/manage_queue.py`: Operator-directed queue and worker manipulation (`list`, `pause`, `unpause`, `set-priority`, `abort`, `pause-worker`, `unpause-worker`, `clear-worker --only-aborted`).
   - `scripts/inspect_checkpoint.py`: Non-destructive read-only inspection of `.psx` archives.
   - `scripts/cluster_abort.py`: Signal-based worker abort and self-healing restart.
   - `scripts/verify_deliverables.py`: Deterministic deliverable quality gate verification.
@@ -93,6 +93,8 @@ All human contributors and autonomous agents managing Agisoft Metashape distribu
 ### 6.6 Direct Storage Standard on Host Nodes
 - When processing datasets residing on the local storage or shared drive of the current physical machine, pass `--no-local-scratch-staging`. Redundant local staging from a host UNC share to a local folder on the same machine wastes I/O bandwidth, risks disk exhaustion, and bypasses existing checkpoints.
 
-### 6.7 Default Parameter Invariant
+### 6.7 Default Parameter & Zero-Neural Alignment Invariants
 - Never dynamically downscale photogrammetry parameters (such as keypoint limits, tiepoint limits, or guided matching) based on photo count heuristics. Pipeline configurations remain default, canonical, and uncompromised.
+- Keep `k4 = b1 = b2 = 0` and `adaptive_fitting = False` locked by default across alignment and USGS gradual-selection passes to prevent wide-angle UAV radial dome distortion.
+- Maintain the zero-neural, zero-OS-Python boundary for multi-flight registration: `icp_bridge.py` and `icp_worker.py` must run strictly offline on CPU via the SHA-256-verified portable `.cluster/bridge_runtime/` bundle without introducing PyTorch, CUDA toolkit, or internet dependencies on worker nodes.
 

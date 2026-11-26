@@ -47,3 +47,17 @@ We gratefully acknowledge the following upstream projects:
 - **Authors**: Johannes L. Schönberger, Jan-Michael Frahm
 - **License**: BSD-3-Clause
 - **Notice**: Structure-from-Motion (SfM) feature extraction, epipolar matching, and bundle adjustment.
+
+---
+
+## 7. Open3D
+- **Upstream**: [isl-org/Open3D](https://github.com/isl-org/Open3D)
+- **License**: MIT License
+- **Notice**: Offline CPU point-cloud normal estimation, voxel downsampling, multi-scale Tukey Sim(3) Point-to-Plane ICP, and gated Colored ICP registration executed via the isolated portable worker runtime (`source/autometashape/core/icp_worker.py` and `.cluster/bridge_runtime/`).
+
+---
+
+## 8. NumPy & SciPy
+- **Upstream**: [numpy/numpy](https://github.com/numpy/numpy) & [scipy/scipy](https://github.com/scipy/scipy)
+- **License**: BSD-3-Clause
+- **Notice**: Numerical linear algebra and geometric array processing inside the isolated offline Open3D ICP bridge worker runtime.

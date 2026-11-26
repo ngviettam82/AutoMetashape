@@ -26,7 +26,7 @@
 ### Scenario 3: Ground Handheld Walkthrough Photogrammetry & Checkpoint Resume
 - **Query**: "I took 150 photos walking around a monument without any GPS. Reconstruct it using optical ray convergence, and if interrupted, resume without restarting."
 - **Expected behavior**:
-  - Detects absence of GPS telemetry and resolves camera trajectory using visual feature matching and adaptive distortion fitting.
+  - Detects absence of GPS telemetry and resolves camera trajectory using visual feature matching with locked lens distortion (`f, cx, cy, k_1..k_3, p_1, p_2`; `k_4 = b_1 = b_2 = 0`, `adaptive_fitting = False`).
   - Applies Iteratively Reweighted Least Squares (IRLS) optical ray convergence (`--crop-method structure`) to isolate the monument from horizon background.
   - When `--resume` is specified, detects completed camera alignment checkpoints and resumes immediately at depth map computation or meshing.
   - Fuses watertight textured 3D model and native `.psx` project.
@@ -52,8 +52,8 @@
 - **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; act as a senior photogrammetrist, audit the survey optics, calculate the true GSD, run USGS gradual selection bundle adjustment, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
 - **Expected behavior**:
   - Uses `--preset pro` (or `--profile`), inspecting image telemetry, sensor hardware pitch, optical GSD in cm/px, flying height $H_{AGL}$, forward/lateral overlap, and shutter mechanism.
-  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411, Phantom 4 Pro, or Zenmuse L2; preserves rolling shutter on Hasselblad Mavic 3 L2D-20c).
-  - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `ImageCount >= 2`, capped at `<= 10%` per pass) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting and tie point covariance).
+  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411, Phantom 4 Pro, or Zenmuse L2; preserves rolling shutter on aerial CMOS payloads like DJI Air 3S `FC9113` and Hasselblad Mavic 3 `L2D-20c`).
+  - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `ImageCount >= 2`, capped at `<= 10%` per pass) with staged camera parameter unfreezing ($f, cx, cy \to f, cx, cy, k_1..k_3, p_1..p_2$ with tie point covariance) while keeping `k_4 = b_1 = b_2 = 0` and `adaptive_fitting = False` hard-locked across all passes.
   - Opts into `buildPointCloud` (`--build-point-cloud --export-point-cloud`), slope-adaptive ground classification (`--classify-ground`), `buildDem` (`--build-dem --export-dem`), `buildOrthomosaic` (`--export-ortho`), and exports an executive PDF quality report (`--export-report`).
   - Outputs the executive Geomatics Engineering Summary with initial vs optimized RMS reprojection errors.
 - **Pass/fail criteria**:
@@ -92,3 +92,14 @@
 - **Pass/fail criteria**:
   - Pass: Markers detected; reference imported; diffuse albedo texture delighted; FBX and GLB exported.
   - Fail: Failing to detect targets; crashing on reference CSV import; shadow removal failure.
+
+### Scenario 9: Multi-Flight Mixed-Altitude (`Mission + Manual`) Zero-Neural Alignment Hygiene & Open3D ICP Bridging
+- **Query**: "Reconstruct this multi-flight drone dataset at `data/survey/site_mixed` containing both a high-altitude automated grid (`Mission/`) and a low-altitude close-range hovering inspection (`Manual/`) captured with DJI Air 3S (`FC9113`) without excluding the manual folder."
+- **Expected behavior**:
+  - Stage 1 deduplicates exact duplicate images across subfolders, skips stray `*.files` directories, and recognizes DJI Air 3S (`FC9113`) sensor geometry.
+  - Stage 2 neutralizes Null-Island / `> 5 km` GPS outliers, normalizes per-flight `TakeoffZ0` barometer datum drift keyed by full parent directory path (preserving RTK Fixed flights), sets `(5, 5, 15) m` non-RTK accuracy, and hard-locks `k4 = b1 = b2 = 0`, `adaptive_fitting = False`.
+  - Stage 3 audits the shared-track tie graph (`edge >= 15`), quarantining any torn/folded rogue strips or main-block GPS spikes while queueing valid disconnected overlapping orbits (`>= 12` cameras) or unaligned close-range folders (`< 35%` aligned) for bridging.
+  - Stage 4 isolates each secondary orbit with `rolling_shutter=Disabled` (preventing scale collapse), generates 4 cm uniform Stage-0 point clouds (`points_spacing=0.04`), executes CPU Open3D multi-scale Tukey Sim(3) Point-to-Plane + gated Colored ICP via the portable offline `.cluster/bridge_runtime/` bundle, verifies the Pre-MVS Quality Gate (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`), disables bridged camera GPS refs, merges via `mergeChunks(merge_tiepoints=False)`, and clears Stage-0 dense assets before unified MVS.
+- **Pass/fail criteria**:
+  - Pass: Single unified chunk merges `Mission + Manual` within Pre-MVS Quality Gate (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `scale` near `1.0`, `tilt <= 5°`); `k4 = b1 = b2 = 0`; zero floating ghost facade layers; zero Stage-0 temporary PLYs leaked into output or staging directories.
+  - Fail: Manual orbit shrinks by 30–46% due to rolling-shutter coupling; `k4` radial dome distortion blows up corners; duplicate ghost buildings appear from unnormalized barometer Z-drift; bridge requires internet, PyTorch, or system Python.

@@ -116,9 +116,10 @@ AutoMetashape supports all core photogrammetric operations in Agisoft Metashape 
   - Samples luminance histograms to detect underexposed shadows ($Y < 20$) and highlight clipping ($Y > 235$), triggering texture delighting when shadow clipping exceeds $15\%$.
 - **⚙️ Camera Shutter Physics Conformance**:
   - Automatically identifies mechanical leaf shutters (e.g. DJI FC3411, Phantom 4 Pro FC6310, Zenmuse P1, Phase One, Hasselblad) and **disables rolling shutter compensation** to eliminate synthetic bundle adjustment drift.
-  - Enables rolling shutter compensation only on CMOS rolling shutter payloads (DJI Mini, Mavic Air, consumer smartphones).
-- **📐 USGS 4-Pass Gradual Selection Bundle Adjustment**:
-  - Staged parameter unfreezing schedule: Pass 1 (RU $\le 12 \to f, cx, cy$) $\to$ Pass 2 (PA $\le 2.5\text{ px} \to k_1..k_3, p_1, p_2$) $\to$ Pass 3 (RE $\le 0.35\text{ px} \to k_4, b_1, b_2$, adaptive fitting) $\to$ Pass 4 (Image multiplicity $\ge 3$).
+  - Enables `Regularized` rolling shutter compensation on aerial CMOS rolling shutter payloads (DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`, Mini/Air series, consumer smartphones), while **explicitly disabling rolling shutter on isolated close-range hovering ICP island orbits** to prevent bundle-adjustment scale collapse.
+- **📐 USGS 4-Pass Gradual Selection Bundle Adjustment (`k4=b1=b2=0` Lens Lock)**:
+  - Staged parameter unfreezing schedule with gentle architectural thresholds (`<= 10%` removal cap per pass): Pass 1 (RU $\le 15.0 \to f, cx, cy$) $\to$ Pass 2 (PA $\le 3.0\text{ px} \to f, cx, cy, k_1..k_3, p_1, p_2$) $\to$ Pass 3 (RE $\le 0.50\text{ px} \to f, cx, cy, k_1..k_3, p_1, p_2$ with tie-point covariance) $\to$ Pass 4 (Image multiplicity $\ge 2$).
+  - **Hard-locks `k4 = b1 = b2 = 0` and `adaptive_fitting = False`** across alignment and all 4 optimization passes to eliminate consumer UAV wide-angle radial dome blowup (`--adaptive-fitting` remains available as an explicit opt-in override).
   - Reports initial vs optimized RMS reprojection errors with reduction percentages.
 - **🎨 1:1 Ground Texel Density Budgeting**:
   - Dynamically calculates the exact 8K texture atlas page count needed to match optical camera resolution on the 3D mesh surface, preventing blurry textures or bloated empty UV sheets.
@@ -129,11 +130,18 @@ AutoMetashape supports all core photogrammetric operations in Agisoft Metashape 
 - **🗺️ Aerial Map Preset (`--preset map`)**:
   - 2M polygon faces, 4-page 8K texture atlas, full uncropped terrain extent, and GeoTIFF orthomosaic.
 
-### 3. Robust Single-Chunk Global Alignment & Multi-Chunk Registration
-- **Single-Chunk Global Alignment (Default, `--multi-chunk disable`)**: To prevent false alignment artifacts or coordinate shifts caused by chunk merging, AutoMetashape defaults to loading all photos across all subfolders into a single unified chunk, solving bundle adjustment globally.
-- **Optional Multi-Chunk Mode (`--multi-chunk auto`)**: When enabled, automatically assigns nested flight subfolders (`flight_1/`, `flight_2/`) to independent chunks and solves sensor calibrations independently.
-- **Camera/GPS-Based Registration (`method=2`, Default)**: Aligns secondary chunks to the anchor flight using camera reference coordinates to prevent 180-degree rotation flips on symmetric structures.
-- **Point-Based RANSAC ICP Fallback (`method=0`)**: If camera reference coordinates are unavailable or degraded, automatically falls back to point-based ICP (`fit_scale=True`).
+### 3. Zero-Neural Universal Alignment Hygiene & Open3D ICP Bridge
+- **Single-Chunk Global Alignment (Default, `--multi-chunk disable`)**: Loads all photos across subfolders into a unified chunk while automatically deduplicating exact duplicate photos, skipping stray `.files` directories, registering DJI Air 3S (`FC9113`) optics, and supporting optional `--exclude-folders`.
+- **Pre-Alignment GPS & Barometer Hygiene (`--alignment-hygiene`, Default: On)**:
+  - Neutralizes Null-Island `(0, 0)` and `> 5 km` GPS outliers before matching.
+  - Normalizes per-flight barometer datum drift via `TakeoffZ0 = AbsoluteAltitude - RelativeAltitude` keyed by full parent directory path, while preserving RTK Fixed surveys untouched and setting anisotropic `(5, 5, 15) m` non-RTK GPS accuracy.
+  - Hard-locks `k4 = b1 = b2 = 0` and `adaptive_fitting = False` to prevent radial dome distortion on wide-angle UAV sensors.
+- **Tie-Graph Topology Audit & Quarantine**: Builds the shared-track camera graph (`edge >= 15`) after global alignment to quarantine torn/folded/tiny rogue strips and main-block GPS spikes (`|dZ| > 7 m` or `dXY > 10 m`), while preserving coherent distant compounds and automatically queueing disconnected overlapping rigid islands (`>= 12` cameras) or unaligned close-range folders (`< 35%` aligned) regardless of folder naming.
+- **Zero-Neural CPU Open3D Sim(3) ICP Bridge (`--icp-bridge`, Default: On)**:
+  - **Zero-Overhead Fast Path**: Skips ICP completely when the project aligns cleanly into a single coherent block.
+  - **Portable Offline Runtime (`.cluster/bridge_runtime/`)**: Auto-provisions a SHA-256-verified standalone CPython 3.11 + Open3D + NumPy + SciPy bundle into `%LOCALAPPDATA%\AutoMetashape\` (~2.5 s one-time extraction; zero system Python, PyTorch, CUDA, admin rights, or internet required).
+  - **Pre-MVS Quality Gate & Scale Protection**: Disables rolling shutter on isolated close-range hovering orbits to prevent scale collapse, runs 4 cm uniform Stage-0 point-cloud extraction (32 GB RAM safe) + multi-scale Tukey Sim(3) Point-to-Plane and gated Colored ICP + pure-Python 3×3 SVD UTM→ECEF alignment, enforces strict acceptance gates (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`), merges via `mergeChunks(merge_tiepoints=False)` with bridged GPS references disabled, and clears Stage-0 assets before unified MVS.
+- **Optional Legacy Multi-Chunk Mode (`--multi-chunk auto`)**: Assigns nested flight subfolders to independent chunks with camera/GPS (`method=2`) or point-based RANSAC ICP (`method=0`) chunk registration.
 
 ### 4. Comprehensive Image & Sensor Format Ingestion
 Recursively scans image folders and nested directories for all supported formats:
@@ -171,19 +179,20 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
 
 ```mermaid
 flowchart TD
-    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Ingestion & Telemetry Profiling<br/>(EXIF / XMP Optics, GPS Extent, Shutter Analysis)"]
+    A["Raw Image Directory<br/>(Recursive Scan, Exact Dedup, *.files Skip)"] --> B["1. Telemetry Audit & Pre-Alignment Hygiene<br/>(Optics DB incl. FC9113, Null-Island/TakeoffZ0 Fix, k4/b1/b2 Lock)"]
     B --> C["2. Quality Filtering, Markers & GCPs<br/>(Sharpness Filter < 0.50, detectMarkers, importReference)"]
-    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 40K/60K Keypoints, 25K Tiepoints, Guided Matching)"]
-    D --> E["4. Bounding Box Cropping<br/>(gps-square | none | structure | manual)"]
-    E --> F["5. Multi-View Stereo (MVS) Depth Maps<br/>(Medium Quality, Moderate / Aggressive Filtering)"]
-    F --> G["6. Dense Point Cloud & AI Classification<br/>(buildPointCloud, Confidence Filtering, Ground / Semantic AI Classification)"]
-    F --> H["7. Surface Meshing & Topology<br/>(Arbitrary / HeightField, 600K-2M Faces, Smoothing, Decimation)"]
-    H --> I["8. Texture Atlas & Delighting<br/>(8K Lossless TIFF, Mosaic Blending, removeLighting Diffuse Albedo)"]
+    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global BA, 50K Keypoints, 40K Tiepoints, 2K/MPx, Guided Matching)"]
+    D --> D2["3b. Tie-Graph Audit, USGS 4-Pass & Open3D ICP Bridge<br/>(Rogue Quarantine, k4/b1/b2 Locked BA, Offline CPU Sim(3) ICP + Quality Gate)"]
+    D2 --> E["4. Bounding Box Cropping<br/>(gps-square | none | structure | manual)"]
+    E --> F["5. Multi-View Stereo (MVS) Depth Maps<br/>(High Quality, Moderate / Aggressive Filtering)"]
+    F --> G["6. Opt-In Dense Point Cloud & AI Classification<br/>(--build-point-cloud, Confidence Filtering, Ground / Semantic AI)"]
+    F --> H["7. Surface Meshing & Topology<br/>(Arbitrary 2M Faces Default / HeightField, Smoothing, Decimation)"]
+    H --> I["8. 16x 8K Texture Atlas & Delighting<br/>(16x 8192x8192 PNG/TIFF, Mosaic Blending, Optional removeLighting)"]
     F --> J["9. Hierarchical 3D Tiled Model<br/>(buildTiledModel: Cesium 3D Tiles, TLS, SLPK, OSGB)"]
-    F --> K["10. Digital Elevation Model & Contours<br/>(buildDem + buildContours: GeoTIFF, SHP, DXF, GeoJSON)"]
-    H --> L["11. GeoTIFF Orthomosaic<br/>(buildOrthomosaic + BigTIFF LZW Export)"]
-    D --> M["12. Executive PDF Calibration Report<br/>(exportReport: camera errors, overlap, GSD)"]
-    G --> N["Output Directory: <images_dir>/model/<br/>• 3D Models: model.glb, model.obj, model.fbx, model.ply, model.dxf<br/>• Dense Cloud: point_cloud.laz, tie_points.ply<br/>• 3D Tiles: tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: dem.tif, contours.shp, contours.dxf<br/>• Ortho & Report: orthomosaic.tif, report.pdf<br/>• Project Archive: building_reconstruction.psx"]
+    F --> K["10. Opt-In DEM & Topographic Contours<br/>(--build-dem + --build-contours: GeoTIFF, SHP, DXF, GeoJSON)"]
+    H --> L["11. Metric GeoTIFF Orthomosaic<br/>(5 cm/px Default UTM CRS, BigTIFF LZW + TFW/PRJ)"]
+    D2 --> M["12. Executive PDF Calibration Report<br/>(exportReport: camera errors, overlap, GSD)"]
+    G --> N["Output Directory: <output_dir>/<br/>• 3D Models: <project>.obj/.mtl/.png, .glb, .fbx, .ply, .dxf<br/>• Opt-In Dense Cloud: <project>.laz, tie_points.ply<br/>• 3D Tiles: tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: dem.tif, contours.shp, contours.dxf<br/>• Ortho & Report: <project>_orthomosaic.tif (+ .tfw/.prj), report.pdf<br/>• Project Archive: <project>.psx + <project>.files/"]
     H --> N
     I --> N
     J --> N
@@ -219,7 +228,10 @@ All outputs are automatically organized inside the dedicated `<images_dir>/model
 
 This repository adheres to the **NVIDIA Isaac Lab** multi-asset skill architecture and governance standards:
 
-- [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md): Autonomous end-to-end photogrammetry pipeline with survey telemetry profiling, target detection, GCP georeferencing, dense point clouds, 3D tiles, DEM, contours, texture delighting, and PDF reporting.
+- [`skills/user/autonomous-photogrammetry`](skills/user/autonomous-photogrammetry/SKILL.md): Master coordinator for end-to-end multi-dataset photogrammetry operations across single or dual-SSD shared folder topologies.
+- [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md): Autonomous end-to-end photogrammetry pipeline with survey telemetry profiling, 4-stage zero-neural alignment hygiene & Open3D ICP bridging, `k4=b1=b2=0` lens lock, target detection, GCP georeferencing, opt-in dense point clouds, 3D tiles, DEM, contours, texture delighting, and PDF reporting.
+- [`skills/user/cluster-fleet-operations`](skills/user/cluster-fleet-operations/SKILL.md): Distributed cluster provisioning, dynamic multi-GPU discovery, fixed-NVMe local scratch staging, portable offline `.cluster/bridge_runtime/` provisioning, canary fleet updates, and signal-based worker abort & self-healing restarts.
+- [`skills/user/cluster-supervisor`](skills/user/cluster-supervisor/SKILL.md): Strict read-only cluster supervision under the Operator Authority Gate, storage headroom watchdogs, canonical batch submission & queue/worker controls, and deterministic deliverable quality gates.
 - [`skills/user/photogrammetry-export`](skills/user/photogrammetry-export/SKILL.md): Production asset export, 3D tiles, contours, point clouds, DEM, FBX/PLY, and texture delighting from existing projects.
 - [`skills/developer/coding-style`](skills/developer/coding-style/SKILL.md): Repository coding conventions, SPDX license headers, line limits, and formatting hygiene.
 - [`skills/developer/pr-workflow`](skills/developer/pr-workflow/SKILL.md): Conventional commits, DCO sign-offs, and presubmit validation pipelines.

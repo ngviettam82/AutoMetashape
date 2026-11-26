@@ -104,6 +104,13 @@ During large-scale reconstructions (1,000+ to 10,000+ photos), intermediate scra
 - **Atomic Deliverable Sync & Status Finalization**: Consolidated deliverables and project files are synchronized atomically to the Result Share, `_autometashape_status.json` is finalized to `status="completed"` (`progress=100.0`) after sync (both external shared `--status-file` and default staged sidecar), and local scratch is cleanly purged.
 - **Opt-Out**: Pass `--no-stage-local` to bypass local staging.
 
+### 3b. Portable Offline Open3D Bridge Runtime Provisioning (`.cluster/bridge_runtime/`)
+To support the Zero-Neural CPU Open3D Sim(3) ICP Bridge (`source/autometashape/core/icp_bridge.py` + `icp_worker.py`) on bare worker nodes that have **no system Python, no PyTorch, no CUDA toolkit, no admin rights, and no internet access**:
+- **Shared Bundle Hosting**: The shared cluster root hosts `<root>/.cluster/bridge_runtime/manifest.json` alongside the SHA-256-verified `bridge_runtime_win_amd64_v1.zip` (~107 MB portable CPython 3.11 + Open3D + NumPy + SciPy + MSVC runtime DLLs).
+- **Zero-Touch One-Time Auto-Provisioning**: On the first project requiring ICP bridging, `icp_bridge.py` verifies the bundle SHA-256 against `manifest.json` and extracts it atomically into `%LOCALAPPDATA%\AutoMetashape\bridge_runtime_v<version>` (~2.5 s via built-in `zipfile`). Single-block projects never invoke the bridge runtime (0 s overhead).
+- **DLL & Environment Isolation**: `_clean_bridge_env()` strips Metashape binary directories from `PATH` and clears `PYTHONHOME` / `PYTHONPATH` before spawning the worker subprocess so Metashape's bundled Qt/OpenMP/VC++ DLLs cannot conflict with Open3D.
+- **32 GB RAM Safety & Isolated Temp Lifecycle**: Stage-0 dense cloud generation enforces `uniform_sampling=True, points_spacing=0.04` (4 cm spacing) to cap memory footprint, writes temporary PLY point clouds strictly to `%TEMP%\autometashape_icp_*` (outside `local_staging_dir` so they are never synced to the Result Share), and automatically purges stale `autometashape_icp_*` directories older than 24 hours.
+
 ### 4. Autonomous 1-Hour Monitoring & Self-Healing Protocol
 For multi-hour cluster runs, run the canonical read-only monitor CLI:
 ```powershell
@@ -254,8 +261,8 @@ python tools/skills/cli.py check
 # Audit license compliance
 python tools/check_licenses.py
 
-# Execute test suite covering cluster utilities, dual-share topology, and regression guards
-python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py tests/test_worker_abort.py tests/test_dual_share.py tests/test_audit_regressions.py
+# Execute test suite covering cluster utilities, dual-share topology, alignment hygiene, ICP bridge, and regression guards
+python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py tests/test_worker_abort.py tests/test_dual_share.py tests/test_audit_regressions.py tests/test_alignment_hygiene.py tests/test_icp_bridge.py tests/test_exclude_folders.py
 ```
 
 ---

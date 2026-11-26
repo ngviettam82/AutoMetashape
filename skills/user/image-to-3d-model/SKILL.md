@@ -18,7 +18,8 @@ Autonomous end-to-end photogrammetry and aerial survey pipeline transforming raw
 Use this skill when:
 - The user provides an image folder (drone survey, building inspection, or ground photogrammetry) and requests 3D models, classified point clouds, digital elevation models, topographic contours, or orthomosaic maps.
 - The user requests an agent that acts like a **Senior Certified Photogrammetrist & Geomatics Engineer**: never relying on simplistic preset heuristics, but systematically auditing survey physics (physical sensor dimensions, pixel pitch in $\mu\text{m}$, flying height $H_{AGL}$, true Ground Sampling Distance GSD in $\text{cm/px}$, forward/lateral overlap geometry, mechanical leaf vs CMOS electronic rolling shutter distinction, dynamic range shadow clipping, and topographic relief ratio $R = \Delta Z / D_{diag}$).
-- Professional bundle adjustment optimization is required: executes the **USGS 4-Pass Gradual Selection protocol** (`ReconstructionUncertainty` $\to$ `ProjectionAccuracy` $\to$ `ReprojectionError` $\to$ `ImageCount` multiplicity) with staged camera parameter unfreezing ($f, cx, cy \to k_1..k_3, p_1..p_2 \to k_4, b_1, b_2$ with adaptive fitting) using gentle architectural thresholds (`RU <= 15.0`, `PA <= 3.0 px`, `RE <= 0.50 px`, `Rays >= 2`, capped at `<= 10%` removal per pass).
+- Professional bundle adjustment optimization is required: executes the **USGS 4-Pass Gradual Selection protocol** (`ReconstructionUncertainty` $\to$ `ProjectionAccuracy` $\to$ `ReprojectionError` $\to$ `ImageCount` multiplicity) with staged camera parameter unfreezing ($f, cx, cy \to f, cx, cy, k_1..k_3, p_1, p_2$ with tie-point covariance) while **strictly locking `k4 = b1 = b2 = 0` and `adaptive_fitting = False`** across all passes using gentle architectural thresholds (`RU <= 15.0`, `PA <= 3.0 px`, `RE <= 0.50 px`, `Rays >= 2`, capped at `<= 10%` removal per pass).
+- Multi-flight mixed-altitude or oblique/manual drone surveys require **4-Stage Zero-Neural Universal Alignment Hygiene & Open3D ICP Bridging** (exact duplicate photo deduplication, `TakeoffZ0` barometer datum normalization with RTK Fixed preservation, tie-graph rogue strip quarantine, and Pre-MVS quality-gated CPU Open3D Sim(3) Point-to-Plane + Colored ICP fusion with zero PyTorch/CUDA/internet dependencies).
 - Deterministic 16-page 8K Texture Atlas Baking is needed: produces $16 \times 8192 \times 8192$ mosaic-blended textures by default in `pro` preset (reusing existing Metashape 2.2.2 `BuildUV/page_count` atlases automatically on `--resume`).
 - Dense 3D Point Clouds are required: generates point clouds directly from depth maps (`chunk.buildPointCloud()`), filters low-confidence points, performs slope-adaptive ground classification (`classifyGroundPoints`), or applies AI semantic classification (`classifyPoints`) with export to compressed LAZ, LAS, PLY, E57, or XYZ.
 - Hierarchical 3D Tiled Models (LOD) are required: generates streaming LOD tilesets in Cesium 3D Tiles (`tileset.json` + `b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), or OpenSceneGraph (`.osgb`) for massive web GIS applications.
@@ -40,10 +41,11 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    A["Raw Image Directory<br/>(Scanned Recursively across Subfolders)"] --> B["1. Pro Survey Physics & Telemetry Audit<br/>(Optics DB, Pixel Pitch, H_AGL, GSD, Shutter Physics, Relief Ratio R)"]
+    A["Raw Image Directory<br/>(Recursive Scan, Exact Dedup, *.files Skip)"] --> B["1. Survey Physics Audit & Pre-Alignment Hygiene<br/>(Optics DB incl. FC9113, Null-Island/TakeoffZ0 Fix, k4/b1/b2 Lock)"]
     B --> C["2. Quality Filtering, Markers & GCPs<br/>(Sharpness Filter < 0.50, detectMarkers, importReference)"]
-    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global Bundle Adjustment, 50K Keypoints, 40K Tiepoints, 2K/MPx, Guided Matching)"]
-    D --> E["4. USGS 4-Pass Gradual Selection Bundle Adjustment<br/>(Pass 1: RU<=15 -> Pass 2: PA<=3.0 -> Pass 3: RE<=0.50 -> Pass 4: Rays>=2, <=10%/pass)"]
+    C --> D["3. GPU Feature Matching & Camera Alignment<br/>(Single-Chunk Global BA, 50K Keypoints, 40K Tiepoints, 2K/MPx, Guided Matching)"]
+    D --> D2["3b. Tie-Graph Audit & Zero-Neural Open3D ICP Bridge<br/>(Rogue Quarantine, Isolated RS=Disabled, Offline CPU Sim(3) ICP + Quality Gate)"]
+    D2 --> E["4. USGS 4-Pass Gradual Selection Bundle Adjustment<br/>(RU<=15 -> PA<=3.0 -> RE<=0.50 -> Rays>=2, <=10%/pass, k4=b1=b2=0 Locked)"]
     E --> F["5. 3D Surface Meshing<br/>(Pro Default: Arbitrary 2M Faces | Optional HeightField Override)"]
     E --> G["6. Opt-In Dense Point Cloud & Ground Filtering<br/>(--build-point-cloud, Adaptive Cell Size & Angle, Semantic AI)"]
     F --> H["7. Deterministic 16x 8K Texture Atlas & Delighting<br/>(16x 8192x8192 Mosaic Blending, Metashape 2.2.2 Resume Reuse, Optional removeLighting)"]
@@ -66,20 +68,26 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 2. **Execute the Survey Physics Audit First**: Run `--profile` or compute the optics metrics before proposing or executing a reconstruction.
 3. **Respect Camera Shutter Physics**:
    - For **Mechanical Leaf / Global Shutters** (e.g. DJI Phantom 4 Pro `FC6310`, Mavic 3 Enterprise Wide `FC3411`, Zenmuse P1, Phase One, Hasselblad): **Rolling shutter compensation must be DISABLED**. Enabling rolling shutter compensation on mechanical leaf shutters introduces ill-conditioned parameters into bundle adjustment and causes synthetic elevation drift.
-   - For **Electronic CMOS Rolling Shutters** (e.g. DJI Mini series, Mavic Air, Air 2S, Mavic Pro, consumer smartphones): Enable `Metashape.Shutter.Model.Regularized` to eliminate flight-velocity shear.
-4. **Execute the USGS 4-Pass Gradual Selection Protocol**:
-   Never accept raw sparse tie points. Staged parameter unfreezing with a `<= 10%` per-pass removal cap protects thin structures while cleaning outliers:
+   - For **Electronic CMOS Rolling Shutters** (e.g. DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`, DJI Mini series, Mavic Air, Air 2S, consumer smartphones): Enable `Metashape.Shutter.Model.Regularized` on high-altitude aerial flight lines to eliminate flight-velocity shear.
+   - **Close-Range Hovering Orbit Exception (`icp_bridge.py`)**: On isolated low-altitude / slow-hovering manual island orbits, explicitly force `Metashape.Shutter.Model.Disabled` before bundle adjustment. Empirical testing confirmed that `Regularized` rolling shutter estimation collapses isolated manual orbit scale by 30–46%.
+4. **Execute the USGS 4-Pass Gradual Selection Protocol (`k4 = b1 = b2 = 0` Lens Lock)**:
+   Never accept raw sparse tie points. Staged parameter unfreezing with a `<= 10%` per-pass removal cap protects thin structures while cleaning outliers, and **strictly locks `fit_k4=False, fit_b1=False, fit_b2=False, adaptive_fitting=False`** across alignment and all 4 passes to prevent wide-angle consumer UAV radial dome blowup:
    - **Pass 1 (Reconstruction Uncertainty $\le 15.0$)**: Prunes tie points with shallow ray intersection angles. Unfreezes basic interior orientation: $f, cx, cy$ only.
-   - **Pass 2 (Projection Accuracy $\le 3.0\text{ px}$)**: Prunes tie points with ambiguous pixel correlation. Unfreezes radial distortion: $f, cx, cy, k_1, k_2, k_3, p_1, p_2$.
-   - **Pass 3 (Reprojection Error $\le 0.50\text{ px}$)**: Prunes high-residual outlier points. Unfreezes complete polynomial model: $f, cx, cy, k_1..k_4, b_1, b_2, p_1, p_2$ with adaptive fitting and tie point covariance.
-   - **Pass 4 (Image Multiplicity $\ge 2$)**: Retains robust multi-view structural rays, locks in bundle adjustment geometry, and reports initial vs final RMS reprojection error.
-5. **Configure 3D Surface Meshing & Opt-In Ground Filtering**:
+   - **Pass 2 (Projection Accuracy $\le 3.0\text{ px}$)**: Prunes tie points with ambiguous pixel correlation. Unfreezes radial & tangential distortion: $f, cx, cy, k_1, k_2, k_3, p_1, p_2$.
+   - **Pass 3 (Reprojection Error $\le 0.50\text{ px}$)**: Prunes high-residual outlier points. Refines $f, cx, cy, k_1, k_2, k_3, p_1, p_2$ with tie-point covariance (`fit_k4=False, fit_b1=False, fit_b2=False, adaptive_fitting=False`).
+   - **Pass 4 (Image Multiplicity $\ge 2$)**: Retains robust multi-view structural rays, locks in bundle adjustment geometry (`k4=b1=b2=0`), and reports initial vs final RMS reprojection error.
+5. **Enforce 4-Stage Zero-Neural Universal Alignment Hygiene & Open3D ICP Bridge (`--alignment-hygiene`, `--icp-bridge`, Default: Enabled)**:
+   - **Stage 1 (Ingestion Hygiene)**: Deduplicates exact duplicate photos across nested subfolders (`deduplicate_photo_groups()`), skips stray `*.files` directories, registers DJI Air 3S (`FC9113`) optics, and supports optional `--exclude-folders`.
+   - **Stage 2 (Pre-Alignment GPS & Lens Hygiene)**: Neutralizes Null-Island `(0, 0)` and `> 5 km` GPS outliers, normalizes per-flight barometer datum drift via `TakeoffZ0 = AbsoluteAltitude - RelativeAltitude` keyed by full parent directory path (preserving RTK Fixed surveys untouched), sets anisotropic `(5, 5, 15) m` non-RTK GPS accuracy, and enforces `k4 = b1 = b2 = 0`, `adaptive_fitting = False`.
+   - **Stage 3 (Tie-Graph Topology Audit & Quarantine)**: Builds the shared-track camera graph (`edge >= 15`) after global alignment to quarantine torn/folded/tiny rogue strips and main-block GPS spikes (`|dZ| > 7 m` or `dXY > 10 m`), preserves coherent distant compounds, and queues overlapping rigid disconnected islands (`>= 12` cameras) plus unaligned close-range folders (`< 35%` aligned) purely by geometry (agnostic of folder names).
+   - **Stage 4 (Zero-Neural CPU Open3D Sim(3) ICP Bridge & Pre-MVS Quality Gate)**: Runs with **zero overhead** when the scene aligns cleanly into a single block. When disconnected overlapping islands exist, it isolates each island with `rolling_shutter=Disabled`, builds 4 cm uniform Stage-0 point clouds (`uniform_sampling=True, points_spacing=0.04` for 32 GB RAM safety), exports temp PLYs outside `local_staging_dir` (`%TEMP%\autometashape_icp_*`), spawns the portable offline CPU Open3D worker (`.cluster/bridge_runtime/`, Metashape `PATH` stripped, non-DJI `±45 m` wide Z-drift auto-centering, multi-scale Tukey Sim(3) Point-to-Plane + gated Colored ICP), computes exact UTM→ECEF via pure-Python 3×3 SVD, enforces the **Pre-MVS Quality Gate** (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`), disables bridged GPS references, merges via `mergeChunks(merge_tiepoints=False)`, and clears Stage-0 dense assets so final MVS runs cleanly on the unified camera block.
+6. **Configure 3D Surface Meshing & Opt-In Ground Filtering**:
    - The `pro` preset defaults to **`Arbitrary`** 3D surface meshing (`2,000,000` faces, `gps-square` crop) so both planar sites and vertical architecture reconstruct accurately without cliff/facade loss (`--surface-type heightfield` remains available as an explicit override).
    - When `--build-point-cloud --classify-ground` is opted in, ground classification defaults to `cell_size = 12.0m`, `max_angle = 28.0 deg`, `max_distance = 0.3m`.
-6. **Enforce Deterministic 16× 8K Texture Atlases**:
+7. **Enforce Deterministic 16× 8K Texture Atlases**:
    - The `pro` preset bakes **16× 8K (`8192×8192`)** UV pages (`--texture-pages 16`, default `--texture-format png`, optional `tiff`/`jpg`).
    - On `--resume`, `_get_model_texture_page_count()` reads Metashape 2.2.2's `model.meta["BuildUV/page_count"]` so an existing 16-page atlas is reused immediately instead of triggering a redundant re-bake.
-7. **Present the Executive Geomatics Engineering Summary**:
+8. **Present the Executive Geomatics Engineering Summary**:
    Provide the user with an authoritative engineering report:
    ```
    ================================================================================
@@ -100,14 +108,15 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 ### 2. Complete Metashape Processing Functions
 
 1. **Ingestion, Quality Filtering & Georeferencing**:
-   - Recursively traverses `<images_dir>` across all subdirectories, ingesting standard rasters (`.jpg`, `.png`, `.tif`, `.webp`, `.exr`), drone RAW formats (`.dng`, `.cr3`, `.nef`, `.arw`), and radiometric sequences (`.seq`, `.ara`).
+   - Recursively traverses `<images_dir>` across all subdirectories, deduplicating exact duplicate images, skipping stray `*.files` directories, supporting optional `--exclude-folders`, and ingesting standard rasters (`.jpg`, `.png`, `.tif`, `.webp`, `.exr`), drone RAW formats (`.dng`, `.cr3`, `.nef`, `.arw`), and radiometric sequences (`.seq`, `.ara`).
    - Executes `chunk.analyzeImages()` to calculate edge gradient sharpness ($<0.50$ disabled).
    - Target Marker Detection (`--detect-markers`, `--target-type`): detects circular coded targets (12-20 bit), cross targets, and AprilTags via `chunk.detectMarkers()`.
    - GCP Reference Import (`--import-reference <path>`): loads ground survey reference CSV/TXT coordinates via `chunk.importReference()` and executes `chunk.updateTransform()`.
 
-2. **Camera Alignment & Radiometric Calibration**:
+2. **Camera Alignment, Hygiene & Radiometric Calibration**:
    - Matching Quality: High (`downscale=1`) in the `pro` preset (customizable via `--align-quality`).
-   - Pro Preset Alignment Defaults: Keypoint Limit `50,000`, Tiepoint Limit `40,000`, Keypoint Limit per MPx `2,000` (preventing guided-matching RAM spikes), Guided Matching enabled by default.
+   - Pro Preset Alignment Defaults: Keypoint Limit `50,000`, Tiepoint Limit `40,000`, Keypoint Limit per MPx `2,000` (preventing guided-matching RAM spikes), Guided Matching enabled by default, `adaptive_fitting=False` (`k4=b1=b2=0` hard-locked by default).
+   - Alignment Hygiene & Zero-Neural ICP Bridge (`--alignment-hygiene` / `--no-alignment-hygiene`, `--icp-bridge` / `--no-icp-bridge`, both enabled by default): Sanitizes GPS outliers and barometer `TakeoffZ0` drift pre-alignment, audits the post-alignment tie-point graph to quarantine rogue strips/spikes, and bridges valid disconnected overlapping orbits via portable offline CPU Open3D Sim(3) ICP with Pre-MVS Quality Gate.
    - Reference Preselection Mode (`--reference-preselection-mode estimated`): Configures camera pair matching using `ReferencePreselectionEstimated` by default, projecting estimated camera frustums onto terrain to robustly pair photos across multi-drone, multi-altitude, or oblique inspection flights without camera dropping.
    - Single-Chunk Default (`--multi-chunk disable`): Solves all images globally in one bundle adjustment to prevent false alignment or chunk-merging offsets.
    - Radiometric Calibration (`--calibrate-colors`): Performs camera color and white balance equalization across frames via `chunk.calibrateColors()`.
@@ -420,6 +429,10 @@ python scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset
 
 # Checkpoint Resume:
 & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --resume
+
+# Optional Opt-Out of Alignment Hygiene / Open3D ICP Bridge or Subfolder Exclusion:
+& "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py `
+    --images "D:/Surveys/Site_A" --preset pro --no-icp-bridge --exclude-folders "test,draft"
 ```
 
 ---
@@ -429,16 +442,17 @@ python scripts/metashape_reconstruction.py --images "D:/Surveys/Site_A" --preset
 Reconstruction outputs must satisfy the following quality criteria:
 1. **Camera Quality Filtering**: All active cameras must have sharpness quality $\ge 0.50$ (blurry frames disabled).
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
-3. **Reprojection Residuals**: Bundle adjustment gradual selection targets gentle architectural thresholds (`RU <= 15.0`, `PA <= 3.0 px`, `RE <= 0.50 px`, capped at `<= 10%` removal per pass).
-4. **Tie-Point Multiplicity**: Multi-ray intersections maintain multiplicity $\ge 2$ rays across structural geometry.
-5. **Shutter Mechanics Conformance**: Rolling shutter compensation verified as DISABLED for mechanical leaf shutters (e.g. DJI FC3411, FC6310, Zenmuse P1, Zenmuse L2) and ENABLED for CMOS rolling shutters (e.g. Hasselblad Mavic 3 L2D-20c).
-6. **Point Cloud Integrity**: When opt-in `--build-point-cloud --export-point-cloud` is requested, `<project>.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
-7. **Surface Topology**: Arbitrary (`2,000,000` faces default in `pro`) or HeightField surface mesh free from degenerate zero-area faces.
-8. **8K Texture Atlas**: Deterministic 16-page 8K ($16 \times 8192 \times 8192$) atlas with zero unmapped black voids (reused on `--resume` without redundant re-baking).
-9. **Elevation Models & Contours**: GeoTIFF orthomosaic (`<project>_orthomosaic.tif` at `5 cm/px` default in metric UTM CRS) and optional `<project>_dem.tif` / `<project>_contours.shp` exported with accompanying `.tfw` / `.prj` files.
-10. **Tiled Model**: Cesium 3D Tiles (`tileset.json`) or TLS archive exported with valid LOD bounding hierarchy when enabled.
-11. **Quality Report**: `<project>_report.pdf` generated containing camera calibration parameters and error estimates when `--export-report` is enabled.
-12. **Native Project**: Native `<project>.psx` archive saved with portable camera paths and loadable in Agisoft Metashape Professional GUI.
+3. **Reprojection Residuals & Lens Lock**: Bundle adjustment gradual selection targets gentle architectural thresholds (`RU <= 15.0`, `PA <= 3.0 px`, `RE <= 0.50 px`, capped at `<= 10%` removal per pass) with **`k4 = b1 = b2 = 0` and `adaptive_fitting = False` verified locked** across all sensors.
+4. **Tie-Point Multiplicity & Alignment Hygiene**: Multi-ray intersections maintain multiplicity $\ge 2$ rays across structural geometry; torn rogue strips and main-block GPS spikes (`|dZ| > 7 m` or `dXY > 10 m`) are quarantined via tie-graph audit (`edge >= 15`).
+5. **Shutter Mechanics Conformance**: Rolling shutter compensation verified as DISABLED for mechanical leaf shutters (e.g. DJI FC3411, FC6310, Zenmuse P1, Zenmuse L2) and isolated close-range hovering ICP islands, and ENABLED (`Regularized`) for aerial CMOS rolling shutters (e.g. DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`).
+6. **Zero-Neural ICP Bridge Pre-MVS Quality Gate** (when disconnected overlapping orbits are bridged): Merged islands satisfy `fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`, bridged camera GPS references disabled, and Stage-0 dense assets cleared before unified MVS.
+7. **Point Cloud Integrity**: When opt-in `--build-point-cloud --export-point-cloud` is requested, `<project>.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
+8. **Surface Topology**: Arbitrary (`2,000,000` faces default in `pro`) or HeightField surface mesh free from degenerate zero-area faces.
+9. **8K Texture Atlas**: Deterministic 16-page 8K ($16 \times 8192 \times 8192$) atlas with zero unmapped black voids (reused on `--resume` without redundant re-baking).
+10. **Elevation Models & Contours**: GeoTIFF orthomosaic (`<project>_orthomosaic.tif` at `5 cm/px` default in metric UTM CRS) and optional `<project>_dem.tif` / `<project>_contours.shp` exported with accompanying `.tfw` / `.prj` files.
+11. **Tiled Model**: Cesium 3D Tiles (`tileset.json`) or TLS archive exported with valid LOD bounding hierarchy when enabled.
+12. **Quality Report**: `<project>_report.pdf` generated containing camera calibration parameters and error estimates when `--export-report` is enabled.
+13. **Native Project**: Native `<project>.psx` archive saved with portable camera paths and loadable in Agisoft Metashape Professional GUI.
 
 ---
 
@@ -455,6 +469,9 @@ Reconstruction outputs must satisfy the following quality criteria:
 
 - [evaluations.md](evaluations.md)
 - [scripts/metashape_reconstruction.py](../../../scripts/metashape_reconstruction.py)
+- [source/autometashape/core/alignment_hygiene.py](../../../source/autometashape/core/alignment_hygiene.py)
+- [source/autometashape/core/icp_bridge.py](../../../source/autometashape/core/icp_bridge.py)
+- [source/autometashape/core/icp_worker.py](../../../source/autometashape/core/icp_worker.py)
 - [scripts/metashape_export.py](../../../scripts/metashape_export.py)
 - [scripts/cluster_utils.py](../../../scripts/cluster_utils.py)
 - [update.bat](../../../update.bat)

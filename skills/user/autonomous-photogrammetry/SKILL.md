@@ -69,7 +69,7 @@ python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\Surveys" --outp
 
 - **Single Dataset Root**: If the root folder directly contains survey photos, it is queued as a single project.
 - **Multi-Dataset Directory**: If subdirectories contain photos (e.g., `CATP_0167/`, `CATP_0204/`), each folder is queued as a discrete project named after the folder.
-- **Excluded Folders**: Auxiliary folders (`model*`, `output*`, `deliverables*`, `temp*`, `__pycache__`) are automatically excluded.
+- **Excluded Folders & Ingestion Hygiene**: Auxiliary folders (`model*`, `output*`, `deliverables*`, `temp*`, `__pycache__`, and stray `*.files` project directories) are automatically excluded, and exact duplicate images across nested subfolders are deduplicated automatically. Optional `--exclude-folders` remains available when operators explicitly wish to skip named subfolders, though close-range `Manual` orbits are natively supported by the 4-stage zero-neural alignment hygiene & Open3D ICP bridge.
 
 ### Phase 1: Environment & Mode Resolution
 Resolve the operational mode based on user constraints:
@@ -119,8 +119,9 @@ Before dispatching each dataset, the coordinator executes the storage watchdog:
 
 ### Phase 3: Autonomous Photogrammetry Reconstruction
 Each project executes using the standardized **Production Geomatics (`pro`)** preset:
-- High-accuracy camera alignment (`keypoint_limit=50,000`, `tiepoint_limit=40,000`, `keypoint_limit_per_mpx=2,000`) with guided matching and sensor-aware shutter physics.
-- USGS 4-Pass gradual selection tie-point filtering and camera parameter re-optimization.
+- High-accuracy camera alignment (`keypoint_limit=50,000`, `tiepoint_limit=40,000`, `keypoint_limit_per_mpx=2,000`) with guided matching, sensor-aware shutter physics (including DJI Air 3S `FC9113`), and **`k4 = b1 = b2 = 0` / `adaptive_fitting = False` hard-locked** across all passes.
+- **4-Stage Zero-Neural Alignment Hygiene & Open3D ICP Bridge** (`--alignment-hygiene`, `--icp-bridge`, enabled by default): neutralizes Null-Island/`> 5 km` GPS outliers, normalizes per-flight `TakeoffZ0` barometer datum drift (preserving RTK Fixed flights), audits the shared-track tie graph (`edge >= 15`) to quarantine rogue strips/spikes, and fuses disconnected overlapping orbits via portable offline CPU Open3D Sim(3) Point-to-Plane + gated Colored ICP under a strict Pre-MVS Quality Gate (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`).
+- USGS 4-Pass gradual selection tie-point filtering (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `Rays >= 2`, `<= 10%/pass`) and camera parameter re-optimization with `k4=b1=b2=0` locked.
 - GPU MVS dense depth map stereopsis with moderate outlier filtering (dense point cloud disabled by default in `pro`; opt-in via `--build-point-cloud`).
 - 2,000,000 polygon arbitrary 3D surface mesh.
 - Deterministic 16-page 8K ($16 \times 8192\times 8192$) texture atlas baking with mosaic blending and ghosting removal (reusing existing Metashape 2.2.2 `BuildUV/page_count` atlases on `--resume`).
@@ -163,8 +164,8 @@ python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\CATP_0167
 Verify that the master orchestrator, discovery, and sub-skill bridges function seamlessly:
 
 ```powershell
-# 1. Run supervisor and verification unit tests
-python -m unittest tests/test_supervisor.py tests/test_verification.py
+# 1. Run supervisor, verification, alignment hygiene, and ICP bridge unit tests
+python -m unittest tests/test_supervisor.py tests/test_verification.py tests/test_alignment_hygiene.py tests/test_icp_bridge.py tests/test_exclude_folders.py
 
 # 2. Run skills validation across the repository
 python tools/skills/cli.py check
