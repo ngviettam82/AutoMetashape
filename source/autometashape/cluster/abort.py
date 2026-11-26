@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import string
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections import deque
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -27,6 +29,94 @@ ABORT_DIR_NAME = "aborts"
 ABORT_SIGNALS_JSON = "abort_signals.json"
 
 
+_TH32CS_SNAPPROCESS = 0x00000002
+_MAX_PATH = 260
+
+
+def _collect_descendant_pids_from_edges(root_pid: int, parent_to_children: Dict[int, List[int]]) -> List[int]:
+    """Return descendant PIDs of ``root_pid`` in leaves-first order (excluding ``root_pid``)."""
+    visited: set[int] = {root_pid}
+    bfs_order: List[int] = []
+    queue: deque[int] = deque([root_pid])
+    while queue:
+        curr = queue.popleft()
+        for child in parent_to_children.get(curr, ()):
+            if child not in visited and child > 0:
+                visited.add(child)
+                bfs_order.append(child)
+                queue.append(child)
+    bfs_order.reverse()
+    return bfs_order
+
+
+def _enumerate_windows_descendant_pids(root_pid: int) -> List[int]:
+    """Snapshot all live Windows descendant PIDs of ``root_pid`` (leaves first).
+
+    Works even if ``root_pid`` has already exited because Windows preserves
+    ``th32ParentProcessID`` on orphaned child processes (such as Metashape's
+    ``--worker --dispatch stdio`` child process that inherits the worker TCP socket).
+    """
+    if sys.platform != "win32" or not root_pid or root_pid <= 0:
+        return []
+
+    try:
+        windll = getattr(ctypes, "windll", None)
+        kernel32 = getattr(windll, "kernel32", None)
+        if kernel32 is None:
+            return []
+
+        class _PROCESSENTRY32W(ctypes.Structure):
+            _fields_ = [
+                ("dwSize", ctypes.c_uint32),
+                ("cntUsage", ctypes.c_uint32),
+                ("th32ProcessID", ctypes.c_uint32),
+                ("th32DefaultHeapID", ctypes.c_void_p),
+                ("th32ModuleID", ctypes.c_uint32),
+                ("cntThreads", ctypes.c_uint32),
+                ("th32ParentProcessID", ctypes.c_uint32),
+                ("pcPriClassBase", ctypes.c_long),
+                ("dwFlags", ctypes.c_uint32),
+                ("szExeFile", ctypes.c_wchar * _MAX_PATH),
+            ]
+
+        create_snap = kernel32.CreateToolhelp32Snapshot
+        create_snap.restype = ctypes.c_void_p
+        create_snap.argtypes = [ctypes.c_uint32, ctypes.c_uint32]
+
+        proc_first = kernel32.Process32FirstW
+        proc_first.restype = ctypes.c_int
+        proc_first.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+
+        proc_next = kernel32.Process32NextW
+        proc_next.restype = ctypes.c_int
+        proc_next.argtypes = [ctypes.c_void_p, ctypes.POINTER(_PROCESSENTRY32W)]
+
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = [ctypes.c_void_p]
+
+        invalid_handle = ctypes.c_void_p(-1).value
+        snap = create_snap(_TH32CS_SNAPPROCESS, 0)
+        if not isinstance(snap, int) or snap in (0, invalid_handle):
+            return []
+
+        parent_to_children: Dict[int, List[int]] = {}
+        try:
+            entry = _PROCESSENTRY32W()
+            entry.dwSize = ctypes.sizeof(_PROCESSENTRY32W)
+            ok = proc_first(snap, ctypes.byref(entry))
+            while ok:
+                pid_val = int(entry.th32ProcessID)
+                ppid_val = int(entry.th32ParentProcessID)
+                parent_to_children.setdefault(ppid_val, []).append(pid_val)
+                ok = proc_next(snap, ctypes.byref(entry))
+        finally:
+            close_handle(snap)
+
+        return _collect_descendant_pids_from_edges(int(root_pid), parent_to_children)
+    except Exception:
+        return []
+
+
 def cleanup_stale_worker_processes(target_pid: Optional[int] = None) -> None:
     """Safely terminate targeted orphaned metashape worker processes on this host."""
     if sys.platform == "win32" and target_pid:
@@ -37,10 +127,12 @@ def cleanup_stale_worker_processes(target_pid: Optional[int] = None) -> None:
 
 
 def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
-    """Forcibly and deterministically terminate the worker process and its process tree.
+    """Forcibly and deterministically terminate the worker process and its entire process tree.
 
-    Guarantees that both parent worker daemon and any child processes running native
-    tasks or scripts are completely reaped, preventing orphaned process locks.
+    On Windows, ``taskkill /F /T /PID`` MUST run BEFORE ``proc.terminate()``: calling
+    ``proc.terminate()`` first kills only the parent daemon, breaking Windows process-tree
+    traversal so ``--worker --dispatch stdio`` child processes survive as orphans holding
+    the inherited TCP socket open on the cluster server.
 
     Args:
         proc: subprocess.Popen instance representing the worker process.
@@ -54,10 +146,43 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
 
     proc_pid = getattr(proc, "pid", None)
     poll_fn = getattr(proc, "poll", None)
-
-    # 1. Attempt graceful termination
-    exited_gracefully = False
     terminate_fn = getattr(proc, "terminate", None)
+
+    if proc_pid and sys.platform == "win32":
+        # 1. Snapshot all descendant PIDs while parent is still alive (or even if already dead)
+        descendants = _enumerate_windows_descendant_pids(int(proc_pid))
+
+        # 2. Tree-kill the parent BEFORE proc.terminate() so Windows kills parent + children together
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
+                capture_output=True,
+                timeout=5,
+            )
+        except Exception:
+            pass
+
+        # 3. Reap any captured descendant PIDs explicitly (defense-in-depth against detached children)
+        for child_pid in descendants:
+            if child_pid != proc_pid:
+                cleanup_stale_worker_processes(child_pid)
+
+        # 4. Fallback terminate/wait if handle still reports alive (or in unit-test mocks)
+        still_running = not callable(poll_fn) or poll_fn() is None
+        if still_running and callable(terminate_fn):
+            try:
+                terminate_fn()
+                wait_deadline = time.time() + timeout
+                while time.time() < wait_deadline:
+                    if callable(poll_fn) and poll_fn() is not None:
+                        break
+                    time.sleep(0.05)
+            except Exception:
+                pass
+        return True
+
+    # Non-Windows (or missing PID): graceful terminate followed by force kill
+    exited_gracefully = False
     if callable(terminate_fn):
         try:
             terminate_fn()
@@ -70,25 +195,13 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
         except Exception:
             pass
 
-    # 2. Windows taskkill tree kill defense: reap entire process tree including child tasks
-    if proc_pid and sys.platform == "win32":
-        try:
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc_pid)],
-                capture_output=True,
-                timeout=5,
-            )
-        except Exception:
-            pass
-        cleanup_stale_worker_processes(proc_pid)
-    else:
-        if not exited_gracefully and callable(poll_fn) and poll_fn() is None:
-            kill_fn = getattr(proc, "kill", None)
-            if callable(kill_fn):
-                try:
-                    kill_fn()
-                except Exception:
-                    pass
+    if not exited_gracefully and callable(poll_fn) and poll_fn() is None:
+        kill_fn = getattr(proc, "kill", None)
+        if callable(kill_fn):
+            try:
+                kill_fn()
+            except Exception:
+                pass
 
     return True
 

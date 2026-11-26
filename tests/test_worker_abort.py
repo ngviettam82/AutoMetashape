@@ -27,6 +27,7 @@ from autometashape.cluster.abort import (
     ABORT_DIR_NAME,
     ABORT_SIGNAL_FILENAME,
     ABORT_SIGNALS_JSON,
+    _collect_descendant_pids_from_edges,
     abort_remote_worker,
     acknowledge_abort_signal,
     check_abort_signal,
@@ -148,6 +149,35 @@ class TestWorkerAbort(unittest.TestCase):
         res = kill_worker_process(mock_proc, timeout=0.2)
         self.assertTrue(res)
         mock_proc.terminate.assert_called_once()
+
+    def test_kill_worker_process_windows_reaps_tree_and_children_before_terminate(self) -> None:
+        """On Windows, taskkill /F /T and child reaping MUST run before proc.terminate() to prevent stdio orphans."""
+        events: list[str] = []
+        mock_proc = MagicMock()
+        mock_proc.pid = 26688
+        mock_proc.poll.side_effect = [None, 0]
+        mock_proc.terminate.side_effect = lambda: events.append("terminate")
+
+        def fake_run(cmd, **kwargs):
+            if isinstance(cmd, list) and cmd[:4] == ["taskkill", "/F", "/T", "/PID"]:
+                events.append(f"taskkill:{cmd[4]}")
+            return MagicMock(returncode=0)
+
+        with (
+            patch("sys.platform", "win32"),
+            patch("autometashape.cluster.abort._enumerate_windows_descendant_pids", return_value=[30692, 30700]),
+            patch("autometashape.cluster.abort.subprocess.run", side_effect=fake_run),
+        ):
+            self.assertTrue(kill_worker_process(mock_proc, timeout=0.2))
+
+        self.assertEqual(events, ["taskkill:26688", "taskkill:30692", "taskkill:30700", "terminate"])
+
+    def test_collect_descendant_pids_leaves_first_and_cycle_safe(self) -> None:
+        """Verify multi-level process-tree traversal returns leaves first and ignores cycles."""
+        edges = {26688: [30692, 30693], 30692: [40100], 40100: [26688]}
+        desc = _collect_descendant_pids_from_edges(26688, edges)
+        self.assertEqual(desc, [40100, 30693, 30692])
+        self.assertNotIn(26688, desc)
 
     def test_dispatch_abort_signal_creates_payload(self) -> None:
         """Verify dispatch_abort_signal creates expected JSON schema in .cluster/aborts."""
