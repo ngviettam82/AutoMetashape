@@ -421,6 +421,19 @@ class TestFleetUpdater(unittest.TestCase):
                 self.assertEqual(results[0]["batch_id"], 101)
                 self.assertEqual(results[1]["batch_id"], 102)
 
+    def test_list_online_workers_excludes_aborted_ghosts(self) -> None:
+        """Verify stale aborted=True ghost workers are excluded from online update targets."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 5, "hostname": "node-a", "state": "inprogress", "aborted": True},
+                {"worker_id": 6, "hostname": "node-b", "state": "offline", "aborted": False},
+                {"worker_id": 17, "hostname": "node-a", "state": "ready", "aborted": False},
+            ]
+        }
+        online = list_online_workers(mock_client)
+        self.assertEqual([w["worker_id"] for w in online], [17])
+
 
 if __name__ == "__main__":
     unittest.main()

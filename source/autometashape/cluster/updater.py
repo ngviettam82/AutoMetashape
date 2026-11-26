@@ -397,12 +397,14 @@ def ensure_cluster_maintenance_project(shared_root: str, worker_slug: str = "") 
 
 
 def list_online_workers(client) -> list[dict]:
-    """Retrieve list of currently connected workers from Metashape Server."""
+    """Retrieve list of currently connected, non-aborted workers from Metashape Server."""
     if not client:
         return []
     info = client.workerList()
     if isinstance(info, dict):
-        return [w for w in info.get("workers", []) if str(w.get("state", "")).lower() != "offline"]
+        return [
+            w for w in info.get("workers", []) if str(w.get("state", "")).lower() != "offline" and not w.get("aborted")
+        ]
     return []
 
 

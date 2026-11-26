@@ -248,7 +248,7 @@ def main() -> int:
         nid = active_node.get("worker_id")
         nname = active_node.get("hostname") or target_name
         naddr = active_node.get("hostaddr")
-        target_key = nname or nid
+        target_key = nid if nid is not None else nname
         print(f"\n>>> Dispatching / updating node: {nname} (ID={nid}, Addr={naddr})...")
 
         res = update_remote_worker(
