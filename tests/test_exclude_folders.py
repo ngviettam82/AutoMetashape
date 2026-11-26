@@ -118,11 +118,14 @@ class TestExcludeFolders(unittest.TestCase):
                 code_excl = self._extract_code(task_excl)
                 # Execute only the setup portion before runpy.run_path
                 setup_only = code_excl.split("sys.argv = ")[0]
-                exec(compile(setup_only, "<legacy_shim>", "exec"), {"__builtins__": __builtins__})
+                with patch.dict(os.environ, {"AUTOMETASHAPE_DIR": _REPO_ROOT}):
+                    exec(compile(setup_only, "<legacy_shim>", "exec"), {"__builtins__": __builtins__})
 
-                res = tel_mod.discover_image_subfolder_groups(tmpdir)
-                kept = sorted(os.path.relpath(p, tmpdir).replace("\\", "/") for paths in res.values() for p in paths)
-                self.assertEqual(kept, ["CATP_0041_1/Nadir/n2.jpg", "Nadir/n1.jpg"])
+                    res = tel_mod.discover_image_subfolder_groups(tmpdir)
+                    kept = sorted(
+                        os.path.relpath(p, tmpdir).replace("\\", "/") for paths in res.values() for p in paths
+                    )
+                    self.assertEqual(kept, ["CATP_0041_1/Nadir/n2.jpg", "Nadir/n1.jpg"])
             finally:
                 tel_mod.discover_image_subfolder_groups = real_fn
                 if hasattr(tel_mod, "_orig_discover_image_subfolder_groups"):

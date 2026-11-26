@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import ctypes
 import os
+import re
 import shutil
 import string
 import struct
 import sys
 import tempfile
+import zipfile
 
 _WIN32_DRIVE_REMOVABLE = 2
 _WIN32_DRIVE_FIXED = 3
@@ -281,6 +283,140 @@ def get_psx_files_dir(psx_path: str) -> str:
     if psx_path.lower().endswith(".psx"):
         return psx_path[:-4] + ".files"
     return psx_path + ".files"
+
+
+def _read_primary_chunk_id(project_zip_path: str) -> str | None:
+    """Read the primary/active chunk ID from a Metashape ``project.zip`` archive."""
+    if not project_zip_path or not os.path.isfile(project_zip_path):
+        return None
+    try:
+        with zipfile.ZipFile(project_zip_path, "r") as zf:
+            if "doc.xml" not in zf.namelist():
+                return None
+            xml_txt = zf.read("doc.xml").decode("utf-8", errors="replace")
+    except Exception:
+        return None
+
+    chunks = re.findall(r'<chunk\s+id="(\d+)"\s+path="([^"]+)"\s*/>', xml_txt)
+    if not chunks:
+        return None
+    chunk_ids = [cid for cid, _ in chunks]
+    active_match = re.search(r'active_id="(\d+)"', xml_txt)
+    if active_match and active_match.group(1) in chunk_ids:
+        return active_match.group(1)
+    return chunk_ids[0]
+
+
+def reconcile_staged_psx_chunk_id(
+    local_stage_dir: str,
+    target_network_dir: str,
+    project_name: str,
+    target_chunk_id: str | None = None,
+) -> tuple[bool, str | None, str | None]:
+    """Re-index a single-chunk staged ``.psx`` to match the shared stub's chunk ID.
+
+    When Metashape Worker runs a monolithic ``RunScript`` task against a shared ``.psx``
+    stub (typically chunk ``0``), its C++ epilogue validates/closes that pre-loaded chunk
+    directory after the script exits. If Stage-4 ICP bridging ran ``doc.mergeChunks()``
+    and removed chunk ``0`` (leaving e.g. ``1/chunk.zip`` or ``3/chunk.zip``), syncing the
+    staged project back deletes ``0/chunk.zip`` and triggers ``io-error: Can't open file:
+    .../0/chunk.zip``, causing Metashape Server to retry an already-completed job forever.
+
+    Must be invoked BEFORE deleting ``target_network_dir/<project_name>.files`` so the
+    original stub chunk ID can be read accurately.
+
+    Args:
+        local_stage_dir: Directory containing the finalized ``.psx`` and ``.files`` folder.
+        target_network_dir: Shared network output directory containing the pre-flight stub.
+        project_name: Base project filename stem (without ``.psx``).
+        target_chunk_id: Optional explicit target chunk ID (used in direct-storage mode when
+            the original stub was already overwritten in place).
+
+    Returns:
+        Tuple of ``(reconciled, old_chunk_id, target_chunk_id)``.
+    """
+    if not local_stage_dir or not project_name:
+        return False, None, None
+
+    local_files_dir = get_psx_files_dir(os.path.join(local_stage_dir, f"{project_name}.psx"))
+    local_pz = os.path.join(local_files_dir, "project.zip")
+    if not os.path.isfile(local_pz):
+        return False, None, None
+
+    if target_chunk_id is not None and str(target_chunk_id).isdigit():
+        target_id = str(target_chunk_id)
+    else:
+        net_pz = (
+            os.path.join(get_psx_files_dir(os.path.join(target_network_dir, f"{project_name}.psx")), "project.zip")
+            if target_network_dir
+            else ""
+        )
+        target_id = _read_primary_chunk_id(net_pz) or "0"
+
+    try:
+        with zipfile.ZipFile(local_pz, "r") as zf:
+            names = zf.namelist()
+            if "doc.xml" not in names:
+                return False, None, target_id
+            xml_txt = zf.read("doc.xml").decode("utf-8", errors="replace")
+            other_entries = [(n, zf.read(n)) for n in names if n != "doc.xml"]
+    except Exception:
+        return False, None, target_id
+
+    chunks_found = re.findall(r'<chunk\s+id="(\d+)"\s+path="([^"]+)"\s*/>', xml_txt)
+    if len(chunks_found) != 1:
+        return False, None, target_id
+
+    old_id, old_path = chunks_found[0]
+    norm_path = old_path.replace("\\", "/")
+    old_dir = norm_path.split("/")[0] if "/" in norm_path else ""
+    if norm_path != f"{old_dir}/chunk.zip":
+        return False, old_id, target_id
+    if old_id == target_id and old_dir == target_id:
+        return False, old_id, target_id
+
+    src_dir = os.path.join(local_files_dir, old_dir)
+    dst_dir = os.path.join(local_files_dir, target_id)
+    if not os.path.isdir(src_dir):
+        return False, old_id, target_id
+
+    next_id = str(max(int(target_id) + 1, 1))
+    new_xml = re.sub(r'next_id="\d+"', f'next_id="{next_id}"', xml_txt, count=1)
+    new_xml = re.sub(r'active_id="\d+"', f'active_id="{target_id}"', new_xml, count=1)
+    new_xml = re.sub(
+        r'<chunk\s+id="\d+"\s+path="[^"]+"\s*/>',
+        f'<chunk id="{target_id}" path="{target_id}/chunk.zip"/>',
+        new_xml,
+        count=1,
+    )
+
+    renamed = False
+    tmp_pz = local_pz + ".reconcile.tmp"
+    try:
+        if old_dir != target_id:
+            if os.path.isdir(dst_dir):
+                shutil.rmtree(dst_dir, ignore_errors=True)
+            os.rename(src_dir, dst_dir)
+            renamed = True
+
+        with zipfile.ZipFile(tmp_pz, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("doc.xml", new_xml.encode("utf-8"))
+            for name, payload in other_entries:
+                zf.writestr(name, payload)
+        os.replace(tmp_pz, local_pz)
+        return True, old_id, target_id
+    except Exception:
+        if os.path.isfile(tmp_pz):
+            try:
+                os.remove(tmp_pz)
+            except OSError:
+                pass
+        if renamed and os.path.isdir(dst_dir) and not os.path.exists(src_dir):
+            try:
+                os.rename(dst_dir, src_dir)
+            except OSError:
+                pass
+        return False, old_id, target_id
 
 
 def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str) -> bool:

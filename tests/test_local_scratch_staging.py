@@ -11,13 +11,17 @@ import os
 import sys
 import tempfile
 import unittest
+import zipfile
 from unittest.mock import MagicMock, patch
 
-# Ensure scripts directory is importable
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "scripts")))
+# Ensure scripts and source directories are importable
+_REPO_ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "scripts"))
+sys.path.insert(0, os.path.join(_REPO_ROOT, "source"))
 
 import cluster_utils as cu
 import metashape_reconstruction as mr
+from autometashape.cluster.staging import reconcile_staged_psx_chunk_id
 
 
 class TestLocalScratchStagingSystem(unittest.TestCase):
@@ -348,6 +352,103 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             # Invariant 3: Worker staging directory is cleanly purged after sync
             staged_folder = os.path.join(worker_nvme, "Existing_Survey_local_stage")
             self.assertFalse(os.path.exists(staged_folder))
+
+    @staticmethod
+    def _write_mock_psx(base_dir: str, project_name: str, chunk_ids: list[str], active_id: str | None = None) -> None:
+        files_dir = os.path.join(base_dir, f"{project_name}.files")
+        os.makedirs(files_dir, exist_ok=True)
+        with open(os.path.join(base_dir, f"{project_name}.psx"), "w", encoding="utf-8") as f:
+            f.write('<document version="1.2.0" path="{projectname}.files/project.zip"/>')
+        act = active_id if active_id is not None else chunk_ids[0]
+        nxt = str(max(int(c) for c in chunk_ids) + 1)
+        chunk_tags = "\n".join(f'    <chunk id="{cid}" path="{cid}/chunk.zip"/>' for cid in chunk_ids)
+        doc_xml = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<document version="1.2.0">\n'
+            f'  <chunks next_id="{nxt}" active_id="{act}">\n'
+            f"{chunk_tags}\n"
+            "  </chunks>\n"
+            "</document>\n"
+        )
+        with zipfile.ZipFile(os.path.join(files_dir, "project.zip"), "w") as zf:
+            zf.writestr("doc.xml", doc_xml.encode("utf-8"))
+            zf.writestr("extra.txt", b"preserved-entry")
+        for cid in chunk_ids:
+            cdir = os.path.join(files_dir, cid, "0")
+            os.makedirs(cdir, exist_ok=True)
+            with open(os.path.join(files_dir, cid, "chunk.zip"), "wb") as f:
+                f.write(f"CHUNK_PAYLOAD_{cid}".encode())
+            with open(os.path.join(cdir, "frame.zip"), "wb") as f:
+                f.write(f"FRAME_PAYLOAD_{cid}".encode())
+
+    def test_reconcile_staged_psx_chunk_id_reindexes_merged_chunk_to_stub_zero(self) -> None:
+        """ICP mergeChunks leaves chunk 3; must reindex to stub's chunk 0 so Metashape Worker never hits io-error."""
+        with tempfile.TemporaryDirectory() as tmp:
+            stage = os.path.join(tmp, "stage")
+            share = os.path.join(tmp, "share")
+            self._write_mock_psx(share, "CATP_0095", ["0"])
+            self._write_mock_psx(stage, "CATP_0095", ["3"])
+            # Also plant a stale leftover empty 0/ folder in stage to verify clean replacement
+            os.makedirs(os.path.join(stage, "CATP_0095.files", "0"), exist_ok=True)
+
+            reconciled, old_id, new_id = reconcile_staged_psx_chunk_id(stage, share, "CATP_0095")
+            self.assertTrue(reconciled)
+            self.assertEqual(old_id, "3")
+            self.assertEqual(new_id, "0")
+
+            staged_files = os.path.join(stage, "CATP_0095.files")
+            self.assertFalse(os.path.exists(os.path.join(staged_files, "3")))
+            with open(os.path.join(staged_files, "0", "chunk.zip"), "rb") as f:
+                self.assertEqual(f.read(), b"CHUNK_PAYLOAD_3")
+            with open(os.path.join(staged_files, "0", "0", "frame.zip"), "rb") as f:
+                self.assertEqual(f.read(), b"FRAME_PAYLOAD_3")
+
+            with zipfile.ZipFile(os.path.join(staged_files, "project.zip"), "r") as zf:
+                xml_txt = zf.read("doc.xml").decode("utf-8")
+                self.assertIn('next_id="1"', xml_txt)
+                self.assertIn('active_id="0"', xml_txt)
+                self.assertIn('<chunk id="0" path="0/chunk.zip"/>', xml_txt)
+                self.assertNotIn("3/chunk.zip", xml_txt)
+                self.assertEqual(zf.read("extra.txt"), b"preserved-entry")
+
+    def test_reconcile_staged_psx_chunk_id_matches_nonzero_stub_and_skips_multichunk(self) -> None:
+        """Verify retry/resume stub ID matching (1 -> 3), no-op when equal, and safe skip on multi-chunk projects."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # Case 1: Shared stub already had chunk 3, local built chunk 1 -> reindex 1 -> 3
+            stage1 = os.path.join(tmp, "stage1")
+            share1 = os.path.join(tmp, "share1")
+            self._write_mock_psx(share1, "SiteA", ["3"])
+            self._write_mock_psx(stage1, "SiteA", ["1"])
+            rec, old_id, new_id = reconcile_staged_psx_chunk_id(stage1, share1, "SiteA")
+            self.assertTrue(rec)
+            self.assertEqual((old_id, new_id), ("1", "3"))
+            self.assertTrue(os.path.isfile(os.path.join(stage1, "SiteA.files", "3", "chunk.zip")))
+            with zipfile.ZipFile(os.path.join(stage1, "SiteA.files", "project.zip"), "r") as zf:
+                xml_txt = zf.read("doc.xml").decode("utf-8")
+                self.assertIn('next_id="4"', xml_txt)
+                self.assertIn('active_id="3"', xml_txt)
+                self.assertIn('<chunk id="3" path="3/chunk.zip"/>', xml_txt)
+
+            # Case 2: Already matches (3 == 3) -> no-op
+            rec2, old2, new2 = reconcile_staged_psx_chunk_id(stage1, share1, "SiteA")
+            self.assertFalse(rec2)
+            self.assertEqual((old2, new2), ("3", "3"))
+
+            # Case 3: Multi-chunk project -> must never mutate
+            stage_mc = os.path.join(tmp, "stage_mc")
+            self._write_mock_psx(stage_mc, "MultiSite", ["1", "2"], active_id="1")
+            rec_mc, _, _ = reconcile_staged_psx_chunk_id(stage_mc, share1, "MultiSite")
+            self.assertFalse(rec_mc)
+            self.assertTrue(os.path.isdir(os.path.join(stage_mc, "MultiSite.files", "1")))
+            self.assertTrue(os.path.isdir(os.path.join(stage_mc, "MultiSite.files", "2")))
+
+            # Case 4: Explicit target_chunk_id override (direct storage mode)
+            stage_dir = os.path.join(tmp, "stage_direct")
+            self._write_mock_psx(stage_dir, "DirectSite", ["2"])
+            rec_d, old_d, new_d = reconcile_staged_psx_chunk_id(stage_dir, "", "DirectSite", target_chunk_id="0")
+            self.assertTrue(rec_d)
+            self.assertEqual((old_d, new_d), ("2", "0"))
+            self.assertTrue(os.path.isfile(os.path.join(stage_dir, "DirectSite.files", "0", "chunk.zip")))
 
 
 if __name__ == "__main__":

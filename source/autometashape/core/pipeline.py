@@ -42,9 +42,11 @@ from autometashape.cluster.orchestrator import (
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import (
+    _read_primary_chunk_id,
     check_scratch_disk_headroom,
     get_optimal_local_scratch_dir,
     get_psx_files_dir,
+    reconcile_staged_psx_chunk_id,
     sync_staged_project_to_network,
 )
 from autometashape.core.alignment_hygiene import (
@@ -657,6 +659,13 @@ def run_reconstruction(
     set_active_status_file(status_file)
 
     # Pre-initialize doc/chunk before defining atexit sync handler so early exceptions never raise UnboundLocalError
+    # Capture original stub chunk ID before direct-storage runs overwrite psx_out in place
+    initial_stub_chunk_id = (
+        _read_primary_chunk_id(os.path.join(get_psx_files_dir(psx_out), "project.zip"))
+        if not local_staging_dir
+        else None
+    )
+
     doc = None
     chunk = None
 
@@ -684,6 +693,18 @@ def run_reconstruction(
                     os.remove(local_lock)
                 except Exception:
                     pass
+            # Reconcile single-chunk IDs (e.g. ICP mergeChunks 3/ -> 0/) against the shared
+            # .psx stub BEFORE replacing .files so Metashape Worker's post-RunScript commit
+            # never fails with "Can't open file: .../0/chunk.zip".
+            reconciled, old_cid, new_cid = reconcile_staged_psx_chunk_id(
+                local_staging_dir, target_network_output, project_name
+            )
+            if reconciled:
+                print(
+                    f"  [Local Scratch Staging] Reconciled staged chunk ID {old_cid} -> {new_cid} "
+                    "to match shared .psx stub for cluster worker commit safety.",
+                    flush=True,
+                )
             # On completed fresh (--no-resume) runs, purge stale shared .files right before
             # overwriting with the freshly built local .psx/.files pair. Early crashes (atexit,
             # replace_fresh_project=False) leave the shared .psx stub untouched so Metashape Server
@@ -3398,6 +3419,16 @@ def run_reconstruction(
             raise RuntimeError(
                 f"[Local Scratch Staging] Failed to synchronize staged deliverables from '{local_staging_dir}' "
                 f"to central share '{target_network_output}'."
+            )
+    elif initial_stub_chunk_id is not None:
+        reconciled, old_cid, new_cid = reconcile_staged_psx_chunk_id(
+            output_dir, "", project_name, target_chunk_id=initial_stub_chunk_id
+        )
+        if reconciled:
+            print(
+                f"  [Direct Storage] Reconciled saved chunk ID {old_cid} -> {new_cid} "
+                "to match original .psx stub for cluster worker commit safety.",
+                flush=True,
             )
 
     total_time = (time.time() - t_start) / 60.0

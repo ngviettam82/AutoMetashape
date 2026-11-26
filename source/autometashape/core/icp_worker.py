@@ -214,6 +214,9 @@ def run_icp(
             )
     z_grid = np.arange(dz_center - search_z_m, dz_center + search_z_m + 0.1, 1.5)
 
+    # Avoid per-call OS thread-pool spawn overhead across ~6,800 tiny coarse queries (50x+ faster on Windows)
+    coarse_workers = -1 if len(src_c) >= 25000 else 1
+
     for dyaw in yaw_grid:
         rz_mat = _rot_z(float(dyaw))
         rot_pts = (src_rel @ rz_mat.T) + s_ctr
@@ -221,7 +224,7 @@ def run_icp(
             for dy in xy_grid:
                 for dz in z_grid:
                     shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=0.50, workers=-1)
+                    dists, _ = tree.query(shifted, distance_upper_bound=0.50, workers=coarse_workers)
                     inl = dists < 0.50
                     score = float(np.sum(1.0 - (dists[inl] / 0.50) ** 2))
                     if score > best_score:
@@ -237,7 +240,7 @@ def run_icp(
             for dy in np.linspace(by - 1.5, by + 1.5, 7):
                 for dz in np.linspace(bz - 1.5, bz + 1.5, 7):
                     shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=0.35, workers=-1)
+                    dists, _ = tree.query(shifted, distance_upper_bound=0.35, workers=coarse_workers)
                     inl = dists < 0.35
                     score = float(np.sum(1.0 - (dists[inl] / 0.35) ** 2))
                     if score > best_score:
