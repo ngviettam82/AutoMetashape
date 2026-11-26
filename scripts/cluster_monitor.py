@@ -16,6 +16,7 @@ import argparse
 import glob
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -37,7 +38,12 @@ from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
 )
-from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
+from autometashape.cluster.hardware import (
+    extract_unc_root,
+    find_metashape_path,
+    get_primary_lan_ip,
+    is_healthy_online_worker,
+)
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -106,10 +112,53 @@ def resolve_server_address(cli_server: str) -> str:
     return "127.0.0.1:5840"
 
 
+_LEGACY_DISPATCH_RE = re.compile(r"^_dispatch_(.+?)(?:_\d{10,13})?$", re.IGNORECASE)
+
+
 def _is_maintenance_batch_path(batch_path: str) -> bool:
-    """Return True if a batch path belongs to internal .cluster/ maintenance/updater tasks."""
+    """Return True if a batch path belongs to internal .cluster/ maintenance/updater tasks (not project tickets)."""
     norm = (batch_path or "").strip().replace("\\", "/").lstrip("/").lower()
+    if norm.startswith(".cluster/tickets/") or "/.cluster/tickets/" in norm:
+        return False
     return norm.startswith(".cluster/") or "/.cluster/" in norm
+
+
+def _resolve_batch_project_target(
+    batch_path: str,
+    storage_paths: List[str],
+) -> Tuple[str, str]:
+    """Resolve canonical ``(project_name, result_dir)`` for a batch path, supporting tickets & legacy stubs."""
+    norm = (batch_path or "").strip().replace("\\", "/")
+    rel_clean = norm.lstrip("/")
+
+    # 1. Hidden .cluster/tickets/<stem>.psx -> read sibling <stem>.ticket.json metadata
+    if rel_clean.lower().startswith(".cluster/tickets/") or "/.cluster/tickets/" in rel_clean.lower():
+        stem = os.path.splitext(os.path.basename(rel_clean))[0]
+        rel_dir = os.path.dirname(rel_clean)
+        for sp in storage_paths:
+            meta_p = os.path.normpath(os.path.join(sp, rel_dir, f"{stem}.ticket.json"))
+            if os.path.isfile(meta_p):
+                try:
+                    with open(meta_p, "r", encoding="utf-8") as mf:
+                        meta = json.load(mf)
+                    pname = str(meta.get("project_name") or "").strip()
+                    rel_out = str(meta.get("rel_output_dir") or "").replace("\\", "/").strip("/")
+                    if pname:
+                        rdir = os.path.normpath(os.path.join(sp, rel_out)) if rel_out else ""
+                        return pname, rdir
+                except Exception:
+                    pass
+
+    raw_stem = os.path.splitext(os.path.basename(rel_clean))[0]
+    m_leg = _LEGACY_DISPATCH_RE.match(raw_stem)
+    pname = m_leg.group(1) if m_leg else raw_stem
+
+    rel_parent = os.path.dirname(rel_clean).lstrip("/")
+    for sp in storage_paths:
+        cand = os.path.normpath(os.path.join(sp, rel_parent)) if rel_parent else os.path.normpath(sp)
+        if os.path.isdir(cand):
+            return pname, cand
+    return pname, ""
 
 
 def resolve_storage_paths(
@@ -131,15 +180,12 @@ def resolve_storage_paths(
     if cfg.get("root") and os.path.normpath(cfg["root"]) not in paths:
         paths.append(os.path.normpath(cfg["root"]))
 
-    # Inspect batch paths to extract network shares dynamically
+    # Inspect batch paths to extract network shares dynamically (supports both \\server\share and //server/share)
     for b in batches:
-        b_path = b.get("path", "")
-        if b_path.startswith("\\\\"):
-            parts = os.path.normpath(b_path).split("\\")
-            if len(parts) >= 4:
-                share_root = f"\\\\{parts[2]}\\{parts[3]}"
-                if share_root not in paths:
-                    paths.append(share_root)
+        b_path = b.get("path", "") or ""
+        share_root = extract_unc_root(b_path)
+        if share_root and share_root not in paths:
+            paths.append(share_root)
 
     if source_root.strip():
         norm_src = os.path.normpath(source_root.strip())
@@ -262,10 +308,10 @@ def audit_memory_allocation_faults(
 
     for b in batches:
         bid = b.get("batch_id")
-        bpath = b.get("path", "")
-        pname = os.path.splitext(os.path.basename(bpath))[0]
-        err_by_type = b.get("error_count_by_type", {})
-        last_err = b.get("last_error", {})
+        bpath = b.get("path", "") or ""
+        pname, rdir = _resolve_batch_project_target(bpath, storage_paths)
+        err_by_type = b.get("error_count_by_type") or {}
+        last_err = b.get("last_error") or {}
 
         is_oom = False
         oom_count = 0
@@ -278,15 +324,17 @@ def audit_memory_allocation_faults(
             oom_count += cnt
             reasons.append(f"{cnt} out-of-memory event(s) recorded by cluster")
 
-        last_err_msg = str(last_err.get("message", ""))
-        last_err_type = str(last_err.get("type", ""))
+        last_err_msg = str(last_err.get("message", "")) if isinstance(last_err, dict) else str(last_err)
+        last_err_type = str(last_err.get("type", "")) if isinstance(last_err, dict) else ""
         if _is_oom_error_text(last_err_msg) or _is_oom_error_text(last_err_type):
             is_oom = True
             reasons.append(f"Last error: '{last_err_msg}' ({last_err_type})")
 
         # 2. Check task-level error records if present
-        task = b.get("task", {})
-        for terr in task.get("errors", []):
+        task = b.get("task") or {}
+        for terr in (task.get("errors") or []) if isinstance(task, dict) else []:
+            if not isinstance(terr, dict):
+                continue
             tmsg = str(terr.get("message", ""))
             ttype = str(terr.get("type", ""))
             if _is_oom_error_text(tmsg) or _is_oom_error_text(ttype):
@@ -296,8 +344,11 @@ def audit_memory_allocation_faults(
                     reasons.append(entry_str)
 
         # 3. Check status sidecar for recorded errors
-        for sp in storage_paths:
-            candidate = os.path.normpath(os.path.join(sp, os.path.dirname(bpath)))
+        sidecar_dirs = [rdir] if rdir else []
+        if not sidecar_dirs:
+            rel_parent = os.path.dirname(bpath.replace("\\", "/")).lstrip("/")
+            sidecar_dirs = [os.path.normpath(os.path.join(sp, rel_parent)) for sp in storage_paths]
+        for candidate in sidecar_dirs:
             sidecar_path = os.path.join(candidate, "_autometashape_status.json")
             if os.path.isfile(sidecar_path):
                 try:
@@ -343,7 +394,7 @@ def execute_audit(
         raise RuntimeError("Metashape module not loaded. Run via metashape.exe -r.")
 
     resolved_server = resolve_server_address(server_host)
-    srv_ip, srv_port_str = resolved_server.split(":")
+    srv_ip, srv_port_str = resolved_server.rsplit(":", 1)
     srv_port = int(srv_port_str)
 
     client = Metashape.NetworkClient()
@@ -370,38 +421,35 @@ def execute_audit(
     checked_headroom = {p: headroom[p] for p in result_storage_paths if p in headroom}
     headroom_ok = all(free_gb >= min_headroom for free_gb in (checked_headroom or headroom).values())
 
-    # Filter active workers
-    active_workers = [w for w in workers if str(w.get("state", "")).lower() != "offline"]
+    # Filter healthy active workers (exclude offline & aborted ghost worker records)
+    active_workers = [w for w in workers if is_healthy_online_worker(w)]
 
     # 4. Memory Allocation Faults Audit (passive post-mortem std::bad_alloc / OOM reporting)
     allocation_faults = audit_memory_allocation_faults(batches, result_storage_paths)
     oom_batch_ids = {f["batch_id"] for f in allocation_faults}
 
-    # Categorize batches
-    running_batches = [b for b in batches if str(b.get("state", "")).lower() in ("inprogress", "running")]
+    # Categorize batches (skip internal .cluster/ maintenance batches from errored_batches)
+    running_batches = [
+        b for b in batches if str(b.get("state", "")).lower() in ("inprogress", "running") and not b.get("aborted")
+    ]
     pending_batches = [b for b in batches if str(b.get("state", "")).lower() in ("pending", "submitted", "queued")]
     completed_batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done")]
     errored_batches = [
         b
         for b in batches
-        if b.get("failed") or int(b.get("error_count", 0) or 0) > 0 or str(b.get("state", "")).lower() == "failed"
+        if not _is_maintenance_batch_path(b.get("path", ""))
+        and not b.get("aborted")
+        and (b.get("failed") or int(b.get("error_count") or 0) > 0 or str(b.get("state", "")).lower() == "failed")
     ]
 
     # 5. Deliverable Verification of Completed Photogrammetry Batches (skip internal .cluster/ maintenance batches)
     deliverable_results: Dict[int, Dict[str, Any]] = {}
     for b in completed_batches:
         bid = b.get("batch_id")
-        bpath = b.get("path", "")
-        if _is_maintenance_batch_path(bpath):
+        bpath = b.get("path", "") or ""
+        if _is_maintenance_batch_path(bpath) or b.get("aborted"):
             continue
-        pname = os.path.splitext(os.path.basename(bpath))[0]
-        # Resolve full path of result directory strictly across Result storage roots
-        rdir = ""
-        for sp in result_storage_paths:
-            candidate = os.path.normpath(os.path.join(sp, os.path.dirname(bpath)))
-            if os.path.isdir(candidate):
-                rdir = candidate
-                break
+        pname, rdir = _resolve_batch_project_target(bpath, result_storage_paths)
         if rdir:
             res = verify_deliverables(rdir, pname)
             if bid in oom_batch_ids:
@@ -464,10 +512,13 @@ def execute_audit(
         wid = w.get("worker_id", "?")
         hname = w.get("hostname", "unknown")
         state = w.get("state", "unknown")
+        if w.get("paused"):
+            state = f"{state}(paused)"
         bid = w.get("batch_id", "none")
+        gmask = w.get("gpu_mask", "?")
         cpu_pct, ram_gb = format_worker_resource_usage(w)
         print(
-            f"  - Worker {wid:>2} ({hname:<18}): State={state:<10} | Batch #{str(bid):<3} | CPU: {cpu_pct:>5.1f}% | RAM: {ram_gb:>5.1f} GB"
+            f"  - Worker {wid:>2} ({hname:<18}): State={state:<14} | GPU={gmask} | Batch #{str(bid):<3} | CPU: {cpu_pct:>5.1f}% | RAM: {ram_gb:>5.1f} GB"
         )
 
     # Queue Status
@@ -500,15 +551,23 @@ def execute_audit(
         for b in running_batches:
             bid = b.get("batch_id")
             prio = b.get("priority", 0)
-            bpath = b.get("path", "")
-            pname = os.path.splitext(os.path.basename(bpath))[0]
+            bpath = b.get("path", "") or ""
+            pname, rdir = _resolve_batch_project_target(bpath, result_storage_paths)
             # Match worker hostname
             assigned_w = next((w.get("hostname") for w in active_workers if w.get("batch_id") == bid), "unassigned")
             stage = "executing"
             stage_desc = ""
             # Inspect sidecar strictly under Result storage roots
-            for sp in result_storage_paths:
-                sidecar_path = os.path.normpath(os.path.join(sp, os.path.dirname(bpath), "_autometashape_status.json"))
+            sidecar_dirs = (
+                [rdir]
+                if rdir
+                else [
+                    os.path.normpath(os.path.join(sp, os.path.dirname(bpath.replace("\\", "/")).lstrip("/")))
+                    for sp in result_storage_paths
+                ]
+            )
+            for sdir in sidecar_dirs:
+                sidecar_path = os.path.join(sdir, "_autometashape_status.json")
                 if os.path.isfile(sidecar_path):
                     try:
                         with open(sidecar_path, "r", encoding="utf-8") as sf:

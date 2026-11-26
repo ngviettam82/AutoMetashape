@@ -41,9 +41,13 @@ def record_server_pid() -> None:
 
 
 def clear_server_pid() -> None:
-    """Remove server PID tracking file on clean exit."""
+    """Remove server PID tracking file on clean exit if it belongs to this process."""
     try:
         if os.path.isfile(PID_FILE_PATH):
+            with open(PID_FILE_PATH, "r", encoding="utf-8") as f:
+                recorded = f.read().strip()
+            if recorded and recorded != str(os.getpid()):
+                return
             os.remove(PID_FILE_PATH)
     except Exception:
         pass
@@ -77,10 +81,8 @@ def reexec_server(target_dir: str) -> None:
     sys.stderr.flush()
     clear_server_pid()
     if sys.platform == "win32":
-        # Windows wexecv does not quote arguments containing spaces, which causes
-        # 'C:\Program: can't open file...' crash when py_exe or path has spaces.
-        quoted_cmd = [f'"{c}"' if " " in c and not (c.startswith('"') and c.endswith('"')) else c for c in cmd]
-        os.execv(py_exe, quoted_cmd)
+        res = subprocess.run(cmd)
+        sys.exit(res.returncode)
     else:
         os.execv(py_exe, cmd)
 
@@ -91,7 +93,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
         description="AutoMetashape Distributed Cluster Server Launcher",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--host", type=str, default="0.0.0.0", help="Binding host IP for control server")
+    parser.add_argument("--host", type=str, default=None, help="Binding host IP for control server (default: 0.0.0.0)")
     parser.add_argument(
         "--port", type=str, default=None, help="Control port for client and worker connections (default: 5840)"
     )
@@ -105,14 +107,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """Main server launcher entrypoint."""
-    record_server_pid()
-    try:
-        return _run_server_lifecycle()
-    finally:
-        clear_server_pid()
+    return _run_server_lifecycle(manage_pid=True)
 
 
-def _run_server_lifecycle() -> int:
+def _run_server_lifecycle(manage_pid: bool = False) -> int:
     """Execute server configuration resolution, diagnostics, and process lifecycle."""
     parser = build_arg_parser()
     args, unknown = parser.parse_known_args()
@@ -121,11 +119,11 @@ def _run_server_lifecycle() -> int:
         if cleaned:
             print(f"[NOTICE] Ignoring unrecognized server arguments: {' '.join(cleaned)}")
 
-    # 1. Resolve Configuration
+    # 1. Resolve Configuration (explicit CLI --host overrides saved config, including 0.0.0.0)
     config_path = args.config or cu.get_default_config_path(cu.DEFAULT_SERVER_CONFIG_FILENAME)
     saved_config = cu.load_cluster_config(config_path)
 
-    host = args.host if args.host != "0.0.0.0" else saved_config.get("host", "0.0.0.0")
+    host = args.host if args.host is not None else saved_config.get("host", "0.0.0.0")
     port = args.port or saved_config.get("port", "5840")
     dispatch_port = args.dispatch_port or saved_config.get("dispatch_port", "5841")
 
@@ -151,41 +149,47 @@ def _run_server_lifecycle() -> int:
     print(f"  Server Binary   : {server_bin}")
     print("=" * 72)
 
-    # 3. Port Pre-flight Check
+    # 3. Port Pre-flight Check (refuse duplicate server launch before touching PID file)
     try:
         port_num = int(port)
     except ValueError:
         port_num = 5840
 
     if cu.test_tcp_connection("127.0.0.1", port_num, timeout=1.0):
-        print(f"\n[WARNING] Port {port_num} is ALREADY IN USE on this PC!", file=sys.stderr)
-        print("A Metashape Server or other service is already active on this port.", file=sys.stderr)
+        print(f"\n[ERROR] Port {port_num} is ALREADY IN USE on this PC!", file=sys.stderr)
+        print(
+            "A Metashape Server or other service is already active on this port. Aborting duplicate launch.",
+            file=sys.stderr,
+        )
+        return 1
 
-    # 4. Construct Command
-    server_cmd = [
-        server_bin,
-        "--host",
-        f"{host}:{port}",
-        "--no-database",
-        "--resume-workers",
-    ]
-
-    print("\n[INSTRUCTIONS FOR REMOTE WORKERS]")
-    print(f'Run on each worker PC:  .\\launch_worker.bat --host {lan_ip} --root "\\\\{lan_ip}\\<share>"')
-    print("\n[READY] Starting Metashape Server daemon...")
-    print(f"Command: {' '.join(server_cmd)}")
-    print("Press Ctrl+C in this terminal to stop the cluster server.\n")
-
-    target_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
-    if not target_dir or not os.path.isdir(target_dir):
-        if os.path.isdir(_REPO_ROOT):
-            target_dir = _REPO_ROOT
-        else:
-            user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-            target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
-
+    if manage_pid:
+        record_server_pid()
     proc = None
     try:
+        # 4. Construct Command
+        server_cmd = [
+            server_bin,
+            "--host",
+            f"{host}:{port}",
+            "--no-database",
+            "--resume-workers",
+        ]
+
+        print("\n[INSTRUCTIONS FOR REMOTE WORKERS]")
+        print(f'Run on each worker PC:  .\\launch_worker.bat --host {lan_ip} --root "\\\\{lan_ip}\\<share>"')
+        print("\n[READY] Starting Metashape Server daemon...")
+        print(f"Command: {' '.join(server_cmd)}")
+        print("Press Ctrl+C in this terminal to stop the cluster server.\n")
+
+        target_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
+        if not target_dir or not os.path.isdir(target_dir):
+            if os.path.isdir(_REPO_ROOT):
+                target_dir = _REPO_ROOT
+            else:
+                user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+                target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+
         proc = subprocess.Popen(server_cmd, cwd=target_dir)
         proc.wait()
         ret_code = proc.returncode
@@ -220,6 +224,8 @@ def _run_server_lifecycle() -> int:
                     proc.kill()
                 except Exception:
                     pass
+        if manage_pid:
+            clear_server_pid()
 
 
 if __name__ == "__main__":

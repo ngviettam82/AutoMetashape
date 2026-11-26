@@ -157,10 +157,20 @@ def map_source_to_result_dir(
                 return ntpath.normpath(ntpath.join(norm_res_root, rel.replace("/", "\\")))
             return os.path.normpath(os.path.join(norm_res_root, *rel.split("/")))
 
-    inferred_name = project_name or os.path.basename(norm_src_proj.rstrip("\\/"))
-    if inferred_name and os.path.basename(norm_res_root.rstrip("\\/")).lower() == inferred_name.lower():
+    use_nt = is_unc_path(norm_res_root) or _is_windows_drive_path(norm_res_root)
+    inferred_name = project_name or (
+        ntpath.basename(norm_src_proj.rstrip("\\/"))
+        if is_unc_path(norm_src_proj) or _is_windows_drive_path(norm_src_proj)
+        else os.path.basename(norm_src_proj.rstrip("\\/"))
+    )
+    res_base = ntpath.basename(norm_res_root.rstrip("\\/")) if use_nt else os.path.basename(norm_res_root.rstrip("\\/"))
+    if inferred_name and res_base.lower() == inferred_name.lower():
         return norm_res_root
-    return os.path.normpath(os.path.join(norm_res_root, inferred_name)) if inferred_name else norm_res_root
+    if not inferred_name:
+        return norm_res_root
+    if use_nt:
+        return ntpath.normpath(ntpath.join(norm_res_root, inferred_name))
+    return os.path.normpath(os.path.join(norm_res_root, inferred_name))
 
 
 def validate_dual_share_topology(
@@ -348,8 +358,21 @@ def discover_dual_share_projects(
 
     from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
 
-    excluded_names = {"model", "models", "output", "outputs", "deliverables", "temp", "tmp", "__pycache__"}
-    excluded_prefixes = ("model", "output", "deliverables", "temp", "result")
+    excluded_names = {
+        "model",
+        "models",
+        "model_export",
+        "model_output",
+        "output",
+        "outputs",
+        "deliverables",
+        "result",
+        "results",
+        "temp",
+        "tmp",
+        "__pycache__",
+    }
+    excluded_prefixes = ("output_", "outputs_", "result_", "results_", "temp_", "tmp_")
     jobs: List[QueueJob] = []
 
     try:
@@ -361,8 +384,8 @@ def discover_dual_share_projects(
     for entry in entries:
         full_p = os.path.join(norm_source, entry)
         if os.path.isdir(full_p) and not entry.startswith((".", "$")):
-            low_name = entry.lower()
-            if low_name not in excluded_names and not low_name.startswith(excluded_prefixes):
+            entry_l = entry.lower()
+            if entry_l not in excluded_names and not entry_l.startswith(excluded_prefixes):
                 subdirs.append((entry, full_p))
 
     for folder_name, folder_path in subdirs:

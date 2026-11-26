@@ -92,23 +92,40 @@ def main() -> int:
             res = subprocess.run(cmd)
             return res.returncode
 
-    # Resolve coordinator host
+    # Resolve coordinator host & shared root (check CLI -> env -> server_config -> worker_config)
+    server_cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     server_host = args.server.strip()
     if not server_host:
-        server_cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
         if server_cfg.get("host") and server_cfg.get("host") != "0.0.0.0":
             server_host = f"{server_cfg['host']}:{server_cfg.get('port', 5840)}"
         else:
             lan_ip = get_primary_lan_ip()
             server_host = f"{lan_ip}:5840"
 
-    # Resolve shared root UNC path
     shared_root = args.root.strip()
     if not shared_root:
+        shared_root = os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip()
+    if not shared_root:
+        shared_root = str(server_cfg.get("root", "") or server_cfg.get("network_path", "")).strip()
+    if not shared_root:
         worker_cfg = load_cluster_config(filename=DEFAULT_WORKER_CONFIG_FILENAME)
-        shared_root = worker_cfg.get("root", "").strip()
+        shared_root = str(worker_cfg.get("root", "") or worker_cfg.get("network_path", "")).strip()
 
     target_node = args.node.strip()
+
+    # Safety guard: refuse to fall back to local %TEMP%\.abort_pending when targeting a remote node!
+    from autometashape.cluster.hardware import get_local_hostname
+
+    local_host = get_local_hostname().strip().lower()
+    if not shared_root and target_node.lower() not in (local_host, "localhost", "127.0.0.1"):
+        print(
+            f"[FATAL ERROR] Cannot dispatch remote abort to '{target_node}' without a shared storage root "
+            "(--root, AUTOMETASHAPE_CLUSTER_ROOT, server_config.json, or worker_config.json). "
+            "Refusing to fall back to local %TEMP% so the coordinator's own worker is never killed.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
     print("=" * 72)
     print("  AutoMetashape: Autonomous Cluster Worker Remote Abort Utility")

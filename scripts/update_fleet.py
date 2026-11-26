@@ -123,11 +123,15 @@ def main() -> int:
         print("[FATAL ERROR] Metashape Python module is unavailable in this runtime.", file=sys.stderr)
         return 1
 
-    # Resolve host
+    # Resolve host (CLI -> server_config.json -> primary LAN IP)
     host = args.host.strip()
     if not host:
-        lan_ip = get_primary_lan_ip()
-        host = f"{lan_ip}:5840" if lan_ip != "127.0.0.1" else "127.0.0.1:5840"
+        sc_host = load_cluster_config(filename="server_config.json")
+        if sc_host.get("host") and sc_host.get("host") != "0.0.0.0":
+            host = f"{sc_host['host']}:{sc_host.get('port', 5840)}"
+        else:
+            lan_ip = get_primary_lan_ip()
+            host = f"{lan_ip}:5840" if lan_ip != "127.0.0.1" else "127.0.0.1:5840"
     elif ":" not in host:
         host = f"{host}:5840"
 
@@ -216,11 +220,15 @@ def main() -> int:
         return 0 if fail_count == 0 else 1
     else:
         matched = None
+        target_low = target_arg.lower()
         for w in online_workers:
+            haddr = str(w.get("hostaddr", "")).strip().lower()
+            hip = haddr.rsplit(":", 1)[0] if ":" in haddr else haddr
             if (
                 str(w.get("worker_id")) == target_arg
-                or str(w.get("hostname", "")).lower() == target_arg.lower()
-                or target_arg in str(w.get("hostaddr", ""))
+                or str(w.get("hostname", "")).lower() == target_low
+                or haddr == target_low
+                or (hip and hip == target_low)
             ):
                 matched = w
                 break

@@ -53,9 +53,13 @@ for %%A in (%*) do (
     if /i "%%~A"=="--headless" set "IS_HEADLESS=1"
 )
 
-set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
-set "TEMP_ZIP=%TEMP%\AutoMetashape_main.zip"
-set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted"
+if "%AUTOMETASHAPE_REPO_ZIP_URL%"=="" (
+    set "REPO_ZIP_URL=https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
+) else (
+    set "REPO_ZIP_URL=%AUTOMETASHAPE_REPO_ZIP_URL%"
+)
+set "TEMP_ZIP=%TEMP%\AutoMetashape_main_%RANDOM%.zip"
+set "TEMP_EXTRACT=%TEMP%\AutoMetashape_extracted_%RANDOM%"
 set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
 set "SERVER_PID_FILE=%TEMP%\autometashape_server.pid"
 
@@ -197,14 +201,16 @@ if "%ACTION_FLAG%"=="--worker" (
     echo Launching cluster worker daemon...
     cd /d "%TARGET_DIR%"
 
-    :: Smart UNC Share Auto-Inference: if no --host/--root passed and SCRIPT_DIR is a UNC path
+    :: Smart UNC Share Auto-Inference: if no --host/--root/--result-share passed and SCRIPT_DIR is a UNC path
     set "HAS_HOST=0"
     set "HAS_ROOT=0"
     if defined FORWARD_ARGS (
-        echo !FORWARD_ARGS! | findstr /i /c:"--host" >nul 2>&1
-        if !errorlevel! equ 0 set "HAS_HOST=1"
-        echo !FORWARD_ARGS! | findstr /i /c:"--root" >nul 2>&1
-        if !errorlevel! equ 0 set "HAS_ROOT=1"
+        for %%T in (!FORWARD_ARGS!) do (
+            if /i "%%~T"=="--host" set "HAS_HOST=1"
+            if /i "%%~T"=="--root" set "HAS_ROOT=1"
+            if /i "%%~T"=="--result-root" set "HAS_ROOT=1"
+            if /i "%%~T"=="--result-share" set "HAS_ROOT=1"
+        )
     )
 
     if "%SCRIPT_DIR:~0,2%"=="\\" (
@@ -216,7 +222,7 @@ if "%ACTION_FLAG%"=="--worker" (
             )
             if !HAS_ROOT! equ 0 (
                 set "INFERRED_ROOT=\\%%i\%%j"
-                set "FORWARD_ARGS=--root !INFERRED_ROOT! !FORWARD_ARGS!"
+                set "FORWARD_ARGS=--root "!INFERRED_ROOT!" !FORWARD_ARGS!"
                 echo [AUTO-INFERRED] Inferred storage root: !INFERRED_ROOT!
             )
         )
@@ -225,10 +231,10 @@ if "%ACTION_FLAG%"=="--worker" (
     :: Ensure non-interactive execution for headless node updates
     set "HAS_NON_INT=0"
     if defined FORWARD_ARGS (
-        echo !FORWARD_ARGS! | findstr /i /c:"--non-interactive" >nul 2>&1
-        if !errorlevel! equ 0 set "HAS_NON_INT=1"
-        echo !FORWARD_ARGS! | findstr /i /c:"--headless" >nul 2>&1
-        if !errorlevel! equ 0 set "HAS_NON_INT=1"
+        for %%T in (!FORWARD_ARGS!) do (
+            if /i "%%~T"=="--non-interactive" set "HAS_NON_INT=1"
+            if /i "%%~T"=="--headless" set "HAS_NON_INT=1"
+        )
     )
     if !HAS_NON_INT! equ 0 (
         set "FORWARD_ARGS=--non-interactive !FORWARD_ARGS!"

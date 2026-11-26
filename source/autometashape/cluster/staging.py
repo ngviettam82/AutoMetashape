@@ -15,6 +15,7 @@ import string
 import struct
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 import zipfile
 
 _WIN32_DRIVE_REMOVABLE = 2
@@ -200,7 +201,7 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
     Returns:
         Absolute normalized path to verified, writable local scratch directory.
     """
-    candidate_dir = None
+    candidate_dirs: list[str] = []
 
     if sys.platform == "win32":
         sys_drive = os.environ.get("SystemDrive", "C:")[0].upper()
@@ -208,9 +209,10 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
 
         for letter in string.ascii_uppercase:
             drive_root = f"{letter}:\\"
+            # Check Win32 GetDriveTypeW + bus type BEFORE os.path.exists() to avoid 15-30s hangs on offline mapped drives
+            if not _is_fixed_local_windows_drive(drive_root):
+                continue
             if os.path.exists(drive_root):
-                if not _is_fixed_local_windows_drive(drive_root):
-                    continue
                 try:
                     usage = shutil.disk_usage(drive_root)
                     free_gb = usage.free / (1024**3)
@@ -221,61 +223,56 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
                     continue
 
         if drive_candidates:
-            valid_non_system = [c for c in drive_candidates if c[1] and c[0] >= min_free_gb]
-            valid_system = [c for c in drive_candidates if not c[1] and c[0] >= min_free_gb]
-
-            if valid_non_system:
-                valid_non_system.sort(key=lambda x: x[0], reverse=True)
-                candidate_dir = valid_non_system[0][2]
-            elif valid_system:
-                candidate_dir = valid_system[0][2]
-            else:
-                drive_candidates.sort(key=lambda x: x[0], reverse=True)
-                candidate_dir = drive_candidates[0][2]
-
+            valid_non_system = sorted(
+                [c for c in drive_candidates if c[1] and c[0] >= min_free_gb], key=lambda x: x[0], reverse=True
+            )
+            valid_system = sorted(
+                [c for c in drive_candidates if not c[1] and c[0] >= min_free_gb], key=lambda x: x[0], reverse=True
+            )
+            under_threshold = sorted(
+                [c for c in drive_candidates if c[0] < min_free_gb], key=lambda x: x[0], reverse=True
+            )
+            candidate_dirs.extend(c[2] for c in (valid_non_system + valid_system + under_threshold))
     else:
         linux_candidates = ["/mnt/scratch", "/var/tmp", "/tmp", os.path.expanduser("~/AutoMetashape_Scratch")]
-        best_cand = None
-        max_free = -1.0
+        ranked_linux: list[tuple[float, str]] = []
         for cand in linux_candidates:
             probe_p = cand if os.path.exists(cand) else os.path.dirname(cand)
             if os.path.exists(probe_p):
                 try:
                     u = shutil.disk_usage(probe_p)
                     f_gb = u.free / (1024**3)
-                    if f_gb > max_free:
-                        max_free = f_gb
-                        best_cand = (
-                            os.path.join(cand, "AutoMetashape_Scratch")
-                            if not cand.endswith("AutoMetashape_Scratch")
-                            else cand
-                        )
+                    target_p = (
+                        os.path.join(cand, "AutoMetashape_Scratch")
+                        if not cand.endswith("AutoMetashape_Scratch")
+                        else cand
+                    )
+                    ranked_linux.append((f_gb, target_p))
                 except Exception:
                     continue
-        if best_cand:
-            candidate_dir = best_cand
+        ranked_linux.sort(key=lambda x: x[0], reverse=True)
+        candidate_dirs.extend(p for _, p in ranked_linux)
 
-    if not candidate_dir:
-        candidate_dir = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
+    fallback = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
+    if fallback not in candidate_dirs:
+        candidate_dirs.append(fallback)
 
-    # Verify directory creation and write access
-    try:
-        os.makedirs(candidate_dir, exist_ok=True)
-        probe_file = os.path.join(candidate_dir, f".write_probe_{os.getpid()}.tmp")
-        with open(probe_file, "w", encoding="utf-8") as f:
-            f.write("probe")
-        if os.path.isfile(probe_file):
-            os.remove(probe_file)
-        if len(candidate_dir) >= 2 and candidate_dir[1] == ":":
-            return candidate_dir
-        return os.path.abspath(candidate_dir)
-    except Exception:
-        fallback = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
+    # Probe ranked candidates in priority order until one is writable (never drop straight to /tmp on a read-only mount)
+    for candidate_dir in candidate_dirs:
         try:
-            os.makedirs(fallback, exist_ok=True)
-            return os.path.abspath(fallback)
+            os.makedirs(candidate_dir, exist_ok=True)
+            probe_file = os.path.join(candidate_dir, f".write_probe_{os.getpid()}.tmp")
+            with open(probe_file, "w", encoding="utf-8") as f:
+                f.write("probe")
+            if os.path.isfile(probe_file):
+                os.remove(probe_file)
+            if len(candidate_dir) >= 2 and candidate_dir[1] == ":":
+                return candidate_dir
+            return os.path.abspath(candidate_dir)
         except Exception:
-            return os.path.abspath(tempfile.gettempdir())
+            continue
+
+    return os.path.abspath(tempfile.gettempdir())
 
 
 def get_psx_files_dir(psx_path: str) -> str:
@@ -363,14 +360,23 @@ def reconcile_staged_psx_chunk_id(
     except Exception:
         return False, None, target_id
 
-    chunks_found = re.findall(r'<chunk\s+id="(\d+)"\s+path="([^"]+)"\s*/>', xml_txt)
-    if len(chunks_found) != 1:
+    try:
+        root_elem = ET.fromstring(xml_txt)
+        chunks_elem = root_elem.find("chunks")
+        chunk_nodes = chunks_elem.findall("chunk") if chunks_elem is not None else []
+    except Exception:
         return False, None, target_id
 
-    old_id, old_path = chunks_found[0]
-    norm_path = old_path.replace("\\", "/")
-    old_dir = norm_path.split("/")[0] if "/" in norm_path else ""
-    if norm_path != f"{old_dir}/chunk.zip":
+    if len(chunk_nodes) != 1:
+        # Multi-chunk projects are intentionally preserved untouched (pipeline multi-chunk merge
+        # removes temporary sub-chunks so merged production projects arrive here as single-chunk).
+        return False, None, target_id
+
+    target_node = chunk_nodes[0]
+    old_id = str(target_node.attrib.get("id", ""))
+    old_path = str(target_node.attrib.get("path", "")).replace("\\", "/")
+    old_dir = old_path.split("/")[0] if "/" in old_path else ""
+    if old_path != f"{old_dir}/chunk.zip":
         return False, old_id, target_id
     if old_id == target_id and old_dir == target_id:
         return False, old_id, target_id
@@ -380,15 +386,14 @@ def reconcile_staged_psx_chunk_id(
     if not os.path.isdir(src_dir):
         return False, old_id, target_id
 
-    next_id = str(max(int(target_id) + 1, 1))
-    new_xml = re.sub(r'next_id="\d+"', f'next_id="{next_id}"', xml_txt, count=1)
-    new_xml = re.sub(r'active_id="\d+"', f'active_id="{target_id}"', new_xml, count=1)
-    new_xml = re.sub(
-        r'<chunk\s+id="\d+"\s+path="[^"]+"\s*/>',
-        f'<chunk id="{target_id}" path="{target_id}/chunk.zip"/>',
-        new_xml,
-        count=1,
-    )
+    target_node.attrib["id"] = target_id
+    target_node.attrib["path"] = f"{target_id}/chunk.zip"
+    if chunks_elem is not None:
+        all_numeric_ids = [int(c.attrib["id"]) for c in chunk_nodes if str(c.attrib.get("id", "")).isdigit()]
+        chunks_elem.attrib["next_id"] = str(max(all_numeric_ids, default=0) + 1)
+        chunks_elem.attrib["active_id"] = target_id
+    xml_body = ET.tostring(root_elem, encoding="unicode").replace(" />", "/>")
+    new_xml = f'<?xml version="1.0" encoding="UTF-8"?>\n{xml_body}\n'
 
     renamed = False
     tmp_pz = local_pz + ".reconcile.tmp"
@@ -422,16 +427,10 @@ def reconcile_staged_psx_chunk_id(
 def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str) -> bool:
     """Synchronizes finalized project and deliverables from local NVMe scratch to central network storage.
 
-    Transfers all deliverables, models, textures, reports, and the consolidated .psx project
-    file and .files directory back to the shared storage root, then cleans up local scratch.
-    Filters out transient out-of-core octree leaves and lock files to avoid wasting bandwidth.
-
-    Args:
-        local_stage_dir: Local staging directory on worker node.
-        target_network_dir: Central shared directory on coordinator / NAS.
-
-    Returns:
-        True if all files synchronized successfully, False otherwise.
+    Transfers all deliverables, models, textures, reports, and the consolidated ``.psx`` + ``.files``
+    archive back to the shared storage root atomically (copying ``.files`` to a temporary sibling
+    directory before swapping, and publishing ``.psx`` last so a mid-transfer SMB error or
+    Win32 Error 112 never destroys the previous valid checkpoint), then cleans up local scratch.
     """
     if not os.path.isdir(local_stage_dir):
         return False
@@ -448,15 +447,53 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
                     pass
 
         ignore_transient = shutil.ignore_patterns("lock", "model.tmp", "*.tmp")
-        for item in os.listdir(local_stage_dir):
+        items = os.listdir(local_stage_dir)
+        psx_items = [it for it in items if it.lower().endswith(".psx")]
+        other_items = [it for it in items if it not in psx_items]
+
+        # 1. Copy deliverables & .files directories (atomic sibling copy-then-swap for .files dirs)
+        for item in other_items:
             s_path = os.path.join(local_stage_dir, item)
             d_path = os.path.join(target_network_dir, item)
 
             if os.path.isdir(s_path):
-                shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
+                if item.lower().endswith(".files"):
+                    tmp_d = f"{d_path}.sync_new_{os.getpid()}"
+                    old_d = f"{d_path}.sync_old_{os.getpid()}"
+                    if os.path.exists(tmp_d):
+                        shutil.rmtree(tmp_d, ignore_errors=True)
+                    shutil.copytree(s_path, tmp_d, dirs_exist_ok=True, ignore=ignore_transient)
+                    try:
+                        if os.path.isdir(d_path):
+                            if os.path.exists(old_d):
+                                shutil.rmtree(old_d, ignore_errors=True)
+                            os.rename(d_path, old_d)
+                        os.rename(tmp_d, d_path)
+                        if os.path.isdir(old_d):
+                            shutil.rmtree(old_d, ignore_errors=True)
+                    except OSError:
+                        # Fallback if Windows SMB lock prevents directory rename
+                        shutil.copytree(tmp_d, d_path, dirs_exist_ok=True)
+                        shutil.rmtree(tmp_d, ignore_errors=True)
+                        if os.path.isdir(old_d) and not os.path.isdir(d_path):
+                            try:
+                                os.rename(old_d, d_path)
+                            except OSError:
+                                pass
+                else:
+                    shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
             else:
                 if not item.endswith(".tmp") and item != "lock":
                     shutil.copy2(s_path, d_path)
+
+        # 2. Publish .psx manifest(s) LAST via atomic temp replace so .psx never points at partial .files
+        for item in psx_items:
+            s_path = os.path.join(local_stage_dir, item)
+            d_path = os.path.join(target_network_dir, item)
+            if os.path.isfile(s_path):
+                tmp_psx = f"{d_path}.sync_tmp_{os.getpid()}"
+                shutil.copy2(s_path, tmp_psx)
+                os.replace(tmp_psx, d_path)
 
         # Cleanup local staging directory upon verified completion
         try:

@@ -186,6 +186,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Comma-separated case-insensitive subfolder patterns to exclude from ingestion (e.g. 'manual,cổng')",
     )
     parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Abort any existing active batch for this project before submitting a fresh batch (default: attach safely)",
+    )
+    parser.add_argument(
+        "--start-paused",
+        action="store_true",
+        help="Submit the batch in paused state so the operator can inspect or stage before running",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -265,6 +275,8 @@ def submit_batch(
     tiepoint_limit: Optional[int] = None,
     build_point_cloud: Optional[bool] = None,
     exclude_folders: str = "",
+    force: bool = False,
+    start_paused: bool = False,
 ) -> int:
     """Create project, guarantee physical doc.save materialization, and submit cluster batch."""
     if Metashape is None:
@@ -296,6 +308,43 @@ def submit_batch(
     print(f"  Resume Checkpoint: {resume}", flush=True)
     print(f"  Direct Storage   : {no_local_scratch_staging}", flush=True)
     print("=" * 72, flush=True)
+
+    # Calculate cluster-relative path and connect BEFORE modifying psx_path on disk so
+    # re-running submit_cluster_batch.py never clobbers a live worker's active .psx archive.
+    rel_psx = get_cluster_relative_path(psx_path, resolved_root)
+    rel_output_dir = get_cluster_relative_path(norm_output, resolved_root)
+
+    print(f"\n[CONNECT] Connecting to server at {resolved_server}...", flush=True)
+    server_ip, server_port_str = resolved_server.rsplit(":", 1)
+    server_port = int(server_port_str)
+
+    net_client = Metashape.NetworkClient()
+    net_client.connect(server_ip, server_port)
+
+    if not force:
+        norm_target = _norm_cluster_path(rel_psx)
+        try:
+            raw_b = net_client.batchList() or {}
+            existing_batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else []
+            for b in existing_batches:
+                if _norm_cluster_path(b.get("path")) != norm_target:
+                    continue
+                b_state = str(b.get("state", "")).lower()
+                b_err = int(b.get("error_count") or 0)
+                if (
+                    b_state in ("inprogress", "running", "submitted", "pending", "queued")
+                    and not (b.get("failed") or b.get("aborted"))
+                    and b_err == 0
+                ):
+                    bid = int(b.get("batch_id"))
+                    print(
+                        f"  [OK] Project '{proj_name}' already has healthy active Batch #{bid} ({b_state}); "
+                        "attaching safely without overwriting .psx (pass --force to replace).",
+                        flush=True,
+                    )
+                    return bid
+        except Exception:
+            pass
 
     # -------------------------------------------------------------------------
     # MANDATORY ARCHITECTURAL INVARIANT: PHYSICAL PROJECT MATERIALIZATION
@@ -356,6 +405,12 @@ def submit_batch(
         "network_path": resolved_root,
         "ortho_resolution": ortho_resolution,
     }
+    if preset == "pro":
+        # Allow worker Pro telemetry profiling to compute adaptive faces/textures/filtering/crop
+        task_kwargs.setdefault("depth_filtering", None)
+        task_kwargs.setdefault("custom_faces", None)
+        task_kwargs.setdefault("texture_pages", None)
+        task_kwargs.setdefault("crop_method", None)
     if keypoint_limit is not None:
         task_kwargs["keypoint_limit"] = keypoint_limit
     if keypoint_limit_per_mpx is not None:
@@ -370,80 +425,33 @@ def submit_batch(
     res_task = build_monolithic_runscript_task(**task_kwargs)
     net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
 
-    # Calculate cluster-relative path
-    rel_psx = get_cluster_relative_path(psx_path, resolved_root)
-
-    # Connect to Metashape Server
-    print(f"  Connecting to server at {resolved_server}...", flush=True)
-    server_ip, server_port_str = resolved_server.split(":")
-    server_port = int(server_port_str)
-
-    net_client = Metashape.NetworkClient()
-    net_client.connect(server_ip, server_port)
-
-    # Submit batch via idempotent safe_create_cluster_batch (deduplicates & rejects zombie error batches)
+    # Submit batch via idempotent safe_create_cluster_batch:
+    # - Applies priority & worker_limit BEFORE unpausing (zero priority race)
+    # - Uses canonical <project>.psx first; falls back to hidden .cluster/tickets/ ONLY if server RAM
+    #   retains an un-evictable aborted key (NEVER creates _dispatch_*.psx in Result/<project>/)
     print(f"  Submitting batch for '{rel_psx}'...", flush=True)
-    try:
-        batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_psx, [net_task])
-    except Exception as e_dup:
-        if "duplicate batch" not in str(e_dup).lower():
-            raise
-        # Metashape Server retains aborted ghost RunScript batch keys until server restart.
-        # Materialize an alternate dispatch stub in the same output dir while keeping
-        # --output and --project-name unchanged so final deliverables still write to <proj>.psx.
-        stub_candidates = [
-            os.path.join(norm_output, f"_dispatch_{proj_name}.psx"),
-            os.path.join(norm_output, f"_dispatch_{proj_name}_{int(time.time())}.psx"),
-        ]
-        batch_id, attached_existing = -1, False
-        for stub_idx, stub_psx in enumerate(stub_candidates):
-            print(
-                f"  [Recovery] Server retains stale aborted batch key for '{rel_psx}'; "
-                f"dispatching via alternate stub '{stub_psx}'...",
-                flush=True,
-            )
-            stub_doc = Metashape.Document()
-            try:
-                stub_doc.addChunk().label = "Dispatch_Stub"
-                stub_doc.save(stub_psx)
-            finally:
-                try:
-                    stub_doc.clear()
-                except Exception:
-                    pass
-            rel_stub = get_cluster_relative_path(stub_psx, resolved_root)
-            try:
-                batch_id, attached_existing = safe_create_cluster_batch(net_client, rel_stub, [net_task])
-                break
-            except Exception as e_stub_dup:
-                if "duplicate batch" not in str(e_stub_dup).lower() or stub_idx == len(stub_candidates) - 1:
-                    raise
+    batch_id, attached_existing = safe_create_cluster_batch(
+        net_client,
+        rel_psx,
+        [net_task],
+        worker_limit=worker_limit,
+        force_fresh=force,
+        priority=priority,
+        start_paused=start_paused,
+        shared_root=resolved_root,
+        ticket_project_name=proj_name,
+        ticket_rel_output_dir=rel_output_dir,
+    )
     if attached_existing:
         print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
     else:
         print(f"  [OK] Batch created successfully with ID: #{batch_id}", flush=True)
 
-    # Configure priority and worker limits
-    try:
-        net_client.setBatchPriority(batch_id, priority)
-    except Exception as e_prio:
-        print(f"  [Notice] Could not set priority ({e_prio})", flush=True)
-
-    if hasattr(net_client, "setBatchWorkerLimit"):
-        try:
-            net_client.setBatchWorkerLimit(batch_id, worker_limit)
-        except Exception:
-            pass
-
-    # Ensure batch is unpaused
-    try:
-        net_client.setBatchPaused(batch_id, False)
-    except Exception:
-        pass
-
     print("=" * 72, flush=True)
+    state_label = "staged (paused)" if start_paused else "active"
     print(
-        f"[SUCCESS] Project '{proj_name}' is active on cluster as Batch #{batch_id} (Priority: {priority})!", flush=True
+        f"[SUCCESS] Project '{proj_name}' is {state_label} on cluster as Batch #{batch_id} (Priority: {priority})!",
+        flush=True,
     )
     print("=" * 72, flush=True)
     return batch_id
@@ -499,28 +507,47 @@ def main() -> int:
                 return 1
 
             submitted_ids: List[int] = []
+            failed_projects: List[str] = []
             for proj in projects:
-                bid = submit_batch(
-                    images_dir=proj.images_dir,
-                    output_dir=proj.output_dir,
-                    project_name=args.project_name if len(projects) == 1 and args.project_name else proj.project_name,
-                    priority=args.priority,
-                    server_host=args.server,
-                    shared_root=resolved_root,
-                    resume=args.resume,
-                    no_local_scratch_staging=args.no_local_scratch_staging,
-                    preset=args.preset,
-                    worker_limit=args.worker_limit,
-                    no_guided_matching=args.no_guided_matching,
-                    ortho_resolution=args.ortho_resolution,
-                    keypoint_limit=args.keypoint_limit,
-                    keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
-                    tiepoint_limit=args.tiepoint_limit,
-                    build_point_cloud=args.build_point_cloud,
-                    exclude_folders=args.exclude_folders,
+                try:
+                    bid = submit_batch(
+                        images_dir=proj.images_dir,
+                        output_dir=proj.output_dir,
+                        project_name=args.project_name
+                        if len(projects) == 1 and args.project_name
+                        else proj.project_name,
+                        priority=args.priority,
+                        server_host=args.server,
+                        shared_root=resolved_root,
+                        resume=args.resume,
+                        no_local_scratch_staging=args.no_local_scratch_staging,
+                        preset=args.preset,
+                        worker_limit=args.worker_limit,
+                        no_guided_matching=args.no_guided_matching,
+                        ortho_resolution=args.ortho_resolution,
+                        keypoint_limit=args.keypoint_limit,
+                        keypoint_limit_per_mpx=args.keypoint_limit_per_mpx,
+                        tiepoint_limit=args.tiepoint_limit,
+                        build_point_cloud=args.build_point_cloud,
+                        exclude_folders=args.exclude_folders,
+                        force=args.force,
+                        start_paused=args.start_paused,
+                    )
+                    if bid > 0:
+                        submitted_ids.append(bid)
+                except Exception as proj_exc:
+                    failed_projects.append(f"{proj.project_name}: {proj_exc}")
+                    print(
+                        f"[ERROR] Failed to submit project '{proj.project_name}': {proj_exc}. Continuing...",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            if failed_projects:
+                print(
+                    f"[SUMMARY] Submitted {len(submitted_ids)}/{len(projects)} project(s); {len(failed_projects)} failed.",
+                    file=sys.stderr,
+                    flush=True,
                 )
-                if bid > 0:
-                    submitted_ids.append(bid)
             return 0 if len(submitted_ids) == len(projects) else 1
 
         effective_root = args.root
@@ -546,6 +573,8 @@ def main() -> int:
             tiepoint_limit=args.tiepoint_limit,
             build_point_cloud=args.build_point_cloud,
             exclude_folders=args.exclude_folders,
+            force=args.force,
+            start_paused=args.start_paused,
         )
         return 0 if batch_id > 0 else 1
     except Exception as e:

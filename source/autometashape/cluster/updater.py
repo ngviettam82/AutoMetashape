@@ -19,6 +19,8 @@ except ImportError:
     Metashape = None
 
 
+from autometashape.cluster.hardware import get_local_hostname, is_healthy_online_worker
+
 DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
 CLUSTER_MAINTENANCE_REL_PATH = ".cluster/maintenance.psx"
 UPDATE_SIGNAL_FILENAME = ".update_pending"
@@ -113,7 +115,7 @@ def check_update_pending(target_dir: str, node_name: str | None = None) -> dict 
         os.path.join(tempfile.gettempdir(), UPDATE_SIGNAL_FILENAME),
     ]
     if node_name is None:
-        target_node = os.environ.get("COMPUTERNAME", "").strip().lower()
+        target_node = get_local_hostname().strip().lower()
     else:
         target_node = node_name.strip().lower()
     if target_node:
@@ -224,15 +226,15 @@ def generate_worker_updater_code(
     and re-execute its process image upon quitWorker.
     """
     clean_expected = expected_hostname.strip().lower()
-    clean_cluster_dir = shared_cluster_dir.replace("\\", "\\\\")
-    return f'''import json
+    return f"""import json
 import os
+import socket
 import sys
 import time
 
 log = []
-node_name = os.environ.get("COMPUTERNAME", "unknown")
-expected_node = "{clean_expected}"
+node_name = (os.environ.get("COMPUTERNAME") or "").strip() or socket.gethostname() or "unknown"
+expected_node = {clean_expected!r}
 if expected_node and expected_node != "unknown":
     if node_name.strip().lower() != expected_node:
         err_msg = f"Target node mismatch: task assigned to {{node_name}}, expected {{expected_node}}"
@@ -246,18 +248,17 @@ log.append(f"Python: {{sys.executable}}")
 target_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
 if not target_dir or not os.path.isdir(target_dir):
     user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    # INVARIANT: %USERPROFILE%/Documents/AutoMetashape is the canonical hardcoded directory in the architecture.
     target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
 os.makedirs(target_dir, exist_ok=True)
 log.append(f"Target AutoMetashape directory: {{target_dir}}")
 
 # 2. Write .update_pending signal file in target directory for persistent supervisor detection
-flag_file = os.path.join(target_dir, "{UPDATE_SIGNAL_FILENAME}")
-shared_dir = r"{clean_cluster_dir}"
+flag_file = os.path.join(target_dir, {UPDATE_SIGNAL_FILENAME!r})
+shared_dir = {shared_cluster_dir!r}
 flag_data = {{
     "action": "autometashape_update",
     "node_name": node_name,
-    "repo_url": "{repo_url}",
+    "repo_url": {repo_url!r},
     "shared_cluster_dir": shared_dir,
     "timestamp": time.time(),
     "target_dir": target_dir,
@@ -287,7 +288,7 @@ if not written:
                 rf.write("\\n".join(log) + "\\n")
     except Exception:
         pass
-'''
+"""
 
 
 def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_ARCHIVE_URL) -> str:
@@ -315,12 +316,23 @@ def stage_cluster_update_payload(shared_root: str, repo_url: str = DEFAULT_REPO_
     if needs_download:
         import urllib.request
 
+        tmp_zip = f"{payload_zip}.tmp.{os.getpid()}"
         try:
             req = urllib.request.Request(repo_url, headers={"User-Agent": "AutoMetashape-Coordinator/1.0"})
-            with urllib.request.urlopen(req, timeout=30) as resp, open(payload_zip, "wb") as out_f:
+            with urllib.request.urlopen(req, timeout=30) as resp, open(tmp_zip, "wb") as out_f:
                 shutil.copyfileobj(resp, out_f)
+            # Validate zip integrity before publishing atomically to shared cache
+            with zipfile.ZipFile(tmp_zip, "r") as zf:
+                bad = zf.testzip()
+                if bad is not None:
+                    raise zipfile.BadZipFile(f"Corrupt entry in archive: {bad}")
+            os.replace(tmp_zip, payload_zip)
         except Exception:
-            pass
+            if os.path.isfile(tmp_zip):
+                try:
+                    os.remove(tmp_zip)
+                except OSError:
+                    pass
 
     return payload_zip if os.path.isfile(payload_zip) else ""
 
@@ -402,10 +414,18 @@ def list_online_workers(client) -> list[dict]:
         return []
     info = client.workerList()
     if isinstance(info, dict):
-        return [
-            w for w in info.get("workers", []) if str(w.get("state", "")).lower() != "offline" and not w.get("aborted")
-        ]
+        return [w for w in info.get("workers", []) if is_healthy_online_worker(w)]
     return []
+
+
+def _extract_host_ip(hostaddr: str) -> str:
+    """Extract host/IP portion from 'host:port' (or '[ipv6]:port') string."""
+    raw = str(hostaddr or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("[") and "]" in raw:
+        return raw[1 : raw.index("]")].strip().lower()
+    return raw.rsplit(":", 1)[0].strip().lower() if ":" in raw else raw.lower()
 
 
 def update_remote_worker(
@@ -458,7 +478,8 @@ def update_remote_worker(
         wid = str(w.get("worker_id", ""))
         hname = str(w.get("hostname", "")).lower()
         haddr = str(w.get("hostaddr", "")).lower()
-        if target_str == wid or target_str == hname or target_str in haddr:
+        hip = _extract_host_ip(haddr)
+        if target_str == wid or target_str == hname or target_str == haddr or (hip and target_str == hip):
             target = w
             break
 
@@ -486,40 +507,68 @@ def update_remote_worker(
                 )
                 return result
 
-            # FORCE MODE: Abort active processing to allow immediate update
-            # 1. Temporarily pause queued/inprogress batches on server so worker cannot grab another job
-            if hasattr(client, "batchList") and hasattr(client, "setBatchPaused"):
+            # FORCE MODE: Abort active processing ONLY on target worker to allow immediate update
+            target_bid = target.get("batch_id")
+            batches_snapshot: list[dict] = []
+            if hasattr(client, "batchList"):
                 try:
                     bl = client.batchList()
                     if isinstance(bl, dict):
-                        for b in bl.get("batches", []):
-                            bid = b.get("batch_id")
-                            bstate = str(b.get("state", "")).lower()
-                            if bstate in ("queued", "inprogress", "running", "active", "submitted", "pending"):
-                                client.setBatchPaused(bid, True)
-                                paused_existing_batches.append(bid)
+                        batches_snapshot = list(bl.get("batches", []))
+                except Exception:
+                    batches_snapshot = []
+
+            # If workerList() omitted batch_id, identify the specific active batch running on `wid`
+            if target_bid is None and batches_snapshot:
+                active_inprog = [
+                    b
+                    for b in batches_snapshot
+                    if str(b.get("state", "")).lower() in ("inprogress", "running", "active")
+                    and b.get("batch_id") is not None
+                ]
+                if hasattr(client, "batchInfo"):
+                    for b in active_inprog:
+                        bid = b.get("batch_id")
+                        try:
+                            binfo = client.batchInfo(bid)
+                            if isinstance(binfo, dict):
+                                if any(
+                                    isinstance(t, dict) and t.get("worker_id") == wid for t in binfo.get("tasks", [])
+                                ):
+                                    target_bid = bid
+                                    break
+                        except Exception:
+                            pass
+                if target_bid is None and len(active_inprog) == 1:
+                    target_bid = active_inprog[0].get("batch_id")
+
+            # 1. Temporarily pause unpaused queued/active batches (EXCEPT target_bid, never unpausing operator-paused work)
+            if batches_snapshot and hasattr(client, "setBatchPaused"):
+                try:
+                    for b in batches_snapshot:
+                        bid = b.get("batch_id")
+                        bstate = str(b.get("state", "")).lower()
+                        if (
+                            bid != target_bid
+                            and not b.get("paused")
+                            and bstate in ("queued", "inprogress", "running", "active", "submitted", "pending")
+                        ):
+                            client.setBatchPaused(bid, True)
+                            paused_existing_batches.append(bid)
                 except Exception:
                     pass
 
-            # 2. Abort ONLY the active batch running on target worker (never disrupt unrelated workers!)
-            if hasattr(client, "abortBatch"):
-                target_bid = target.get("batch_id")
-                if target_bid is not None:
-                    try:
-                        client.abortBatch(target_bid)
-                    except Exception:
-                        pass
-                elif hasattr(client, "batchList"):
-                    try:
-                        bl = client.batchList()
-                        if isinstance(bl, dict):
-                            for b in bl.get("batches", []):
-                                bid = b.get("batch_id")
-                                bstate = str(b.get("state", "")).lower()
-                                if bstate in ("inprogress", "running", "active"):
-                                    client.abortBatch(bid)
-                    except Exception:
-                        pass
+            # 2. Unpause (if paused) and abort ONLY the active batch running on target worker
+            if hasattr(client, "abortBatch") and target_bid is not None:
+                try:
+                    if hasattr(client, "setBatchPaused"):
+                        client.setBatchPaused(target_bid, False)
+                except Exception:
+                    pass
+                try:
+                    client.abortBatch(target_bid)
+                except Exception:
+                    pass
 
             # 3. Wait for target worker to transition to 'ready'
             abort_start = time.time()
@@ -567,23 +616,16 @@ def update_remote_worker(
                 result["error"] = f"Failed to force worker '{node_hname}' (ID={wid}) into ready state after abort"
                 return result
 
-        # 4. Cluster Isolation: Temporarily pause all OTHER workers so Metashape ONLY assigns update batch to target
+        # 4. Cluster Isolation: Temporarily pause all OTHER workers and record ALL pause states for restoration
         current_fleet = list_online_workers(client) if target_state not in ("ready", "") else workers
         for w in current_fleet:
             w_id = w.get("worker_id")
-            if w_id != wid:
-                other_workers_paused[w_id] = bool(w.get("paused", False))
-                if hasattr(client, "setWorkerPaused"):
-                    try:
-                        client.setWorkerPaused(w_id, True)
-                    except Exception:
-                        pass
-            else:
-                if hasattr(client, "setWorkerPaused"):
-                    try:
-                        client.setWorkerPaused(wid, False)
-                    except Exception:
-                        pass
+            other_workers_paused[w_id] = bool(w.get("paused", False))
+            if hasattr(client, "setWorkerPaused"):
+                try:
+                    client.setWorkerPaused(w_id, w_id != wid)
+                except Exception:
+                    pass
 
         # 5. Ensure per-worker maintenance project and stage update payload
         rel_project = ensure_cluster_maintenance_project(shared_root, worker_slug=f"{node_hname}_{wid}")
@@ -691,7 +733,10 @@ def update_remote_worker(
                         cw_state = str(cw.get("state", "")).strip().lower()
 
                         match_hname = bool(result["hostname"] and cw_hname == str(result["hostname"]).strip().lower())
-                        match_ip = bool(target_host_ip and target_host_ip != "127.0.0.1" and target_host_ip in cw_addr)
+                        cw_ip = _extract_host_ip(cw_addr)
+                        match_ip = bool(
+                            target_host_ip and target_host_ip != "127.0.0.1" and cw_ip == target_host_ip.lower()
+                        )
 
                         if cw_id != wid and (match_hname or match_ip) and cw_state == "ready":
                             result["relaunched"] = True
@@ -755,11 +800,13 @@ def update_all_workers_parallel(
                     for b in bl.get("batches", []):
                         bid = b.get("batch_id")
                         bstate = str(b.get("state", "")).lower()
-                        if bstate in ("queued", "pending", "submitted"):
+                        if bstate in ("queued", "pending", "submitted") and not b.get("paused"):
                             if hasattr(client, "setBatchPaused"):
                                 client.setBatchPaused(bid, True)
                                 paused_existing_batches.append(bid)
                         elif bstate in ("inprogress", "running", "active"):
+                            if b.get("paused") and hasattr(client, "setBatchPaused"):
+                                client.setBatchPaused(bid, False)
                             if hasattr(client, "abortBatch"):
                                 client.abortBatch(bid)
             except Exception:
@@ -925,7 +972,8 @@ def update_all_workers_parallel(
                         cw_state = str(cw.get("state", "")).strip().lower()
 
                         match_hname = bool(target_hname and cw_hname == target_hname)
-                        match_ip = bool(target_ip and target_ip != "127.0.0.1" and target_ip in cw_addr)
+                        cw_ip = _extract_host_ip(cw_addr)
+                        match_ip = bool(target_ip and target_ip != "127.0.0.1" and cw_ip == target_ip.lower())
 
                         if cw_id != old_wid and (match_hname or match_ip) and cw_state == "ready":
                             nr["relaunched"] = True

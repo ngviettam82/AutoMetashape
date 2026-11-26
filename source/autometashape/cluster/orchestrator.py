@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import time
+import zipfile
 
 try:
     import Metashape
@@ -256,9 +258,17 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "        all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)\n"
             "        med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]\n"
             "        flight_height = abs(med_cam_z - med_pz)\n"
+            "        min_z, max_z = min(all_zs), max(all_zs)\n"
+            "        span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))\n"
+            "        mid_z = (min_z + max_z) * 0.5\n"
             "    else:\n"
-            "        all_zs = inlier_zs\n"
-            "        flight_height = 0.0\n"
+            "        orig_mid_z = (rot_t * chunk.region.center).z\n"
+            "        orig_span_z = chunk.region.size.z\n"
+            "        all_zs = inlier_zs + [orig_mid_z - 0.5 * orig_span_z, orig_mid_z + 0.5 * orig_span_z]\n"
+            "        flight_height = max(0.0, abs((sorted(inlier_zs)[len(inlier_zs) // 2]) - orig_mid_z))\n"
+            "        min_z, max_z = min(all_zs), max(all_zs)\n"
+            "        span_z = max(orig_span_z, (max_z - min_z) * (1.0 + 2.0 * padding))\n"
+            "        mid_z = (min_z + max_z) * 0.5\n"
             "    fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0\n"
             "    margin_x = max(span_x * padding, fov_margin)\n"
             "    margin_y = max(span_y * padding, fov_margin)\n"
@@ -269,9 +279,6 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "    cos_t, sin_t = math.cos(best_theta), math.sin(best_theta)\n"
             "    mid_x = mid_rx * cos_t - mid_ry * sin_t\n"
             "    mid_y = mid_rx * sin_t + mid_ry * cos_t\n"
-            "    min_z, max_z = min(all_zs), max(all_zs)\n"
-            "    span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))\n"
-            "    mid_z = (min_z + max_z) * 0.5\n"
             "    Rz = Metashape.Matrix([[cos_t, -sin_t, 0.0], [sin_t, cos_t, 0.0], [0.0, 0.0, 1.0]])\n"
             "    chunk.region.rot = rot * Rz\n"
             "    chunk.region.center = rot * Metashape.Vector([mid_x, mid_y, mid_z])\n"
@@ -374,12 +381,28 @@ def build_monolithic_runscript_task(
     smooth_strength: float = 3.0,
     decimate_mesh: int | None = None,
     exclude_folders: list[str] | tuple[str, ...] | str | None = None,
+    alignment_hygiene: bool | None = None,
+    icp_bridge: bool | None = None,
+    adaptive_fitting: bool | None = None,
+    filter_stationary_points: bool | None = None,
+    reference_preselection_mode: str | None = None,
+    min_quality: float | None = None,
+    disable_quality_filter: bool = False,
+    crop_padding: float | None = None,
+    close_holes: bool | None = None,
+    fill_holes: bool | None = None,
+    ghosting_filter: bool | None = None,
+    rebake_texture: bool = False,
+    points_spacing: float | None = None,
+    filter_point_confidence: bool | None = None,
+    ortho_cull_faces: bool | None = None,
+    report_title: str | None = None,
+    scratch_dir: str | None = None,
+    min_scratch_free_gb: float | None = None,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
         status_file = os.path.join(output_dir, "_autometashape_status.json")
-    if crop_method is None:
-        crop_method = "gps-square"
 
     # Standard relative entry point on worker local repository
     rel_script = "scripts/metashape_reconstruction.py"
@@ -408,14 +431,6 @@ def build_monolithic_runscript_task(
         align_quality,
         "--depth-quality",
         depth_quality,
-        "--depth-filtering",
-        depth_filtering or "moderate",
-        "--faces",
-        str(custom_faces or 2000000),
-        "--texture-pages",
-        str(texture_pages or 16),
-        "--crop-method",
-        crop_method or "none",
         "--texture-format",
         texture_format,
         "--ortho-resolution",
@@ -423,6 +438,14 @@ def build_monolithic_runscript_task(
         "--status-file",
         rel_status,
     ]
+    if depth_filtering is not None:
+        worker_args.extend(["--depth-filtering", depth_filtering])
+    if custom_faces is not None:
+        worker_args.extend(["--faces", str(custom_faces)])
+    if texture_pages is not None:
+        worker_args.extend(["--texture-pages", str(texture_pages)])
+    if crop_method is not None:
+        worker_args.extend(["--crop-method", crop_method])
     if keypoint_limit is not None:
         worker_args.extend(["--keypoint-limit", str(keypoint_limit)])
     if keypoint_limit_per_mpx is not None:
@@ -437,6 +460,46 @@ def build_monolithic_runscript_task(
         worker_args.append("--no-rolling-shutter")
     if filter_tiepoints is False:
         worker_args.append("--no-filter-tiepoints")
+    if alignment_hygiene is False:
+        worker_args.append("--no-alignment-hygiene")
+    if icp_bridge is False:
+        worker_args.append("--no-icp-bridge")
+    if adaptive_fitting is True:
+        worker_args.append("--adaptive-fitting")
+    elif adaptive_fitting is False:
+        worker_args.append("--no-adaptive-fitting")
+    if filter_stationary_points is False:
+        worker_args.append("--no-filter-stationary-points")
+    if reference_preselection_mode:
+        worker_args.extend(["--reference-preselection-mode", reference_preselection_mode])
+    if min_quality is not None:
+        worker_args.extend(["--min-quality", str(min_quality)])
+    if disable_quality_filter:
+        worker_args.append("--no-quality-filter")
+    if crop_padding is not None:
+        worker_args.extend(["--crop-padding", str(crop_padding)])
+    if close_holes is True:
+        worker_args.append("--close-holes")
+    elif close_holes is False:
+        worker_args.append("--no-close-holes")
+    if fill_holes is False:
+        worker_args.append("--no-fill-holes")
+    if ghosting_filter is False:
+        worker_args.append("--no-ghosting-filter")
+    if rebake_texture:
+        worker_args.append("--rebake-texture")
+    if points_spacing is not None:
+        worker_args.extend(["--points-spacing", str(points_spacing)])
+    if filter_point_confidence is False:
+        worker_args.append("--no-filter-point-confidence")
+    if ortho_cull_faces is False:
+        worker_args.append("--no-ortho-cull-faces")
+    if report_title:
+        worker_args.extend(["--report-title", report_title])
+    if scratch_dir:
+        worker_args.extend(["--scratch-dir", scratch_dir])
+    if min_scratch_free_gb is not None:
+        worker_args.extend(["--min-scratch-free-gb", str(min_scratch_free_gb)])
     if network_path:
         worker_args.extend(["--network-path", network_path])
     if resume:
@@ -513,7 +576,10 @@ def build_monolithic_runscript_task(
             ]
         )
     if import_reference:
-        worker_args.extend(["--import-reference", import_reference])
+        rel_ref = (
+            relpath_under(import_reference, norm_net, case_insensitive=True) if norm_net else None
+        ) or import_reference.replace("\\", "/")
+        worker_args.extend(["--import-reference", rel_ref])
     if smooth_mesh:
         worker_args.extend(["--smooth-mesh", "--smooth-strength", str(smooth_strength)])
     if decimate_mesh and decimate_mesh > 0:
@@ -598,7 +664,13 @@ if "exclude_folders" not in _am_ins.signature(_am_tel.discover_image_subfolder_g
     bootstrap_code = f"""import os, runpy, sys
 
 user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-repo_dir = os.environ.get("AUTOMETASHAPE_DIR") or os.path.join(user_profile, "Documents", "AutoMetashape")
+_repo_candidates = [
+    os.environ.get("AUTOMETASHAPE_DIR", "").strip(),
+    os.path.join(user_profile, "Documents", "AutoMetashape"),
+    os.path.join(user_profile, "AutoMetashape"),
+    os.getcwd(),
+]
+repo_dir = next((c for c in _repo_candidates if c and os.path.isfile(os.path.join(c, "scripts", "metashape_reconstruction.py"))), _repo_candidates[1])
 script_path = os.path.join(repo_dir, "scripts", "metashape_reconstruction.py")
 source_dir = os.path.join(repo_dir, "source")
 if not os.path.isfile(script_path):
@@ -1026,31 +1098,170 @@ def build_unified_cluster_pipeline_tasks(
     return tasks, stage_info
 
 
+CLUSTER_TICKETS_REL_DIR = ".cluster/tickets"
+
+
+def _slugify_ticket_name(project_name: str) -> str:
+    """Convert a project name into an ASCII filesystem-safe slug for hidden cluster tickets."""
+    cleaned = "".join(ch if ch.isalnum() or ch in ("-", "_") else "_" for ch in str(project_name or "project").strip())
+    return (cleaned.strip("_") or "project")[:80]
+
+
+def cleanup_stale_dispatch_tickets(shared_root: str, max_age_hours: float = 24.0) -> int:
+    """Prune old ephemeral ticket files under ``<shared_root>/.cluster/tickets/``."""
+    if not shared_root:
+        return 0
+    tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
+    if not os.path.isdir(tickets_dir):
+        return 0
+    cutoff = time.time() - max(0.0, max_age_hours) * 3600.0
+    removed = 0
+    try:
+        import shutil
+
+        for entry in os.listdir(tickets_dir):
+            full = os.path.join(tickets_dir, entry)
+            try:
+                if os.path.getmtime(full) > cutoff:
+                    continue
+                if os.path.isdir(full):
+                    shutil.rmtree(full, ignore_errors=True)
+                else:
+                    os.remove(full)
+                if not os.path.exists(full):
+                    removed += 1
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return removed
+
+
+def create_hidden_dispatch_ticket(
+    shared_root: str,
+    project_name: str,
+    rel_output_dir: str = "",
+) -> str:
+    """Materialize a minimal hidden scheduler ticket under ``.cluster/tickets/`` (never in ``Result/``).
+
+    Used ONLY when Metashape Network Server retains an un-evictable aborted batch key for the
+    canonical ``<project>.psx`` path. Keeps the user's deliverables directory spotless with a
+    single canonical ``<project>.psx`` while writing a tiny ``.ticket.json`` metadata sidecar so
+    ``cluster_monitor.py`` still verifies the real Result directory accurately.
+
+    Returns:
+        Cluster-relative POSIX path to the hidden ticket ``.psx`` (e.g. ``.cluster/tickets/<slug>_<ts>.psx``).
+    """
+    cleanup_stale_dispatch_tickets(shared_root)
+    tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
+    os.makedirs(tickets_dir, exist_ok=True)
+    slug = _slugify_ticket_name(project_name)
+    stem = f"{slug}_{int(time.time() * 1000)}_{os.getpid()}"
+    psx_path = os.path.join(tickets_dir, f"{stem}.psx")
+    files_dir = os.path.join(tickets_dir, f"{stem}.files")
+    os.makedirs(files_dir, exist_ok=True)
+    project_zip = os.path.join(files_dir, "project.zip")
+
+    materialized = False
+    if Metashape is not None and hasattr(Metashape, "Document"):
+        stub_doc = Metashape.Document()
+        try:
+            stub_doc.addChunk().label = "Dispatch_Ticket"
+            stub_doc.save(psx_path)
+            materialized = os.path.isfile(psx_path)
+        except Exception:
+            materialized = False
+        finally:
+            try:
+                stub_doc.clear()
+            except Exception:
+                pass
+
+    if not materialized:
+        with open(psx_path, "w", encoding="utf-8") as fh:
+            fh.write(
+                f'<?xml version="1.0" encoding="UTF-8"?>\n<document version="1.2.0" path="{stem}.files/project.zip"/>\n'
+            )
+        chunk_dir = os.path.join(files_dir, "0")
+        os.makedirs(chunk_dir, exist_ok=True)
+        with zipfile.ZipFile(os.path.join(chunk_dir, "chunk.zip"), "w", compression=zipfile.ZIP_DEFLATED) as zc:
+            zc.writestr("doc.xml", '<?xml version="1.0" encoding="UTF-8"?>\n<chunk version="1.2.0"/>\n')
+        with zipfile.ZipFile(project_zip, "w", compression=zipfile.ZIP_DEFLATED) as zp:
+            zp.writestr(
+                "doc.xml",
+                '<?xml version="1.0" encoding="UTF-8"?>\n'
+                '<document version="1.2.0">\n'
+                '  <chunks next_id="1" active_id="0">\n'
+                '    <chunk id="0" path="0/chunk.zip"/>\n'
+                "  </chunks>\n"
+                "</document>\n",
+            )
+
+    meta_path = os.path.join(tickets_dir, f"{stem}.ticket.json")
+    try:
+        with open(meta_path, "w", encoding="utf-8") as mf:
+            json.dump(
+                {
+                    "project_name": project_name,
+                    "rel_output_dir": rel_output_dir.replace("\\", "/").strip("/"),
+                    "created_at": time.time(),
+                },
+                mf,
+                indent=2,
+            )
+    except OSError:
+        pass
+
+    return f"{CLUSTER_TICKETS_REL_DIR}/{stem}.psx"
+
+
+def _safe_abort_batch(net_client, batch_id: int, is_paused: bool = False) -> None:
+    """Unpause (if needed) and abort a cluster batch without freezing the Metashape scheduler."""
+    if is_paused and hasattr(net_client, "setBatchPaused"):
+        try:
+            net_client.setBatchPaused(batch_id, False)
+        except Exception:
+            pass
+    try:
+        net_client.abortBatch(batch_id)
+    except Exception:
+        pass
+
+
 def safe_create_cluster_batch(
     net_client: Metashape.NetworkClient,
     rel_psx: str,
     net_tasks: list,
     worker_limit: int | None = 1,
     force_fresh: bool = True,
+    priority: int | None = None,
+    start_paused: bool = False,
+    shared_root: str = "",
+    ticket_project_name: str = "",
+    ticket_rel_output_dir: str = "",
 ) -> tuple[int, bool]:
     """Safely creates a cluster batch, resolving 'Duplicate batch' conflicts on the Network Server."""
     if net_client is None:
         raise ValueError("NetworkClient is not connected or None")
 
     norm_target = _norm_cluster_path(rel_psx)
+    done_states = ("completed", "finished")
+    terminal_states = ("completed", "finished", "failed", "aborted", "cancelled")
 
     if hasattr(net_client, "findBatch"):
         try:
             fb_id = net_client.findBatch(rel_psx)
-            if fb_id is not None and fb_id > 0:
+            if isinstance(fb_id, int) and not isinstance(fb_id, bool) and fb_id > 0:
                 fb_info = net_client.batchInfo(fb_id)
                 fb_state = (
                     fb_info.get("state", "") if isinstance(fb_info, dict) else getattr(fb_info, "state", "")
                 ).lower()
-                fb_err_cnt = fb_info.get("error_count", 0) if isinstance(fb_info, dict) else 0
+                fb_err_cnt = int((fb_info.get("error_count") if isinstance(fb_info, dict) else 0) or 0)
+                fb_aborted = bool(isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
+                fb_paused = bool(isinstance(fb_info, dict) and fb_info.get("paused"))
                 fb_healthy_active = (
                     fb_state in ("inprogress", "running", "submitted", "pending", "queued")
-                    and not (isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
+                    and not fb_aborted
                     and fb_err_cnt == 0
                 )
                 if not force_fresh and fb_healthy_active:
@@ -1059,12 +1270,11 @@ def safe_create_cluster_batch(
                         flush=True,
                     )
                     return fb_id, True
-                else:
-                    try:
-                        net_client.abortBatch(fb_id)
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
+                elif fb_state not in done_states and (
+                    (force_fresh and fb_state != "aborted") or (fb_state not in terminal_states and not fb_aborted)
+                ):
+                    _safe_abort_batch(net_client, fb_id, is_paused=fb_paused)
+                    time.sleep(0.5)
         except Exception:
             pass
 
@@ -1078,21 +1288,24 @@ def safe_create_cluster_batch(
             if _norm_cluster_path(b_path) == norm_target:
                 b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
                 b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
-                b_err_cnt = b.get("error_count", 0) if isinstance(b, dict) else 0
+                b_err_cnt = int((b.get("error_count") if isinstance(b, dict) else 0) or 0)
+                b_aborted = bool(isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
+                b_paused = bool(isinstance(b, dict) and b.get("paused"))
                 b_healthy_active = (
                     b_state in ("inprogress", "running", "submitted", "pending", "queued")
-                    and not (isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
+                    and not b_aborted
                     and b_err_cnt == 0
                 )
                 if not force_fresh and b_healthy_active:
                     print(f"  [Cluster] Attaching to active batch #{b_id} for '{rel_psx}' ({b_state}).", flush=True)
                     return b_id, True
-                else:
-                    try:
-                        net_client.abortBatch(b_id)
-                        time.sleep(0.5)
-                    except Exception:
-                        pass
+                elif (
+                    b_id is not None
+                    and b_state not in done_states
+                    and ((force_fresh and b_state != "aborted") or (b_state not in terminal_states and not b_aborted))
+                ):
+                    _safe_abort_batch(net_client, b_id, is_paused=b_paused)
+                    time.sleep(0.5)
     except Exception as e_pre:
         print(f"  [Cluster] Note: Pre-dispatch batch check: {e_pre}", flush=True)
 
@@ -1112,33 +1325,64 @@ def safe_create_cluster_batch(
                     b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
                     if _norm_cluster_path(b_path) == norm_target:
                         b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
-                        if b_id is not None:
-                            try:
-                                net_client.abortBatch(b_id)
-                                aborted_ids.add(b_id)
-                            except Exception:
-                                pass
+                        b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
+                        b_paused = bool(isinstance(b, dict) and b.get("paused"))
+                        if b_id is not None and b_state not in done_states:
+                            _safe_abort_batch(net_client, b_id, is_paused=b_paused)
+                            aborted_ids.add(b_id)
                 if not aborted_ids and hasattr(net_client, "findBatch"):
                     try:
                         fb_id = net_client.findBatch(rel_psx)
-                        if fb_id is not None and fb_id not in aborted_ids:
-                            net_client.abortBatch(fb_id)
+                        if (
+                            isinstance(fb_id, int)
+                            and not isinstance(fb_id, bool)
+                            and fb_id > 0
+                            and fb_id not in aborted_ids
+                        ):
+                            _safe_abort_batch(net_client, fb_id, is_paused=True)
                     except Exception:
                         pass
                 time.sleep(1.0)
-                batch_id = net_client.createBatch(rel_psx, net_tasks)
+                try:
+                    batch_id = net_client.createBatch(rel_psx, net_tasks)
+                except Exception as e_retry_dup:
+                    if "duplicate batch" in str(e_retry_dup).lower() and shared_root and os.path.isdir(shared_root):
+                        # Metashape Server 2.2.2 locks hard-killed aborted RunScript batch keys in RAM until
+                        # server restart. Dispatch via a hidden .cluster/tickets/ stub so Result/<project>/
+                        # NEVER gets polluted with a second _dispatch_*.psx project file.
+                        proj_label = ticket_project_name or os.path.splitext(os.path.basename(rel_psx))[0]
+                        rel_out = ticket_rel_output_dir or os.path.dirname(rel_psx.replace("\\", "/"))
+                        ticket_rel = create_hidden_dispatch_ticket(
+                            shared_root=shared_root,
+                            project_name=proj_label,
+                            rel_output_dir=rel_out,
+                        )
+                        print(
+                            f"  [Cluster Recovery] Server holds stale aborted key for '{rel_psx}'; "
+                            f"dispatching via hidden ticket '{ticket_rel}' (Result folder stays clean).",
+                            flush=True,
+                        )
+                        batch_id = net_client.createBatch(ticket_rel, net_tasks)
+                    else:
+                        raise e_retry_dup
             except Exception as e_retry:
                 raise e_retry
         else:
             raise e_create
 
+    # Configure priority and worker limits BEFORE unpausing so idle workers never claim at wrong priority
+    if priority is not None and hasattr(net_client, "setBatchPriority"):
+        try:
+            net_client.setBatchPriority(batch_id, priority)
+        except Exception:
+            pass
     if worker_limit is not None and worker_limit > 0:
         try:
             net_client.setBatchWorkerLimit(batch_id, worker_limit)
         except Exception:
             pass
     try:
-        net_client.setBatchPaused(batch_id, False)
+        net_client.setBatchPaused(batch_id, bool(start_paused))
     except Exception:
         pass
 
@@ -1166,14 +1410,18 @@ def evaluate_cluster_batch_info(b_info: dict) -> tuple[str, bool, str]:
         return "failed", False, "Invalid batchInfo structure received from cluster server"
 
     state = str(b_info.get("state") or "").lower()
-    tasks_info = b_info.get("tasks", [])
+    tasks_info = b_info.get("tasks") or []
 
     has_failed = bool(
         state in ("failed", "aborted")
         or b_info.get("failed")
         or b_info.get("aborted")
-        or b_info.get("error_count", 0) > 0
-        or any(t.get("state") in ("failed", "aborted") or t.get("failed") or t.get("aborted") for t in tasks_info)
+        or int(b_info.get("error_count") or 0) > 0
+        or any(
+            str(t.get("state") or "").lower() in ("failed", "aborted") or t.get("failed") or t.get("aborted")
+            for t in tasks_info
+            if isinstance(t, dict)
+        )
     )
 
     if has_failed:

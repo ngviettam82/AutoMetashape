@@ -67,8 +67,8 @@ def check_storage_headroom(target_path: str, min_headroom_gb: float = 50.0) -> T
         free_gb = usage.free / (1024.0**3)
         return free_gb >= min_headroom_gb, round(free_gb, 2)
     except Exception:
-        # Fallback if path is remote or unresolvable
-        return True, 999.0
+        # Fail closed: unreachable or unmeasurable storage must NOT falsely pass the Error 112 watchdog
+        return False, 0.0
 
 
 def _derive_default_expected_assets(extra_args: Optional[Dict[str, Any]] = None) -> List[str]:
@@ -141,9 +141,21 @@ class ClusterSupervisor:
     ) -> None:
         self.min_headroom_gb = min_headroom_gb
         self.stop_on_failure = stop_on_failure
-        self.scratch_dir = scratch_dir or get_optimal_local_scratch_dir()
+        # Defer coordinator scratch probing in remote concurrent mode so we don't touch local drives needlessly
+        self._scratch_dir = scratch_dir
         self.concurrent = concurrent
         self.queue: List[QueueJob] = []
+
+    @property
+    def scratch_dir(self) -> str:
+        """Lazily resolve local scratch directory on first access."""
+        if not self._scratch_dir:
+            self._scratch_dir = get_optimal_local_scratch_dir()
+        return self._scratch_dir
+
+    @scratch_dir.setter
+    def scratch_dir(self, value: Optional[str]) -> None:
+        self._scratch_dir = value
 
     def add_job(
         self,
@@ -572,8 +584,20 @@ class ClusterSupervisor:
             )
 
             try:
+                rel_out_dir = (
+                    os.path.relpath(job.output_dir, net_path).replace("\\", "/")
+                    if net_path and is_subpath(job.output_dir, net_path)
+                    else job.output_dir.replace("\\", "/")
+                )
                 batch_id, was_attached = safe_create_cluster_batch(
-                    net_client, rel_psx, [net_task], worker_limit=1, force_fresh=False
+                    net_client,
+                    rel_psx,
+                    [net_task],
+                    worker_limit=1,
+                    force_fresh=False,
+                    shared_root=net_path or "",
+                    ticket_project_name=job.project_name,
+                    ticket_rel_output_dir=rel_out_dir,
                 )
                 job.status = "RUNNING"
                 active_batches[batch_id] = job
@@ -595,6 +619,8 @@ class ClusterSupervisor:
         # Phase 2: Parallel Telemetry & Verification Supervision Loop
         print("\n[SUPERVISOR] All eligible projects dispatched. Entering parallel supervision loop...\n", flush=True)
         last_stage_keys: Dict[int, str] = {}
+        consecutive_rpc_errors: Dict[int, int] = {}
+        completed_job_ids: set[int] = set()
 
         while active_batches:
             time.sleep(poll_interval)
@@ -602,12 +628,21 @@ class ClusterSupervisor:
                 job = active_batches[batch_id]
                 try:
                     b_info = net_client.batchInfo(batch_id)
+                    consecutive_rpc_errors[batch_id] = 0
                 except Exception as e_poll:
+                    err_streak = consecutive_rpc_errors.get(batch_id, 0) + 1
+                    consecutive_rpc_errors[batch_id] = err_streak
                     print(
-                        f"  [Cluster Warning] Failed to poll batch #{batch_id}: {e_poll}",
+                        f"  [Cluster Warning] Failed to poll batch #{batch_id} ({err_streak}/10): {e_poll}",
                         file=sys.stderr,
                         flush=True,
                     )
+                    if err_streak >= 10:
+                        job.status = "FAILED"
+                        job.error_message = f"Lost cluster server connection polling batch #{batch_id}: {e_poll}"
+                        completed_results.append(job.to_dict())
+                        completed_job_ids.add(id(job))
+                        del active_batches[batch_id]
                     continue
 
                 # Check sidecar telemetry
@@ -656,15 +691,8 @@ class ClusterSupervisor:
                             flush=True,
                         )
 
-                    if self.scratch_dir and os.path.isdir(self.scratch_dir):
-                        staged_sub = os.path.join(self.scratch_dir, f"{job.project_name}_local_stage")
-                        if os.path.isdir(staged_sub):
-                            try:
-                                shutil.rmtree(staged_sub, ignore_errors=True)
-                            except Exception:
-                                pass
-
                     completed_results.append(job.to_dict())
+                    completed_job_ids.add(id(job))
                     del active_batches[batch_id]
 
                     if job.status != "COMPLETED" and self.stop_on_failure:
@@ -677,6 +705,7 @@ class ClusterSupervisor:
                             rem_j = active_batches[rem_b_id]
                             rem_j.status = "ABORTED"
                             completed_results.append(rem_j.to_dict())
+                            completed_job_ids.add(id(rem_j))
                         active_batches.clear()
                         break
 
@@ -697,6 +726,7 @@ class ClusterSupervisor:
                     job.status = "FAILED"
                     job.error_message = b_err
                     completed_results.append(job.to_dict())
+                    completed_job_ids.add(id(job))
                     del active_batches[batch_id]
 
                     if self.stop_on_failure:
@@ -712,13 +742,13 @@ class ClusterSupervisor:
                             rem_j = active_batches[rem_b_id]
                             rem_j.status = "ABORTED"
                             completed_results.append(rem_j.to_dict())
+                            completed_job_ids.add(id(rem_j))
                         active_batches.clear()
                         break
 
-        # Collect any unexecuted pending jobs if stopped on failure
-        executed_job_names = {r["project_name"] for r in completed_results}
+        # Collect any unexecuted pending jobs by identity (handles duplicate project_names cleanly)
         for job in self.queue:
-            if job.project_name not in executed_job_names:
+            if id(job) not in completed_job_ids and job.status == "PENDING":
                 completed_results.append(job.to_dict())
 
         passed_count = sum(1 for r in completed_results if r["status"] == "COMPLETED")
@@ -781,7 +811,20 @@ def discover_dataset_projects(
             pass
         return count
 
-    excluded_names = {"model", "models", "output", "outputs", "deliverables", "temp", "tmp", "__pycache__"}
+    excluded_names = {
+        "model",
+        "models",
+        "model_export",
+        "model_output",
+        "output",
+        "outputs",
+        "deliverables",
+        "result",
+        "results",
+        "temp",
+        "tmp",
+        "__pycache__",
+    }
 
     # 1. Inspect immediate subdirectories
     subdirs = []
@@ -789,7 +832,10 @@ def discover_dataset_projects(
         for entry in sorted(os.listdir(scan_dir)):
             full_p = os.path.join(scan_dir, entry)
             if os.path.isdir(full_p) and not entry.startswith((".", "$")):
-                if entry.lower() not in excluded_names and not entry.lower().startswith("model"):
+                entry_l = entry.lower()
+                if entry_l not in excluded_names and not entry_l.startswith(
+                    ("output_", "outputs_", "result_", "results_", "temp_", "tmp_")
+                ):
                     subdirs.append((entry, full_p))
     except Exception as exc:
         raise ValueError(f"Failed to list scan directory '{scan_dir}': {exc}") from exc

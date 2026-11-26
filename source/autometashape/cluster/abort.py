@@ -24,6 +24,12 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.hardware import (
+    _is_fixed_local_drive_fast,
+    get_local_hostname,
+    is_healthy_online_worker,
+)
+
 ABORT_SIGNAL_FILENAME = ".abort_pending"
 ABORT_DIR_NAME = "aborts"
 ABORT_SIGNALS_JSON = "abort_signals.json"
@@ -225,14 +231,11 @@ def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: 
     if target_dir and os.path.isdir(target_dir):
         lock_dirs.append(target_dir)
 
-    if root_path and os.path.isdir(root_path):
-        cluster_dir = os.path.join(root_path, ".cluster")
-        if os.path.isdir(cluster_dir):
-            lock_dirs.append(cluster_dir)
-
-    # Local scratch directories across system drives (AutoMetashape-scoped only)
+    # Local scratch directories across fixed local drives only (never touch mapped network shares or shared .cluster/)
     if sys.platform == "win32":
         for letter in string.ascii_uppercase:
+            if not _is_fixed_local_drive_fast(letter):
+                continue
             scratch_cand = rf"{letter}:\AutoMetashape_Scratch"
             if os.path.isdir(scratch_cand):
                 lock_dirs.append(scratch_cand)
@@ -291,7 +294,7 @@ def check_abort_signal(
     Returns:
         Dictionary containing abort signal metadata and _signal_path, or None.
     """
-    resolved_node = (node_name or os.environ.get("COMPUTERNAME", "unknown")).strip().lower()
+    resolved_node = (node_name or get_local_hostname()).strip().lower()
     temp_dir = tempfile.gettempdir()
 
     # 1. Fast local checks (Zero network I/O)
@@ -326,6 +329,11 @@ def check_abort_signal(
                     data = {"action": "abort_and_restart", "raw_content": content}
             else:
                 data = {"action": "abort_and_restart"}
+
+            # Guard against wrong-node execution: if a signal specifies a target node_name, verify it matches us
+            sig_target = str(data.get("node_name") or "").strip().lower()
+            if sig_target and sig_target not in (resolved_node, "all", "unknown") and resolved_node != "unknown":
+                continue
 
             data["_signal_path"] = flag_path
             data.setdefault("node_name", resolved_node)
@@ -373,8 +381,9 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
         return False
 
     sig_path = abort_data.get("_signal_path")
-    node_name = str(abort_data.get("node_name", os.environ.get("COMPUTERNAME", "unknown"))).lower()
+    node_name = str(abort_data.get("node_name", get_local_hostname())).lower()
     batch_id = abort_data.get("batch_id", "unknown")
+    unique_tmp_suffix = f".tmp.{os.getpid()}.{node_name}"
 
     ack_written = False
     if sig_path and os.path.isfile(sig_path):
@@ -387,8 +396,10 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                     del data[key]
                 elif "signals" in data and key in data["signals"]:
                     del data["signals"][key]
-                with open(sig_path, "w", encoding="utf-8") as f:
+                tmp_sig = f"{sig_path}{unique_tmp_suffix}"
+                with open(tmp_sig, "w", encoding="utf-8") as f:
                     json.dump(data, f, indent=2)
+                os.replace(tmp_sig, sig_path)
                 ack_written = True
             except Exception:
                 pass
@@ -401,8 +412,10 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 "ack_timestamp": datetime.now(timezone.utc).isoformat(),
             }
             try:
-                with open(ack_path, "w", encoding="utf-8") as af:
+                tmp_ack = f"{ack_path}{unique_tmp_suffix}"
+                with open(tmp_ack, "w", encoding="utf-8") as af:
                     json.dump(ack_payload, af, indent=2)
+                os.replace(tmp_ack, ack_path)
                 ack_written = True
             except Exception:
                 pass
@@ -432,7 +445,7 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                                 del agg_data["signals"][node_name]
                                 changed = True
                     if changed:
-                        tmp_agg = f"{agg_json}.tmp"
+                        tmp_agg = f"{agg_json}{unique_tmp_suffix}"
                         with open(tmp_agg, "w", encoding="utf-8") as wf:
                             json.dump(agg_data, wf, indent=2)
                         os.replace(tmp_agg, agg_json)
@@ -491,13 +504,20 @@ def dispatch_abort_signal(
     if shared_root:
         aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME)
         os.makedirs(aborts_dir, exist_ok=True)
+        # Clear any stale acknowledgment from an earlier abort before dispatching the new signal
+        stale_ack = os.path.join(aborts_dir, f"{clean_node}.abort_ack")
+        if os.path.isfile(stale_ack):
+            try:
+                os.remove(stale_ack)
+            except OSError:
+                pass
         sig_path = os.path.join(aborts_dir, f"{clean_node}.abort")
-        tmp_sig = f"{sig_path}.tmp"
+        tmp_sig = f"{sig_path}.tmp.{os.getpid()}"
         with open(tmp_sig, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
         os.replace(tmp_sig, sig_path)
 
-        # Also update aggregate abort_signals.json
+        # Also update aggregate abort_signals.json atomically with a PID-unique temp file
         agg_path = os.path.join(shared_root, ".cluster", ABORT_SIGNALS_JSON)
         try:
             agg_data: Dict[str, Any] = {}
@@ -505,7 +525,7 @@ def dispatch_abort_signal(
                 with open(agg_path, "r", encoding="utf-8") as rf:
                     agg_data = json.load(rf)
             agg_data[clean_node] = payload
-            tmp_agg = f"{agg_path}.tmp"
+            tmp_agg = f"{agg_path}.tmp.{os.getpid()}"
             with open(tmp_agg, "w", encoding="utf-8") as wf:
                 json.dump(agg_data, wf, indent=2)
             os.replace(tmp_agg, agg_path)
@@ -517,7 +537,7 @@ def dispatch_abort_signal(
     out_dir = local_dir or tempfile.gettempdir()
     os.makedirs(out_dir, exist_ok=True)
     sig_path = os.path.join(out_dir, ABORT_SIGNAL_FILENAME)
-    tmp_local = f"{sig_path}.tmp"
+    tmp_local = f"{sig_path}.tmp.{os.getpid()}"
     with open(tmp_local, "w", encoding="utf-8") as f:
         json.dump(payload, f, indent=2)
     os.replace(tmp_local, sig_path)
@@ -646,6 +666,22 @@ sys.exit(0)
             if not result["error"]:
                 result["error"] = f"Warning during batch abort: {batch_err}"
 
+    # Record pre-abort worker IDs for target node so we only count a genuinely fresh reconnect
+    pre_abort_worker_ids: set[Any] = set()
+    if client is not None and hasattr(client, "workerList"):
+        try:
+            w_pre = client.workerList()
+            if isinstance(w_pre, dict):
+                for w in w_pre.get("workers", []):
+                    if not is_healthy_online_worker(w):
+                        continue
+                    if str(w.get("hostname", "")).strip().lower() == clean_node:
+                        wid = w.get("worker_id")
+                        if wid is not None:
+                            pre_abort_worker_ids.add(wid)
+        except Exception:
+            pass
+
     # Step 4: Write abort signal file atomically
     sig_path = ""
     try:
@@ -673,15 +709,19 @@ sys.exit(0)
         elif sig_path and not os.path.isfile(sig_path):
             ack_seen = True
 
-        # Check worker list for reconnection / ready state
+        # Check worker list for a genuinely fresh/healthy online reconnect
         if client is not None and hasattr(client, "workerList"):
             try:
                 w_info = client.workerList()
                 if isinstance(w_info, dict):
                     for w in w_info.get("workers", []):
+                        if not is_healthy_online_worker(w):
+                            continue
                         w_hname = str(w.get("hostname", "")).strip().lower()
                         w_state = str(w.get("state", "")).strip().lower()
-                        if w_hname == clean_node and w_state == "ready":
+                        w_id = w.get("worker_id")
+                        is_fresh_worker = (w_id is None) or (w_id not in pre_abort_worker_ids) or ack_seen
+                        if w_hname == clean_node and w_state == "ready" and is_fresh_worker:
                             reconnected = True
                             break
             except Exception:
