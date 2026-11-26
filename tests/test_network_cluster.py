@@ -809,11 +809,11 @@ class TestNetworkCluster(unittest.TestCase):
             )
             self.assertIn("--crop-method gps-square", getattr(t_def, "args", ""))
 
-            # 2. Explicit crop_method=None -> gps-square
+            # 2. Explicit crop_method=None -> omitted so pipeline.py auto-infers gps-square vs structure
             t_none_arg, _, _ = mr.build_monolithic_runscript_task(
                 images_dir=img_dir, output_dir=out_dir, project_name="Test", crop_method=None
             )
-            self.assertIn("--crop-method gps-square", getattr(t_none_arg, "args", ""))
+            self.assertNotIn("--crop-method", getattr(t_none_arg, "args", ""))
 
             # 3. Explicit crop_method='none' -> none
             t_none_str, _, _ = mr.build_monolithic_runscript_task(

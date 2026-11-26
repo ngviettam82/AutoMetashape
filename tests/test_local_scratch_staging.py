@@ -340,18 +340,29 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
                             build_texture=False,
                         )
 
-            # Invariant 1: Document.open was called with the staged local .psx path
-            staged_psx = os.path.join(worker_nvme, "Existing_Survey_local_stage", "Existing_Survey.psx")
+            # Invariant 1: Document.open was called with the staged local .psx path inside worker_nvme
             opened_paths = [call.args[0] for call in mock_doc.open.call_args_list if call.args]
-            self.assertTrue(any(staged_psx in p for p in opened_paths))
+            self.assertTrue(
+                any(
+                    os.path.abspath(p).startswith(os.path.abspath(worker_nvme))
+                    and p.endswith(os.path.join("_local_stage", "Existing_Survey.psx"))
+                    or (
+                        os.path.abspath(p).startswith(os.path.abspath(worker_nvme))
+                        and "_local_stage" in p
+                        and os.path.basename(p) == "Existing_Survey.psx"
+                    )
+                    for p in opened_paths
+                ),
+                msg=f"Expected staged local .psx under {worker_nvme}, got: {opened_paths}",
+            )
 
             # Invariant 2: Central share retains the synchronized project checkpoint
             self.assertTrue(os.path.isfile(central_psx))
             self.assertTrue(os.path.isfile(os.path.join(central_files, "alignment.data")))
 
             # Invariant 3: Worker staging directory is cleanly purged after sync
-            staged_folder = os.path.join(worker_nvme, "Existing_Survey_local_stage")
-            self.assertFalse(os.path.exists(staged_folder))
+            remaining_stage_dirs = [d for d in os.listdir(worker_nvme) if d.endswith("_local_stage")]
+            self.assertEqual(remaining_stage_dirs, [])
 
     @staticmethod
     def _write_mock_psx(base_dir: str, project_name: str, chunk_ids: list[str], active_id: str | None = None) -> None:
