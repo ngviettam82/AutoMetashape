@@ -77,14 +77,14 @@ All human contributors and autonomous agents managing Agisoft Metashape distribu
 ### 6.4 Action-as-Code: Canonical Script Standard
 - **Ban on Ad-Hoc Freehand Scripting**: Agents must never author improvised Python scripts in chat or scratch folders to manipulate the cluster queue or submit tasks.
 - All cluster operations must strictly use the canonical, battle-tested utilities under `scripts/`:
-  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation, optional `--exclude-folders` (with legacy worker shim), and timestamped alternate stub recovery when Metashape Server retains stale aborted batch keys.
-  - `scripts/cluster_monitor.py`: Autonomous read-only telemetry, headroom audit, and deliverable verification.
-  - `scripts/manage_queue.py`: Operator-directed queue and worker manipulation (`list`, `pause`, `unpause`, `set-priority`, `abort`, `pause-worker`, `unpause-worker`, `clear-worker --only-aborted`).
+  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation, active-batch attach guard (`--force` to replace, `--start-paused`), optional `--exclude-folders`, and hidden `.cluster/tickets/` failover when Metashape Server retains un-evictable aborted keys (keeping `Result/<project>/` free of `_dispatch_*.psx` stubs).
+  - `scripts/cluster_monitor.py`: Autonomous read-only telemetry, headroom audit, GPU bitmask reporting, hidden-ticket/legacy-stub resolution, and deliverable verification.
+  - `scripts/manage_queue.py`: Operator-directed queue and worker manipulation (`list`, `pause`, `unpause`, `set-priority`, `abort`, `pause-worker`, `unpause-worker`, `clear-worker --only-aborted`, `set-worker-gpu-mask`).
   - `scripts/inspect_checkpoint.py`: Non-destructive read-only inspection of `.psx` archives.
   - `scripts/cluster_abort.py`: Signal-based worker abort and self-healing restart.
   - `scripts/verify_deliverables.py`: Deterministic deliverable quality gate verification.
-  - `scripts/update_fleet.py`: Rolling canary fleet updates.
-  - `scripts/launch_server.py` & `scripts/launch_worker.py`: Cluster node daemons.
+  - `scripts/update_fleet.py`: Rolling canary and parallel ZIP-parity fleet updates (zero Git required on workers).
+  - `scripts/launch_server.py` & `scripts/launch_worker.py`: Cluster node daemons with dynamic Metashape `enumGPUDevices()` discrete GPU bitmask probing.
 
 ### 6.5 Prohibition of Script-Side Node Affinity Rejection
 - **The Priority Thrashing Flaw**: Never implement client-side worker rejection by checking `COMPUTERNAME` inside batch execution scripts (e.g., `sys.exit(2)` if not the target node).

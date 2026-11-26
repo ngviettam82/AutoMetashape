@@ -240,7 +240,7 @@ When submitting a standalone or queued batch to the cluster, agents and operator
    - Pass `--source-share` (SSD #1, raw photos) and `--result-share` (SSD #2, writable `.psx` + deliverables) to utilize two separate SSD shares without mixing I/O.
    - Only pass `--no-local-scratch-staging` for standalone/host-pinned runs where remote workers will never claim the batch.
    - Optional `--exclude-folders "pat1,pat2"` filters named subfolders out of ingestion (with automatic legacy worker shim in `build_monolithic_runscript_task` so older workers ignore unknown flags safely). Note that close-range `Manual` orbits are natively bridged by default via Zero-Neural Alignment Hygiene & Open3D ICP and do not need exclusion unless explicitly requested by the operator.
-   - **Timestamped Alternate Dispatch Stub Fallback**: When re-submitting a project whose `.psx` key is still cached on Metashape Server as a previously aborted batch (`Duplicate batch`), `submit_cluster_batch.py` automatically materializes a fresh `<project>_dispatch_<timestamp>.psx` stub while keeping the final target output directory unchanged.
+   - **Hidden `.cluster/tickets/` Recovery (Zero `_dispatch_*.psx` Pollution in `Result/`)**: `submit_cluster_batch.py` always submits the canonical single `<project>.psx` project file (attaching safely if an active healthy batch already exists unless `--force` is passed). If Metashape Network Server 2.2.2 retains an un-evictable hard-killed aborted batch key in RAM (`Duplicate batch`), `safe_create_cluster_batch()` automatically dispatches via a hidden scheduler ticket under `<root>/.cluster/tickets/<slug>_<ts>_<pid>.psx` + `.ticket.json` metadata sidecar — keeping `Result/<project>/` spotless with a single `<project>.psx` while `cluster_monitor.py` seamlessly resolves the real `Result/<project>/` directory for deliverable verification.
 3. **Execution**:
    ```powershell
    # Single-project dual-SSD submission (5 cm/px ortho, no dense point cloud in pro preset):
@@ -292,6 +292,9 @@ When submitting a standalone or queued batch to the cluster, agents and operator
 
    # Disconnect a stale aborted ghost worker record safely
    python scripts/manage_queue.py clear-worker --worker-id 14 --only-aborted
+
+   # Override a live worker's GPU bitmask immediately without restarting
+   python scripts/manage_queue.py set-worker-gpu-mask --hostname CTUAV --gpu-mask 2
    ```
 
 4. **Anti-Patterns & Prohibitions**:

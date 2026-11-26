@@ -69,7 +69,7 @@ python scripts/cluster_supervisor.py --scan-dir "\\CLUSTER_SHARE\Surveys" --outp
 
 - **Single Dataset Root**: If the root folder directly contains survey photos, it is queued as a single project.
 - **Multi-Dataset Directory**: If subdirectories contain photos (e.g., `CATP_0167/`, `CATP_0204/`), each folder is queued as a discrete project named after the folder.
-- **Excluded Folders & Ingestion Hygiene**: Auxiliary folders (`model*`, `output*`, `deliverables*`, `temp*`, `__pycache__`, and stray `*.files` project directories) are automatically excluded, and exact duplicate images across nested subfolders are deduplicated automatically. Optional `--exclude-folders` remains available when operators explicitly wish to skip named subfolders, though close-range `Manual` orbits are natively supported by the 4-stage zero-neural alignment hygiene & Open3D ICP bridge.
+- **Excluded Folders & Ingestion Hygiene**: Auxiliary output directories (`model`, `models`, `output`, `output_*`, `result`, `result_*`, `deliverables`, `temp`, `temp_*`, `tmp`, `tmp_*`, `__pycache__`, and stray `*.files` project directories) are automatically excluded without falsely skipping legitimate site names like `ModelHouse`, and exact duplicate images across nested subfolders are deduplicated automatically. Optional `--exclude-folders` remains available when operators explicitly wish to skip named subfolders, though close-range `Manual` orbits are natively supported by the 4-stage zero-neural alignment hygiene & Open3D ICP bridge.
 
 ### Phase 1: Environment & Mode Resolution
 Resolve the operational mode based on user constraints:
@@ -136,7 +136,7 @@ python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\CATP_0167
 - **PDF Report (Opt-In)**: Calibration report exists and exceeds $15\text{ KB}$ when `--export-report` is enabled.
 
 ### Phase 5: Scratch Purge & Executive Geomatics Summary
-- Upon successful verification, the local NVMe staging folder `{project}_local_stage` is purged cleanly.
+- Upon successful verification, the PID+hash-isolated local NVMe staging folder `{project}_{hash}_{pid}_local_stage` is synced atomically (`.files` sibling swap, `.psx` published last) and purged cleanly.
 - The coordinator outputs a consolidated delivery matrix:
 
 ```text

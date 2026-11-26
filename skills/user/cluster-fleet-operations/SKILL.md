@@ -93,8 +93,8 @@ On each remote worker node across the local network:
    - Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
    - Tests TCP port reachability to server host.
    - Tests Result Share (`--root`) and optional Data Source Share (`--source-root`) SMB/UNC accessibility.
-   - **Native Multi-GPU Discovery**: When `--gpu-mask` is omitted or `"Auto"` (default), Metashape Pro dynamically discovers, benchmarks, and engages all discrete GPUs natively, bypassing integrated graphics.
-   - **Auto-Reconnect Daemon**: Automatically reconnects every 10s if the coordinator restarts or network fluctuates.
+   - **Dynamic Metashape Discrete GPU Bitmask Probing**: When `--gpu-mask` is omitted or `"Auto"` (default), `launch_worker.py` probes `Metashape.app.enumGPUDevices()` directly via `probe_metashape_gpu_mask()` to compute the exact Metashape-indexed discrete GPU bitmask (excluding Intel UHD/HD/Iris/Core Ultra Arc iGPUs, AMD 610M–890M/Vega APUs, and software renderers) and passes `--gpu-mask <N>` explicitly. This guarantees index parity on mixed iGPU+RTX nodes (e.g., `mask=2` for `[0] Intel Graphics, [1] RTX 5080`) and prevents poisoned `HKCU` Registry `gpu_mask=0` values from trapping workers in CPU-only mode. Explicit overrides (`--gpu-mask <N>`) persist `"gpu_mask_explicit": true` and set `AUTOMETASHAPE_EXPLICIT_GPU_MASK`.
+   - **Auto-Reconnect Daemon**: Automatically reconnects every 10s if the coordinator restarts or network fluctuates, re-probing GPU bitmask if an initial boot probe transiently failed.
 
 ### 3. Local NVMe Scratch Staging & Independent Project Defaults
 During large-scale reconstructions (1,000+ to 10,000+ photos), intermediate scratch data (depth maps and octree meshing leaves) reaches 75–150+ GB.
@@ -186,15 +186,15 @@ The repository provides an end-to-end autonomous remote updater (`scripts/update
    - Writes registration notice to `.cluster/<node>_update_result.txt`.
    - Task completes immediately with zero network heavy downloads inside Metashape.
 4. **Graceful Daemon Signal**: Coordinator verifies task completion and calls `client.quitWorker(wid)`. Child `metashape.exe` terminates cleanly with return code 0, releasing all binary file handles.
-5. **Supervisor Autonomous Mirror & Git-Parity Prune**:
+5. **Supervisor Autonomous Mirror & ZIP-Parity Prune (Zero Git on Workers)**:
    - The persistent `launch_worker.py` supervisor intercepts child exit and detects `.update_pending`.
-   - Pulls update payload (preferring high-speed LAN `.cluster/update_payload.zip`, falling back to GitHub).
-   - Extracts archive and executes Git-parity file mirror with automatic pruning of obsolete repository files.
-   - Strictly preserves machine-local files (`worker_config.json`, `server_config.json`), logs, and `.cluster/`.
+   - Pulls the freshly staged ZIP archive (preferring high-speed LAN `.cluster/update_payload.zip` verified via `testzip()`, falling back to GitHub `main.zip`, matching `update.bat` without requiring Git on workers).
+   - Extracts archive, verifies repository structure, and executes case-safe Git-parity mirroring with automatic pruning of obsolete repository files.
+   - Strictly preserves machine-local files (`worker_config.json`, `server_config.json`), `.agents/`, logs, signal files (`.update_pending`, `.abort_pending`), and `.cluster/`.
    - Removes `.update_pending`.
-6. **Clean Process Image Re-Execution (`os.execv`)**:
-   - Supervisor invokes `os.execv(sys.executable, [sys.executable, launcher_py] + sys.argv[1:])` to replace the Python process image entirely from disk.
-   - Dynamic GPU benchmarking, TCP checks, and updated CLI flags execute fresh without stale memory.
+6. **Clean Process Re-Execution**:
+   - Supervisor clears its PID file and relaunches `launch_worker.py` cleanly from disk (`subprocess.run` + `sys.exit` on Windows to preserve parent `.bat`/Task Scheduler handles and backslash escaping; `os.execv` on POSIX).
+   - Dynamic Metashape GPU probing (`probe_metashape_gpu_mask()`), TCP/UNC checks, and updated CLI flags execute fresh without stale memory.
 7. **Zero OS-Python Invariant**:
    - `launch_worker.bat` and `reexec_supervisor` prioritize Metashape Pro's bundled Python (`python\python.exe`) across all system drives. Worker nodes operate 100% headless without requiring system Python.
 8. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.

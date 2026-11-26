@@ -158,8 +158,9 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
 - **1-Click Resilient Worker Node (`launch_worker.bat`)**:
   - Automatically loads server address and shared Result network root (`--root`) plus optional read-only Data Source share (`--source-root`) from `worker_config.json`.
   - First-run interactive setup wizard with LAN auto-discovery.
+  - **Dynamic Metashape GPU Bitmask Probing**: Queries `Metashape.app.enumGPUDevices()` at startup to pass the exact discrete GPU `--gpu-mask` (excluding Intel/AMD iGPUs and overriding poisoned `HKCU gpu_mask=0`), while honoring explicit operator overrides (`--gpu-mask <N>`).
   - Built-in pre-flight health diagnostics (Metashape executable discovery, TCP port 5840 reachability test, and Shared UNC storage access check).
-  - Resilient auto-reconnect loop: automatically reconnects if the coordinator restarts or network drops temporarily.
+  - Resilient auto-reconnect loop with non-git ZIP-parity self-updates (`update.bat` / `update_fleet.bat`) and hidden `.cluster/tickets/` failover (keeping `Result/<project>/` clean with a single canonical `<project>.psx`).
 - **Dual Shared Folder (Multi-SSD) Topology**:
   - Supports separating **Data Source Share** (SSD #1, read-only raw survey photos via `--source-share`) from **Result Share** (SSD #2, writable `.psx` + deliverables acting as Metashape `--root` via `--result-share`), doubling aggregate storage I/O bandwidth and protecting raw captures.
 - **Pro Production Defaults (`--preset pro`)**:
