@@ -17,6 +17,7 @@ import tempfile
 import unittest
 import zipfile
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import patch
 
 repo_root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
@@ -449,6 +450,272 @@ class TestIcpBridge(unittest.TestCase):
             for ep in exported_paths:
                 self.assertFalse(os.path.normcase(os.path.abspath(ep)).startswith(abs_stage))
                 self.assertFalse(os.path.exists(os.path.dirname(ep)))
+
+    def test_isolate_coherent_sub_islands_prunes_rogue_fragments(self) -> None:
+        """Verify rescue chunk splitting into [19, 8, 5] + 3 unaligned keeps ONLY the 19 coherent cams."""
+
+        class _Cam:
+            def __init__(self, key: int, label: str, path: str, transform: Any) -> None:
+                self.key = key
+                self.label = label
+                self.enabled = True
+                self.transform = transform
+                self.photo = SimpleNamespace(path=path)
+                self.reference = SimpleNamespace(enabled=True, location=None)
+                self.sensor = None
+
+        def _make_grouped_chunk(group_sizes: list[int], unaligned_cnt: int = 0) -> Any:
+            cameras: list[_Cam] = []
+            points = []
+            projs: dict[Any, list[SimpleNamespace]] = {}
+            cam_key = 1
+            track_id = 1
+            for g_idx, g_size in enumerate(group_sizes):
+                g_cams = []
+                for j in range(g_size):
+                    c = _Cam(cam_key, f"g{g_idx}_c{j}", f"/proj/g{g_idx}_c{j}.jpg", object())
+                    cameras.append(c)
+                    g_cams.append(c)
+                    projs[c] = []
+                    cam_key += 1
+                # Connect consecutive pairs within group with 20 valid shared tie tracks (> edge_min=15)
+                for j in range(len(g_cams) - 1):
+                    for _ in range(20):
+                        points.append(SimpleNamespace(track_id=track_id, valid=True))
+                        projs[g_cams[j]].append(SimpleNamespace(track_id=track_id))
+                        projs[g_cams[j + 1]].append(SimpleNamespace(track_id=track_id))
+                        track_id += 1
+            for u in range(unaligned_cnt):
+                c = _Cam(cam_key, f"unal_{u}", f"/proj/unal_{u}.jpg", None)
+                cameras.append(c)
+                projs[c] = []
+                cam_key += 1
+
+            class _SubChunk:
+                def __init__(self, label: str, cams: list[Any]) -> None:
+                    self.label = label
+                    self.cameras = list(cams)
+                    self.sensors = [SimpleNamespace(calibration=SimpleNamespace(k4=0.0, b1=0.0, b2=0.0))]
+                    self.tie_points = SimpleNamespace(points=points, projections=projs)
+                    self.opt_calls = 0
+
+                def copy(self):
+                    cloned_cams = [
+                        _Cam(c.key + 1000, c.label, c.photo.path, c.transform)  # Simulate Metashape key renumbering
+                        for c in self.cameras
+                    ]
+                    return _SubChunk(self.label + "_copy", cloned_cams)
+
+                def remove(self, rm_cams) -> None:
+                    rm_ids = {id(c) for c in rm_cams}
+                    self.cameras = [c for c in self.cameras if id(c) not in rm_ids]
+
+                def optimizeCameras(self, **_kw) -> None:
+                    self.opt_calls += 1
+
+                def updateTransform(self) -> None:
+                    pass
+
+                def resetRegion(self) -> None:
+                    pass
+
+            return _SubChunk("_ICP_Rescue_1", cameras)
+
+        # Case 1: CATP_0038 regression — [19, 8, 5] + 3 unaligned -> keep ONLY the 19 coherent cameras
+        ch1 = _make_grouped_chunk([19, 8, 5], unaligned_cnt=3)
+        temps1: list[Any] = []
+        res1 = ib._isolate_coherent_sub_islands(ch1, "rescue_1", temps1, min_cams=12)
+        self.assertEqual(len(res1), 1)
+        self.assertEqual(res1[0][0], "rescue_1")
+        self.assertEqual(len(res1[0][1].cameras), 19)
+        self.assertTrue(all(c.label.startswith("g0_") for c in res1[0][1].cameras))
+        self.assertEqual(ch1.opt_calls, 1)
+        self.assertEqual(temps1, [])
+
+        # Case 2: Multiple sizable internal islands [15, 13, 4] -> split into 2 isolated chunks & drop 4-cam fragment
+        ch2 = _make_grouped_chunk([15, 13, 4], unaligned_cnt=2)
+        temps2: list[Any] = []
+        res2 = ib._isolate_coherent_sub_islands(ch2, "rescue_2", temps2, min_cams=12)
+        self.assertEqual(len(res2), 2)
+        self.assertEqual([lbl for lbl, _ in res2], ["rescue_2_sub1", "rescue_2_sub2"])
+        self.assertEqual(len(res2[0][1].cameras), 15)
+        self.assertEqual(len(res2[1][1].cameras), 13)
+        self.assertTrue(all(c.label.startswith("g0_") for c in res2[0][1].cameras))
+        self.assertTrue(all(c.label.startswith("g1_") for c in res2[1][1].cameras))
+        self.assertEqual(len(temps2), 1)
+        self.assertIs(temps2[0], res2[1][1])
+
+        # Case 3: Shattered chunk [7, 7, 6] (20 aligned total, but max island < 12) -> rejected cleanly
+        ch3 = _make_grouped_chunk([7, 7, 6])
+        temps3: list[Any] = []
+        res3 = ib._isolate_coherent_sub_islands(ch3, "rescue_3", temps3, min_cams=12)
+        self.assertEqual(res3, [])
+        self.assertEqual(temps3, [])
+
+    def test_bridge_rescue_prunes_detached_fragments_before_merge(self) -> None:
+        """End-to-end check that detached internal fragments in _ICP_Rescue never reach mergeChunks()."""
+
+        class _Cam:
+            def __init__(self, key: int, label: str, path: str, transform: Any, ref_enabled: bool = True) -> None:
+                self.key = key
+                self.label = label
+                self.enabled = True
+                self.transform = transform
+                self.photo = SimpleNamespace(path=path)
+                self.reference = SimpleNamespace(enabled=ref_enabled, location=None)
+                self.sensor = None
+
+        class _FakeMat:
+            def __init__(self, rows) -> None:
+                self.rows = rows
+
+            def __mul__(self, other):
+                return _FakeMat(self.rows)
+
+        class _RescueChunk:
+            def __init__(self, key: int, label: str, cameras: list[Any] | None = None) -> None:
+                self.key = key
+                self.label = label
+                self.cameras = list(cameras or [])
+                self.sensors = [SimpleNamespace(calibration=SimpleNamespace(k4=0.0, b1=0.0, b2=0.0))]
+                self.transform = SimpleNamespace(
+                    matrix=_FakeMat([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]])
+                )
+                self.tie_points = None
+                self.depth_maps = None
+                self.point_cloud = None
+
+            def addPhotos(self, paths: list[str]) -> None:
+                for i, p in enumerate(paths, 1):
+                    self.cameras.append(_Cam(100 + i, os.path.basename(p), p, None))
+
+            def matchPhotos(self, **_kw) -> None:
+                pass
+
+            def alignCameras(self, **_kw) -> None:
+                # 14 coherent (0..13) + 6 detached fragment (14..19) + 2 unaligned (20..21)
+                pts = []
+                projs: dict[Any, list[SimpleNamespace]] = {c: [] for c in self.cameras}
+                tid = 1
+                for idx, c in enumerate(self.cameras):
+                    if idx < 20:
+                        c.transform = object()
+                for grp in (self.cameras[:14], self.cameras[14:20]):
+                    for j in range(len(grp) - 1):
+                        for _ in range(18):
+                            pts.append(SimpleNamespace(track_id=tid, valid=True))
+                            projs[grp[j]].append(SimpleNamespace(track_id=tid))
+                            projs[grp[j + 1]].append(SimpleNamespace(track_id=tid))
+                            tid += 1
+                self.tie_points = SimpleNamespace(points=pts, projections=projs)
+
+            def copy(self):
+                copied = _RescueChunk(
+                    doc._next_key(),
+                    self.label + "_copy",
+                    [_Cam(c.key, c.label, c.photo.path, c.transform, c.reference.enabled) for c in self.cameras],
+                )
+                doc.chunks.append(copied)
+                return copied
+
+            def remove(self, rm_cams) -> None:
+                rm_keys = {c.key for c in rm_cams}
+                self.cameras = [c for c in self.cameras if c.key not in rm_keys]
+
+            def optimizeCameras(self, **_kw) -> None:
+                pass
+
+            def exportPointCloud(self, path: str, **_kw) -> None:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("ply\n")
+
+        class _FakeDoc:
+            def __init__(self) -> None:
+                self._k = 10
+                self.chunks: list[_RescueChunk] = []
+                self.chunk: _RescueChunk | None = None
+                self.path = ""
+
+            def _next_key(self) -> int:
+                self._k += 1
+                return self._k
+
+            def addChunk(self) -> _RescueChunk:
+                c = _RescueChunk(self._next_key(), "Chunk")
+                self.chunks.append(c)
+                return c
+
+            def mergeChunks(self, chunks: list[int], **_kw) -> None:
+                by_k = {c.key: c for c in self.chunks}
+                merged_cams = []
+                for ck in chunks:
+                    merged_cams.extend(by_k[ck].cameras)
+                self.chunks.append(_RescueChunk(self._next_key(), "Merged", merged_cams))
+
+            def remove(self, to_rm) -> None:
+                rm_set = set(to_rm)
+                self.chunks = [c for c in self.chunks if c not in rm_set]
+
+        doc = _FakeDoc()
+        main_cams = [_Cam(k, f"main_{k}.jpg", f"/proj/main_{k}.jpg", object()) for k in (1, 2)]
+        res_cams = [_Cam(10 + i, f"res_{i:02d}.jpg", f"/proj/res_{i:02d}.jpg", None) for i in range(22)]
+        orig = _RescueChunk(1, "Production_Reconstruction", main_cams + res_cams)
+        doc.chunks.append(orig)
+        doc.chunk = orig
+
+        def _pass_icp(cmd, **_kw):
+            out_path = cmd[cmd.index("--output") + 1]
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "ok": True,
+                        "T_enu": [[1, 0, 0, 0.2], [0, 1, 0, -0.1], [0, 0, 1, 0.05], [0, 0, 0, 1]],
+                        "scale": 1.0,
+                        "tilt_deg": 0.2,
+                        "fitness_15cm": 0.78,
+                        "median_15cm_m": 0.03,
+                    },
+                    f,
+                )
+            return SimpleNamespace(returncode=0)
+
+        fake_ms = SimpleNamespace(
+            Vector=lambda v: tuple(v),
+            Matrix=_FakeMat,
+            DataSource=SimpleNamespace(PointCloudData=1),
+            PointCloudFormat=SimpleNamespace(PointCloudFormatPLY=1),
+            ReferencePreselectionMode=SimpleNamespace(ReferencePreselectionSource=1),
+        )
+        with (
+            patch.object(ib, "Metashape", fake_ms),
+            patch.object(ib, "ensure_bridge_runtime", return_value="/fake/python.exe"),
+            patch.object(ib, "_build_stage0_cloud", return_value=True),
+            patch.object(ib, "_compute_island_utm_frame", return_value=(object(), (0.0, 0.0, 0.0), 32648)),
+            patch.object(
+                ib,
+                "convert_utm_transform_to_ecef",
+                return_value=([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]], 0.001),
+            ),
+            patch.object(ib.subprocess, "run", side_effect=_pass_icp),
+        ):
+            final_chunk, stats = ib.bridge_disconnected_islands(
+                doc=doc,
+                chunk=orig,
+                audit_result={"main_island": [1, 2], "bridge_candidates": [], "kept_distant": []},
+                unaligned_groups=[[c.key for c in res_cams]],
+            )
+
+        self.assertTrue(stats["triggered"])
+        self.assertEqual(stats["accepted"], 1)
+        self.assertEqual(stats["rejected"], 0)
+        # Main (2) + coherent rescue primary island (14) = 16; detached 6-cam fragment & 2 unaligned MUST be excluded!
+        final_labels = sorted(c.label for c in final_chunk.cameras)
+        self.assertEqual(len(final_labels), 16)
+        self.assertIn("res_00.jpg", final_labels)
+        self.assertIn("res_13.jpg", final_labels)
+        self.assertNotIn("res_14.jpg", final_labels)
+        self.assertNotIn("res_19.jpg", final_labels)
+        self.assertNotIn("res_21.jpg", final_labels)
 
     def test_icp_worker_end_to_end_on_synthetic_building_cloud(self) -> None:
         """Integration test running real icp_worker.py via portable Open3D runtime if available."""

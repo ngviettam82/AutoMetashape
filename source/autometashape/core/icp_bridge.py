@@ -29,6 +29,7 @@ import zipfile
 from typing import Any
 
 from autometashape.core.alignment_hygiene import (
+    build_tie_point_islands,
     normalize_flight_takeoff_z0,
     optimize_cameras_no_k4,
     sanitize_camera_gps,
@@ -706,6 +707,124 @@ def _merge_chunks_preserve_poses(doc: Any, chunk_keys: list[int]) -> Any:
     return doc.chunks[-1]
 
 
+def _camera_stable_identity(cam: Any) -> tuple[str, Any]:
+    """Return a path-based stable camera identity immune to key renumbering across chunk.copy()."""
+    photo = getattr(cam, "photo", None)
+    path = getattr(photo, "path", "") if photo is not None else ""
+    if path:
+        return ("path", os.path.normcase(os.path.abspath(path)))
+    return ("key", int(cam.key))
+
+
+def _isolate_coherent_sub_islands(
+    chunk: Any,
+    label_prefix: str,
+    temp_chunks: list[Any],
+    min_cams: int = 12,
+    edge_min: int = 15,
+) -> list[tuple[str, Any]]:
+    """Enforce single coherent tie-point island integrity on an ICP candidate chunk.
+
+    Prevents detached internal fragments created during independent rescue alignment (e.g. a
+    32-camera rescue chunk shattering into ``[19, 8, 5]`` with zero shared tie tracks) from
+    corrupting the Stage-0 dense cloud or leaking shifted ghost cameras into ``mergeChunks()``.
+
+    - Strips unaligned/disabled cameras and any internal sub-island smaller than ``min_cams``.
+    - Splits multiple sizable (``>= min_cams``) disconnected internal sub-islands into isolated
+      candidate chunks so each undergoes its own Sim(3) ICP registration and Pre-MVS Quality Gate.
+    - Leaves tie-point-less chunks (e.g. lightweight mock chunks in unit tests) untouched.
+    """
+    tp = getattr(chunk, "tie_points", None)
+    raw_pts = getattr(tp, "points", None) if tp is not None else None
+    projs = getattr(tp, "projections", None) if tp is not None else None
+    if tp is None or not raw_pts or projs is None:
+        return [(label_prefix, chunk)]
+
+    islands = build_tie_point_islands(
+        chunk,
+        edge_min=edge_min,
+        cut_weak_hinges=True,
+        min_bridge_cams=min_cams,
+    )
+    valid_islands = [comp for comp in islands if len(comp) >= min_cams]
+    if not valid_islands:
+        print(
+            f"  [ICP Bridge] {label_prefix} shattered into sub-threshold fragments "
+            f"{[len(x) for x in islands]} (< {min_cams} cams) — skipping.",
+            flush=True,
+        )
+        return []
+
+    by_key = {c.key: c for c in chunk.cameras}
+    if len(islands) == 1:
+        keep_keys = set(valid_islands[0])
+        stale_cams = [c for c in chunk.cameras if c.key not in keep_keys]
+        if stale_cams:
+            chunk.remove(stale_cams)
+        return [(label_prefix, chunk)]
+
+    pruned_frag_cams = sum(len(x) for x in islands if len(x) < min_cams)
+    print(
+        f"  [ICP Bridge] {label_prefix} split internally into {[len(x) for x in islands]}; "
+        f"isolating {len(valid_islands)} coherent sub-island(s) (>={min_cams} cams) and "
+        f"pruning {pruned_frag_cams} detached fragment camera(s).",
+        flush=True,
+    )
+
+    isolated: list[tuple[str, Any]] = []
+
+    # Copy out secondary sizable (>= min_cams) internal sub-islands BEFORE pruning the primary chunk
+    for sub_idx, comp in enumerate(valid_islands[1:], 2):
+        keep_ids = {_camera_stable_identity(by_key[k]) for k in comp if k in by_key}
+        sub_ch = chunk.copy()
+        sub_ch.label = f"{chunk.label}_sub{sub_idx}"
+        temp_chunks.append(sub_ch)
+        rm_sub = [c for c in sub_ch.cameras if _camera_stable_identity(c) not in keep_ids]
+        if rm_sub:
+            sub_ch.remove(rm_sub)
+        if hasattr(sub_ch, "updateTransform"):
+            try:
+                sub_ch.updateTransform()
+            except Exception:
+                pass
+        try:
+            optimize_cameras_no_k4(sub_ch, tiepoint_covariance=True)
+        except Exception as exc:
+            print(f"  [ICP Bridge] {label_prefix}_sub{sub_idx} optimization note: {exc}", flush=True)
+        for _fn in ("updateTransform", "resetRegion"):
+            if hasattr(sub_ch, _fn):
+                try:
+                    getattr(sub_ch, _fn)()
+                except Exception:
+                    pass
+        isolated.append((f"{label_prefix}_sub{sub_idx}", sub_ch))
+
+    # Prune primary chunk down to strictly valid_islands[0] (removes secondary blocks, <min_cams
+    # rogue fragments, and unaligned/disabled cameras) and re-optimize cleanly
+    primary_keys = set(valid_islands[0])
+    rm_primary = [c for c in chunk.cameras if c.key not in primary_keys]
+    if rm_primary:
+        chunk.remove(rm_primary)
+    if hasattr(chunk, "updateTransform"):
+        try:
+            chunk.updateTransform()
+        except Exception:
+            pass
+    try:
+        optimize_cameras_no_k4(chunk, tiepoint_covariance=True)
+    except Exception as exc:
+        print(f"  [ICP Bridge] {label_prefix} post-prune optimization note: {exc}", flush=True)
+    for _fn in ("updateTransform", "resetRegion"):
+        if hasattr(chunk, _fn):
+            try:
+                getattr(chunk, _fn)()
+            except Exception:
+                pass
+
+    primary_label = f"{label_prefix}_sub1" if len(valid_islands) > 1 else label_prefix
+    return [(primary_label, chunk)] + isolated
+
+
 def bridge_disconnected_islands(
     doc: Any,
     chunk: Any,
@@ -775,12 +894,7 @@ def bridge_disconnected_islands(
             "quarantined_cameras": quarantined_cnt,
         }
 
-    def _cam_identity(cam: Any) -> tuple[str, Any]:
-        photo = getattr(cam, "photo", None)
-        p = getattr(photo, "path", "") if photo is not None else ""
-        if p:
-            return ("path", os.path.normcase(os.path.abspath(p)))
-        return ("key", int(cam.key))
+    _cam_identity = _camera_stable_identity
 
     # Capture stable path-based identities BEFORE doc.save() (which reloads chunks in Metashape 2.2+)
     pre_by_key = {c.key: c for c in chunk.cameras}
@@ -892,7 +1006,19 @@ def bridge_disconnected_islands(
                         getattr(ch_isl, _fn)()
                     except Exception:
                         pass
-            candidate_chunks.append((f"aligned_island_{idx}", ch_isl))
+            isl_min_cams = min(12, len(comp_ids))
+            isolated_isl = _isolate_coherent_sub_islands(
+                ch_isl,
+                label_prefix=f"aligned_island_{idx}",
+                temp_chunks=temp_chunks,
+                min_cams=isl_min_cams,
+            )
+            if not isolated_isl:
+                island_reports.append(
+                    {"id": f"aligned_island_{idx}", "passed": False, "reasons": ["no_coherent_subisland"]}
+                )
+            else:
+                candidate_chunks.extend(isolated_isl)
 
         for idx, paths in enumerate(rescue_photo_groups, 1):
             ch_res = doc.addChunk()
@@ -936,7 +1062,18 @@ def bridge_disconnected_islands(
                     island_reports.append({"id": f"rescue_{idx}", "passed": False, "reasons": ["insufficient_aligned"]})
                     continue
                 optimize_cameras_no_k4(ch_res, tiepoint_covariance=True)
-                candidate_chunks.append((f"rescue_{idx}", ch_res))
+                isolated_res = _isolate_coherent_sub_islands(
+                    ch_res,
+                    label_prefix=f"rescue_{idx}",
+                    temp_chunks=temp_chunks,
+                    min_cams=12,
+                )
+                if not isolated_res:
+                    island_reports.append(
+                        {"id": f"rescue_{idx}", "passed": False, "reasons": ["no_coherent_subisland"]}
+                    )
+                    continue
+                candidate_chunks.extend(isolated_res)
             except Exception as exc:
                 print(f"  [ICP Bridge] Rescue group #{idx} alignment failed ({exc}) — skipping.", flush=True)
                 island_reports.append({"id": f"rescue_{idx}", "passed": False, "reasons": [str(exc)]})
