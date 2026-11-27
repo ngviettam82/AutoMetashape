@@ -450,13 +450,30 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             self.assertFalse(rec2)
             self.assertEqual((old2, new2), ("3", "3"))
 
-            # Case 3: Multi-chunk project -> must never mutate
+            # Case 3a: Multi-chunk project already containing target_id '0' -> no-op
             stage_mc = os.path.join(tmp, "stage_mc")
-            self._write_mock_psx(stage_mc, "MultiSite", ["1", "2"], active_id="1")
-            rec_mc, _, _ = reconcile_staged_psx_chunk_id(stage_mc, share1, "MultiSite")
+            self._write_mock_psx(stage_mc, "MultiSite", ["0", "1"], active_id="0")
+            rec_mc, _, _ = reconcile_staged_psx_chunk_id(stage_mc, share1, "MultiSite", target_chunk_id="0")
             self.assertFalse(rec_mc)
+            self.assertTrue(os.path.isdir(os.path.join(stage_mc, "MultiSite.files", "0")))
             self.assertTrue(os.path.isdir(os.path.join(stage_mc, "MultiSite.files", "1")))
-            self.assertTrue(os.path.isdir(os.path.join(stage_mc, "MultiSite.files", "2")))
+
+            # Case 3b: Multi-chunk project missing target_id '0' -> reindex active chunk 1 -> 0, keep chunk 2
+            stage_mc2 = os.path.join(tmp, "stage_mc2")
+            self._write_mock_psx(stage_mc2, "MultiSite2", ["1", "2"], active_id="1")
+            rec_mc2, old_mc2, new_mc2 = reconcile_staged_psx_chunk_id(
+                stage_mc2, share1, "MultiSite2", target_chunk_id="0"
+            )
+            self.assertTrue(rec_mc2)
+            self.assertEqual((old_mc2, new_mc2), ("1", "0"))
+            self.assertTrue(os.path.isfile(os.path.join(stage_mc2, "MultiSite2.files", "0", "chunk.zip")))
+            self.assertTrue(os.path.isfile(os.path.join(stage_mc2, "MultiSite2.files", "2", "chunk.zip")))
+            with zipfile.ZipFile(os.path.join(stage_mc2, "MultiSite2.files", "project.zip"), "r") as zf:
+                xml_mc2 = zf.read("doc.xml").decode("utf-8")
+                self.assertIn('active_id="0"', xml_mc2)
+                self.assertIn('next_id="3"', xml_mc2)
+                self.assertIn('<chunk id="0" path="0/chunk.zip"/>', xml_mc2)
+                self.assertIn('<chunk id="2" path="2/chunk.zip"/>', xml_mc2)
 
             # Case 4: Explicit target_chunk_id override (direct storage mode)
             stage_dir = os.path.join(tmp, "stage_direct")

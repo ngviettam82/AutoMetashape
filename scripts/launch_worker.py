@@ -538,7 +538,10 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                         worker_cmd.extend(["--gpu-mask", active_gpu_mask])
                     print(f"[Hardware] Dynamic GPU probe recovered on reconnect: --gpu-mask {active_gpu_mask}")
             start_t = time.time()
-            proc = subprocess.Popen(worker_cmd, env=worker_env, cwd=target_dir)
+            popen_kwargs: dict[str, object] = {"env": worker_env, "cwd": target_dir}
+            if sys.platform != "win32":
+                popen_kwargs["start_new_session"] = True
+            proc = subprocess.Popen(worker_cmd, **popen_kwargs)
 
             # Watchdog polling loop: check for abort signals while proc is running
             aborted_by_supervisor = False
@@ -561,7 +564,12 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                     aborted_by_supervisor = True
 
                     # 2. Clean up scratch locks: remove any stale lock files in target_dir or scratch dirs
-                    cu.cleanup_scratch_locks(target_dir=target_dir, root_path=root_path)
+                    try:
+                        cu.cleanup_scratch_locks(
+                            target_dir=target_dir, root_path=root_path, worker_pid=getattr(proc, "pid", None)
+                        )
+                    except TypeError:
+                        cu.cleanup_scratch_locks(target_dir=target_dir, root_path=root_path)
 
                     # 3. Acknowledge and clear signal file
                     cu.acknowledge_abort_signal(abort_sig)

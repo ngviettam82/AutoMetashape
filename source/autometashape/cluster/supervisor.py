@@ -31,6 +31,7 @@ except ImportError:
 from autometashape.cluster.abort import _split_host_port
 from autometashape.cluster.dual_share import (
     discover_dual_share_projects,
+    extract_path_leaf_name,
     relpath_under,
     validate_dual_share_topology,
 )
@@ -44,6 +45,7 @@ from autometashape.cluster.orchestrator import (
 from autometashape.cluster.staging import get_optimal_local_scratch_dir
 from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
 from autometashape.core.verification import verify_project_deliverables
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 
 def check_storage_headroom(target_path: str, min_headroom_gb: float = 50.0) -> Tuple[bool, float]:
@@ -106,7 +108,7 @@ class QueueJob:
         extra_args: Optional[Dict[str, Any]] = None,
     ) -> None:
         self.images_dir = os.path.abspath(images_dir)
-        self.project_name = project_name or os.path.basename(self.images_dir.rstrip("\\/"))
+        self.project_name = (project_name or "").strip() or extract_path_leaf_name(self.images_dir)
         self.output_dir = (
             os.path.abspath(output_dir) if output_dir else os.path.join(self.images_dir, self.project_name)
         )
@@ -886,7 +888,7 @@ def discover_dataset_projects(
             if os.path.isfile(os.path.join(scan_dir, f)) and f.lower().endswith(SUPPORTED_IMAGE_EXTS)
         ]
         if root_images:
-            project_name = os.path.basename(scan_dir.rstrip("\\/"))
+            project_name = extract_path_leaf_name(scan_dir)
             out_dir = os.path.join(output_root, project_name) if output_root else os.path.join(scan_dir, project_name)
             job = QueueJob(
                 images_dir=scan_dir,
@@ -1042,6 +1044,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """CLI entry point for supervisor."""
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 

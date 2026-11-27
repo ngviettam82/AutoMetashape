@@ -496,6 +496,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """CLI entry point."""
+    try:
+        from autometashape.ipc.protocol import configure_utf8_stdio
+
+        configure_utf8_stdio()
+    except ImportError:
+        pass
     parser = build_arg_parser()
     args = parser.parse_args()
 

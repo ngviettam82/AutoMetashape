@@ -223,7 +223,10 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
                 user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
                 target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
 
-        proc = subprocess.Popen(server_cmd, cwd=target_dir)
+        popen_kwargs: dict[str, object] = {"cwd": target_dir}
+        if sys.platform != "win32":
+            popen_kwargs["start_new_session"] = True
+        proc = subprocess.Popen(server_cmd, **popen_kwargs)
         proc.wait()
         ret_code = proc.returncode
 

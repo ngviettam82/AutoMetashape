@@ -34,6 +34,7 @@ from autometashape.cluster.config import (
     load_cluster_config,
 )
 from autometashape.cluster.hardware import get_primary_lan_ip
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -78,6 +79,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """Main execution function for cluster worker abort utility."""
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 

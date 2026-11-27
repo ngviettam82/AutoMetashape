@@ -10,6 +10,7 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import re
 import signal
 import string
 import subprocess
@@ -17,8 +18,9 @@ import sys
 import tempfile
 import threading
 import time
+import uuid
 from collections import deque
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 try:
@@ -35,11 +37,183 @@ from autometashape.cluster.hardware import (
 ABORT_SIGNAL_FILENAME = ".abort_pending"
 ABORT_DIR_NAME = "aborts"
 ABORT_SIGNALS_JSON = "abort_signals.json"
-
+DEFAULT_ABORT_SIGNAL_TTL_S = 3600.0
 
 _TH32CS_SNAPPROCESS = 0x00000002
 _MAX_PATH = 260
 _IGNORED_LOCK_SCAN_DIRS = frozenset({".git", ".venv", ".agents", "node_modules", "__pycache__", ".cluster"})
+_PROTECTED_PACKAGE_LOCKS = frozenset(
+    {
+        "uv.lock",
+        "poetry.lock",
+        "cargo.lock",
+        "pdm.lock",
+        "pipfile.lock",
+        "yarn.lock",
+        "composer.lock",
+        "gemfile.lock",
+        "flake.lock",
+        "bun.lock",
+        "package-lock.json",
+        "pnpm-lock.yaml",
+    }
+)
+_STAGE_DIR_PID_RE = re.compile(r"_(\d+)_local_stage$", re.IGNORECASE)
+
+
+def _sanitize_node_filename(node_name: str) -> str:
+    """Sanitize a node identifier so it cannot escape ``aborts/`` or contain invalid filename chars."""
+    raw = str(node_name or "").strip().lower()
+    cleaned = re.sub(r"[^a-z0-9._-]+", "_", raw)
+    cleaned = re.sub(r"\.{2,}", ".", cleaned).strip("._-")
+    return cleaned or "unknown"
+
+
+def _hostnames_match(a: str, b: str) -> bool:
+    """Match node hostnames across FQDN/short-name and localhost aliases."""
+    na = str(a or "").strip().lower()
+    nb = str(b or "").strip().lower()
+    if not na or not nb:
+        return False
+    if na == nb:
+        return True
+    sa = na.split(".", 1)[0]
+    sb = nb.split(".", 1)[0]
+    if sa and sa == sb:
+        return True
+    if na in ("localhost", "127.0.0.1") or nb in ("localhost", "127.0.0.1"):
+        local = str(get_local_hostname() or "").strip().lower()
+        local_short = local.split(".", 1)[0] if local else ""
+        other = nb if na in ("localhost", "127.0.0.1") else na
+        other_short = other.split(".", 1)[0]
+        return other in (local, local_short) or (bool(other_short) and other_short in (local, local_short))
+    return False
+
+
+def _parse_iso_timestamp(value: Any) -> Optional[float]:
+    """Parse float epoch or ISO-8601 UTC timestamp string safely under Python 3.9+."""
+    if value is None or isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    txt = str(value).strip()
+    if not txt:
+        return None
+    try:
+        return float(txt)
+    except ValueError:
+        pass
+    try:
+        if txt.endswith("Z"):
+            txt = txt[:-1] + "+00:00"
+        dt = datetime.fromisoformat(txt)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.timestamp()
+    except Exception:
+        return None
+
+
+def _is_signal_expired(data: Dict[str, Any], ttl_s: float = DEFAULT_ABORT_SIGNAL_TTL_S) -> bool:
+    """Return True if an abort signal payload has passed its explicit expiry or TTL."""
+    now_ts = time.time()
+    exp_ts = _parse_iso_timestamp(data.get("expires_at"))
+    if exp_ts is not None:
+        return now_ts > exp_ts
+    sig_ts = _parse_iso_timestamp(data.get("timestamp"))
+    if sig_ts is not None and ttl_s > 0:
+        return (now_ts - sig_ts) > ttl_s
+    return False
+
+
+def _node_ack_candidates(aborts_dir: str, resolved_node: str) -> List[str]:
+    """Return ordered unique per-node `.abort_ack` candidate paths for ``resolved_node``."""
+    safe_node = _sanitize_node_filename(resolved_node)
+    short_node = _sanitize_node_filename(str(resolved_node or "").strip().lower().split(".", 1)[0])
+    paths: List[str] = []
+    for name in (safe_node, short_node):
+        if name and name != "unknown":
+            cand = os.path.join(aborts_dir, f"{name}.abort_ack")
+            if cand not in paths:
+                paths.append(cand)
+    if short_node and short_node != "unknown" and os.path.isdir(aborts_dir):
+        prefix = f"{short_node}."
+        try:
+            for fname in sorted(os.listdir(aborts_dir)):
+                low = fname.lower()
+                if low.startswith(prefix) and low.endswith(".abort_ack"):
+                    cand = os.path.join(aborts_dir, fname)
+                    if cand not in paths:
+                        paths.append(cand)
+        except OSError:
+            pass
+    return paths
+
+
+def _is_broadcast_already_acked(
+    aborts_dir: str,
+    resolved_node: str,
+    sig_data: Dict[str, Any],
+    sig_mtime: Optional[float] = None,
+) -> bool:
+    """Check whether this node already acknowledged a broadcast signal via signal_id or ack mtime."""
+    if not aborts_dir or not resolved_node or resolved_node == "unknown":
+        return False
+    sig_id = str(sig_data.get("signal_id") or "").strip()
+    for ack_path in _node_ack_candidates(aborts_dir, resolved_node):
+        if not os.path.isfile(ack_path):
+            continue
+        try:
+            with open(ack_path, "r", encoding="utf-8") as af:
+                ack_json = json.load(af)
+            if isinstance(ack_json, dict):
+                acked_ids: set[str] = set()
+                if ack_json.get("signal_id"):
+                    acked_ids.add(str(ack_json["signal_id"]))
+                for sid in ack_json.get("acked_signal_ids") or []:
+                    if sid:
+                        acked_ids.add(str(sid))
+                if sig_id and sig_id in acked_ids:
+                    return True
+        except Exception:
+            pass
+        if not sig_id and sig_mtime is not None:
+            try:
+                if os.path.getmtime(ack_path) >= sig_mtime:
+                    return True
+            except OSError:
+                pass
+    return False
+
+
+def _is_pid_alive(pid: int) -> bool:
+    """Best-effort check whether local OS PID is currently active."""
+    if not pid or pid <= 0:
+        return False
+    if sys.platform == "win32":
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(0x1000, False, int(pid))
+            if not handle:
+                return False
+            try:
+                exit_code = ctypes.c_uint32()
+                if kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+                    return int(exit_code.value) == 259
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return False
+        return False
+    try:
+        os.kill(int(pid), 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
 
 
 class _PROCESSENTRY32W(ctypes.Structure):
@@ -293,18 +467,16 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
     return True
 
 
-def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: int = 3) -> List[str]:
-    """Remove any stale lock files in target_dir, temp dir, or local scratch staging dirs.
+def cleanup_scratch_locks(
+    target_dir: str = "",
+    root_path: str = "",
+    max_depth: int = 3,
+    worker_pid: Optional[int] = None,
+) -> List[str]:
+    """Remove stale Metashape lock files in scratch staging dirs or project ``.files`` dirs.
 
-    Bounded to max_depth to prevent expensive recursive scans of large project or scratch trees.
-
-    Args:
-        target_dir: Active project target directory to inspect.
-        root_path: Shared network storage root containing .cluster maintenance files.
-        max_depth: Maximum directory recursion depth (default: 3).
-
-    Returns:
-        List of paths of removed lock files.
+    Bounded to max_depth, skips protected package manager lockfiles (``uv.lock``,
+    ``poetry.lock``, ``Cargo.lock``, etc.), and leaves live sibling workers' staging locks untouched.
     """
     removed_locks: List[str] = []
     lock_dirs: List[str] = []
@@ -337,16 +509,45 @@ def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: 
     for d in lock_dirs:
         if not os.path.isdir(d):
             continue
+        is_repo_target = bool(
+            target_dir
+            and os.path.normcase(os.path.abspath(d)) == os.path.normcase(os.path.abspath(target_dir))
+            and (os.path.isdir(os.path.join(d, ".git")) or os.path.isfile(os.path.join(d, "pyproject.toml")))
+        )
         try:
-            base_depth = d.rstrip(r"\/").count(os.sep)
-            for root, dirs, files in os.walk(d):
-                dirs[:] = [sub for sub in dirs if sub.lower() not in _IGNORED_LOCK_SCAN_DIRS]
-                cur_depth = root.rstrip(r"\/").count(os.sep) - base_depth
+            norm_base = os.path.normpath(d)
+            base_depth = norm_base.rstrip(r"\/").count(os.sep)
+            for root, dirs, files in os.walk(norm_base):
+                kept_dirs: List[str] = []
+                for sub in dirs:
+                    if sub.lower() in _IGNORED_LOCK_SCAN_DIRS:
+                        continue
+                    m_stage = _STAGE_DIR_PID_RE.search(sub)
+                    if m_stage:
+                        stage_pid = int(m_stage.group(1))
+                        if (worker_pid is not None and stage_pid != worker_pid) or _is_pid_alive(stage_pid):
+                            continue
+                    kept_dirs.append(sub)
+                dirs[:] = kept_dirs
+
+                norm_root = os.path.normpath(root)
+                cur_depth = norm_root.rstrip(r"\/").count(os.sep) - base_depth
                 if cur_depth >= max_depth:
                     dirs.clear()  # Prune deeper traversal to avoid massive I/O
+
+                rel_root = os.path.relpath(norm_root, norm_base)
+                rel_parts = [p.lower() for p in rel_root.replace("\\", "/").split("/") if p and p != "."]
+                in_metashape_dir = any(
+                    p.endswith(".files") or p == "scratch" or p.endswith("_local_stage") for p in rel_parts
+                )
                 for f in files:
-                    if f.lower() == "lock" or f.lower().endswith(".lock"):
-                        lock_path = os.path.join(root, f)
+                    low_f = f.lower()
+                    if low_f in _PROTECTED_PACKAGE_LOCKS:
+                        continue
+                    if is_repo_target and not in_metashape_dir:
+                        continue
+                    if low_f == "lock" or low_f.endswith(".lock"):
+                        lock_path = os.path.join(norm_root, f)
                         try:
                             os.remove(lock_path)
                             removed_locks.append(lock_path)
@@ -367,46 +568,46 @@ def check_abort_signal(
 
     Optimized for zero network contention: inspects local fast paths first, then
     direct per-node signal files, with shared aggregate JSON checked only as a fallback.
-
-    Args:
-        target_dir: Active worker working directory.
-        root_path: Shared network storage UNC path.
-        node_name: Current host node name (default: COMPUTERNAME or 'unknown').
-
-    Returns:
-        Dictionary containing abort signal metadata and _signal_path, or None.
+    Broadcast ``all.abort`` signals are deduplicated per-node by ``signal_id`` and ack mtime,
+    and stale signals older than their TTL are skipped cleanly.
     """
     resolved_node = (node_name or get_local_hostname()).strip().lower()
+    safe_node = _sanitize_node_filename(resolved_node)
+    short_node = _sanitize_node_filename(resolved_node.split(".", 1)[0]) if resolved_node else "unknown"
+    node_aliases: List[str] = []
+    for n in (resolved_node, safe_node, short_node):
+        if n and n != "unknown" and n not in node_aliases:
+            node_aliases.append(n)
+    file_aliases: List[str] = []
+    for n in (safe_node, short_node):
+        if n and n != "unknown" and n not in file_aliases:
+            file_aliases.append(n)
+
     temp_dir = tempfile.gettempdir()
+    aborts_dir = os.path.join(root_path, ".cluster", ABORT_DIR_NAME) if root_path and os.path.isdir(root_path) else ""
 
     # 1. Fast local checks (Zero network I/O)
     candidates: List[str] = []
     if target_dir:
         candidates.append(os.path.join(target_dir, ABORT_SIGNAL_FILENAME))
     candidates.append(os.path.join(temp_dir, ABORT_SIGNAL_FILENAME))
-    if resolved_node and resolved_node != "unknown":
-        candidates.append(os.path.join(temp_dir, f"{ABORT_SIGNAL_FILENAME}_{resolved_node}"))
+    for alias in file_aliases:
+        candidates.append(os.path.join(temp_dir, f"{ABORT_SIGNAL_FILENAME}_{alias}"))
 
     # 2. UNC Direct per-node file checks (Atomic single stat, zero contention)
-    if root_path and os.path.isdir(root_path):
-        aborts_dir = os.path.join(root_path, ".cluster", ABORT_DIR_NAME)
-        if os.path.isdir(aborts_dir):
-            if resolved_node and resolved_node != "unknown":
-                candidates.append(os.path.join(aborts_dir, f"{resolved_node}.abort"))
-            candidates.append(os.path.join(aborts_dir, "all.abort"))
+    if aborts_dir and os.path.isdir(aborts_dir):
+        for alias in file_aliases:
+            candidates.append(os.path.join(aborts_dir, f"{alias}.abort"))
+        candidates.append(os.path.join(aborts_dir, "all.abort"))
 
     for flag_path in candidates:
         if not os.path.isfile(flag_path):
             continue
-        # For broadcast all.abort, skip if this node already wrote a newer per-node .abort_ack
-        if os.path.basename(flag_path).lower() == "all.abort" and resolved_node and resolved_node != "unknown":
-            node_ack = os.path.join(os.path.dirname(flag_path), f"{resolved_node}.abort_ack")
-            if os.path.isfile(node_ack):
-                try:
-                    if os.path.getmtime(node_ack) >= os.path.getmtime(flag_path):
-                        continue
-                except OSError:
-                    pass
+        is_broadcast = os.path.basename(flag_path).lower() == "all.abort"
+        try:
+            sig_mtime = os.path.getmtime(flag_path)
+        except OSError:
+            sig_mtime = None
         try:
             with open(flag_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
@@ -421,12 +622,29 @@ def check_abort_signal(
             else:
                 data = {"action": "abort_and_restart"}
 
+            if _is_signal_expired(data):
+                continue
+
+            if is_broadcast and _is_broadcast_already_acked(
+                os.path.dirname(flag_path), resolved_node, data, sig_mtime=sig_mtime
+            ):
+                continue
+
             # Guard against wrong-node execution: if a signal specifies a target node_name, verify it matches us
             sig_target = str(data.get("node_name") or "").strip().lower()
-            if sig_target and sig_target not in (resolved_node, "all", "unknown") and resolved_node != "unknown":
+            if (
+                sig_target
+                and sig_target not in ("all", "unknown")
+                and resolved_node != "unknown"
+                and not _hostnames_match(sig_target, resolved_node)
+            ):
                 continue
 
             data["_signal_path"] = flag_path
+            if is_broadcast or sig_target in ("", "all", "unknown"):
+                if resolved_node and resolved_node != "unknown":
+                    data["_target_node"] = sig_target or ("all" if is_broadcast else "")
+                    data["node_name"] = resolved_node
             data.setdefault("node_name", resolved_node)
             data.setdefault("batch_id", "unknown")
             return data
@@ -438,25 +656,76 @@ def check_abort_signal(
         json_sig = os.path.join(root_path, ".cluster", ABORT_SIGNALS_JSON)
         if os.path.isfile(json_sig):
             try:
+                json_mtime = os.path.getmtime(json_sig)
                 with open(json_sig, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 if isinstance(data, dict):
-                    entry = data.get(resolved_node) or data.get("all")
-                    if not entry and "signals" in data and isinstance(data["signals"], dict):
-                        entry = data["signals"].get(resolved_node) or data["signals"].get("all")
-                    if isinstance(entry, dict):
+                    signals_sub = data.get("signals") if isinstance(data.get("signals"), dict) else None
+                    matched_key: Optional[str] = None
+                    entry: Any = None
+                    for cand_key in [*node_aliases, "all"]:
+                        if isinstance(data.get(cand_key), dict):
+                            entry = data[cand_key]
+                            matched_key = cand_key
+                            break
+                        if signals_sub and isinstance(signals_sub.get(cand_key), dict):
+                            entry = signals_sub[cand_key]
+                            matched_key = cand_key
+                            break
+                    if isinstance(entry, dict) and matched_key is not None:
+                        if _is_signal_expired(entry):
+                            return None
+                        if matched_key == "all" and _is_broadcast_already_acked(
+                            aborts_dir, resolved_node, entry, sig_mtime=json_mtime
+                        ):
+                            return None
                         entry_copy = dict(entry)
                         entry_copy["_signal_path"] = json_sig
-                        entry_copy["_json_key"] = (
-                            resolved_node
-                            if resolved_node in data or ("signals" in data and resolved_node in data["signals"])
-                            else "all"
-                        )
+                        entry_copy["_json_key"] = matched_key
+                        if matched_key == "all" and resolved_node and resolved_node != "unknown":
+                            entry_copy["_target_node"] = "all"
+                            entry_copy["node_name"] = resolved_node
                         return entry_copy
             except Exception:
                 pass
 
     return None
+
+
+def _write_node_ack(
+    ack_path: str,
+    node_name: str,
+    batch_id: Any,
+    signal_id: Optional[str],
+) -> bool:
+    """Atomically write ``.abort_ack`` preserving recent acknowledged ``signal_id`` entries."""
+    os.makedirs(os.path.dirname(os.path.abspath(ack_path)), exist_ok=True)
+    prior_ids: List[str] = []
+    if os.path.isfile(ack_path):
+        try:
+            with open(ack_path, "r", encoding="utf-8") as af:
+                old_ack = json.load(af)
+            if isinstance(old_ack, dict):
+                prior_ids = [str(x) for x in (old_ack.get("acked_signal_ids") or []) if x]
+                if old_ack.get("signal_id") and str(old_ack["signal_id"]) not in prior_ids:
+                    prior_ids.append(str(old_ack["signal_id"]))
+        except Exception:
+            pass
+    if signal_id and signal_id not in prior_ids:
+        prior_ids.append(signal_id)
+    ack_payload: Dict[str, Any] = {
+        "action": "aborted",
+        "node_name": node_name,
+        "batch_id": batch_id,
+        "signal_id": signal_id,
+        "acked_signal_ids": prior_ids[-32:],
+        "ack_timestamp": datetime.now(timezone.utc).isoformat(),
+    }
+    try:
+        _atomic_write_json(ack_path, ack_payload)
+        return True
+    except Exception:
+        return False
 
 
 def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
@@ -472,57 +741,61 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
         return False
 
     sig_path = abort_data.get("_signal_path")
-    node_name = str(abort_data.get("node_name", get_local_hostname())).lower()
+    raw_node = str(abort_data.get("node_name") or "").strip().lower()
+    if raw_node in ("", "all", "unknown"):
+        raw_node = str(get_local_hostname() or "unknown").strip().lower()
+    node_name = raw_node
+    safe_node = _sanitize_node_filename(node_name)
+    short_node = _sanitize_node_filename(node_name.split(".", 1)[0]) if node_name else "unknown"
     batch_id = abort_data.get("batch_id", "unknown")
+    sig_id = str(abort_data.get("signal_id") or "").strip() or None
 
     ack_written = False
     if sig_path and os.path.isfile(sig_path):
         if sig_path.endswith(ABORT_SIGNALS_JSON):
-            try:
-                with open(sig_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                key = abort_data.get("_json_key") or node_name
-                if isinstance(data, dict):
-                    if key in data and key != "all":
-                        del data[key]
-                    elif (
-                        "signals" in data
-                        and isinstance(data["signals"], dict)
-                        and key in data["signals"]
-                        and key != "all"
-                    ):
-                        del data["signals"][key]
-                    _atomic_write_json(sig_path, data)
-                ack_written = True
-            except Exception:
-                pass
+            key = str(abort_data.get("_json_key") or node_name)
+            if key == "all" and safe_node != "unknown":
+                aborts_dir = os.path.join(os.path.dirname(sig_path), ABORT_DIR_NAME)
+                ack_written = _write_node_ack(
+                    os.path.join(aborts_dir, f"{safe_node}.abort_ack"),
+                    node_name=node_name,
+                    batch_id=batch_id,
+                    signal_id=sig_id,
+                )
+            else:
+                try:
+                    with open(sig_path, "r", encoding="utf-8") as f:
+                        data = json.load(f)
+                    if isinstance(data, dict):
+                        if key in data and key != "all":
+                            del data[key]
+                        elif (
+                            "signals" in data
+                            and isinstance(data["signals"], dict)
+                            and key in data["signals"]
+                            and key != "all"
+                        ):
+                            del data["signals"][key]
+                        _atomic_write_json(sig_path, data)
+                    ack_written = True
+                except Exception:
+                    pass
         elif sig_path.endswith(".abort"):
             is_broadcast = os.path.basename(sig_path).lower() == "all.abort"
             ack_base = (
-                os.path.join(os.path.dirname(sig_path), node_name)
-                if (is_broadcast and node_name and node_name != "unknown")
+                os.path.join(os.path.dirname(sig_path), safe_node)
+                if (is_broadcast and safe_node and safe_node != "unknown")
                 else os.path.splitext(sig_path)[0]
             )
             ack_path = ack_base + ".abort_ack"
-            ack_payload = {
-                "action": "aborted",
-                "node_name": node_name,
-                "batch_id": batch_id,
-                "ack_timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-            try:
-                _atomic_write_json(ack_path, ack_payload)
-                ack_written = True
-            except Exception:
-                pass
+            ack_written = _write_node_ack(ack_path, node_name=node_name, batch_id=batch_id, signal_id=sig_id)
             # Never delete broadcast all.abort so sibling workers also receive the broadcast
             if not is_broadcast:
                 try:
                     os.remove(sig_path)
                 except Exception:
                     pass
-            # Also purge matching node entry from sibling .cluster/abort_signals.json
-            # to prevent the watchdog from firing a second kill on the next poll.
+            # Purge matching node entries from sibling .cluster/abort_signals.json
             parent_dir = os.path.dirname(sig_path)
             cluster_dir = (
                 os.path.dirname(parent_dir) if os.path.basename(parent_dir).lower() == ABORT_DIR_NAME else parent_dir
@@ -534,13 +807,14 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                         agg_data = json.load(rf)
                     changed = False
                     if isinstance(agg_data, dict):
-                        if node_name in agg_data:
-                            del agg_data[node_name]
-                            changed = True
-                        if "signals" in agg_data and isinstance(agg_data["signals"], dict):
-                            if node_name in agg_data["signals"]:
-                                del agg_data["signals"][node_name]
+                        for k_purge in {node_name, safe_node, short_node}:
+                            if k_purge in agg_data:
+                                del agg_data[k_purge]
                                 changed = True
+                            if "signals" in agg_data and isinstance(agg_data["signals"], dict):
+                                if k_purge in agg_data["signals"]:
+                                    del agg_data["signals"][k_purge]
+                                    changed = True
                     if changed:
                         _atomic_write_json(agg_json, agg_data)
                 except Exception:
@@ -560,12 +834,15 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
         except Exception:
             pass
 
-    node_temp_abort = os.path.join(tempfile.gettempdir(), f"{ABORT_SIGNAL_FILENAME}_{node_name}")
-    if os.path.isfile(node_temp_abort):
-        try:
-            os.remove(node_temp_abort)
-        except Exception:
-            pass
+    for alias in {safe_node, short_node}:
+        if not alias or alias == "unknown":
+            continue
+        node_temp_abort = os.path.join(tempfile.gettempdir(), f"{ABORT_SIGNAL_FILENAME}_{alias}")
+        if os.path.isfile(node_temp_abort):
+            try:
+                os.remove(node_temp_abort)
+            except Exception:
+                pass
 
     return ack_written
 
@@ -579,7 +856,7 @@ def dispatch_abort_signal(
     """Dispatches an abort signal file for a target worker node using atomic replace.
 
     Args:
-        node_name: Target worker node hostname.
+        node_name: Target worker node hostname (or ``"all"`` for broadcast).
         batch_id: Optional Metashape batch ID being aborted.
         shared_root: Shared network storage root containing .cluster directory.
         local_dir: Optional local directory to write .abort_pending.
@@ -588,26 +865,29 @@ def dispatch_abort_signal(
         Absolute path to the created signal file.
     """
     clean_node = str(node_name).strip().lower()
+    safe_file_node = "all" if clean_node == "all" else _sanitize_node_filename(clean_node)
+    now_utc = datetime.now(timezone.utc)
     payload = {
         "action": "abort_and_restart",
         "node_name": clean_node,
         "batch_id": batch_id,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "signal_id": uuid.uuid4().hex,
+        "timestamp": now_utc.isoformat(),
+        "expires_at": (now_utc + timedelta(seconds=DEFAULT_ABORT_SIGNAL_TTL_S)).isoformat(),
     }
 
     if shared_root:
         aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME)
         os.makedirs(aborts_dir, exist_ok=True)
-        # Clear any stale acknowledgment from an earlier abort before dispatching the new signal
-        stale_ack = os.path.join(aborts_dir, f"{clean_node}.abort_ack")
-        if os.path.isfile(stale_ack):
-            try:
-                os.remove(stale_ack)
-            except OSError:
-                pass
+        # Clear any stale acknowledgment from an earlier targeted abort before dispatching the new signal
+        if clean_node != "all":
+            stale_ack = os.path.join(aborts_dir, f"{safe_file_node}.abort_ack")
+            if os.path.isfile(stale_ack):
+                try:
+                    os.remove(stale_ack)
+                except OSError:
+                    pass
 
-        # Write aggregate abort_signals.json FIRST so a worker acknowledging <node>.abort
-        # always sees and clears the aggregate entry cleanly instead of triggering a second kill.
         agg_path = os.path.join(shared_root, ".cluster", ABORT_SIGNALS_JSON)
         try:
             agg_data: Dict[str, Any] = {}
@@ -616,12 +896,24 @@ def dispatch_abort_signal(
                     loaded = json.load(rf)
                 if isinstance(loaded, dict):
                     agg_data = loaded
-            agg_data[clean_node] = payload
-            _atomic_write_json(agg_path, agg_data)
+            if clean_node == "all":
+                # Never leave an un-acknowledged "all" entry in abort_signals.json (would cause an infinite kill loop)
+                changed_agg = False
+                if "all" in agg_data:
+                    del agg_data["all"]
+                    changed_agg = True
+                if isinstance(agg_data.get("signals"), dict) and "all" in agg_data["signals"]:
+                    del agg_data["signals"]["all"]
+                    changed_agg = True
+                if changed_agg:
+                    _atomic_write_json(agg_path, agg_data)
+            else:
+                agg_data[clean_node] = payload
+                _atomic_write_json(agg_path, agg_data)
         except Exception:
             pass
 
-        sig_path = os.path.join(aborts_dir, f"{clean_node}.abort")
+        sig_path = os.path.join(aborts_dir, f"{safe_file_node}.abort")
         _atomic_write_json(sig_path, payload)
         return sig_path
 
@@ -656,10 +948,12 @@ def abort_remote_worker(
         Dictionary detailing operation results, acknowledgment status, and reconnect state.
     """
     clean_node = str(node_name).strip().lower()
+    safe_node = _sanitize_node_filename(clean_node)
     result: Dict[str, Any] = {
         "success": False,
         "node_name": clean_node,
         "batch_id": batch_id,
+        "signal_dispatched": False,
         "acknowledged": False,
         "reconnected": False,
         "error": None,
@@ -770,7 +1064,7 @@ def abort_remote_worker(
                     for w in w_pre.get("workers", []):
                         if not is_healthy_online_worker(w):
                             continue
-                        if str(w.get("hostname", "")).strip().lower() == clean_node:
+                        if _hostnames_match(str(w.get("hostname", "")), clean_node):
                             wid = w.get("worker_id")
                             if wid is not None:
                                 pre_abort_worker_ids.add(wid)
@@ -785,13 +1079,14 @@ def abort_remote_worker(
                 batch_id=batch_id,
                 shared_root=shared_root,
             )
+            result["signal_dispatched"] = True
         except Exception as sig_err:
             result["error"] = f"Failed to write abort signal file: {sig_err}"
             return result
 
         # Step 5: Wait up to timeout for supervisor acknowledgment and reconnect
         aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME) if shared_root else ""
-        ack_path = os.path.join(aborts_dir, f"{clean_node}.abort_ack") if aborts_dir else ""
+        ack_path = os.path.join(aborts_dir, f"{safe_node}.abort_ack") if aborts_dir else ""
 
         start_t = time.time()
         ack_seen = False
@@ -814,7 +1109,7 @@ def abort_remote_worker(
                             w_state = str(w.get("state", "")).strip().lower()
                             w_id = w.get("worker_id")
                             is_fresh_worker = (w_id is None) or (w_id not in pre_abort_worker_ids)
-                            if w_hname == clean_node and w_state == "ready" and is_fresh_worker:
+                            if _hostnames_match(w_hname, clean_node) and w_state == "ready" and is_fresh_worker:
                                 reconnected = True
                                 break
                 except Exception:

@@ -69,6 +69,34 @@ EXPORT_TAG_MAP: dict[str, tuple[str, str]] = {
 }
 
 _ACTIVE_STATUS_FILE: str | None = None
+_SIDECAR_LOCK = threading.RLock()
+
+
+def configure_utf8_stdio() -> None:
+    """Configure stdout/stderr streams for UTF-8 on Windows without crashing redirected pipes."""
+    for stream_name in ("stdout", "stderr"):
+        stream = getattr(sys, stream_name, None)
+        if stream is not None and hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (AttributeError, OSError, ValueError):
+                pass
+
+
+def _safe_print(message: str, *, file: Any = None) -> None:
+    """Print text safely even if the console encoding cannot represent all Unicode glyphs."""
+    target = sys.stdout if file is None else file
+    try:
+        print(message, file=file, flush=True)
+    except UnicodeEncodeError:
+        enc = getattr(target, "encoding", None) or "ascii"
+        safe_msg = str(message).encode(enc, errors="replace").decode(enc, errors="replace")
+        print(safe_msg, file=file, flush=True)
+
+
+def _sanitized_host_tag() -> str:
+    raw = (os.environ.get("COMPUTERNAME") or "").strip() or socket.gethostname() or "node"
+    return re.sub(r"[^0-9A-Za-z_-]", "_", raw)[:24] or "node"
 
 
 def set_active_status_file(path: str | None) -> None:
@@ -82,29 +110,31 @@ def set_active_status_file(path: str | None) -> None:
 
 
 def _write_status_sidecar_atomic(status_path: str, data: dict) -> None:
-    """Write status sidecar JSON atomically with Windows/SMB retry and orphan-temp cleanup."""
+    """Write status sidecar JSON atomically with cross-host temp isolation and SMB retry."""
     parent = os.path.dirname(os.path.abspath(status_path))
     if parent and not os.path.exists(parent):
         os.makedirs(parent, exist_ok=True)
-    tmp_path = f"{status_path}.tmp.{os.getpid()}.{threading.get_ident()}"
-    try:
-        with open(tmp_path, "w", encoding="utf-8") as sf:
-            json.dump(data, sf, indent=2, ensure_ascii=False)
-        for attempt in range(3):
-            try:
-                os.replace(tmp_path, status_path)
-                return
-            except PermissionError:
-                if attempt < 2:
-                    time.sleep(0.05 * (attempt + 1))
-                else:
-                    raise
-    except Exception:
+    host_tag = _sanitized_host_tag()
+    tmp_path = f"{status_path}.tmp.{host_tag}.{os.getpid()}.{threading.get_ident()}"
+    with _SIDECAR_LOCK:
         try:
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-        except OSError:
-            pass
+            with open(tmp_path, "w", encoding="utf-8") as sf:
+                json.dump(data, sf, indent=2, ensure_ascii=False)
+            for attempt in range(3):
+                try:
+                    os.replace(tmp_path, status_path)
+                    return
+                except PermissionError:
+                    if attempt < 2:
+                        time.sleep(0.05 * (attempt + 1))
+                    else:
+                        raise
+        except Exception:
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except OSError:
+                pass
 
 
 def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> None:
@@ -116,7 +146,7 @@ def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> N
         progress: Stage progress percentage between 0.0 and 100.0.
     """
     safe_desc = re.sub(r"[\r\n]+", " ", str(description)).strip()
-    print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{safe_desc}{IPC_SENTINEL_SUFFIX}", flush=True)
+    _safe_print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{safe_desc}{IPC_SENTINEL_SUFFIX}")
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE:
         _write_status_sidecar_atomic(
@@ -138,9 +168,10 @@ def emit_ipc_event(sentinel: str) -> None:
     Args:
         sentinel: Complete sentinel token string (e.g. IPC_COMPLETE or IPC_PAUSE_CROP).
     """
-    print(sentinel, flush=True)
+    token = str(sentinel).strip()
+    _safe_print(sentinel)
     global _ACTIVE_STATUS_FILE
-    if _ACTIVE_STATUS_FILE and "COMPLETE" in sentinel:
+    if _ACTIVE_STATUS_FILE and token == IPC_COMPLETE:
         _write_status_sidecar_atomic(
             _ACTIVE_STATUS_FILE,
             {
@@ -152,7 +183,7 @@ def emit_ipc_event(sentinel: str) -> None:
                 "timestamp": time.time(),
             },
         )
-    elif _ACTIVE_STATUS_FILE and "PAUSE" in sentinel:
+    elif _ACTIVE_STATUS_FILE and token == IPC_PAUSE_CROP:
         _write_status_sidecar_atomic(
             _ACTIVE_STATUS_FILE,
             {
@@ -175,7 +206,7 @@ def emit_ipc_error(stage_key: str, error_message: str) -> None:
     """
     safe_err = re.sub(r"[\r\n]+", " ", str(error_message)).strip()
     err_line = f"[ERROR] Pipeline error in stage '{stage_key}': {safe_err}"
-    print(err_line, file=sys.stderr, flush=True)
+    _safe_print(err_line, file=sys.stderr)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE:
         _write_status_sidecar_atomic(

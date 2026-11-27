@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
+import sys
 import time
 import uuid
 import zipfile
@@ -1312,13 +1314,16 @@ def _extract_batch_paused(obj) -> bool:
     return bool(isinstance(obj, dict) and obj.get("paused")) or _extract_batch_state(obj) == "paused"
 
 
+_ACTIVE_BATCH_STATES = frozenset({"active", "inprogress", "running", "submitted", "pending", "queued", "paused"})
+
+
 def _find_blocking_batch_id(net_client, rel_psx: str) -> int | None:
     """Return active blocking int batch_id for ``rel_psx`` via ``findBatch``, or ``None`` if free."""
     if not hasattr(net_client, "findBatch"):
         return None
     try:
         fb_id = net_client.findBatch(rel_psx)
-        if isinstance(fb_id, int) and not isinstance(fb_id, bool) and fb_id > 0:
+        if isinstance(fb_id, int) and not isinstance(fb_id, bool) and fb_id >= 0:
             return fb_id
     except Exception:
         pass
@@ -1376,22 +1381,54 @@ def _reap_holding_workers(net_client, batch_ids: set[int], shared_root: str) -> 
 
 
 def clear_stale_project_lock(shared_root: str, rel_psx: str) -> tuple[bool, str]:
-    """Safely remove a leftover ``<project>.files/lock`` ONLY after server batch lock is released.
+    """Safely remove a leftover ``<project>.files/lock`` ONLY after verifying no live process holds it.
 
     Returns ``(cleared_or_absent, message)``. Raises ``RuntimeError`` on WinError 32 / PermissionError
-    when an active OS process still holds an open handle to the lock file.
+    or active POSIX ``flock`` contention when another process holds the lock file.
     """
-    if not shared_root or not rel_psx or not os.path.isdir(shared_root):
+    if not rel_psx:
         return True, ""
-    clean_rel = rel_psx.strip().replace("\\", "/").lstrip("/")
-    if not clean_rel or ".." in clean_rel.split("/"):
-        return True, ""
-    abs_psx = os.path.join(shared_root, *clean_rel.split("/"))
+    if os.path.isabs(rel_psx) or rel_psx.startswith(("\\\\", "//")):
+        abs_psx = os.path.normpath(rel_psx)
+    else:
+        if not shared_root or not os.path.isdir(shared_root):
+            return True, ""
+        clean_rel = rel_psx.strip().replace("\\", "/").lstrip("/")
+        if not clean_rel or ".." in clean_rel.split("/"):
+            return True, ""
+        abs_psx = os.path.join(shared_root, *clean_rel.split("/"))
     from autometashape.cluster.staging import get_psx_files_dir
 
     lock_file = os.path.join(get_psx_files_dir(abs_psx), "lock")
     if not os.path.isfile(lock_file):
         return True, ""
+
+    if sys.platform != "win32":
+        try:
+            import fcntl
+
+            fd = os.open(lock_file, os.O_RDONLY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except (BlockingIOError, OSError) as flock_err:
+                err_no = getattr(flock_err, "errno", None)
+                if isinstance(flock_err, BlockingIOError) or err_no in (
+                    errno.EACCES,
+                    errno.EAGAIN,
+                    getattr(errno, "EWOULDBLOCK", errno.EAGAIN),
+                ):
+                    raise RuntimeError(
+                        f"Project lock '{lock_file}' is still actively held by a running POSIX process ({flock_err}); "
+                        "refusing to unlink live lock."
+                    ) from flock_err
+            finally:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+        except ImportError:
+            pass
+
     try:
         os.remove(lock_file)
         print(f"  [Cluster] Cleared stale project lock after batch release: {lock_file}", flush=True)
@@ -1482,11 +1519,7 @@ def safe_create_cluster_batch(
             fb_err_cnt = int((fb_info.get("error_count") if isinstance(fb_info, dict) else 0) or 0)
             fb_aborted = bool(isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
             fb_paused = _extract_batch_paused(fb_info)
-            fb_healthy_active = (
-                fb_state in ("inprogress", "running", "submitted", "pending", "queued", "paused")
-                and not fb_aborted
-                and fb_err_cnt == 0
-            )
+            fb_healthy_active = fb_state in _ACTIVE_BATCH_STATES and not fb_aborted and fb_err_cnt == 0
             if not force_fresh and fb_healthy_active:
                 print(
                     f"  [Cluster] Attaching to active batch #{fb_id} via findBatch for '{rel_psx}' ({fb_state}).",
@@ -1520,11 +1553,7 @@ def safe_create_cluster_batch(
                 b_err_cnt = int((b.get("error_count") if isinstance(b, dict) else 0) or 0)
                 b_aborted = bool(isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
                 b_paused = _extract_batch_paused(b)
-                b_healthy_active = (
-                    b_state in ("inprogress", "running", "submitted", "pending", "queued", "paused")
-                    and not b_aborted
-                    and b_err_cnt == 0
-                )
+                b_healthy_active = b_state in _ACTIVE_BATCH_STATES and not b_aborted and b_err_cnt == 0
                 if not force_fresh and b_healthy_active:
                     print(f"  [Cluster] Attaching to active batch #{b_id} for '{rel_psx}' ({b_state}).", flush=True)
                     return b_id, True
@@ -1563,19 +1592,61 @@ def safe_create_cluster_batch(
                     if isinstance(raw_b, dict)
                     else (raw_b if isinstance(raw_b, (list, tuple)) else [])
                 )
+                matched_batches: list[tuple[int, str, bool, bool]] = []
                 for b in batches:
                     b_path = b.get("path") if isinstance(b, dict) else getattr(b, "path", None)
                     if b_path:
                         known_batch_paths.add(str(b_path))
                     canon_b_path = resolve_batch_canonical_path(b_path, shared_root)
                     if _norm_cluster_path(b_path) == norm_target or _norm_cluster_path(canon_b_path) == norm_target:
-                        b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
+                        b_id = (
+                            b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
+                        )
+                        if b_id is None:
+                            continue
                         b_state = _extract_batch_state(b)
+                        b_err_cnt = int((b.get("error_count") if isinstance(b, dict) else 0) or 0)
+                        b_aborted = bool(isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
                         b_paused = _extract_batch_paused(b)
-                        if b_id is not None and b_state not in done_states:
-                            _safe_abort_batch(net_client, b_id, is_paused=b_paused)
-                            aborted_ids.add(b_id)
+                        b_healthy = b_state in _ACTIVE_BATCH_STATES and not b_aborted and b_err_cnt == 0
+                        matched_batches.append((int(b_id), b_state, b_paused, b_healthy))
+
                 fb_retry = _find_blocking_batch_id(net_client, rel_psx)
+                if not force_fresh:
+                    for b_id, b_state, _b_paused, b_healthy in matched_batches:
+                        if b_healthy:
+                            print(
+                                f"  [Cluster] Attaching to active batch #{b_id} after duplicate check "
+                                f"for '{rel_psx}' ({b_state}).",
+                                flush=True,
+                            )
+                            return b_id, True
+                    if fb_retry is not None:
+                        fb_healthy = True
+                        fb_state = "active"
+                        if hasattr(net_client, "batchInfo"):
+                            try:
+                                fb_info = net_client.batchInfo(fb_retry)
+                                fb_state = _extract_batch_state(fb_info)
+                                fb_err_cnt = int((fb_info.get("error_count") if isinstance(fb_info, dict) else 0) or 0)
+                                fb_aborted = bool(
+                                    isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted"))
+                                )
+                                fb_healthy = fb_state in _ACTIVE_BATCH_STATES and not fb_aborted and fb_err_cnt == 0
+                            except Exception:
+                                fb_healthy = True
+                        if fb_healthy:
+                            print(
+                                f"  [Cluster] Attaching to blocking active batch #{fb_retry} "
+                                f"for '{rel_psx}' ({fb_state}).",
+                                flush=True,
+                            )
+                            return fb_retry, True
+
+                for b_id, b_state, b_paused, _b_healthy in matched_batches:
+                    if b_state not in done_states:
+                        _safe_abort_batch(net_client, b_id, is_paused=b_paused)
+                        aborted_ids.add(b_id)
                 if fb_retry is not None and fb_retry not in aborted_ids:
                     _safe_abort_batch(net_client, fb_retry, is_paused=True)
                     aborted_ids.add(fb_retry)
@@ -1586,7 +1657,7 @@ def safe_create_cluster_batch(
                     aborted_ids,
                     timeout_s=release_timeout,
                     shared_root=shared_root,
-                    allow_reap=True,
+                    allow_reap=force_fresh,
                 )
                 if still_blocked is None and shared_root:
                     clear_stale_project_lock(shared_root, rel_psx)

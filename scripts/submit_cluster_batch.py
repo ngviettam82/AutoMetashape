@@ -36,6 +36,7 @@ from autometashape.cluster.config import (
 )
 from autometashape.cluster.dual_share import (
     discover_dual_share_projects,
+    extract_path_leaf_name,
     is_subpath,
     resolve_result_network_root,
     validate_dual_share_topology,
@@ -52,6 +53,7 @@ from autometashape.cluster.orchestrator import (
     safe_create_cluster_batch,
 )
 from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 IMAGE_EXTENSIONS = SUPPORTED_IMAGE_EXTS
 
@@ -302,7 +304,7 @@ def submit_batch(
     if not os.path.isdir(norm_images):
         raise FileNotFoundError(f"Input image directory does not exist: {norm_images}")
 
-    proj_name = project_name.strip() or os.path.basename(norm_images)
+    proj_name = project_name.strip() or extract_path_leaf_name(norm_images)
     norm_output = os.path.normpath(output_dir.strip()) if output_dir.strip() else os.path.join(norm_images, "Result")
     os.makedirs(norm_output, exist_ok=True)
 
@@ -350,9 +352,15 @@ def submit_batch(
                 continue
             b_state = str(b.get("state", "")).lower()
             b_err = int(b.get("error_count") or 0)
-            is_active = b_state in ("inprogress", "running", "submitted", "pending", "queued", "paused") and not (
-                b.get("failed") or b.get("aborted")
-            )
+            is_active = b_state in (
+                "active",
+                "inprogress",
+                "running",
+                "submitted",
+                "pending",
+                "queued",
+                "paused",
+            ) and not (b.get("failed") or b.get("aborted"))
             if not force and is_active and b_err == 0:
                 bid = int(b.get("batch_id"))
                 print(
@@ -511,6 +519,7 @@ def submit_batch(
 
 def main() -> int:
     """CLI entry point for cluster batch submission."""
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -603,7 +612,7 @@ def main() -> int:
                         start_paused=args.start_paused,
                         allow_hidden_ticket=args.allow_hidden_ticket,
                     )
-                    if bid > 0:
+                    if bid >= 0:
                         submitted_ids.append(bid)
                 except Exception as proj_exc:
                     failed_projects.append(f"{proj.project_name}: {proj_exc}")
@@ -626,7 +635,7 @@ def main() -> int:
         if args.output:
             effective_output = args.output
         elif args.result_share:
-            single_proj_name = args.project_name.strip() or os.path.basename(os.path.normpath(args.images))
+            single_proj_name = args.project_name.strip() or extract_path_leaf_name(os.path.normpath(args.images))
             effective_output = os.path.join(os.path.normpath(args.result_share), single_proj_name)
         else:
             effective_output = ""
@@ -653,7 +662,7 @@ def main() -> int:
             start_paused=args.start_paused,
             allow_hidden_ticket=args.allow_hidden_ticket,
         )
-        return 0 if batch_id > 0 else 1
+        return 0 if batch_id >= 0 else 1
     except Exception as e:
         print(f"\n[FATAL ERROR] Cluster batch submission failed: {e}", file=sys.stderr, flush=True)
         return 1

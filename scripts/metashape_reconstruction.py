@@ -106,6 +106,7 @@ if not _DELEGATED:
         IPC_SENTINEL_PREFIX,
         IPC_SENTINEL_SUFFIX,
         _ACTIVE_STATUS_FILE,
+        configure_utf8_stdio,
         emit_ipc_error,
         emit_ipc_event,
         emit_ipc_stage,
@@ -287,6 +288,7 @@ def run_reconstruction(*args, **kwargs):
 
 
 if __name__ == "__main__" and not _DELEGATED:
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 

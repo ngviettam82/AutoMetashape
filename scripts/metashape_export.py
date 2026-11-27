@@ -41,6 +41,7 @@ from autometashape.ipc.protocol import (
     IPC_PAUSE_CROP,
     IPC_SENTINEL_PREFIX,
     IPC_SENTINEL_SUFFIX,
+    configure_utf8_stdio,
     emit_ipc_error,
     emit_ipc_event,
     emit_ipc_stage,
@@ -284,11 +285,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format"
     )
+    parser.add_argument(
+        "--save-project-changes",
+        action="store_true",
+        default=False,
+        help="Persist in-session smoothing, decimation, or texture re-baking changes back to the master .psx",
+    )
+    parser.add_argument(
+        "--bake-missing-texture",
+        action="store_true",
+        default=False,
+        help="Automatically run 8K UV/texture baking if an untextured mesh is exported as GLB/OBJ/FBX",
+    )
     parser.add_argument("--no-reexec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
 if __name__ == "__main__":
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -363,6 +377,8 @@ if __name__ == "__main__":
             export_dxf=args.export_dxf,
             export_tie_points=args.export_tie_points,
             project_name=args.project_name,
+            save_project_changes=args.save_project_changes,
+            bake_missing_texture=args.bake_missing_texture,
         )
     except Exception as exc:
         emit_ipc_error("export", str(exc))

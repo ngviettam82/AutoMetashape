@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import os
 import re
 import shutil
@@ -389,12 +390,20 @@ def reconcile_staged_psx_chunk_id(
     except Exception:
         return False, None, target_id
 
-    if len(chunk_nodes) != 1:
-        # Multi-chunk projects are intentionally preserved untouched (pipeline multi-chunk merge
-        # removes temporary sub-chunks so merged production projects arrive here as single-chunk).
+    if not chunk_nodes:
         return False, None, target_id
 
-    target_node = chunk_nodes[0]
+    for node in chunk_nodes:
+        nid = str(node.attrib.get("id", ""))
+        npath = str(node.attrib.get("path", "")).replace("\\", "/")
+        if nid == target_id and npath == f"{target_id}/chunk.zip":
+            return False, target_id, target_id
+
+    active_attr = str(chunks_elem.attrib.get("active_id", "")) if chunks_elem is not None else ""
+    target_node = next(
+        (n for n in chunk_nodes if active_attr and str(n.attrib.get("id", "")) == active_attr),
+        chunk_nodes[0],
+    )
     old_id = str(target_node.attrib.get("id", ""))
     old_path = str(target_node.attrib.get("path", "")).replace("\\", "/")
     old_dir = old_path.split("/")[0] if "/" in old_path else ""
@@ -418,11 +427,16 @@ def reconcile_staged_psx_chunk_id(
     new_xml = f'<?xml version="1.0" encoding="UTF-8"?>\n{xml_body}\n'
 
     renamed = False
+    dst_bak = f"{dst_dir}.reconcile_bak_{os.getpid()}"
+    backed_up_dst = False
     tmp_pz = local_pz + ".reconcile.tmp"
     try:
         if old_dir != target_id:
+            if os.path.isdir(dst_bak):
+                shutil.rmtree(dst_bak, ignore_errors=True)
             if os.path.isdir(dst_dir):
-                shutil.rmtree(dst_dir, ignore_errors=True)
+                os.rename(dst_dir, dst_bak)
+                backed_up_dst = True
             os.rename(src_dir, dst_dir)
             renamed = True
 
@@ -431,6 +445,8 @@ def reconcile_staged_psx_chunk_id(
             for name, payload in other_entries:
                 zf.writestr(name, payload)
         os.replace(tmp_pz, local_pz)
+        if backed_up_dst and os.path.isdir(dst_bak):
+            shutil.rmtree(dst_bak, ignore_errors=True)
         return True, old_id, target_id
     except Exception:
         if os.path.isfile(tmp_pz):
@@ -443,21 +459,117 @@ def reconcile_staged_psx_chunk_id(
                 os.rename(dst_dir, src_dir)
             except OSError:
                 pass
+        if backed_up_dst and os.path.isdir(dst_bak) and not os.path.exists(dst_dir):
+            try:
+                os.rename(dst_bak, dst_dir)
+            except OSError:
+                pass
         return False, old_id, target_id
+
+
+def _is_disk_full_error(exc: BaseException) -> bool:
+    """Return True if ``exc`` (or a wrapped shutil/cause error) represents ENOSPC or Win32 Error 112."""
+    seen: set[int] = set()
+    stack: list[BaseException] = [exc]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if getattr(cur, "errno", None) == errno.ENOSPC or getattr(cur, "winerror", None) == 112:
+            return True
+        msg = str(cur)
+        if "[WinError 112]" in msg or "[Errno 28]" in msg or "There is not enough space on the disk" in msg:
+            return True
+        for child_attr in ("__cause__", "__context__"):
+            child = getattr(cur, child_attr, None)
+            if isinstance(child, BaseException):
+                stack.append(child)
+    return False
+
+
+def _calc_staged_payload_bytes(local_stage_dir: str) -> int:
+    """Calculate total size of non-transient payload files inside ``local_stage_dir``."""
+    total = 0
+    for root, _, files in os.walk(local_stage_dir):
+        for fname in files:
+            low = fname.lower()
+            if low == "lock" or low == "model.tmp" or low.endswith(".tmp"):
+                continue
+            try:
+                total += os.path.getsize(os.path.join(root, fname))
+            except OSError:
+                pass
+    return total
+
+
+def _is_same_physical_dir(dir_a: str, dir_b: str) -> bool:
+    """Return True if ``dir_a`` and ``dir_b`` refer to the same physical directory (including symlinks/junctions)."""
+    try:
+        if os.path.exists(dir_a) and os.path.exists(dir_b) and os.path.samefile(dir_a, dir_b):
+            return True
+    except OSError:
+        pass
+    return os.path.normcase(os.path.realpath(dir_a)) == os.path.normcase(os.path.realpath(dir_b))
+
+
+def _sync_directory_atomic(s_path: str, d_path: str, uniq_tag: str, ignore_fn) -> None:
+    """Copy a staging directory to ``d_path`` via sibling temp-dir swap with safe rollback."""
+    tmp_d = f"{d_path}.sync_new_{uniq_tag}"
+    old_d = f"{d_path}.sync_old_{uniq_tag}"
+    if os.path.exists(tmp_d):
+        shutil.rmtree(tmp_d, ignore_errors=True)
+    try:
+        shutil.copytree(s_path, tmp_d, dirs_exist_ok=True, ignore=ignore_fn)
+    except Exception:
+        shutil.rmtree(tmp_d, ignore_errors=True)
+        raise
+    moved_old = False
+    try:
+        if os.path.isdir(d_path):
+            if os.path.exists(old_d):
+                shutil.rmtree(old_d, ignore_errors=True)
+            os.rename(d_path, old_d)
+            moved_old = True
+        os.rename(tmp_d, d_path)
+        if os.path.isdir(old_d):
+            shutil.rmtree(old_d, ignore_errors=True)
+    except OSError as e_swap:
+        shutil.rmtree(tmp_d, ignore_errors=True)
+        if _is_disk_full_error(e_swap) or not moved_old:
+            if moved_old and os.path.isdir(old_d) and not os.path.exists(d_path):
+                try:
+                    os.rename(old_d, d_path)
+                except OSError:
+                    pass
+            raise
+        try:
+            shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_fn)
+        except Exception:
+            if moved_old and os.path.isdir(old_d):
+                if os.path.exists(d_path):
+                    shutil.rmtree(d_path, ignore_errors=True)
+                try:
+                    os.rename(old_d, d_path)
+                except OSError:
+                    pass
+            raise
+        if os.path.isdir(old_d):
+            shutil.rmtree(old_d, ignore_errors=True)
 
 
 def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str) -> bool:
     """Synchronizes finalized project and deliverables from local NVMe scratch to central network storage.
 
     Transfers all deliverables, models, textures, reports, and the consolidated ``.psx`` + ``.files``
-    archive back to the shared storage root atomically (copying ``.files`` to a temporary sibling
-    directory before swapping, and publishing ``.psx`` last so a mid-transfer SMB error or
-    Win32 Error 112 never destroys the previous valid checkpoint), then cleans up local scratch.
+    archive back to the shared storage root atomically (copying directories to a temporary sibling
+    directory before swapping, checking target headroom, and publishing ``.psx`` last so a mid-transfer
+    SMB error or Win32 Error 112 never destroys the previous valid checkpoint), then cleans up local scratch.
     """
     if not os.path.isdir(local_stage_dir):
         return False
 
-    if os.path.normcase(os.path.abspath(local_stage_dir)) == os.path.normcase(os.path.abspath(target_network_dir)):
+    if _is_same_physical_dir(local_stage_dir, target_network_dir):
         return True
 
     os.makedirs(target_network_dir, exist_ok=True)
@@ -466,6 +578,21 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
     uniq_tag = f"{host_tag}_{os.getpid()}"
 
     try:
+        # Pre-check target filesystem capacity before overwriting or staging large payloads
+        needed_bytes = _calc_staged_payload_bytes(local_stage_dir)
+        if needed_bytes > 0:
+            try:
+                free_bytes = shutil.disk_usage(target_network_dir).free
+                if free_bytes < needed_bytes:
+                    raise OSError(
+                        errno.ENOSPC,
+                        f"Insufficient free space on '{target_network_dir}' "
+                        f"(need {needed_bytes} B, free {free_bytes} B)",
+                    )
+            except OSError as e_du:
+                if _is_disk_full_error(e_du):
+                    raise
+
         # Pre-clean any lingering local lock files before network transfer
         for root, _, files in os.walk(local_stage_dir):
             for fname in files:
@@ -480,62 +607,36 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
         psx_items = [it for it in items if it.lower().endswith(".psx")]
         other_items = [it for it in items if it not in psx_items]
 
-        # 1. Copy deliverables & .files directories (atomic sibling copy-then-swap for .files dirs)
+        # 1. Copy deliverables & .files directories (atomic sibling copy-then-swap)
         for item in other_items:
             s_path = os.path.join(local_stage_dir, item)
             d_path = os.path.join(target_network_dir, item)
 
             if os.path.isdir(s_path):
-                if item.lower().endswith(".files"):
-                    tmp_d = f"{d_path}.sync_new_{uniq_tag}"
-                    old_d = f"{d_path}.sync_old_{uniq_tag}"
-                    if os.path.exists(tmp_d):
-                        shutil.rmtree(tmp_d, ignore_errors=True)
-                    try:
-                        shutil.copytree(s_path, tmp_d, dirs_exist_ok=True, ignore=ignore_transient)
-                    except Exception:
-                        shutil.rmtree(tmp_d, ignore_errors=True)
-                        raise
-                    moved_old = False
-                    try:
-                        if os.path.isdir(d_path):
-                            if os.path.exists(old_d):
-                                shutil.rmtree(old_d, ignore_errors=True)
-                            os.rename(d_path, old_d)
-                            moved_old = True
-                        os.rename(tmp_d, d_path)
-                        if os.path.isdir(old_d):
-                            shutil.rmtree(old_d, ignore_errors=True)
-                    except OSError:
-                        # Fallback if Windows SMB lock prevents directory rename: copy directly from
-                        # local NVMe s_path (never SMB->SMB from tmp_d) and restore old_d on failure.
-                        shutil.rmtree(tmp_d, ignore_errors=True)
-                        try:
-                            shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
-                        except Exception:
-                            if moved_old and os.path.isdir(old_d) and not os.path.exists(d_path):
-                                try:
-                                    os.rename(old_d, d_path)
-                                except OSError:
-                                    pass
-                            raise
-                        if os.path.isdir(old_d):
-                            shutil.rmtree(old_d, ignore_errors=True)
-                else:
-                    shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
+                _sync_directory_atomic(s_path, d_path, uniq_tag, ignore_transient)
             else:
                 low_item = item.lower()
                 if not low_item.endswith(".tmp") and low_item != "lock":
                     tmp_file = f"{d_path}.sync_tmp_{uniq_tag}"
                     try:
                         shutil.copy2(s_path, tmp_file)
-                        os.replace(tmp_file, d_path)
-                    except OSError:
+                    except Exception:
                         if os.path.isfile(tmp_file):
                             try:
                                 os.remove(tmp_file)
                             except OSError:
                                 pass
+                        raise
+                    try:
+                        os.replace(tmp_file, d_path)
+                    except OSError as e_rep:
+                        if os.path.isfile(tmp_file):
+                            try:
+                                os.remove(tmp_file)
+                            except OSError:
+                                pass
+                        if _is_disk_full_error(e_rep):
+                            raise
                         shutil.copy2(s_path, d_path)
 
         # 2. Publish .psx manifest(s) LAST via atomic temp replace so .psx never points at partial .files

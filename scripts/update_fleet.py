@@ -36,6 +36,7 @@ from autometashape.cluster.updater import (
     update_all_workers_parallel,
     update_remote_worker,
 )
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -113,6 +114,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def main() -> int:
     """CLI entrypoint with automatic Metashape runtime re-exec."""
+    configure_utf8_stdio()
     parser = build_arg_parser()
     args = parser.parse_args()
 

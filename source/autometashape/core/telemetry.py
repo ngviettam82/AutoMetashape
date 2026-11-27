@@ -788,7 +788,15 @@ def discover_image_subfolder_groups(
     with a single entry.
     """
     supported_exts = SUPPORTED_IMAGE_EXTS
+    abs_images = os.path.abspath(images_dir)
     abs_output = os.path.abspath(output_dir) if output_dir else None
+    # Only exclude output_dir when it is strictly a proper subdirectory inside images_dir
+    # (never when output_dir == images_dir or output_dir is an ancestor of images_dir).
+    exclude_output = bool(
+        abs_output
+        and _is_same_or_subpath(abs_output, abs_images)
+        and not _is_same_or_subpath(abs_images, abs_output)
+    )
     exclude_patterns = parse_exclude_folder_patterns(exclude_folders)
     excluded_dirs: list[str] = []
     groups = {}
@@ -804,7 +812,7 @@ def discover_image_subfolder_groups(
         if os.path.isdir(full_path):
             abs_sub = os.path.abspath(full_path)
             # Skip output dir, hidden dirs, '*.files' Metashape asset dirs, and 'model*' export dirs
-            if _is_ignored_survey_dir(entry) or (abs_output and _is_same_or_subpath(abs_sub, abs_output)):
+            if _is_ignored_survey_dir(entry) or (exclude_output and _is_same_or_subpath(abs_sub, abs_output)):
                 continue
             if _dir_matches_exclude_patterns(entry, exclude_patterns):
                 excluded_dirs.append(entry)
@@ -815,7 +823,7 @@ def discover_image_subfolder_groups(
                 kept_dirs = []
                 for d in dirs:
                     if _is_ignored_survey_dir(d) or (
-                        abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output)
+                        exclude_output and _is_same_or_subpath(os.path.join(r, d), abs_output)
                     ):
                         continue
                     if _dir_matches_exclude_patterns(d, exclude_patterns):
@@ -853,7 +861,7 @@ def discover_image_subfolder_groups(
                 for d in dirs
                 if not _is_ignored_survey_dir(d)
                 and not _dir_matches_exclude_patterns(d, exclude_patterns)
-                and not (abs_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
+                and not (exclude_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
             ]
             for f in files:
                 if f.lower().endswith(supported_exts):

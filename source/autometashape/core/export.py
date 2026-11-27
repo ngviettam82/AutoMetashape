@@ -250,6 +250,8 @@ def export_project_assets(
     export_dxf: bool = False,
     export_tie_points: bool = False,
     project_name: str | None = None,
+    save_project_changes: bool = False,
+    bake_missing_texture: bool = False,
 ):
     """Exports production assets from a solved Metashape project."""
     if not os.path.exists(project_path):
@@ -274,13 +276,6 @@ def export_project_assets(
     emit_ipc_stage("project", f"Loading Metashape Project: {os.path.basename(project_path)}")
     doc = Metashape.Document()
     try:
-        files_dir = project_path[:-4] + ".files" if project_path.lower().endswith(".psx") else project_path + ".files"
-        lock_file = os.path.join(files_dir, "lock")
-        if os.path.isfile(lock_file):
-            try:
-                os.remove(lock_file)
-            except Exception:
-                pass
         try:
             doc.open(project_path, read_only=False, ignore_lock=True)
         except Exception:
@@ -330,6 +325,8 @@ def export_project_assets(
             export_ply=export_ply,
             export_dxf=export_dxf,
             export_tie_points=export_tie_points,
+            save_project_changes=save_project_changes,
+            bake_missing_texture=bake_missing_texture,
         )
     finally:
         try:
@@ -375,6 +372,8 @@ def _export_opened_document(
     export_ply: bool,
     export_dxf: bool,
     export_tie_points: bool,
+    save_project_changes: bool = False,
+    bake_missing_texture: bool = False,
 ):
 
     from autometashape.cluster.hardware import compute_discrete_gpu_mask
@@ -433,9 +432,10 @@ def _export_opened_document(
         print(f"[Import] Importing 3D mesh model from: {import_model_path}", flush=True)
         imp_fmt = _infer_model_format_from_path(import_model_path)
         chunk.importModel(path=import_model_path, format=imp_fmt)
-        doc.save()
-        chunk = doc.chunk
-        print(f"[Import] Re-linked model saved to project: {project_path}", flush=True)
+        if save_project_changes:
+            doc.save()
+            chunk = doc.chunk
+        print(f"[Import] Re-linked model loaded into session: {project_path}", flush=True)
     elif not chunk.model and needs_mesh:
         candidates = [
             os.path.join(output_dir, f"{project_name}.obj"),
@@ -448,14 +448,16 @@ def _export_opened_document(
             if os.path.isfile(cand):
                 print(f"[Auto-Recover] Project chunk has no model, but found existing: {cand}", flush=True)
                 chunk.importModel(path=cand, format=Metashape.ModelFormat.ModelFormatOBJ)
-                doc.save()
-                chunk = doc.chunk
-                print(f"[Auto-Recover] Re-linked '{cand}' into project successfully!", flush=True)
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
+                print(f"[Auto-Recover] Re-linked '{cand}' into session successfully!", flush=True)
                 recovered = True
                 break
         if not recovered:
             raise ValueError(f"Project '{project_path}' contains no reconstructed 3D mesh model!")
 
+    has_baked_texture = True
     if chunk.model:
         mesh_verts = len(chunk.model.vertices)
         mesh_faces = len(chunk.model.faces)
@@ -465,20 +467,22 @@ def _export_opened_document(
         if smooth_mesh:
             print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
             try:
-                chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True, replace_asset=True)
+                chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True, replace_asset=False)
             except TypeError:
                 chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
-            doc.save()
-            chunk = doc.chunk
+            if save_project_changes:
+                doc.save()
+                chunk = doc.chunk
 
         if decimate_mesh and decimate_mesh > 0:
             print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
             try:
-                chunk.decimateModel(face_count=decimate_mesh, replace_asset=True)
+                chunk.decimateModel(face_count=decimate_mesh, replace_asset=False)
             except TypeError:
                 chunk.decimateModel(face_count=decimate_mesh)
-            doc.save()
-            chunk = doc.chunk
+            if save_project_changes:
+                doc.save()
+                chunk = doc.chunk
 
         current_pages = 0
         try:
@@ -491,8 +495,15 @@ def _export_opened_document(
             elif hasattr(chunk.model, "texture") and chunk.model.texture():
                 current_pages = 1
 
-        needs_textured_mesh = any([export_glb, export_obj, export_fbx, remove_lighting])
-        will_bake_texture = rebake_texture or (current_pages == 0 and needs_textured_mesh)
+        needs_textured_mesh = any([export_glb, export_obj, export_fbx])
+        will_bake_texture = rebake_texture or (current_pages == 0 and needs_textured_mesh and bake_missing_texture)
+        has_baked_texture = current_pages > 0 or will_bake_texture
+        if current_pages == 0 and needs_textured_mesh and not will_bake_texture:
+            print(
+                "  [Texture] Mesh has no existing texture atlas and --bake-missing-texture is False; "
+                "exporting untextured geometry without automatic 16x 8K bake.",
+                flush=True,
+            )
 
         if calibrate_colors or will_bake_texture or remove_lighting:
             emit_ipc_stage("texture", "Processing Texture Atlas & Delighting")
@@ -501,8 +512,9 @@ def _export_opened_document(
             print("\n[Color Calibration] Executing radiometric calibration & white balance...", flush=True)
             try:
                 chunk.calibrateColors(source_data=Metashape.DataSource.ModelData, white_balance=True)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
@@ -524,16 +536,18 @@ def _export_opened_document(
                 ghosting_filter=ghosting_filter,
             )
             print(f"  Texture baking completed in {(time.time() - t_tex) / 60:.2f} min.", flush=True)
-            doc.save()
-            chunk = doc.chunk
-            print(f"  Updated project saved: {project_path}", flush=True)
+            if save_project_changes:
+                doc.save()
+                chunk = doc.chunk
+                print(f"  Updated project saved: {project_path}", flush=True)
 
         if remove_lighting:
             print("\n[Delighting] Removing harsh ambient shadows and illumination...", flush=True)
             try:
                 chunk.removeLighting(color_mode=delighting_color_mode)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
                 print("  Texture delighting completed.", flush=True)
             except Exception as e_lt:
                 print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
@@ -549,8 +563,8 @@ def _export_opened_document(
         chunk.exportModel(
             glb_out,
             format=Metashape.ModelFormat.ModelFormatGLTF,
-            save_texture=True,
-            embed_texture=True,
+            save_texture=has_baked_texture,
+            embed_texture=has_baked_texture,
             save_normals=True,
             save_colors=True,
         )
@@ -573,7 +587,7 @@ def _export_opened_document(
             obj_out,
             format=Metashape.ModelFormat.ModelFormatOBJ,
             texture_format=tex_fmt,
-            save_texture=True,
+            save_texture=has_baked_texture,
             save_normals=True,
             save_colors=True,
         )
@@ -622,10 +636,13 @@ def _export_opened_document(
                 if proj_dem is not None:
                     dem_kwargs["projection"] = proj_dem
                 chunk.buildDem(**dem_kwargs)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
+                    print("  [DEM] Elevation model built and saved successfully.", flush=True)
+                else:
+                    print("  [DEM] Elevation model built in memory for export.", flush=True)
                 has_dem = getattr(chunk, "elevation", None) is not None
-                print("  [DEM] Elevation model built and saved successfully.", flush=True)
             except Exception as e_dem_build:
                 print(f"  [WARNING] Could not build DEM on-demand: {e_dem_build}.", flush=True)
 
@@ -674,10 +691,13 @@ def _export_opened_document(
                 if proj_om is not None:
                     ortho_kwargs["projection"] = proj_om
                 chunk.buildOrthomosaic(**ortho_kwargs)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
+                    print("  [Orthomosaic] Orthomosaic built and saved successfully.", flush=True)
+                else:
+                    print("  [Orthomosaic] Orthomosaic built in memory for export.", flush=True)
                 has_ortho = getattr(chunk, "orthomosaic", None) is not None
-                print("  [Orthomosaic] Orthomosaic built and saved successfully.", flush=True)
             except Exception as e_ortho_build:
                 print(f"  [WARNING] Could not build Orthomosaic on-demand: {e_ortho_build}.", flush=True)
 
@@ -718,7 +738,7 @@ def _export_opened_document(
             chunk.exportModel(
                 fbx_out,
                 format=Metashape.ModelFormat.ModelFormatFBX,
-                save_texture=True,
+                save_texture=has_baked_texture,
                 save_normals=True,
                 save_colors=True,
             )
@@ -772,8 +792,9 @@ def _export_opened_document(
                     else Metashape.DataSource.ModelData
                 )
                 chunk.buildTiledModel(tile_size=tile_size, source_data=tile_src)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
 
             tiled_fmt_key = (tiled_model_format or "cesium").lower()
             tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(
@@ -815,8 +836,9 @@ def _export_opened_document(
                 if proj_dem is not None:
                     dem_kwargs["projection"] = proj_dem
                 chunk.buildDem(**dem_kwargs)
-                doc.save()
-                chunk = doc.chunk
+                if save_project_changes:
+                    doc.save()
+                    chunk = doc.chunk
                 has_dem = getattr(chunk, "elevation", None) is not None
             except Exception as e_dem_cnt:
                 print(f"  [WARNING] Could not build DEM for contours: {e_dem_cnt}", flush=True)

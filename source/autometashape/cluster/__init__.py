@@ -26,6 +26,7 @@ from autometashape.cluster.config import (
 )
 from autometashape.cluster.dual_share import (
     discover_dual_share_projects,
+    extract_path_leaf_name,
     is_subpath,
     is_unc_path,
     map_source_to_result_dir,
@@ -137,6 +138,7 @@ __all__ = [
     "detect_gpu_devices",
     "discover_dataset_projects",
     "discover_dual_share_projects",
+    "extract_path_leaf_name",
     "ensure_cluster_maintenance_project",
     "evaluate_cluster_batch_info",
     "extract_unc_root",

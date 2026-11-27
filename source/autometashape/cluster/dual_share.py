@@ -19,12 +19,41 @@ from __future__ import annotations
 
 import ntpath
 import os
+import re
 import shutil
 import sys
 import tempfile
 from typing import Any, Dict, List, Optional
 
 from autometashape.cluster.hardware import extract_unc_root
+
+_INVALID_LEAF_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+
+
+def extract_path_leaf_name(path: str, fallback: str = "Project") -> str:
+    """Extract a non-empty sanitized project name from UNC roots, drive roots, or nested folders."""
+    raw = str(path or "").strip().rstrip("\\/")
+    if not raw:
+        return fallback
+
+    # Handle Win32 extended UNC prefix \\?\UNC\server\share and \\?\C:\...
+    low = raw.lower()
+    if low.startswith("\\\\?\\unc\\") or low.startswith("//?/unc/"):
+        raw = "\\\\" + raw[8:]
+    elif low.startswith("\\\\?\\") or low.startswith("//?/"):
+        raw = raw[4:]
+
+    # Drive root (e.g. "D:", "D:\", "D:/") -> ntpath.basename returns ""
+    stripped_drive = raw.rstrip("\\/")
+    if _is_windows_drive_path(stripped_drive) and len(stripped_drive) == 2:
+        return f"Drive_{stripped_drive[0].upper()}"
+
+    segs = [s for s in stripped_drive.replace("\\", "/").split("/") if s and s not in (".", "..")]
+    candidate = segs[-1] if segs else ""
+    if candidate and len(candidate) == 2 and candidate[0].isascii() and candidate[0].isalpha() and candidate[1] == ":":
+        candidate = f"Drive_{candidate[0].upper()}"
+    candidate = _INVALID_LEAF_CHARS_RE.sub("_", candidate).strip(" .")
+    return candidate or fallback
 
 
 def _is_windows_drive_path(path: str) -> bool:
@@ -187,11 +216,7 @@ def map_source_to_result_dir(
             return os.path.normpath(os.path.join(norm_res_root, *rel.split("/")))
 
     use_nt = is_unc_path(norm_res_root) or _is_windows_drive_path(norm_res_root)
-    inferred_name = project_name or (
-        ntpath.basename(norm_src_proj.rstrip("\\/"))
-        if is_unc_path(norm_src_proj) or _is_windows_drive_path(norm_src_proj)
-        else os.path.basename(norm_src_proj.rstrip("\\/"))
-    )
+    inferred_name = (project_name or "").strip() or extract_path_leaf_name(norm_src_proj)
     res_base = ntpath.basename(norm_res_root.rstrip("\\/")) if use_nt else os.path.basename(norm_res_root.rstrip("\\/"))
     if inferred_name and res_base.lower() == inferred_name.lower():
         return norm_res_root
@@ -446,7 +471,7 @@ def discover_dual_share_projects(
             os.path.isfile(os.path.join(norm_source, f)) and f.lower().endswith(SUPPORTED_IMAGE_EXTS) for f in entries
         )
         if root_has_images:
-            project_name = os.path.basename(norm_source.rstrip("\\/"))
+            project_name = extract_path_leaf_name(norm_source)
             out_dir = map_source_to_result_dir(
                 source_project_dir=norm_source,
                 source_share=norm_source,
