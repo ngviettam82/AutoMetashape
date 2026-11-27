@@ -13,19 +13,19 @@ version = "1.4.0"
 description = "AutoMetashape: Autonomous High-Precision 3D Photogrammetry Pipeline"
 authors = [{ name = "AutoMetashape Contributors" }]
 license = { text = "Apache-2.0" }
-requires-python = ">=3.10"
+requires-python = ">=3.9"
+
+[project.optional-dependencies]
+dev = ["ruff==0.14.10"]
+radiometry = ["Pillow>=9.0"]
+icp = ["numpy>=1.21", "open3d>=0.17"]
 
 [tool.setuptools.packages.find]
 where = ["source"]
 
-[tool.pytest.ini_options]
-minversion = "7.0"
-testpaths = ["tests"]
-python_files = "test_*.py"
-
 [tool.ruff]
 line-length = 120
-target-version = "py310"
+target-version = "py39"
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B"]
@@ -37,5 +37,9 @@ ignore = [
 ]
 
 [tool.ruff.lint.per-file-ignores]
-"scripts/*" = ["F401", "I001"]
+"scripts/cluster_utils.py" = ["F401", "I001"]
+"scripts/cluster_supervisor.py" = ["F401", "I001"]
+"scripts/metashape_export.py" = ["F401", "I001"]
+"scripts/metashape_reconstruction.py" = ["F401", "I001"]
+"scripts/verify_deliverables.py" = ["F401", "I001"]
 "tests/*" = ["F401", "F811"]

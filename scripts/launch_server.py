@@ -81,8 +81,14 @@ def reexec_server(target_dir: str) -> None:
     sys.stderr.flush()
     clear_server_pid()
     if sys.platform == "win32":
-        res = subprocess.run(cmd)
-        sys.exit(res.returncode)
+        child = subprocess.Popen(cmd)
+        while True:
+            try:
+                rc = child.wait()
+                break
+            except KeyboardInterrupt:
+                continue
+        sys.exit(rc)
     else:
         os.execv(py_exe, cmd)
 
@@ -98,7 +104,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--port", type=str, default=None, help="Control port for client and worker connections (default: 5840)"
     )
     parser.add_argument(
-        "--dispatch-port", type=str, default=None, help="Dispatch port for task distribution (default: 5841)"
+        "--root",
+        "--result-root",
+        "--result-share",
+        dest="root",
+        type=str,
+        default="",
+        help="Optional shared cluster Result storage root persisted to server_config.json for cluster tools",
+    )
+    parser.add_argument(
+        "--dispatch-port",
+        type=str,
+        default=None,
+        help="(Deprecated: Metashape Pro 2.x uses a single unified control port)",
     )
     parser.add_argument("--config", type=str, default="", help="Path to custom JSON server configuration file")
     parser.add_argument("--server", action="store_true", help=argparse.SUPPRESS)
@@ -125,7 +143,17 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
 
     host = args.host if args.host is not None else saved_config.get("host", "0.0.0.0")
     port = args.port or saved_config.get("port", "5840")
-    dispatch_port = args.dispatch_port or saved_config.get("dispatch_port", "5841")
+    shared_root = args.root.strip() or saved_config.get("root", "")
+
+    if args.root.strip():
+        updated_cfg = dict(saved_config)
+        updated_cfg.setdefault("host", host)
+        updated_cfg.setdefault("port", str(port))
+        updated_cfg["root"] = args.root.strip()
+        try:
+            cu.save_cluster_config(updated_cfg, config_path)
+        except Exception:
+            pass
 
     # 2. Locate Metashape Server binary (Metashape Pro 2.x requires standalone metashape-server)
     ms_exe = cu.find_metashape_path()
@@ -141,19 +169,24 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
 
     lan_ip = cu.get_primary_lan_ip()
 
-    print("=" * 72)
-    print("  AutoMetashape Distributed Cluster - Server Daemon Launcher")
-    print(f"  Bind Control IP : {host}:{port}")
-    print(f"  Dispatch Port   : {dispatch_port}")
-    print(f"  Coordinator LAN : {lan_ip}")
-    print(f"  Server Binary   : {server_bin}")
-    print("=" * 72)
-
     # 3. Port Pre-flight Check (refuse duplicate server launch before touching PID file)
     try:
         port_num = int(port)
-    except ValueError:
+        if not (1 <= port_num <= 65535):
+            raise ValueError(f"Port {port_num} out of valid TCP range 1..65535")
+    except (ValueError, TypeError):
+        print(f"[WARNING] Invalid port '{port}'; falling back to 5840.", file=sys.stderr)
         port_num = 5840
+        port = "5840"
+
+    print("=" * 72)
+    print("  AutoMetashape Distributed Cluster - Server Daemon Launcher")
+    print(f"  Bind Control IP : {host}:{port}")
+    if shared_root:
+        print(f"  Shared Root     : {shared_root}")
+    print(f"  Coordinator LAN : {lan_ip}")
+    print(f"  Server Binary   : {server_bin}")
+    print("=" * 72)
 
     if cu.test_tcp_connection("127.0.0.1", port_num, timeout=1.0):
         print(f"\n[ERROR] Port {port_num} is ALREADY IN USE on this PC!", file=sys.stderr)

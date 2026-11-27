@@ -19,6 +19,9 @@ if [ -z "$PYTHON_CMD" ]; then
     exit 1
 fi
 
+echo "[BUILD] Auditing SPDX license compliance..."
+"$PYTHON_CMD" tools/check_licenses.py
+
 echo "[BUILD] Validating agent skills..."
 "$PYTHON_CMD" tools/skills/cli.py check
 

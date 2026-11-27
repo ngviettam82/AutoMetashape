@@ -21,7 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 
 try:
     import Metashape
@@ -34,6 +34,7 @@ _SOURCE_DIR = os.path.join(_REPO_ROOT, "source")
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
+from autometashape.cluster.abort import _split_host_port
 from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
@@ -44,6 +45,7 @@ from autometashape.cluster.hardware import (
     get_primary_lan_ip,
     is_healthy_online_worker,
 )
+from autometashape.core.verification import verify_project_deliverables
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -87,6 +89,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Output telemetry audit as structured JSON",
     )
     parser.add_argument(
+        "--advisory",
+        action="store_true",
+        help="Always exit with code 0 even when cluster health issues are detected",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -97,13 +104,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_server_address(cli_server: str) -> str:
     """Dynamically determine server host and port without hardcoded IPs."""
     if cli_server.strip():
-        srv = cli_server.strip()
-        return srv if ":" in srv else f"{srv}:5840"
+        host, port = _split_host_port(cli_server.strip(), 5840)
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("host") and cfg.get("host") != "0.0.0.0":
-        port = cfg.get("port", 5840)
-        return f"{cfg['host']}:{port}"
+        host, port = _split_host_port(str(cfg["host"]), int(cfg.get("port", 5840) or 5840))
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     lan_ip = get_primary_lan_ip()
     if lan_ip and lan_ip != "127.0.0.1":
@@ -232,16 +239,18 @@ def audit_headroom(paths: List[str]) -> Dict[str, float]:
 
 
 def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
-    """Inspect deliverables in result directory for production integrity."""
+    """Inspect deliverables in result directory via canonical structural verification."""
     if not os.path.isdir(result_dir):
         return {"intact": False, "reason": "Directory does not exist"}
 
+    canonical = verify_project_deliverables(result_dir, project_name=proj_name, expected_assets=["obj", "ortho"])
+
     escaped_dir = glob.escape(result_dir)
-    obj_files = glob.glob(os.path.join(escaped_dir, "*.obj"))
+    obj_files = sorted(glob.glob(os.path.join(escaped_dir, "*.obj")))
     obj_bytes = os.path.getsize(obj_files[0]) if obj_files else 0
     obj_sz = obj_bytes / (1024 * 1024)
 
-    mtl_files = glob.glob(os.path.join(escaped_dir, "*.mtl"))
+    mtl_files = sorted(glob.glob(os.path.join(escaped_dir, "*.mtl")))
     img_candidates = sorted(
         glob.glob(os.path.join(escaped_dir, "*.png"))
         + glob.glob(os.path.join(escaped_dir, "*.tif"))
@@ -258,31 +267,21 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
         and "_dem" not in os.path.basename(p).lower()
     ]
 
-    ortho_files = glob.glob(os.path.join(escaped_dir, "*_orthomosaic.tif"))
+    ortho_files = sorted(glob.glob(os.path.join(escaped_dir, "*_orthomosaic.tif")))
     if not ortho_files:
-        ortho_files = [
+        ortho_files = sorted(
             p for p in glob.glob(os.path.join(escaped_dir, "*.tif")) if "_orthomosaic" in os.path.basename(p).lower()
-        ]
+        )
     ortho_bytes = os.path.getsize(ortho_files[0]) if ortho_files else 0
     ortho_sz = ortho_bytes / (1024 * 1024)
 
     prj_files = glob.glob(os.path.join(escaped_dir, "*.prj"))
     tfw_files = glob.glob(os.path.join(escaped_dir, "*.tfw"))
 
-    # Align minimum non-trivial byte threshold (1,000 bytes) with canonical verification.py so
-    # compact meshes and 25x-lighter 5 cm/px GeoTIFF orthomosaics are never falsely flagged.
-    intact = bool(
-        obj_files
-        and obj_bytes >= 1000
-        and mtl_files
-        and len(tex_files) >= 1
-        and ortho_files
-        and ortho_bytes >= 1000
-        and prj_files
-        and tfw_files
-    )
+    # Require structural OBJ/GeoTIFF validation from canonical verification.py plus MTL, textures, and spatial sidecars
+    intact = bool(canonical.get("status") == "PASS" and mtl_files and len(tex_files) >= 1 and prj_files and tfw_files)
 
-    return {
+    result: Dict[str, Any] = {
         "intact": intact,
         "obj": os.path.basename(obj_files[0]) if obj_files else None,
         "obj_sz_mb": round(obj_sz, 1),
@@ -292,6 +291,9 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
         "ortho_sz_mb": round(ortho_sz, 1),
         "spatial": bool(prj_files and tfw_files),
     }
+    if not intact and canonical.get("errors"):
+        result["reason"] = "; ".join(canonical["errors"])
+    return result
 
 
 def _is_oom_error_text(text: str) -> bool:
@@ -350,18 +352,25 @@ def audit_memory_allocation_faults(
             is_oom = True
             reasons.append(f"Last error: '{last_err_msg}' ({last_err_type})")
 
-        # 2. Check task-level error records if present
-        task = b.get("task") or {}
-        for terr in (task.get("errors") or []) if isinstance(task, dict) else []:
-            if not isinstance(terr, dict):
-                continue
-            tmsg = str(terr.get("message", ""))
-            ttype = str(terr.get("type", ""))
-            if _is_oom_error_text(tmsg) or _is_oom_error_text(ttype):
-                is_oom = True
-                entry_str = f"Task error: '{tmsg}'"
-                if entry_str not in reasons:
-                    reasons.append(entry_str)
+        # 2. Check task-level error records (both singular 'task' and plural 'tasks' schemas)
+        task_records: List[Dict[str, Any]] = []
+        single_task = b.get("task")
+        if isinstance(single_task, dict):
+            task_records.append(single_task)
+        plural_tasks = b.get("tasks")
+        if isinstance(plural_tasks, list):
+            task_records.extend(t for t in plural_tasks if isinstance(t, dict))
+        for task_rec in task_records:
+            for terr in task_rec.get("errors") or []:
+                if not isinstance(terr, dict):
+                    continue
+                tmsg = str(terr.get("message", ""))
+                ttype = str(terr.get("type", ""))
+                if _is_oom_error_text(tmsg) or _is_oom_error_text(ttype):
+                    is_oom = True
+                    entry_str = f"Task error: '{tmsg}'"
+                    if entry_str not in reasons:
+                        reasons.append(entry_str)
 
         # 3. Check status sidecar for recorded errors
         sidecar_dirs = [rdir] if rdir else []
@@ -414,19 +423,24 @@ def execute_audit(
         raise RuntimeError("Metashape module not loaded. Run via metashape.exe -r.")
 
     resolved_server = resolve_server_address(server_host)
-    srv_ip, srv_port_str = resolved_server.rsplit(":", 1)
-    srv_port = int(srv_port_str)
+    srv_ip, srv_port = _split_host_port(resolved_server, 5840)
 
     client = Metashape.NetworkClient()
     client.connect(srv_ip, srv_port)
+    try:
+        # 1. Query Workers
+        w_resp = client.workerList() or {}
+        workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
 
-    # 1. Query Workers
-    w_resp = client.workerList() or {}
-    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
-
-    # 2. Query Batches
-    b_resp = client.batchList() or {}
-    batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
+        # 2. Query Batches
+        b_resp = client.batchList() or {}
+        batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
+    finally:
+        if hasattr(client, "disconnect"):
+            try:
+                client.disconnect()
+            except Exception:
+                pass
 
     # 3. Headroom Audit
     storage_paths = resolve_storage_paths(shared_root, batches, source_root=source_root)
@@ -453,7 +467,7 @@ def execute_audit(
         b for b in batches if str(b.get("state", "")).lower() in ("inprogress", "running") and not b.get("aborted")
     ]
     pending_batches = [b for b in batches if str(b.get("state", "")).lower() in ("pending", "submitted", "queued")]
-    completed_batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done")]
+    completed_batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done", "finished")]
     errored_batches = [
         b
         for b in batches
@@ -476,6 +490,18 @@ def execute_audit(
                 res["intact"] = False
                 res["oom_fault"] = True
             deliverable_results[bid] = res
+        else:
+            deliverable_results[bid] = {
+                "intact": False,
+                "reason": "Deliverables directory not found",
+                "obj": None,
+                "obj_sz_mb": 0.0,
+                "mtl": False,
+                "textures_count": 0,
+                "ortho": None,
+                "ortho_sz_mb": 0.0,
+                "spatial": False,
+            }
 
     incomplete_deliverables = [bid for bid, d in deliverable_results.items() if not d.get("intact")]
     issues: List[str] = []
@@ -529,16 +555,17 @@ def execute_audit(
     # Workers (passive CPU % & RAM GB telemetry — no artificial RAM guard)
     print(f"\n[Fleet Health] {len(active_workers)} active workers online:")
     for w in active_workers:
-        wid = w.get("worker_id", "?")
-        hname = w.get("hostname", "unknown")
-        state = w.get("state", "unknown")
+        wid_str = str(w.get("worker_id") if w.get("worker_id") is not None else "?")
+        hname = str(w.get("hostname") or "unknown")
+        state = str(w.get("state") or "unknown")
         if w.get("paused"):
             state = f"{state}(paused)"
-        bid = w.get("batch_id", "none")
-        gmask = w.get("gpu_mask", "?")
+        bid_val = w.get("batch_id")
+        bid_str = str(bid_val if bid_val is not None else "none")
+        gmask = str(w.get("gpu_mask") if w.get("gpu_mask") is not None else "?")
         cpu_pct, ram_gb = format_worker_resource_usage(w)
         print(
-            f"  - Worker {wid:>2} ({hname:<18}): State={state:<14} | GPU={gmask} | Batch #{str(bid):<3} | CPU: {cpu_pct:>5.1f}% | RAM: {ram_gb:>5.1f} GB"
+            f"  - Worker {wid_str:>2} ({hname:<18}): State={state:<14} | GPU={gmask} | Batch #{bid_str:<3} | CPU: {cpu_pct:>5.1f}% | RAM: {ram_gb:>5.1f} GB"
         )
 
     # Queue Status
@@ -553,11 +580,11 @@ def execute_audit(
     if allocation_faults:
         print(f"  [ALERT: {len(allocation_faults)} BATCH(ES) FAULTED ON std::bad_alloc / OOM]")
         for f in allocation_faults:
-            bid = f["batch_id"]
+            bid_str = str(f.get("batch_id") if f.get("batch_id") is not None else "?")
             pname = f["project"]
             state = f["state"]
             reasons_str = "; ".join(f["reasons"])
-            print(f"  * Batch #{bid:>2} [Project: {pname}] (State: {state}):")
+            print(f"  * Batch #{bid_str:>2} [Project: {pname}] (State: {state}):")
             print(f"    - Failure Diagnosis: {reasons_str}")
             print(
                 "    - Corrective Action: Worker physical RAM exhausted. Resubmit with '--no-guided-matching' or reduced keypoints limit."
@@ -570,11 +597,15 @@ def execute_audit(
         print("\n[Running Projects Progress]:")
         for b in running_batches:
             bid = b.get("batch_id")
-            prio = b.get("priority", 0)
+            bid_str = str(bid if bid is not None else "?")
+            prio_str = str(b.get("priority") if b.get("priority") is not None else 0)
             bpath = b.get("path", "") or ""
             pname, rdir = _resolve_batch_project_target(bpath, result_storage_paths)
             # Match worker hostname
-            assigned_w = next((w.get("hostname") for w in active_workers if w.get("batch_id") == bid), "unassigned")
+            assigned_w = next(
+                (str(w.get("hostname") or "unassigned") for w in active_workers if w.get("batch_id") == bid),
+                "unassigned",
+            )
             stage = "executing"
             stage_desc = ""
             # Inspect sidecar strictly under Result storage roots
@@ -601,7 +632,9 @@ def execute_audit(
                         pass
                     break
             desc_str = f" | {stage_desc}" if stage_desc else ""
-            print(f"  * Batch #{bid:>2} [Prio {prio:>3}] ({assigned_w:<15}): Project={pname} | Stage={stage}{desc_str}")
+            print(
+                f"  * Batch #{bid_str:>2} [Prio {prio_str:>3}] ({assigned_w:<15}): Project={pname} | Stage={stage}{desc_str}"
+            )
 
     # Deliverables Audit
     if deliverable_results:
@@ -628,6 +661,15 @@ def execute_audit(
 
 def main() -> int:
     """CLI entry point for cluster monitoring."""
+    if sys.platform == "win32":
+        for _stream_name in ("stdout", "stderr"):
+            _stream = getattr(sys, _stream_name, None)
+            if _stream and hasattr(_stream, "reconfigure"):
+                try:
+                    _stream.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -635,21 +677,27 @@ def main() -> int:
     if Metashape is None and not args.no_reexec:
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
         print("[ERROR] Agisoft Metashape Pro executable not found. Cannot run cluster monitor.", file=sys.stderr)
         return 1
+    if Metashape is None:
+        print("[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.", file=sys.stderr)
+        return 1
 
     try:
-        execute_audit(
+        audit_data = execute_audit(
             server_host=args.server,
             shared_root=args.root,
             min_headroom=args.min_headroom,
             json_output=args.json,
             source_root=args.source_root,
         )
-        return 0
+        return 0 if (audit_data.get("healthy") or args.advisory) else 1
     except Exception as e:
         print(f"[FATAL ERROR] Cluster monitor audit failed: {e}", file=sys.stderr, flush=True)
         return 1

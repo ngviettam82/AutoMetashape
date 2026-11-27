@@ -45,17 +45,25 @@ MAX_LINE_COUNT = 500
 MAX_DESCRIPTION_LEN = 1024
 
 
+def _unquote_yaml_scalar(value: str) -> str:
+    """Strip matching surrounding single or double quotes from a YAML scalar."""
+    val = value.strip()
+    if len(val) >= 2 and ((val[0] == '"' and val[-1] == '"') or (val[0] == "'" and val[-1] == "'")):
+        return val[1:-1]
+    return val
+
+
 def parse_simple_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]], str, Optional[str]]:
     """Extracts and parses simple YAML frontmatter without external dependencies."""
     if not content.startswith("---"):
         return None, content, "File does not start with '---' frontmatter boundary"
 
-    parts = content.split("---", 2)
-    if len(parts) < 3:
+    match = re.match(r"^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)", content)
+    if not match:
         return None, content, "Unterminated frontmatter; missing closing '---'"
 
-    yaml_block = parts[1].strip()
-    body = parts[2]
+    yaml_block = match.group(1)
+    body = content[match.end() :]
 
     data: Dict[str, Any] = {}
     current_key: Optional[str] = None
@@ -68,7 +76,7 @@ def parse_simple_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]
             continue
 
         if stripped.startswith("- ") and current_key:
-            item_val = stripped[2:].strip().strip("\"'")
+            item_val = _unquote_yaml_scalar(stripped[2:])
             if is_list:
                 data[current_key].append(item_val)
             else:
@@ -76,7 +84,7 @@ def parse_simple_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]
                 is_list = True
             continue
 
-        if ":" in stripped:
+        if not line.startswith((" ", "\t")) and ":" in stripped:
             key, val = stripped.split(":", 1)
             key = key.strip()
             val = val.strip()
@@ -85,11 +93,17 @@ def parse_simple_yaml_frontmatter(content: str) -> Tuple[Optional[Dict[str, Any]
                 current_key = key
                 data[current_key] = []
                 is_list = True
+            elif val.startswith("[") and val.endswith("]"):
+                current_key = key
+                is_list = True
+                inner = val[1:-1].strip()
+                data[current_key] = (
+                    [_unquote_yaml_scalar(tok) for tok in inner.split(",") if tok.strip()] if inner else []
+                )
             else:
                 current_key = key
                 is_list = False
-                val = val.strip("\"'")
-                data[current_key] = val
+                data[current_key] = _unquote_yaml_scalar(val)
         else:
             if current_key and not is_list and isinstance(data.get(current_key), str):
                 data[current_key] = f"{data[current_key]} {stripped}".strip()
@@ -147,26 +161,48 @@ class SkillValidator:
             errors.append("skills/README.md catalog index is missing")
         readme_content = self.readme_path.read_text(encoding="utf-8") if self.readme_path.is_file() else ""
 
-        skills = self.list_skills()
-        if not skills:
+        discovered_slugs: Dict[str, str] = {}
+        total_skill_dirs = 0
+
+        for category_dir in sorted(self.skills_dir.iterdir()):
+            if not category_dir.is_dir() or category_dir.name.startswith("."):
+                continue
+            category = category_dir.name
+            if category not in ALLOWED_CATEGORIES:
+                errors.append(
+                    f"[skills/{category}] Disallowed skill category; must be one of {sorted(ALLOWED_CATEGORIES)}"
+                )
+                continue
+
+            for skill_dir in sorted(category_dir.iterdir()):
+                if not skill_dir.is_dir() or skill_dir.name.startswith("."):
+                    continue
+                total_skill_dirs += 1
+                slug = skill_dir.name
+                skill_file = skill_dir / "SKILL.md"
+
+                if slug in discovered_slugs:
+                    errors.append(
+                        f"[{category}/{slug}] Duplicate skill slug already defined in '{discovered_slugs[slug]}/{slug}'"
+                    )
+                else:
+                    discovered_slugs[slug] = category
+
+                if not skill_file.is_file():
+                    errors.append(f"[{category}/{slug}] Missing required 'SKILL.md'")
+                    continue
+
+                skill_errors = self._validate_single_skill(skill_file, category, slug, readme_content)
+                for err in skill_errors:
+                    errors.append(f"[{category}/{slug}] {err}")
+
+                # Validate Discovery symlink in .agents/skills/
+                sym_err = self._validate_symlink(category, slug)
+                if sym_err:
+                    errors.append(f"[{category}/{slug}] {sym_err}")
+
+        if total_skill_dirs == 0:
             errors.append("Zero skills discovered in 'skills/' catalog")
-
-        discovered_slugs: Set[str] = set()
-
-        for s in skills:
-            slug = s["slug"]
-            category = s["category"]
-            skill_file: Path = s["path"]
-
-            discovered_slugs.add(slug)
-            skill_errors = self._validate_single_skill(skill_file, category, slug, readme_content)
-            for err in skill_errors:
-                errors.append(f"[{category}/{slug}] {err}")
-
-            # Validate Discovery symlink in .agents/skills/
-            sym_err = self._validate_symlink(category, slug)
-            if sym_err:
-                errors.append(f"[{category}/{slug}] {sym_err}")
 
         # Check for orphaned aliases in .agents/skills/
         if self.agents_skills_dir.is_dir():
@@ -258,6 +294,8 @@ class SkillValidator:
         if not name or not isinstance(name, str):
             errs.append("Missing required 'name' field in frontmatter")
         else:
+            if name != slug:
+                errs.append(f"'name' ('{name}') must match directory slug '{slug}'")
             if not NAME_REGEX.match(name):
                 errs.append(f"'name' ('{name}') must match ^[a-z0-9-]{{1,64}}$")
             if any(term in name.split("-") for term in GENERIC_TERMS):
@@ -288,9 +326,12 @@ class SkillValidator:
         if not owners or not isinstance(owners, list) or len(owners) == 0:
             errs.append("'owners' must be a non-empty list of maintainer identifiers")
 
+        # Strip fenced code blocks before heading, link, and backticked path checks
+        body_no_fences = re.sub(r"```[\s\S]*?```", "", body)
+
         # 5. Section Heading Integrity (Exact 5 H2 headers)
         found_sections: List[str] = []
-        for line in body.splitlines():
+        for line in body_no_fences.splitlines():
             line_str = line.strip()
             if line_str.startswith("## "):
                 found_sections.append(line_str)
@@ -300,7 +341,7 @@ class SkillValidator:
                 errs.append(f"Missing mandatory section header '{mandatory}'")
 
         # 6. Relative Markdown Link Verification
-        markdown_links = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", body)
+        markdown_links = re.findall(r"\[([^\]]+)\]\(([^)]+)\)", body_no_fences)
         for _, link in markdown_links:
             clean_link = link.strip()
             if clean_link.startswith(("http://", "https://", "mailto:", "#")):
@@ -314,7 +355,9 @@ class SkillValidator:
                 errs.append(f"Broken relative markdown link to '{clean_path}'")
 
         # 7. Backticked Repo Paths Verification
-        backtick_matches = re.findall(r"`((?:source|skills|tools|docs|scripts|tests|\.agents)/[a-zA-Z0-9_./-]+)`", body)
+        backtick_matches = re.findall(
+            r"`((?:source|skills|tools|docs|scripts|tests|\.agents)/[a-zA-Z0-9_./-]+)`", body_no_fences
+        )
         for b_path in backtick_matches:
             target_f = (self.repo_root / b_path).resolve()
             if not target_f.exists():
@@ -351,29 +394,21 @@ class SkillValidator:
             return f"Missing discovery alias at '.agents/skills/{slug}'"
 
         expected_rel = f"../../skills/{category}/{slug}"
-        # Allow domain skills to satisfy legacy user category aliases
-        alt_expected_rel = f"../../skills/domain/{slug}" if category == "user" else f"../../skills/user/{slug}"
+        expected_resolved = (self.skills_dir / category / slug).resolve()
 
         # True symlink
         if link_target_path.is_symlink():
             try:
                 target = os.readlink(str(link_target_path)).replace("\\", "/")
                 resolved = (link_target_path.parent / target).resolve()
-                expected_resolved = (self.skills_dir / category / slug).resolve()
-                alt_resolved = (self.skills_dir / ("domain" if category == "user" else "user") / slug).resolve()
-                if resolved != expected_resolved and resolved != alt_resolved:
+                if not resolved.exists() or resolved != expected_resolved:
                     return f"Symlink points to '{target}', expected target '{expected_rel}'"
             except Exception as e:
                 return f"Error reading symlink: {e}"
         # Plain text file shim (Git on Windows when symlinks disabled)
         elif link_target_path.is_file():
             text = link_target_path.read_text(encoding="utf-8").strip().replace("\\", "/")
-            if (
-                text != expected_rel
-                and text != alt_expected_rel
-                and not text.endswith(f"skills/{category}/{slug}")
-                and not text.endswith(f"skills/domain/{slug}")
-            ):
+            if text != expected_rel:
                 return f"Symlink text shim contains '{text}', expected '{expected_rel}'"
         else:
             return f"Alias at '.agents/skills/{slug}' is neither a symlink nor a 1-line text shim"
@@ -403,14 +438,23 @@ class SkillValidator:
 
             link_path = self.agents_skills_dir / slug
             expected_rel = f"../../skills/{category}/{slug}"
+            expected_resolved = (self.skills_dir / category / slug).resolve()
 
-            # Create or update if missing or incorrect
+            # Create or update if missing, broken symlink, or mismatched shim
             needs_update = False
             if not link_path.exists() and not link_path.is_symlink():
                 needs_update = True
-            elif link_path.is_file() and not link_path.is_symlink():
+            elif link_path.is_symlink():
+                try:
+                    cur_target = os.readlink(str(link_path)).replace("\\", "/")
+                    cur_resolved = (link_path.parent / cur_target).resolve()
+                    if not cur_resolved.exists() or cur_resolved != expected_resolved:
+                        needs_update = True
+                except OSError:
+                    needs_update = True
+            elif link_path.is_file():
                 content = link_path.read_text(encoding="utf-8").strip().replace("\\", "/")
-                if content != expected_rel and not content.endswith(f"skills/{category}/{slug}"):
+                if content != expected_rel:
                     needs_update = True
 
             if needs_update:
@@ -513,7 +557,7 @@ python tools/skills/cli.py check
 
 ## References
 
-- Contributing guide: `docs/contributing.md`
+- Contributing guide: `CONTRIBUTING.md`
 - Benchmark evaluation suite: [evaluations.md](evaluations.md)
 """
         (target_dir / "SKILL.md").write_text(skill_content, encoding="utf-8")

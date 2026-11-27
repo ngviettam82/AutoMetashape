@@ -16,7 +16,6 @@ import argparse
 import os
 import subprocess
 import sys
-import time
 from typing import Any, List, Optional
 
 try:
@@ -30,6 +29,7 @@ _SOURCE_DIR = os.path.join(_REPO_ROOT, "source")
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
+from autometashape.cluster.abort import _split_host_port
 from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
@@ -40,10 +40,14 @@ from autometashape.cluster.dual_share import (
     resolve_result_network_root,
     validate_dual_share_topology,
 )
-from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
+from autometashape.cluster.hardware import extract_unc_root, find_metashape_path, get_primary_lan_ip
 from autometashape.cluster.orchestrator import (
+    _find_blocking_batch_id,
     _norm_cluster_path,
+    _safe_abort_batch,
+    _wait_for_batch_path_release,
     build_monolithic_runscript_task,
+    clear_stale_project_lock,
     resolve_batch_canonical_path,
     safe_create_cluster_batch,
 )
@@ -130,7 +134,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-local-scratch-staging",
         action="store_true",
-        help="Bypass NVMe local scratch copy and process directly on shared storage (mandatory for host data)",
+        help="Bypass NVMe local scratch copy and process directly on shared storage",
     )
     parser.add_argument(
         "--preset",
@@ -170,6 +174,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Explicitly enable (--build-point-cloud) or disable (--no-build-point-cloud) dense point cloud generation",
     )
     parser.add_argument(
+        "--no-point-cloud",
+        dest="build_point_cloud",
+        action="store_false",
+        help="Alias for --no-build-point-cloud",
+    )
+    parser.add_argument(
         "--worker-limit",
         type=int,
         default=1,
@@ -195,6 +205,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--start-paused",
         action="store_true",
         help="Submit the batch in paused state so the operator can inspect or stage before running",
+    )
+    parser.add_argument(
+        "--allow-hidden-ticket",
+        action="store_true",
+        help="Opt in to hidden .cluster/tickets/ fallback if server still holds a duplicate canonical path",
     )
     parser.add_argument(
         "--no-reexec",
@@ -223,13 +238,13 @@ def find_photos_in_directory(images_dir: str, exclude_folders: str = "") -> List
 def resolve_server_address(cli_server: str) -> str:
     """Dynamically determine server host and port without hardcoded IPs."""
     if cli_server.strip():
-        srv = cli_server.strip()
-        return srv if ":" in srv else f"{srv}:5840"
+        host, port = _split_host_port(cli_server.strip(), 5840)
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("host") and cfg.get("host") != "0.0.0.0":
-        port = cfg.get("port", 5840)
-        return f"{cfg['host']}:{port}"
+        host, port = _split_host_port(str(cfg["host"]), int(cfg.get("port", 5840) or 5840))
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     lan_ip = get_primary_lan_ip()
     if lan_ip and lan_ip != "127.0.0.1":
@@ -243,13 +258,12 @@ def resolve_shared_root(cli_root: str, target_path: str) -> str:
     if cli_root.strip():
         return os.path.normpath(cli_root.strip())
 
-    # If target_path is UNC (\\\\server\\share\\...), extract the root share directly
-    norm_target = os.path.normpath(target_path)
-    if norm_target.startswith("\\\\"):
-        parts = norm_target.split("\\")
-        if len(parts) >= 4:
-            return f"\\\\{parts[2]}\\{parts[3]}"
+    # If target_path is UNC (\\\\server\\share\\..., //server/share/..., or \\\\?\\UNC\\...), extract root share
+    unc_root = extract_unc_root(target_path)
+    if unc_root:
+        return unc_root
 
+    norm_target = os.path.normpath(target_path)
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("root"):
         return os.path.normpath(cfg["root"])
@@ -278,6 +292,7 @@ def submit_batch(
     exclude_folders: str = "",
     force: bool = False,
     start_paused: bool = False,
+    allow_hidden_ticket: bool = False,
 ) -> int:
     """Create project, guarantee physical doc.save materialization, and submit cluster batch."""
     if Metashape is None:
@@ -316,16 +331,18 @@ def submit_batch(
     rel_output_dir = get_cluster_relative_path(norm_output, resolved_root)
 
     print(f"\n[CONNECT] Connecting to server at {resolved_server}...", flush=True)
-    server_ip, server_port_str = resolved_server.rsplit(":", 1)
-    server_port = int(server_port_str)
+    server_ip, server_port = _split_host_port(resolved_server, 5840)
 
     net_client = Metashape.NetworkClient()
     net_client.connect(server_ip, server_port)
 
-    norm_target = _norm_cluster_path(rel_psx)
     try:
-        raw_b = net_client.batchList() or {}
+        norm_target = _norm_cluster_path(rel_psx)
+        raw_b = net_client.batchList()
+        if raw_b is None:
+            raw_b = {}
         existing_batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else []
+        aborted_ids: set[int] = set()
         for b in existing_batches:
             b_raw_path = b.get("path")
             b_canon_path = resolve_batch_canonical_path(b_raw_path, resolved_root)
@@ -333,7 +350,7 @@ def submit_batch(
                 continue
             b_state = str(b.get("state", "")).lower()
             b_err = int(b.get("error_count") or 0)
-            is_active = b_state in ("inprogress", "running", "submitted", "pending", "queued") and not (
+            is_active = b_state in ("inprogress", "running", "submitted", "pending", "queued", "paused") and not (
                 b.get("failed") or b.get("aborted")
             )
             if not force and is_active and b_err == 0:
@@ -344,130 +361,152 @@ def submit_batch(
                     flush=True,
                 )
                 return bid
-            if force and is_active and b.get("batch_id") is not None:
+            if force and b.get("batch_id") is not None and b_state not in ("completed", "finished"):
                 # Abort active canonical or hidden-ticket batch BEFORE saving fresh .psx stub
                 bid_abort = int(b.get("batch_id"))
-                if b.get("paused") and hasattr(net_client, "setBatchPaused"):
-                    try:
-                        net_client.setBatchPaused(bid_abort, False)
-                    except Exception:
-                        pass
-                try:
-                    net_client.abortBatch(bid_abort)
-                except Exception:
-                    pass
-    except Exception:
-        pass
+                if is_active or b_state != "aborted":
+                    _safe_abort_batch(net_client, bid_abort, is_paused=bool(b.get("paused") or b_state == "paused"))
+                aborted_ids.add(bid_abort)
 
-    # -------------------------------------------------------------------------
-    # MANDATORY ARCHITECTURAL INVARIANT: PHYSICAL PROJECT MATERIALIZATION
-    # Always release .psx locks via doc.clear() before dispatching to workers.
-    # -------------------------------------------------------------------------
-    doc = Metashape.Document()
-    try:
-        if resume and os.path.isfile(psx_path):
-            print(f"\n[CHECKPOINT] Verifying existing project archive: {psx_path}...", flush=True)
-            try:
-                doc.open(psx_path, read_only=True, ignore_lock=True)
-            except TypeError:
-                doc.open(psx_path)
-            print(f"[OK] Checkpoint verified with {len(doc.chunks)} chunk(s).", flush=True)
-        else:
-            print("\n[INGEST] Verifying raw survey images...", flush=True)
-            photos = find_photos_in_directory(norm_images, exclude_folders=exclude_folders)
-            if not photos:
-                raise ValueError(f"No supported image files found under: {norm_images}")
-            excl_note = f" (excluding folders: {exclude_folders})" if exclude_folders.strip() else ""
-            print(
-                f"  Verified {len(photos)} photos in source folder{excl_note} (deferred ingest on worker).", flush=True
-            )
-
-            chunk = doc.addChunk()
-            chunk.label = "Production_Reconstruction"
-
-            # MANDATORY: Save minimal valid .psx stub to Result Share and verify existence BEFORE submission!
-            print(f"  [MATERIALIZE] Saving project stub to shared disk: {psx_path}...", flush=True)
-            doc.save(psx_path)
-            if not os.path.isfile(psx_path):
-                raise IOError(
-                    f"[FATAL ERROR] Project file was not created on disk: {psx_path}. "
-                    "Aborting dispatch to protect workers from missing-file crashes."
+        if force:
+            fb_id = _find_blocking_batch_id(net_client, rel_psx)
+            if fb_id is not None:
+                if fb_id not in aborted_ids:
+                    _safe_abort_batch(net_client, fb_id, is_paused=True)
+                    aborted_ids.add(fb_id)
+            if aborted_ids:
+                blocker = _wait_for_batch_path_release(
+                    net_client,
+                    rel_psx,
+                    aborted_ids,
+                    timeout_s=30.0,
+                    shared_root=resolved_root,
+                    allow_reap=True,
                 )
-            print(
-                f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).",
-                flush=True,
-            )
-    finally:
+                if blocker is not None and not allow_hidden_ticket:
+                    raise RuntimeError(
+                        f"Cannot replace '{rel_psx}': Metashape Server still holds batch #{blocker} after 30s. "
+                        "Reap the worker holding that batch (scripts/cluster_abort.py) before retrying."
+                    )
+                if blocker is None:
+                    clear_stale_project_lock(resolved_root, rel_psx)
+
+        # -------------------------------------------------------------------------
+        # MANDATORY ARCHITECTURAL INVARIANT: PHYSICAL PROJECT MATERIALIZATION
+        # Always release .psx locks via doc.clear() before dispatching to workers.
+        # -------------------------------------------------------------------------
+        doc = Metashape.Document()
         try:
-            doc.clear()
-        except Exception:
-            pass
+            if resume and os.path.isfile(psx_path):
+                print(f"\n[CHECKPOINT] Verifying existing project archive: {psx_path}...", flush=True)
+                try:
+                    doc.open(psx_path, read_only=True, ignore_lock=True)
+                except TypeError:
+                    doc.open(psx_path)
+                print(f"[OK] Checkpoint verified with {len(doc.chunks)} chunk(s).", flush=True)
+            else:
+                print("\n[INGEST] Verifying raw survey images...", flush=True)
+                photos = find_photos_in_directory(norm_images, exclude_folders=exclude_folders)
+                if not photos:
+                    raise ValueError(f"No supported image files found under: {norm_images}")
+                excl_note = f" (excluding folders: {exclude_folders})" if exclude_folders.strip() else ""
+                print(
+                    f"  Verified {len(photos)} photos in source folder{excl_note} (deferred ingest on worker).",
+                    flush=True,
+                )
 
-    # -------------------------------------------------------------------------
-    # BUILD MONOLITHIC NETWORK TASK
-    # -------------------------------------------------------------------------
-    print("\n[DISPATCH] Constructing cluster network task...", flush=True)
-    task_kwargs: dict[str, Any] = {
-        "images_dir": norm_images,
-        "output_dir": norm_output,
-        "project_name": proj_name,
-        "preset": preset,
-        "resume": resume,
-        "guided_matching": not no_guided_matching,
-        "local_scratch": not no_local_scratch_staging,
-        "network_path": resolved_root,
-        "ortho_resolution": ortho_resolution,
-    }
-    if preset == "pro":
-        # Allow worker Pro telemetry profiling to compute adaptive faces/textures/filtering/crop
-        task_kwargs.setdefault("depth_filtering", None)
-        task_kwargs.setdefault("custom_faces", None)
-        task_kwargs.setdefault("texture_pages", None)
-        task_kwargs.setdefault("crop_method", None)
-    if keypoint_limit is not None:
-        task_kwargs["keypoint_limit"] = keypoint_limit
-    if keypoint_limit_per_mpx is not None:
-        task_kwargs["keypoint_limit_per_mpx"] = keypoint_limit_per_mpx
-    if tiepoint_limit is not None:
-        task_kwargs["tiepoint_limit"] = tiepoint_limit
-    if build_point_cloud is not None:
-        task_kwargs["build_point_cloud"] = build_point_cloud
-    if exclude_folders and exclude_folders.strip():
-        task_kwargs["exclude_folders"] = exclude_folders.strip()
+                chunk = doc.addChunk()
+                chunk.label = "Production_Reconstruction"
 
-    res_task = build_monolithic_runscript_task(**task_kwargs)
-    net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
+                # MANDATORY: Save minimal valid .psx stub to Result Share and verify existence BEFORE submission!
+                print(f"  [MATERIALIZE] Saving project stub to shared disk: {psx_path}...", flush=True)
+                doc.save(psx_path)
+                if not os.path.isfile(psx_path):
+                    raise IOError(
+                        f"[FATAL ERROR] Project file was not created on disk: {psx_path}. "
+                        "Aborting dispatch to protect workers from missing-file crashes."
+                    )
+                print(
+                    f"  [OK] Physical .psx project archive materialized successfully ({os.path.getsize(psx_path)} bytes).",
+                    flush=True,
+                )
+        finally:
+            try:
+                doc.clear()
+            except Exception:
+                pass
 
-    # Submit batch via idempotent safe_create_cluster_batch:
-    # - Applies priority & worker_limit BEFORE unpausing (zero priority race)
-    # - Uses canonical <project>.psx first; falls back to hidden .cluster/tickets/ ONLY if server RAM
-    #   retains an un-evictable aborted key (NEVER creates _dispatch_*.psx in Result/<project>/)
-    print(f"  Submitting batch for '{rel_psx}'...", flush=True)
-    batch_id, attached_existing = safe_create_cluster_batch(
-        net_client,
-        rel_psx,
-        [net_task],
-        worker_limit=worker_limit,
-        force_fresh=force,
-        priority=priority,
-        start_paused=start_paused,
-        shared_root=resolved_root,
-        ticket_project_name=proj_name,
-        ticket_rel_output_dir=rel_output_dir,
-    )
-    if attached_existing:
-        print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
-    else:
-        print(f"  [OK] Batch created successfully with ID: #{batch_id}", flush=True)
+        # -------------------------------------------------------------------------
+        # BUILD MONOLITHIC NETWORK TASK
+        # -------------------------------------------------------------------------
+        print("\n[DISPATCH] Constructing cluster network task...", flush=True)
+        task_kwargs: dict[str, Any] = {
+            "images_dir": norm_images,
+            "output_dir": norm_output,
+            "project_name": proj_name,
+            "preset": preset,
+            "resume": resume,
+            "guided_matching": not no_guided_matching,
+            "local_scratch": not no_local_scratch_staging,
+            "network_path": resolved_root,
+            "ortho_resolution": ortho_resolution,
+        }
+        if preset == "pro":
+            # Allow worker Pro telemetry profiling to compute adaptive faces/textures/filtering/crop
+            task_kwargs.setdefault("depth_filtering", None)
+            task_kwargs.setdefault("custom_faces", None)
+            task_kwargs.setdefault("texture_pages", None)
+            task_kwargs.setdefault("crop_method", None)
+        if keypoint_limit is not None:
+            task_kwargs["keypoint_limit"] = keypoint_limit
+        if keypoint_limit_per_mpx is not None:
+            task_kwargs["keypoint_limit_per_mpx"] = keypoint_limit_per_mpx
+        if tiepoint_limit is not None:
+            task_kwargs["tiepoint_limit"] = tiepoint_limit
+        if build_point_cloud is not None:
+            task_kwargs["build_point_cloud"] = build_point_cloud
+        if exclude_folders and exclude_folders.strip():
+            task_kwargs["exclude_folders"] = exclude_folders.strip()
 
-    print("=" * 72, flush=True)
-    state_label = "staged (paused)" if start_paused else "active"
-    print(
-        f"[SUCCESS] Project '{proj_name}' is {state_label} on cluster as Batch #{batch_id} (Priority: {priority})!",
-        flush=True,
-    )
-    print("=" * 72, flush=True)
-    return batch_id
+        res_task = build_monolithic_runscript_task(**task_kwargs)
+        net_task = res_task[0] if isinstance(res_task, tuple) else res_task.toNetworkTask()
+
+        # Submit batch via idempotent safe_create_cluster_batch:
+        # - Applies priority & worker_limit BEFORE unpausing (zero priority race)
+        # - Always dispatches under canonical <project>.psx (refusing silent ticket renames unless opted in)
+        print(f"  Submitting batch for '{rel_psx}'...", flush=True)
+        batch_id, attached_existing = safe_create_cluster_batch(
+            net_client,
+            rel_psx,
+            [net_task],
+            worker_limit=worker_limit,
+            force_fresh=force,
+            priority=priority,
+            start_paused=start_paused,
+            shared_root=resolved_root,
+            ticket_project_name=proj_name,
+            ticket_rel_output_dir=rel_output_dir,
+            allow_hidden_ticket=allow_hidden_ticket,
+        )
+        if attached_existing:
+            print(f"  [OK] Attached to existing healthy Batch #{batch_id}", flush=True)
+        else:
+            print(f"  [OK] Batch created successfully with ID: #{batch_id}", flush=True)
+
+        print("=" * 72, flush=True)
+        state_label = "staged (paused)" if start_paused else "active"
+        print(
+            f"[SUCCESS] Project '{proj_name}' is {state_label} on cluster as Batch #{batch_id} (Priority: {priority})!",
+            flush=True,
+        )
+        print("=" * 72, flush=True)
+        return batch_id
+    finally:
+        if hasattr(net_client, "disconnect"):
+            try:
+                net_client.disconnect()
+            except Exception:
+                pass
 
 
 def main() -> int:
@@ -484,10 +523,16 @@ def main() -> int:
     if Metashape is None and not args.no_reexec:
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
         print("[ERROR] Agisoft Metashape Pro executable not found. Cannot submit cluster batch.", file=sys.stderr)
+        return 1
+    if Metashape is None:
+        print("[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.", file=sys.stderr)
         return 1
 
     try:
@@ -512,6 +557,17 @@ def main() -> int:
                 result_share,
                 result_network_root=resolved_root,
             )
+            excl_pats = tuple(tok.strip().lower() for tok in (args.exclude_folders or "").split(",") if tok.strip())
+            if excl_pats and projects:
+                filtered_projects = []
+                for proj in projects:
+                    rel_parts = (
+                        os.path.relpath(proj.images_dir, args.source_share).replace("\\", "/").lower().split("/")
+                    )
+                    if any(any(pat in seg for pat in excl_pats) for seg in rel_parts):
+                        continue
+                    filtered_projects.append(proj)
+                projects = filtered_projects
             if not projects:
                 print(
                     f"[FATAL ERROR] No image datasets discovered under source share: {args.source_share}",
@@ -545,6 +601,7 @@ def main() -> int:
                         exclude_folders=args.exclude_folders,
                         force=args.force,
                         start_paused=args.start_paused,
+                        allow_hidden_ticket=args.allow_hidden_ticket,
                     )
                     if bid > 0:
                         submitted_ids.append(bid)
@@ -566,7 +623,13 @@ def main() -> int:
         effective_root = args.root
         if args.result_share:
             effective_root = resolve_result_network_root(args.result_share, explicit_root=args.root)
-        effective_output = args.output or args.result_share
+        if args.output:
+            effective_output = args.output
+        elif args.result_share:
+            single_proj_name = args.project_name.strip() or os.path.basename(os.path.normpath(args.images))
+            effective_output = os.path.join(os.path.normpath(args.result_share), single_proj_name)
+        else:
+            effective_output = ""
 
         batch_id = submit_batch(
             images_dir=args.images,
@@ -588,6 +651,7 @@ def main() -> int:
             exclude_folders=args.exclude_folders,
             force=args.force,
             start_paused=args.start_paused,
+            allow_hidden_ticket=args.allow_hidden_ticket,
         )
         return 0 if batch_id > 0 else 1
     except Exception as e:

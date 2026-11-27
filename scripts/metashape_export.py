@@ -29,6 +29,7 @@ except ImportError:
     Metashape = None
 
 import autometashape.core.export as _export_mod
+from autometashape.cluster.hardware import find_metashape_path
 from autometashape.core.export import (
     POINT_CLOUD_FORMAT_MAP,
     SHAPES_FORMAT_MAP,
@@ -50,14 +51,41 @@ from autometashape.ipc.protocol import (
 def export_project_assets(*args, **kwargs):
     """Facade for export_project_assets ensuring compatibility with module-level Metashape mocks."""
     _export_mod.Metashape = Metashape
-    if Metashape is not None and getattr(Metashape, "PointCloudFormat", None) is not None:
-        _export_mod.POINT_CLOUD_FORMAT_MAP = {
-            "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
-            "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
-            "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
-            "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
-            "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
-        }
+    if Metashape is not None:
+        if getattr(Metashape, "PointCloudFormat", None) is not None:
+            _export_mod.POINT_CLOUD_FORMAT_MAP = {
+                "las": (Metashape.PointCloudFormat.PointCloudFormatLAS, ".las"),
+                "laz": (Metashape.PointCloudFormat.PointCloudFormatLAZ, ".laz"),
+                "ply": (Metashape.PointCloudFormat.PointCloudFormatPLY, ".ply"),
+                "e57": (Metashape.PointCloudFormat.PointCloudFormatE57, ".e57"),
+                "xyz": (Metashape.PointCloudFormat.PointCloudFormatXYZ, ".xyz"),
+            }
+        if getattr(Metashape, "TiledModelFormat", None) is not None:
+            tmf = Metashape.TiledModelFormat
+            tiled_map = {}
+            if hasattr(tmf, "TiledModelFormatCesium"):
+                tiled_map["cesium"] = (tmf.TiledModelFormatCesium, "tileset.json")
+            if hasattr(tmf, "TiledModelFormatTLS"):
+                tiled_map["tls"] = (tmf.TiledModelFormatTLS, ".tls")
+            if hasattr(tmf, "TiledModelFormatSLPK"):
+                tiled_map["slpk"] = (tmf.TiledModelFormatSLPK, ".slpk")
+            if hasattr(tmf, "TiledModelFormatOSGB"):
+                tiled_map["osgb"] = (tmf.TiledModelFormatOSGB, ".osgb")
+            if tiled_map:
+                _export_mod.TILED_MODEL_FORMAT_MAP = tiled_map
+        if getattr(Metashape, "ShapesFormat", None) is not None:
+            sf = Metashape.ShapesFormat
+            shapes_map = {}
+            if hasattr(sf, "ShapesFormatSHP"):
+                shapes_map["shp"] = (sf.ShapesFormatSHP, ".shp")
+            if hasattr(sf, "ShapesFormatDXF"):
+                shapes_map["dxf"] = (sf.ShapesFormatDXF, ".dxf")
+            if hasattr(sf, "ShapesFormatGeoJSON"):
+                shapes_map["geojson"] = (sf.ShapesFormatGeoJSON, ".geojson")
+            if hasattr(sf, "ShapesFormatKML"):
+                shapes_map["kml"] = (sf.ShapesFormatKML, ".kml")
+            if shapes_map:
+                _export_mod.SHAPES_FORMAT_MAP = shapes_map
     return _export_mod.export_project_assets(*args, **kwargs)
 
 
@@ -163,6 +191,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--export-orthomosaic",
+        "--export-ortho",
         dest="export_orthomosaic",
         action="store_true",
         default=False,
@@ -170,6 +199,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--no-export-orthomosaic",
+        "--no-export-ortho",
         dest="export_orthomosaic",
         action="store_false",
         help="Disable GeoTIFF Orthomosaic export",
@@ -254,6 +284,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--export-tie-points", action="store_true", default=False, help="Export sparse tie points in PLY format"
     )
+    parser.add_argument("--no-reexec", action="store_true", help=argparse.SUPPRESS)
     return parser
 
 
@@ -262,18 +293,19 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     # Seamless auto-handoff: if executed in standard Python, launch via Metashape Pro
-    if Metashape is None:
+    if Metashape is None and not getattr(args, "no_reexec", False):
         try:
-            import cluster_utils as cu
-
-            ms_exe = cu.find_metashape_path()
+            ms_exe = find_metashape_path()
         except Exception:
             ms_exe = None
 
         if ms_exe and os.path.isfile(ms_exe):
             print("[AutoMetashape] Metashape Python environment not detected in current interpreter.")
             print(f"[AutoMetashape] Automatically launching via Metashape Pro: {ms_exe}", flush=True)
-            relaunch_cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:]
+            relaunch_cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                relaunch_cmd.extend(["-platform", "offscreen"])
+            relaunch_cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             proc = subprocess.run(relaunch_cmd)
             sys.exit(proc.returncode)
         else:
@@ -288,39 +320,50 @@ if __name__ == "__main__":
             )
             sys.exit(1)
 
-    export_project_assets(
-        project_path=args.project,
-        output_dir=args.output,
-        texture_format=args.texture_format,
-        rebake_texture=args.rebake_texture,
-        texture_pages=args.texture_pages,
-        fill_holes=args.fill_holes,
-        ghosting_filter=args.ghosting_filter,
-        import_model_path=args.import_model,
-        export_point_cloud=args.export_point_cloud,
-        point_cloud_format=args.point_cloud_format,
-        export_dem=args.export_dem,
-        export_orthomosaic=args.export_orthomosaic,
-        ortho_resolution=args.ortho_resolution,
-        export_report=args.export_report,
-        report_title=args.report_title,
-        export_tiled_model=args.export_tiled_model,
-        tiled_model_format=args.tiled_model_format,
-        tile_size=args.tile_size,
-        export_contours=args.export_contours,
-        contour_interval=args.contour_interval,
-        contours_format=args.contours_format,
-        remove_lighting=args.remove_lighting,
-        delighting_color_mode=args.delighting_color_mode,
-        calibrate_colors=args.calibrate_colors,
-        smooth_mesh=args.smooth_mesh,
-        smooth_strength=args.smooth_strength,
-        decimate_mesh=args.decimate_mesh,
-        export_glb=args.export_glb,
-        export_obj=args.export_obj,
-        export_fbx=args.export_fbx,
-        export_ply=args.export_ply,
-        export_dxf=args.export_dxf,
-        export_tie_points=args.export_tie_points,
-        project_name=args.project_name,
-    )
+    if Metashape is None:
+        print(
+            "[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    try:
+        export_project_assets(
+            project_path=args.project,
+            output_dir=args.output,
+            texture_format=args.texture_format,
+            rebake_texture=args.rebake_texture,
+            texture_pages=args.texture_pages,
+            fill_holes=args.fill_holes,
+            ghosting_filter=args.ghosting_filter,
+            import_model_path=args.import_model,
+            export_point_cloud=args.export_point_cloud,
+            point_cloud_format=args.point_cloud_format,
+            export_dem=args.export_dem,
+            export_orthomosaic=args.export_orthomosaic,
+            ortho_resolution=args.ortho_resolution,
+            export_report=args.export_report,
+            report_title=args.report_title,
+            export_tiled_model=args.export_tiled_model,
+            tiled_model_format=args.tiled_model_format,
+            tile_size=args.tile_size,
+            export_contours=args.export_contours,
+            contour_interval=args.contour_interval,
+            contours_format=args.contours_format,
+            remove_lighting=args.remove_lighting,
+            delighting_color_mode=args.delighting_color_mode,
+            calibrate_colors=args.calibrate_colors,
+            smooth_mesh=args.smooth_mesh,
+            smooth_strength=args.smooth_strength,
+            decimate_mesh=args.decimate_mesh,
+            export_glb=args.export_glb,
+            export_obj=args.export_obj,
+            export_fbx=args.export_fbx,
+            export_ply=args.export_ply,
+            export_dxf=args.export_dxf,
+            export_tie_points=args.export_tie_points,
+            project_name=args.project_name,
+        )
+    except Exception as exc:
+        emit_ipc_error("export", str(exc))
+        raise

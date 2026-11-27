@@ -36,7 +36,7 @@ EXCLUDED_DIRS = {
     ".eggs",
 }
 
-SOURCE_EXTENSIONS = {".py", ".cpp", ".h", ".hpp", ".cu"}
+SOURCE_EXTENSIONS = {".py", ".c", ".cc", ".cpp", ".cxx", ".h", ".hpp", ".cu", ".cuh", ".sh", ".bat"}
 
 SPDX_PATTERN = re.compile(r"SPDX-License-Identifier:\s*Apache-2\.0", re.IGNORECASE)
 FORBIDDEN_COPYRIGHT_PATTERN = re.compile(r"Copyright\s+(\(c\)\s+)?\d{4}(-\d{4})?,?\s*NVIDIA", re.IGNORECASE)
@@ -54,19 +54,19 @@ def check_source_spdx_headers() -> list[str]:
             file_path = Path(root) / file
             if file_path.suffix.lower() in SOURCE_EXTENSIONS:
                 scanned_count += 1
+                rel_path = file_path.relative_to(REPO_ROOT).as_posix()
                 try:
                     content = file_path.read_text(encoding="utf-8")
-                except UnicodeDecodeError:
+                except UnicodeDecodeError as exc:
+                    errors.append(f"{rel_path}: Non-UTF-8 encoding prevents license verification ({exc})")
                     continue
-
-                rel_path = file_path.relative_to(REPO_ROOT).as_posix()
 
                 # 1. Check for SPDX License Identifier
                 if not SPDX_PATTERN.search(content[:500]):
                     errors.append(f"{rel_path}: Missing valid 'SPDX-License-Identifier: Apache-2.0' header")
 
-                # 2. Check for unauthorized NVIDIA copyright claims
-                if FORBIDDEN_COPYRIGHT_PATTERN.search(content[:500]):
+                # 2. Check for unauthorized NVIDIA copyright claims across full file
+                if FORBIDDEN_COPYRIGHT_PATTERN.search(content):
                     errors.append(
                         f"{rel_path}: Contains unauthorized 'Copyright NVIDIA' claim. "
                         f"Project code must be owned by project authors."
@@ -84,7 +84,7 @@ def check_license_files() -> list[str]:
         errors.append("Missing root 'LICENSE' file.")
     else:
         content = license_file.read_text(encoding="utf-8")
-        if "Apache License" not in content and "Version 2.0" not in content:
+        if "Apache License" not in content or "Version 2.0" not in content:
             errors.append("Root LICENSE does not match Apache-2.0 specification.")
 
     notices_file = REPO_ROOT / "THIRD_PARTY_NOTICES.md"

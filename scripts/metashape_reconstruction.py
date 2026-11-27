@@ -12,7 +12,6 @@ surface meshing, texture baking, DEM, orthomosaics, and cluster batch orchestrat
 
 from __future__ import annotations
 
-import argparse
 import os
 import subprocess
 import sys
@@ -54,6 +53,7 @@ def _maybe_delegate_to_local_codebase() -> bool:
         import runpy
 
         print(f"[WORKER DELEGATION] Handing off task to local node codebase: {local_dir}", flush=True)
+        prev_delegated = os.environ.get("AUTOMETASHAPE_LOCAL_DELEGATED")
         os.environ["AUTOMETASHAPE_LOCAL_DELEGATED"] = "1"
         if local_source not in sys.path:
             sys.path.insert(0, local_source)
@@ -62,6 +62,11 @@ def _maybe_delegate_to_local_codebase() -> bool:
         except SystemExit as se:
             if se.code not in (None, 0):
                 raise
+        finally:
+            if prev_delegated is None:
+                os.environ.pop("AUTOMETASHAPE_LOCAL_DELEGATED", None)
+            else:
+                os.environ["AUTOMETASHAPE_LOCAL_DELEGATED"] = prev_delegated
         return True
     return False
 
@@ -176,7 +181,8 @@ def _sync_state() -> None:
     _hygiene_mod.Metashape = Metashape
     _icp_bridge_mod.Metashape = Metashape
     _export_mod.Metashape = Metashape
-    _ipc_mod._ACTIVE_STATUS_FILE = _ACTIVE_STATUS_FILE
+    if _ACTIVE_STATUS_FILE is not None:
+        _ipc_mod._ACTIVE_STATUS_FILE = _ACTIVE_STATUS_FILE
 
     if Metashape is not None:
         if getattr(Metashape, "FilterMode", None) is not None:
@@ -290,17 +296,32 @@ if __name__ == "__main__" and not _DELEGATED:
         print(f"  Target Directory: {args.images}")
         print("=========================================================================", flush=True)
 
-        physics = analyze_survey_physics(args.images, sample_size=50, output_dir=args.output)
+        physics = analyze_survey_physics(
+            args.images,
+            sample_size=50,
+            output_dir=args.output,
+            exclude_folders=getattr(args, "exclude_folders", ""),
+        )
         plan = derive_pro_photogrammetry_plan(physics)
         print_pro_engineering_report(physics, plan)
     elif Metashape is None and not getattr(args, "no_reexec", False):
         ms_exe = _hardware_mod.find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             sys.exit(res.returncode)
         print(
             "[ERROR] Agisoft Metashape Pro executable not found. Run via 'metashape.exe -r'.",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
+    elif Metashape is None:
+        print(
+            "[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.",
             file=sys.stderr,
             flush=True,
         )
@@ -396,6 +417,7 @@ if __name__ == "__main__" and not _DELEGATED:
                 scratch_dir=args.scratch_dir,
                 min_scratch_free_gb=args.min_scratch_free_gb,
                 project_name=args.project_name,
+                exclude_folders=getattr(args, "exclude_folders", ""),
                 status_file=getattr(args, "status_file", None),
                 resume=getattr(args, "resume", True),
             )

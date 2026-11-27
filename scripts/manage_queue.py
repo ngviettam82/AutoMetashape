@@ -28,6 +28,7 @@ _SOURCE_DIR = os.path.join(_REPO_ROOT, "source")
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
+from autometashape.cluster.abort import _split_host_port
 from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     load_cluster_config,
@@ -37,6 +38,7 @@ from autometashape.cluster.hardware import (
     get_primary_lan_ip,
     is_healthy_online_worker,
 )
+from autometashape.cluster.orchestrator import resolve_batch_canonical_path
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -50,6 +52,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     # Command: list
     list_p = subparsers.add_parser("list", help="List all batches on the cluster server")
     list_p.add_argument("--server", type=str, default="", help="Cluster server host")
+    list_p.add_argument("--root", type=str, default="", help="Shared cluster storage root (for ticket resolution)")
     list_p.add_argument(
         "--filter", type=str, default="all", choices=["all", "running", "pending", "completed"], help="Filter by state"
     )
@@ -110,13 +113,13 @@ def build_arg_parser() -> argparse.ArgumentParser:
 def resolve_server_address(cli_server: str) -> str:
     """Dynamically determine server host and port without hardcoded IPs."""
     if cli_server and cli_server.strip():
-        srv = cli_server.strip()
-        return srv if ":" in srv else f"{srv}:5840"
+        host, port = _split_host_port(cli_server.strip(), 5840)
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("host") and cfg.get("host") != "0.0.0.0":
-        port = cfg.get("port", 5840)
-        return f"{cfg['host']}:{port}"
+        host, port = _split_host_port(str(cfg["host"]), int(cfg.get("port", 5840) or 5840))
+        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
 
     lan_ip = get_primary_lan_ip()
     if lan_ip and lan_ip != "127.0.0.1":
@@ -128,16 +131,21 @@ def resolve_server_address(cli_server: str) -> str:
 def connect_client(server_str: str) -> Any:
     """Connect to Metashape NetworkClient."""
     resolved = resolve_server_address(server_str)
-    srv_ip, srv_port_str = resolved.rsplit(":", 1)
+    srv_ip, srv_port = _split_host_port(resolved, 5840)
     client = Metashape.NetworkClient()
-    client.connect(srv_ip, int(srv_port_str))
+    client.connect(srv_ip, srv_port)
     return client
 
 
-def cmd_list(client: Any, state_filter: str) -> int:
+def cmd_list(client: Any, state_filter: str, shared_root: str = "") -> int:
     """List batches with status and details."""
     b_resp = client.batchList() or {}
     batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
+
+    eff_root = shared_root.strip()
+    if not eff_root:
+        cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
+        eff_root = str(cfg.get("root") or "").strip()
 
     if state_filter != "all":
         if state_filter == "running":
@@ -145,19 +153,21 @@ def cmd_list(client: Any, state_filter: str) -> int:
         elif state_filter == "pending":
             batches = [b for b in batches if str(b.get("state", "")).lower() in ("pending", "submitted", "queued")]
         elif state_filter == "completed":
-            batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done")]
+            batches = [b for b in batches if str(b.get("state", "")).lower() in ("completed", "done", "finished")]
 
     print("=" * 80)
     print(f"{'ID':>4} | {'Priority':>8} | {'State':<12} | {'Project Path'}")
     print("-" * 80)
     for b in batches:
-        bid = b.get("batch_id", "?")
-        prio = b.get("priority", 0)
-        state = b.get("state", "unknown")
+        bid_str = str(b.get("batch_id") if b.get("batch_id") is not None else "?")
+        prio_str = str(b.get("priority") if b.get("priority") is not None else 0)
+        state = str(b.get("state") or "unknown")
         if b.get("paused"):
             state = f"{state} (paused)"
-        path = b.get("path", "")
-        print(f"{bid:>4} | {prio:>8} | {state:<12} | {path}")
+        path = str(b.get("path") or "")
+        canon = resolve_batch_canonical_path(path, eff_root) if eff_root else path
+        display_path = f"{path} -> {canon}" if (canon and canon != path) else path
+        print(f"{bid_str:>4} | {prio_str:>8} | {state:<12} | {display_path}")
     print("=" * 80)
     print(f"Total Batches Listed: {len(batches)}")
     return 0
@@ -206,7 +216,7 @@ def cmd_abort(client: Any, batch_id: int, demote_priority: int) -> int:
 
 
 def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = None, hostname: str = "") -> int:
-    """Pause or unpause cluster workers matching worker_id or hostname."""
+    """Pause or unpause cluster workers matching worker_id and/or hostname."""
     if worker_id is None and not hostname.strip():
         print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
         return 1
@@ -217,8 +227,12 @@ def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = Non
     for w in workers:
         wid = w.get("worker_id")
         whost = str(w.get("hostname", "")).strip().lower()
-        if worker_id is not None and wid == worker_id:
-            matched.append((wid, w.get("hostname", "")))
+        if worker_id is not None and target_host:
+            if wid == worker_id and whost == target_host:
+                matched.append((wid, w.get("hostname", "")))
+        elif worker_id is not None:
+            if wid == worker_id:
+                matched.append((wid, w.get("hostname", "")))
         elif target_host and whost == target_host and is_healthy_online_worker(w):
             matched.append((wid, w.get("hostname", "")))
     if not matched:
@@ -244,13 +258,18 @@ def cmd_clear_worker(client: Any, worker_id: int, only_aborted: bool = False) ->
         print(f"[REFUSED] Worker #{worker_id} ({target.get('hostname')}) is not marked aborted.", file=sys.stderr)
         return 1
     print(f"Clearing worker #{worker_id} ({target.get('hostname')}, batch={target.get('batch_id')})...", flush=True)
+    dispatched = 0
     for fn_name in ("abortWorker", "quitWorker"):
         if hasattr(client, fn_name):
             try:
                 getattr(client, fn_name)(worker_id)
+                dispatched += 1
                 print(f"  [OK] {fn_name}({worker_id}) dispatched.")
             except Exception as e:
                 print(f"  [Notice] {fn_name}({worker_id}): {e}")
+    if dispatched == 0:
+        print(f"[ERROR] Failed to dispatch abortWorker/quitWorker for worker #{worker_id}.", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -260,7 +279,7 @@ def cmd_set_worker_gpu_mask(
     worker_id: int | None = None,
     hostname: str = "",
 ) -> int:
-    """Set live GPU bitmask on healthy online workers matching worker_id or hostname."""
+    """Set live GPU bitmask on healthy online workers matching worker_id and/or hostname."""
     if worker_id is None and not hostname.strip():
         print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
         return 1
@@ -271,8 +290,12 @@ def cmd_set_worker_gpu_mask(
     for w in workers:
         wid = w.get("worker_id")
         whost = str(w.get("hostname", "")).strip().lower()
-        if worker_id is not None and wid == worker_id:
-            matched.append((wid, w.get("hostname", "")))
+        if worker_id is not None and target_host:
+            if wid == worker_id and whost == target_host:
+                matched.append((wid, w.get("hostname", "")))
+        elif worker_id is not None:
+            if wid == worker_id:
+                matched.append((wid, w.get("hostname", "")))
         elif target_host and whost == target_host and is_healthy_online_worker(w):
             matched.append((wid, w.get("hostname", "")))
     if not matched:
@@ -287,6 +310,15 @@ def cmd_set_worker_gpu_mask(
 
 def main() -> int:
     """CLI entry point for queue management."""
+    if sys.platform == "win32":
+        for _stream_name in ("stdout", "stderr"):
+            _stream = getattr(sys, _stream_name, None)
+            if _stream and hasattr(_stream, "reconfigure"):
+                try:
+                    _stream.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -298,16 +330,23 @@ def main() -> int:
     if Metashape is None and not getattr(args, "no_reexec", False):
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
         print("[ERROR] Agisoft Metashape Pro executable not found. Cannot manage cluster queue.", file=sys.stderr)
         return 1
+    if Metashape is None:
+        print("[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.", file=sys.stderr)
+        return 1
 
+    client = None
     try:
         client = connect_client(getattr(args, "server", ""))
         if args.command == "list":
-            return cmd_list(client, args.filter)
+            return cmd_list(client, args.filter, shared_root=getattr(args, "root", ""))
         elif args.command == "set-priority":
             return cmd_set_priority(client, args.batch, args.priority)
         elif args.command == "pause":
@@ -328,6 +367,12 @@ def main() -> int:
     except Exception as e:
         print(f"[FATAL ERROR] Queue operation '{args.command}' failed: {e}", file=sys.stderr, flush=True)
         return 1
+    finally:
+        if client is not None and hasattr(client, "disconnect"):
+            try:
+                client.disconnect()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

@@ -23,18 +23,19 @@ echo "[FORMAT] Checking licenses and formatting source code..."
 if ! "$PYTHON_CMD" tools/check_licenses.py; then
     echo "[FORMAT] Inserting missing license headers..."
     "$PYTHON_CMD" tools/add_license_headers.py
+    "$PYTHON_CMD" tools/check_licenses.py
 fi
 
-RUFF_CMD=""
+RUFF_CMD=()
 if command -v ruff >/dev/null 2>&1; then
-    RUFF_CMD="ruff"
+    RUFF_CMD=(ruff)
 elif "$PYTHON_CMD" -m ruff --version >/dev/null 2>&1; then
-    RUFF_CMD="$PYTHON_CMD -m ruff"
+    RUFF_CMD=("$PYTHON_CMD" -m ruff)
 fi
 
-if [ -n "$RUFF_CMD" ]; then
-    $RUFF_CMD format .
-    $RUFF_CMD check .
+if [ "${#RUFF_CMD[@]}" -gt 0 ]; then
+    "${RUFF_CMD[@]}" format .
+    "${RUFF_CMD[@]}" check .
 else
     echo "[WARN] ruff not found in PATH or Python environment; skipping ruff format/check."
     echo "[WARN] Install ruff ('pip install ruff') to mirror GitHub Actions Lint & Format checks locally."

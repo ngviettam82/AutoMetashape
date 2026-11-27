@@ -886,7 +886,7 @@ class TestAuditRegressions(unittest.TestCase):
 
             # Result share contains valid deliverables for SiteA
             with open(os.path.join(res_site, "SiteA.obj"), "wb") as f:
-                f.write(b"v 0 0 0\n" * 200)
+                f.write(b"mtllib SiteA.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n" + b"v 0 0 0\n" * 200)
             with open(os.path.join(res_site, "SiteA.mtl"), "w", encoding="utf-8") as f:
                 f.write("newmtl m0\n")
             with open(os.path.join(res_site, "SiteA.png"), "wb") as f:

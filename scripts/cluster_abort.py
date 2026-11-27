@@ -27,7 +27,7 @@ _SOURCE_DIR = os.path.join(_REPO_ROOT, "source")
 if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
-from autometashape.cluster.abort import abort_remote_worker
+from autometashape.cluster.abort import _split_host_port, abort_remote_worker
 from autometashape.cluster.config import (
     DEFAULT_SERVER_CONFIG_FILENAME,
     DEFAULT_WORKER_CONFIG_FILENAME,
@@ -88,19 +88,25 @@ def main() -> int:
 
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
 
     # Resolve coordinator host & shared root (check CLI -> env -> server_config -> worker_config)
     server_cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
-    server_host = args.server.strip()
-    if not server_host:
-        if server_cfg.get("host") and server_cfg.get("host") != "0.0.0.0":
-            server_host = f"{server_cfg['host']}:{server_cfg.get('port', 5840)}"
-        else:
-            lan_ip = get_primary_lan_ip()
-            server_host = f"{lan_ip}:5840"
+    raw_server = args.server.strip()
+    if raw_server:
+        srv_ip, srv_port = _split_host_port(raw_server, 5840)
+        server_host = f"[{srv_ip}]:{srv_port}" if ":" in srv_ip else f"{srv_ip}:{srv_port}"
+    elif server_cfg.get("host") and server_cfg.get("host") != "0.0.0.0":
+        srv_ip, srv_port = _split_host_port(str(server_cfg["host"]), int(server_cfg.get("port", 5840) or 5840))
+        server_host = f"[{srv_ip}]:{srv_port}" if ":" in srv_ip else f"{srv_ip}:{srv_port}"
+    else:
+        lan_ip = get_primary_lan_ip()
+        server_host = f"{lan_ip}:5840"
 
     shared_root = args.root.strip()
     if not shared_root:
@@ -147,7 +153,7 @@ def main() -> int:
 
     if res.get("acknowledged"):
         print(f"[OK] Worker '{target_node}' acknowledged abort signal and terminated stuck process.")
-    else:
+    elif res.get("signal_dispatched", True):
         print(f"[NOTICE] Signal dispatched. Supervisor on '{target_node}' will handle abort on next watchdog cycle.")
 
     if res.get("reconnected"):
@@ -163,6 +169,15 @@ def main() -> int:
         print(f"[SUCCESS] Remote abort for worker '{target_node}' executed successfully!")
         print("=" * 72)
         return 0
+    elif not res.get("signal_dispatched", True) or (
+        res.get("error") and "failed to write" in str(res.get("error")).lower()
+    ):
+        print(
+            f"[ERROR] Failed to write abort signal for worker '{target_node}': {res.get('error') or 'unknown error'}",
+            file=sys.stderr,
+        )
+        print("=" * 72)
+        return 1
     else:
         print(f"[WARNING] Remote abort dispatched but acknowledgment timed out after {args.timeout:.1f}s.")
         print("=" * 72)

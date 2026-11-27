@@ -31,6 +31,16 @@ if _SCRIPTS_DIR not in sys.path:
 
 import cluster_utils as cu
 
+# Configure Windows console streams for international Unicode paths
+if sys.platform == "win32":
+    for _stream_name in ("stdout", "stderr", "stdin"):
+        _stream = getattr(sys, _stream_name, None)
+        if _stream and hasattr(_stream, "reconfigure"):
+            try:
+                _stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
 PID_FILE_PATH = os.path.join(tempfile.gettempdir(), "autometashape_worker.pid")
 
 
@@ -75,8 +85,14 @@ def reexec_supervisor(target_dir: str) -> None:
     clear_worker_pid()
     if sys.platform == "win32":
         # Avoid Windows _wexecv (which detaches from parent .bat/Task Scheduler and mangles trailing backslashes)
-        res = subprocess.run(cmd)
-        sys.exit(res.returncode)
+        child = subprocess.Popen(cmd)
+        while True:
+            try:
+                rc = child.wait()
+                break
+            except KeyboardInterrupt:
+                continue
+        sys.exit(rc)
     else:
         os.execv(py_exe, cmd)
 
@@ -271,7 +287,10 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
     if args.cpu_enable is not None:
         cpu_enable = args.cpu_enable
     elif "cpu_enable" in saved_config:
-        cpu_enable = int(saved_config["cpu_enable"])
+        try:
+            cpu_enable = 1 if int(saved_config["cpu_enable"]) else 0
+        except (ValueError, TypeError):
+            cpu_enable = 1
     else:
         cpu_enable = 1
 
@@ -338,6 +357,8 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                 "root": root_path,
                 "cpu_enable": cpu_enable,
             }
+            if source_root:
+                conf_data["source_root"] = source_root
             if explicit_gpu_mask is not None:
                 conf_data["gpu_mask"] = explicit_gpu_mask
                 conf_data["gpu_mask_explicit"] = True
@@ -438,8 +459,12 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
     # 6. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
     try:
         port_num = int(port)
-    except ValueError:
+        if not (1 <= port_num <= 65535):
+            raise ValueError(f"Port {port_num} out of valid TCP range 1..65535")
+    except (ValueError, TypeError):
+        print(f"  [WARNING] Invalid port '{port}'; falling back to 5840.", file=sys.stderr)
         port_num = 5840
+        port = "5840"
 
     print(f"\n[PRE-FLIGHT] Testing network connection to {host}:{port_num}...")
     if cu.test_tcp_connection(host, port_num, timeout=3.0):
@@ -527,8 +552,12 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                         "Forcibly terminating stuck child process...",
                         flush=True,
                     )
-                    # 1. Kill child metashape.exe process tree immediately
+                    # 1. Kill child metashape.exe process tree immediately and wait for handles to release
                     cu.kill_worker_process(proc)
+                    try:
+                        proc.wait(timeout=2.0)
+                    except Exception:
+                        pass
                     aborted_by_supervisor = True
 
                     # 2. Clean up scratch locks: remove any stale lock files in target_dir or scratch dirs

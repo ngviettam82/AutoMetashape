@@ -8,24 +8,35 @@ __pycache__/
 
 # C / C++ / CUDA Build artifacts
 build/
+dist/
 bin/
 *.obj
+*.mtl
 *.exe
 *.lib
 *.a
 *.pdb
 *.exp
 
-# Datasets and large transient models
+# Datasets, Metashape projects, and large transient deliverables
 data/
 outputs/
 recordings/
+*.psx
+*.files/
+*.glb
+*.fbx
 *.ply
+*.laz
+*.las
+*.e57
 *.spz
 *.tar
 *.zip
 *.tif
 *.tiff
+*.tfw
+*.prj
 *.JPG
 *.jpg
 *.PNG
@@ -51,14 +62,20 @@ env/
 *.swp
 *.swo
 
-# Testing & Coverage
+# Testing, Linting & Coverage
 .coverage
 htmlcov/
 .pytest_cache/
+.ruff_cache/
 
-# Local Node & Cluster Configuration
+# Local Node, Cluster Configuration & Runtime Signals
 worker_config.json
 server_config.json
+_autometashape_status.json
+.update_pending
+.abort_pending
+*.pid
+*.log
 
 # Agent workspace quarantine (Isaac Standard)
 .agents/*

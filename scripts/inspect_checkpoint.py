@@ -176,6 +176,15 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
 
 def main() -> int:
     """CLI entry point for checkpoint forensics."""
+    if sys.platform == "win32":
+        for _stream_name in ("stdout", "stderr"):
+            _stream = getattr(sys, _stream_name, None)
+            if _stream and hasattr(_stream, "reconfigure"):
+                try:
+                    _stream.reconfigure(encoding="utf-8", errors="replace")
+                except Exception:
+                    pass
+
     parser = build_arg_parser()
     args = parser.parse_args()
 
@@ -183,10 +192,16 @@ def main() -> int:
     if Metashape is None and not args.no_reexec:
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
-            cmd = [ms_exe, "-r", os.path.abspath(__file__)] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
         print("[ERROR] Agisoft Metashape Pro executable not found. Cannot inspect checkpoint.", file=sys.stderr)
+        return 1
+    if Metashape is None:
+        print("[FATAL ERROR] Agisoft Metashape Python module is unavailable in this runtime.", file=sys.stderr)
         return 1
 
     try:

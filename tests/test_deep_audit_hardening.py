@@ -417,7 +417,7 @@ class TestHiddenDispatchTicketsAndMonitor(unittest.TestCase):
             with open(os.path.join(proj_dir, "SiteT.mtl"), "w", encoding="utf-8") as f:
                 f.write("newmtl m0\nmap_Kd SiteT.png\n")
             with open(os.path.join(proj_dir, "SiteT.png"), "wb") as f:
-                f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 512)
+                f.write(b"\x89PNG\r\n\x1a\n" + b"\x00" * 1024)
             with open(os.path.join(proj_dir, "SiteT_orthomosaic.tif"), "wb") as f:
                 f.write(b"II*\x00" + b"\x00" * 1500)
             with open(os.path.join(proj_dir, "SiteT_orthomosaic.prj"), "w", encoding="utf-8") as f:
