@@ -47,22 +47,33 @@ def umeyama_sim3(
     src: np.ndarray,
     dst: np.ndarray,
     with_scale: bool = True,
+    weights: np.ndarray | None = None,
 ) -> tuple[float, np.ndarray, np.ndarray]:
-    """Compute exact least-squares Sim(3) transform ``dst ≈ scale * (R @ src) + t``."""
+    """Compute weighted least-squares Sim(3) transform ``dst ≈ scale * (R @ src) + t``."""
     if len(src) < 3 or len(dst) != len(src):
         raise ValueError(f"umeyama_sim3 requires >= 3 matching point pairs, got src={len(src)}, dst={len(dst)}")
-    mu_s = src.mean(axis=0)
-    mu_d = dst.mean(axis=0)
+    if weights is None:
+        w = np.full(len(src), 1.0 / len(src), dtype=np.float64)
+    else:
+        w_arr = np.asarray(weights, dtype=np.float64).reshape(-1)
+        if len(w_arr) != len(src):
+            raise ValueError(f"umeyama_sim3 weights length mismatch: {len(w_arr)} != {len(src)}")
+        w_arr = np.where(np.isfinite(w_arr) & (w_arr > 0.0), w_arr, 0.0)
+        w_sum = float(np.sum(w_arr))
+        w = (w_arr / w_sum) if w_sum > 0.0 else np.full(len(src), 1.0 / len(src), dtype=np.float64)
+
+    mu_s = np.sum(src * w[:, None], axis=0)
+    mu_d = np.sum(dst * w[:, None], axis=0)
     xc = src - mu_s
     yc = dst - mu_d
-    cov = (yc.T @ xc) / len(src)
+    cov = yc.T @ (xc * w[:, None])
     u_mat, singular_vals, vt_mat = np.linalg.svd(cov)
     sign_mat = np.eye(3, dtype=np.float64)
     if np.linalg.det(u_mat) * np.linalg.det(vt_mat) < 0.0:
         sign_mat[2, 2] = -1.0
     rot = u_mat @ sign_mat @ vt_mat
     if with_scale:
-        var_s = float(np.sum(xc * xc) / len(src))
+        var_s = float(np.sum((xc * xc) * w[:, None]))
         if var_s <= 0.0:
             raise ValueError("Degenerate zero-variance source point set in umeyama_sim3")
         scale = float(np.sum(singular_vals * np.diag(sign_mat)) / var_s)
@@ -138,15 +149,28 @@ def run_icp(
         return 0
 
     src_pts = np.asarray(src_full.points)
-    # Use robust [1, 99] percentiles for initial ROI crop so stray Stage-0 outliers cannot distort crop/pivot
+    tgt_pts = np.asarray(tgt_full.points)
+    # Use robust [1, 99] percentiles for symmetric ROI crop so stray Stage-0 outliers cannot distort crop/pivot
     s_min_raw, s_max_raw = np.percentile(src_pts, [1.0, 99.0], axis=0)
+    t_min_raw, t_max_raw = np.percentile(tgt_pts, [1.0, 99.0], axis=0)
     # Use a wide +/-45 m Z crop initially so non-DJI flights lacking RelativeAltitude XMP still overlap in ROI
     eff_z_margin = max(crop_z_margin, 45.0)
-    crop_min = np.array([s_min_raw[0] - crop_xy_margin, s_min_raw[1] - crop_xy_margin, s_min_raw[2] - eff_z_margin])
-    crop_max = np.array([s_max_raw[0] + crop_xy_margin, s_max_raw[1] + crop_xy_margin, s_max_raw[2] + eff_z_margin])
-    bbox = o3d.geometry.AxisAlignedBoundingBox(crop_min, crop_max)
-    tgt_crop = tgt_full.crop(bbox)
-    print(f"[ICP] Cropped Target around ROI: {len(tgt_crop.points):,} pts", flush=True)
+    tgt_bbox = o3d.geometry.AxisAlignedBoundingBox(
+        np.array([s_min_raw[0] - crop_xy_margin, s_min_raw[1] - crop_xy_margin, s_min_raw[2] - eff_z_margin]),
+        np.array([s_max_raw[0] + crop_xy_margin, s_max_raw[1] + crop_xy_margin, s_max_raw[2] + eff_z_margin]),
+    )
+    tgt_crop = tgt_full.crop(tgt_bbox)
+    src_bbox = o3d.geometry.AxisAlignedBoundingBox(
+        np.array([t_min_raw[0] - crop_xy_margin, t_min_raw[1] - crop_xy_margin, t_min_raw[2] - eff_z_margin]),
+        np.array([t_max_raw[0] + crop_xy_margin, t_max_raw[1] + crop_xy_margin, t_max_raw[2] + eff_z_margin]),
+    )
+    src_crop = src_full.crop(src_bbox)
+    if len(src_crop.points) < 200:
+        src_crop = src_full
+    print(
+        f"[ICP] Symmetric ROI crop: Target={len(tgt_crop.points):,} pts, Source={len(src_crop.points):,} pts",
+        flush=True,
+    )
 
     if len(tgt_crop.points) < 200:
         _write_result(
@@ -168,7 +192,7 @@ def run_icp(
         )
         return 0
 
-    src_ds0 = src_full.voxel_down_sample(0.05)
+    src_ds0 = src_crop.voxel_down_sample(0.05)
     tgt_ds0 = tgt_crop.voxel_down_sample(0.05)
     src_clean, _ = src_ds0.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.0)
     tgt_clean, _ = tgt_ds0.remove_statistical_outlier(nb_neighbors=16, std_ratio=2.0)
@@ -195,23 +219,33 @@ def run_icp(
         )
         return 0
 
-    # Compute yaw pivot and XY mask bounds strictly from outlier-cleaned cloud
+    # Compute overlap-centroid yaw pivot strictly from mutual outlier-cleaned bounds
     src_clean_pts = np.asarray(src_clean.points)
+    tgt_clean_pts = np.asarray(tgt_clean.points)
     s_min = src_clean_pts.min(axis=0)
     s_max = src_clean_pts.max(axis=0)
+    t_min = tgt_clean_pts.min(axis=0)
+    t_max = tgt_clean_pts.max(axis=0)
     s_ctr = 0.5 * (s_min + s_max)
+    ov_min = np.maximum(s_min, t_min)
+    ov_max = np.minimum(s_max, t_max)
+    has_ov_box = bool(np.all(ov_max > ov_min))
+    yaw_pivot = 0.5 * (ov_min + ov_max) if has_ov_box else s_ctr
+    ov_span = (ov_max - ov_min) if has_ov_box else (s_max - s_min)
+    ov_diag_xy = float(math.hypot(max(0.0, float(ov_span[0])), max(0.0, float(ov_span[1]))))
+    grid_scale = max(0.25, ov_diag_xy / 6.0) if 0.0 < ov_diag_xy < 6.0 else 1.0
 
     # Stage 1: Fast vectorized multi-start coarse search around normalized GPS prior
-    src_c = np.asarray(src_clean.voxel_down_sample(0.35).points)
-    tgt_c = np.asarray(tgt_clean.voxel_down_sample(0.25).points)
+    src_c = np.asarray(src_clean.voxel_down_sample(max(0.10, 0.35 * grid_scale)).points)
+    tgt_c = np.asarray(tgt_clean.voxel_down_sample(max(0.08, 0.25 * grid_scale)).points)
     if len(src_c) < 30 or len(tgt_c) < 30:
         src_c = src_clean_pts
-        tgt_c = np.asarray(tgt_clean.points)
+        tgt_c = tgt_clean_pts
 
-    src_rel = src_c - s_ctr
+    src_rel = src_c - yaw_pivot
     tree = cKDTree(tgt_c)
 
-    # Initialize best_score=0.0 so zero-match grids preserve the (0,0,0,0) GPS prior instead of teleporting to a corner
+    # Initialize best_score=0.0 so zero-match grids preserve the (0,0,0,0) GPS prior instead of teleporting
     best_score = 0.0
     best_params = (0.0, 0.0, 0.0, 0.0)
     print(
@@ -219,72 +253,79 @@ def run_icp(
         flush=True,
     )
 
-    yaw_grid = np.arange(-search_yaw_deg, search_yaw_deg + 0.1, 5.0)
-    xy_grid = np.arange(-search_xy_m, search_xy_m + 0.1, 2.0)
+    step_xy_1a = 2.0 * grid_scale
+    step_z_1a = 1.5 * grid_scale
+    cutoff_1a = 1.75 * grid_scale
+    half_1b = 1.5 * grid_scale
+    cutoff_1b = 0.55 * grid_scale
 
-    # Auto-detect large vertical barometer drift (> 4m) when XMP RelativeAltitude was unavailable.
-    # Always preserve the zero-centered band alongside any shifted band so roof/facade islands
-    # (whose median Z legitimately sits above ground-dominated target clouds) never exclude dZ=0.
-    xy_mask = (
+    yaw_grid = np.arange(-search_yaw_deg, search_yaw_deg + 0.1, 5.0)
+    xy_grid = np.arange(-search_xy_m, search_xy_m + 1e-4, step_xy_1a)
+
+    # Auto-detect large vertical barometer drift (> 4m) strictly inside the mutual XY overlap mask
+    s_xy_mask = (
+        (src_c[:, 0] >= t_min[0] - 5.0)
+        & (src_c[:, 0] <= t_max[0] + 5.0)
+        & (src_c[:, 1] >= t_min[1] - 5.0)
+        & (src_c[:, 1] <= t_max[1] + 5.0)
+    )
+    t_xy_mask = (
         (tgt_c[:, 0] >= s_min[0] - 5.0)
         & (tgt_c[:, 0] <= s_max[0] + 5.0)
         & (tgt_c[:, 1] >= s_min[1] - 5.0)
         & (tgt_c[:, 1] <= s_max[1] + 5.0)
     )
     dz_center = 0.0
-    if int(np.sum(xy_mask)) >= 50:
-        dz_est = float(np.median(tgt_c[xy_mask, 2]) - np.median(src_c[:, 2]))
+    if int(np.sum(t_xy_mask)) >= 50 and int(np.sum(s_xy_mask)) >= 50:
+        dz_est = float(np.median(tgt_c[t_xy_mask, 2]) - np.median(src_c[s_xy_mask, 2]))
         if 4.0 < abs(dz_est) <= 40.0:
-            dz_center = round(dz_est / 1.5) * 1.5
+            dz_center = round(dz_est / step_z_1a) * step_z_1a
             print(
-                f"[ICP] Detected vertical Z median offset ({dz_est:+.1f}m); searching both 0.0m and {dz_center:+.1f}m Z bands.",
+                f"[ICP] Detected vertical Z median offset ({dz_est:+.1f}m); "
+                f"searching both 0.0m and {dz_center:+.1f}m Z bands.",
                 flush=True,
             )
-    z_zero_band = np.arange(-search_z_m, search_z_m + 0.1, 1.5)
+    z_zero_band = np.arange(-search_z_m, search_z_m + 1e-4, step_z_1a)
     if dz_center != 0.0:
-        z_shift_band = np.arange(dz_center - search_z_m, dz_center + search_z_m + 0.1, 1.5)
+        z_shift_band = np.arange(dz_center - search_z_m, dz_center + search_z_m + 1e-4, step_z_1a)
         z_grid = np.unique(np.round(np.concatenate([z_zero_band, z_shift_band]), 4))
     else:
         z_grid = z_zero_band
 
-    # Deterministically cap Stage-1a query points to <= 3,500 (5-20x faster with identical peak precision)
+    # Deterministically cap Stage-1a query points to <= 3,500
     if len(src_c) > 3500:
         stride = max(1, len(src_c) // 3500)
         src_q_rel = src_rel[::stride]
     else:
         src_q_rel = src_rel
 
-    # Avoid per-call OS thread-pool spawn overhead across thousands of tiny coarse queries (50x+ faster on Windows)
-    coarse_workers = -1 if len(src_q_rel) >= 25000 else 1
-
     for dyaw in yaw_grid:
         rz_mat = _rot_z(float(dyaw))
-        rot_pts = (src_q_rel @ rz_mat.T) + s_ctr
+        rot_pts = (src_q_rel @ rz_mat.T) + yaw_pivot
         for dx in xy_grid:
             for dy in xy_grid:
                 for dz in z_grid:
                     shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=0.50, workers=coarse_workers)
-                    inl = dists < 0.50
-                    score = float(np.sum(1.0 - (dists[inl] / 0.50) ** 2))
+                    dists, _ = tree.query(shifted, distance_upper_bound=cutoff_1a, workers=1)
+                    inl = dists < cutoff_1a
+                    score = float(np.sum(1.0 - (dists[inl] / cutoff_1a) ** 2))
                     if score > best_score:
                         best_score = score
                         best_params = (float(dx), float(dy), float(dz), float(dyaw))
 
-    # Pass 1b: Refine around best coarse peak (0.5m XYZ, 1 deg yaw)
-    # CRITICAL: Reset best_score_1b=0.0 because tighter 0.35m kernel values are <= 0.50m scores, while zero-match preserves Pass 1a!
+    # Pass 1b: Refine around best coarse peak with half-diagonal-safe cutoff
     bx, by, bz, byaw = best_params
     best_score_1b = 0.0
     for dyaw in np.linspace(byaw - 3.0, byaw + 3.0, 7):
         rz_mat = _rot_z(float(dyaw))
-        rot_pts = (src_q_rel @ rz_mat.T) + s_ctr
-        for dx in np.linspace(bx - 1.5, bx + 1.5, 7):
-            for dy in np.linspace(by - 1.5, by + 1.5, 7):
-                for dz in np.linspace(bz - 1.5, bz + 1.5, 7):
+        rot_pts = (src_q_rel @ rz_mat.T) + yaw_pivot
+        for dx in np.linspace(bx - half_1b, bx + half_1b, 7):
+            for dy in np.linspace(by - half_1b, by + half_1b, 7):
+                for dz in np.linspace(bz - half_1b, bz + half_1b, 7):
                     shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=0.35, workers=coarse_workers)
-                    inl = dists < 0.35
-                    score = float(np.sum(1.0 - (dists[inl] / 0.35) ** 2))
+                    dists, _ = tree.query(shifted, distance_upper_bound=cutoff_1b, workers=1)
+                    inl = dists < cutoff_1b
+                    score = float(np.sum(1.0 - (dists[inl] / cutoff_1b) ** 2))
                     if score > best_score_1b:
                         best_score_1b = score
                         best_params = (float(dx), float(dy), float(dz), float(dyaw))
@@ -295,7 +336,7 @@ def run_icp(
     rz_mat = _rot_z(byaw)
     t_curr = np.eye(4, dtype=np.float64)
     t_curr[:3, :3] = rz_mat
-    t_curr[:3, 3] = s_ctr - (rz_mat @ s_ctr) + np.array([bx, by, bz], dtype=np.float64)
+    t_curr[:3, 3] = yaw_pivot - (rz_mat @ yaw_pivot) + np.array([bx, by, bz], dtype=np.float64)
     print(
         f"[ICP] Stage 1 Coarse peak: dXY=({bx:+.2f}, {by:+.2f})m, dZ={bz:+.2f}m, "
         f"dYaw={byaw:+.1f}deg (score={best_score:.1f}/{len(src_q_rel)}, {time.time() - t0:.1f}s)",
@@ -353,15 +394,25 @@ def run_icp(
             tp = np.asarray(t_ds.points)
             sp_tr = (sp @ t_curr[:3, :3].T) + t_curr[:3, 3]
             tt = cKDTree(tp)
-            dd, ii = tt.query(sp_tr, distance_upper_bound=max_dist * 0.7, workers=-1)
-            valid = dd < (max_dist * 0.7)
+            cutoff = max_dist * 0.7
+            dd, ii = tt.query(sp_tr, distance_upper_bound=cutoff, workers=-1)
+            valid = dd < cutoff
             if int(np.sum(valid)) >= 500:
-                s_new, r_new, tr_new = umeyama_sim3(sp[valid], tp[ii[valid]], with_scale=True)
+                sp_v = sp[valid]
+                tp_v = tp[ii[valid]]
+                d_v = dd[valid]
+                tukey_w = (1.0 - (d_v / cutoff) ** 2) ** 2
+                s_new, r_new, tr_new = umeyama_sim3(sp_v, tp_v, with_scale=True, weights=tukey_w)
                 if 0.85 <= s_new <= 1.15 and r_new[2, 2] > 0.95:
-                    scale_curr = s_new
-                    t_curr = np.eye(4, dtype=np.float64)
-                    t_curr[:3, :3] = scale_curr * r_new
-                    t_curr[:3, 3] = tr_new
+                    prev_rmse = float(np.sqrt(np.mean(d_v * d_v)))
+                    cand_pts = (sp_v @ (s_new * r_new).T) + tr_new
+                    cand_d = np.linalg.norm(cand_pts - tp_v, axis=1)
+                    cand_rmse = float(np.sqrt(np.mean(cand_d * cand_d)))
+                    if cand_rmse <= 1.02 * prev_rmse:
+                        scale_curr = s_new
+                        t_curr = np.eye(4, dtype=np.float64)
+                        t_curr[:3, :3] = scale_curr * r_new
+                        t_curr[:3, 3] = tr_new
 
         print(
             f"  [ICP voxel={voxel:.2f}m] fitness={reg.fitness:.3f} | "
@@ -409,13 +460,20 @@ def run_icp(
                 t_cand[:3, :3] = scale_curr * reg_col.transformation[:3, :3]
                 t_cand[:3, 3] = reg_col.transformation[:3, 3]
 
-                d_cur, _ = tt_f.query(
+                d_ov_ref, _ = tt_f.query(
                     (sp_f @ t_curr[:3, :3].T) + t_curr[:3, 3],
+                    distance_upper_bound=0.50,
+                    workers=-1,
+                )
+                in_ov = d_ov_ref < 0.50
+                sp_eval = sp_f[in_ov] if int(np.sum(in_ov)) >= 100 else sp_f
+                d_cur, _ = tt_f.query(
+                    (sp_eval @ t_curr[:3, :3].T) + t_curr[:3, 3],
                     distance_upper_bound=0.15,
                     workers=-1,
                 )
                 d_cnd, _ = tt_f.query(
-                    (sp_f @ t_cand[:3, :3].T) + t_cand[:3, 3],
+                    (sp_eval @ t_cand[:3, :3].T) + t_cand[:3, 3],
                     distance_upper_bound=0.15,
                     workers=-1,
                 )
@@ -425,12 +483,19 @@ def run_icp(
                 fit_cur, fit_cnd = float(np.mean(v_cur)), float(np.mean(v_cnd))
                 r_cnd = t_cand[:3, :3] / scale_curr
                 tilt_cnd = float(np.degrees(np.arccos(np.clip(r_cnd[2, 2], -1.0, 1.0))))
+                shift_m = float(np.linalg.norm(t_cand[:3, 3] - t_curr[:3, 3]))
                 print(
                     f"  [Colored ICP Check] P2L: fit={fit_cur * 100:.1f}% rmse={rmse_cur * 100:.2f}cm -> "
-                    f"Colored: fit={fit_cnd * 100:.1f}% rmse={rmse_cnd * 100:.2f}cm tilt={tilt_cnd:.2f}deg",
+                    f"Colored: fit={fit_cnd * 100:.1f}% rmse={rmse_cnd * 100:.2f}cm "
+                    f"tilt={tilt_cnd:.2f}deg shift={shift_m * 100:.1f}cm",
                     flush=True,
                 )
-                if fit_cnd >= fit_cur - 0.005 and rmse_cnd <= rmse_cur + 0.002 and tilt_cnd <= 5.0:
+                if (
+                    fit_cnd >= fit_cur - 0.005
+                    and rmse_cnd <= rmse_cur + 0.002
+                    and tilt_cnd <= 5.0
+                    and shift_m <= 0.12
+                ):
                     t_curr = t_cand
                     colored_accepted = True
                     print("  [Colored ICP] ACCEPTED (geometric fit preserved + tangent color locked).", flush=True)
@@ -448,18 +513,24 @@ def run_icp(
     rmse_15 = float(np.sqrt(np.mean(dd[valid] ** 2))) if np.any(valid) else 999.0
     med_15 = float(np.median(dd[valid])) if np.any(valid) else 999.0
 
-    # Symmetric overlap-zone fitness: handles legitimate partial-overlap wings (adjacent blocks/facades)
-    tgt_xy_min = tp_f[:, :2].min(axis=0)
-    tgt_xy_max = tp_f[:, :2].max(axis=0)
-    in_tgt_xy = (
-        (sp_tr[:, 0] >= tgt_xy_min[0] - 1.0)
-        & (sp_tr[:, 0] <= tgt_xy_max[0] + 1.0)
-        & (sp_tr[:, 1] >= tgt_xy_min[1] - 1.0)
-        & (sp_tr[:, 1] <= tgt_xy_max[1] + 1.0)
-    )
-    overlap_count = int(np.sum(in_tgt_xy))
+    # Symmetric 3D overlap-zone fitness: handles vertical towers, facades, and L-shaped partial wings
+    d_ov, ov_idx = tt_f.query(sp_tr, distance_upper_bound=1.0, workers=-1)
+    in_ov_3d = d_ov < 1.0
+    overlap_count = int(np.sum(in_ov_3d))
     overlap_fraction = float(overlap_count) / max(1, len(sp_tr))
-    overlap_fitness_15cm = float(np.mean(valid[in_tgt_xy])) if overlap_count >= 100 else 0.0
+    overlap_fitness_15cm = float(np.mean(valid[in_ov_3d])) if overlap_count >= 100 else 0.0
+
+    normal_min_eig_ratio = 0.0
+    if t_005_cached is not None and t_005_cached.has_normals() and np.any(valid & in_ov_3d):
+        tgt_normals = np.asarray(t_005_cached.normals)
+        ov_n_idx = np.unique(ov_idx[valid & in_ov_3d])
+        if len(ov_n_idx) >= 30:
+            ns = tgt_normals[ov_n_idx]
+            cov_n = (ns.T @ ns) / float(len(ns))
+            eigvals = np.linalg.eigvalsh(cov_n)
+            eig_max = float(eigvals[-1]) if len(eigvals) else 0.0
+            if eig_max > 1e-12:
+                normal_min_eig_ratio = float(max(0.0, eigvals[0]) / eig_max)
 
     r_fin = t_curr[:3, :3] / scale_curr
     rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(r_fin) - 1.0) * 0.5, -1.0, 1.0))))
@@ -491,6 +562,7 @@ def run_icp(
             "inlier_count_15cm": inlier_count_15cm,
             "rmse_15cm_m": rmse_15,
             "median_15cm_m": med_15,
+            "normal_min_eig_ratio": round(normal_min_eig_ratio, 6),
             "colored_accepted": colored_accepted,
             "elapsed_s": round(elapsed_s, 2),
         },

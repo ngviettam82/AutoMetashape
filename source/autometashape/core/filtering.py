@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import math
 import time
+from collections import defaultdict, deque
+
+from autometashape.core.crs_utils import is_linear_crs
 
 try:
     import Metashape
@@ -22,11 +25,21 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
     t_qual = time.time()
     chunk.analyzeImages()
 
+    regular_type = (
+        getattr(getattr(getattr(Metashape, "Camera", None), "Type", None), "Regular", None)
+        if Metashape is not None
+        else None
+    )
+
     disabled_count = 0
     scored_enabled = []
+    regular_enabled_count = 0
     for cam in chunk.cameras:
         if not getattr(cam, "enabled", True):
             continue
+        if regular_type is not None and getattr(cam, "type", regular_type) != regular_type:
+            continue
+        regular_enabled_count += 1
         if "Image/Quality" in cam.meta:
             try:
                 qual_val = float(cam.meta["Image/Quality"])
@@ -35,11 +48,23 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
             except (ValueError, TypeError):
                 pass
 
-    below = [(q, c) for q, c in scored_enabled if q < min_quality]
-    total_enabled_before = sum(1 for c in chunk.cameras if getattr(c, "enabled", True))
-    # Never disable cameras down to < 2 remaining (protects hazy/low-contrast scenes from total collapse)
-    max_disable = max(0, total_enabled_before - 2)
-    if len(below) > max_disable and total_enabled_before >= 2:
+    eff_min_quality = float(min_quality)
+    below = [(q, c) for q, c in scored_enabled if q < eff_min_quality]
+    if len(scored_enabled) >= 6 and (len(below) / len(scored_enabled)) > 0.80:
+        sorted_q = sorted(q for q, _c in scored_enabled)
+        med_q = sorted_q[len(sorted_q) // 2]
+        eff_min_quality = min(eff_min_quality, max(0.15, med_q * 0.65))
+        print(
+            f"  [Quality Filter] Uniformly low-contrast/hazy dataset detected "
+            f"({len(below)}/{len(scored_enabled)} < {min_quality:.2f}); "
+            f"adapting quality cutoff to {eff_min_quality:.2f}.",
+            flush=True,
+        )
+        below = [(q, c) for q, c in scored_enabled if q < eff_min_quality]
+
+    # Never disable cameras down to < 2 remaining (protects extreme low-contrast scenes from total collapse)
+    max_disable = max(0, regular_enabled_count - 2)
+    if len(below) > max_disable and regular_enabled_count >= 2:
         below.sort(key=lambda item: item[0])
         to_disable = [c for _q, c in below[:max_disable]]
         print(
@@ -57,12 +82,14 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
     active_count = sum(1 for c in chunk.cameras if c.enabled)
     t_elapsed = time.time() - t_qual
     print(
-        f"  [Quality Filter] Analyzed in {t_elapsed:.1f}s: {active_count}/{len(chunk.cameras)} sharp images passed (Quality >= {min_quality:.2f}).",
+        f"  [Quality Filter] Analyzed in {t_elapsed:.1f}s: "
+        f"{active_count}/{len(chunk.cameras)} sharp images passed (Quality >= {eff_min_quality:.2f}).",
         flush=True,
     )
     if disabled_count > 0:
         print(
-            f"  [Quality Filter] Automatically disabled {disabled_count} blurry/defocused images (< {min_quality:.2f}) to protect alignment accuracy.",
+            f"  [Quality Filter] Automatically disabled {disabled_count} blurry/defocused images "
+            f"(< {eff_min_quality:.2f}) to protect alignment accuracy.",
             flush=True,
         )
     return disabled_count
@@ -163,8 +190,9 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         flush=True,
     )
     target_center, inlier_cams = solve_ray_convergence_irls(aligned_cams, iterations=3, scale=scale)
+    ray_converged = target_center is not None
 
-    if target_center is not None:
+    if ray_converged:
         inlier_count = len(inlier_cams)
         outlier_count = len(aligned_cams) - inlier_count
         print(
@@ -194,18 +222,49 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     rot_t = rot.t()
     target_local = rot_t * target_center
 
+    inward_dots: list[float] = []
+    cam_all = [c.center for c in aligned_cams if getattr(c, "center", None) is not None]
+    if cam_all:
+        cam_mean = Metashape.Vector(
+            [
+                sum(p.x for p in cam_all) / len(cam_all),
+                sum(p.y for p in cam_all) / len(cam_all),
+                sum(p.z for p in cam_all) / len(cam_all),
+            ]
+        )
+        for c in aligned_cams:
+            try:
+                to_mean = cam_mean - c.center
+                norm_tm = math.sqrt(to_mean.x**2 + to_mean.y**2 + to_mean.z**2)
+                if norm_tm <= 1e-6:
+                    continue
+                ray_dir = c.transform.mulp(Metashape.Vector([0.0, 0.0, 1.0])) - c.center
+                norm_r = math.sqrt(ray_dir.x**2 + ray_dir.y**2 + ray_dir.z**2)
+                if norm_r <= 1e-6:
+                    continue
+                dot_val = (to_mean.x * ray_dir.x + to_mean.y * ray_dir.y + to_mean.z * ray_dir.z) / (norm_tm * norm_r)
+                if math.isfinite(dot_val):
+                    inward_dots.append(dot_val)
+            except Exception:
+                pass
+    dot_inward = sorted(inward_dots)[len(inward_dots) // 2] if inward_dots else 1.0
+    outward_or_parallel = (not ray_converged) or (dot_inward <= 0.25)
+
     inlier_centers = [c_pos for c_pos, _ in inlier_cams]
-    dists_xy = []
-    for c_pos in inlier_centers:
-        cl = rot_t * c_pos
-        dists_xy.append(math.hypot(cl.x - target_local.x, cl.y - target_local.y))
-    dists_xy.sort()
-    if dists_xy:
-        idx_95 = min(int(len(dists_xy) * 0.95), len(dists_xy) - 1)
-        dist_95 = dists_xy[idx_95]
-        max_radius = dist_95 * 1.25 if dist_95 > 0 else float("inf")
-    else:
+    if outward_or_parallel:
         max_radius = float("inf")
+    else:
+        dists_xy = []
+        for c_pos in inlier_centers:
+            cl = rot_t * c_pos
+            dists_xy.append(math.hypot(cl.x - target_local.x, cl.y - target_local.y))
+        dists_xy.sort()
+        if dists_xy:
+            idx_95 = min(int(len(dists_xy) * 0.95), len(dists_xy) - 1)
+            dist_95 = dists_xy[idx_95]
+            max_radius = dist_95 * 1.25 if dist_95 > 0 else float("inf")
+        else:
+            max_radius = float("inf")
 
     pts = chunk.tie_points.points if chunk.tie_points else []
     if not pts:
@@ -243,8 +302,17 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     local_x.sort()
     local_y.sort()
 
-    min_x, max_x = robust_bounds(local_x, k=3.0)
-    min_y, max_y = robust_bounds(local_y, k=3.0)
+    k_rb = 3.5 if outward_or_parallel else 3.0
+    min_x, max_x = robust_bounds(local_x, k=k_rb)
+    min_y, max_y = robust_bounds(local_y, k=k_rb)
+    if outward_or_parallel and cam_all:
+        cam_local = [rot_t * p for p in cam_all]
+        cxs = [p.x for p in cam_local]
+        cys = [p.y for p in cam_local]
+        min_x = min(min_x, min(cxs))
+        max_x = max(max_x, max(cxs))
+        min_y = min(min_y, min(cys))
+        max_y = max(max_y, max(cys))
 
     span_x = (max_x - min_x) * (1.0 + 2.0 * padding)
     span_y = (max_y - min_y) * (1.0 + 2.0 * padding)
@@ -291,12 +359,11 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
 
     raw_scale = getattr(getattr(chunk, "transform", None), "scale", None)
     scale = float(raw_scale) if (isinstance(raw_scale, (int, float)) and raw_scale > 0.0) else 1.0
-    crs_wkt = str(getattr(getattr(chunk, "crs", None), "wkt", "") or "").upper()
-    is_local_cs = "LOCAL_CS" in crs_wkt
+    skip_null_island = not is_linear_crs(getattr(chunk, "crs", None))
 
     valid_cams = []
     for c in aligned_cams:
-        if not is_local_cs and c.reference and getattr(c.reference, "enabled", True) and c.reference.location:
+        if skip_null_island and c.reference and getattr(c.reference, "enabled", True) and c.reference.location:
             loc = c.reference.location
             if abs(loc.x) < 1e-4 and abs(loc.y) < 1e-4:
                 continue
@@ -313,28 +380,56 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     ys = [p.y for p in cam_locs]
     cam_zs = [p.z for p in cam_locs]
 
-    sorted_xs = sorted(xs)
-    sorted_ys = sorted(ys)
-    med_x = sorted_xs[len(sorted_xs) // 2]
-    med_y = sorted_ys[len(sorted_ys) // 2]
-    dists = [math.hypot(x - med_x, y - med_y) for x, y in zip(xs, ys)]
-    sorted_dists = sorted(dists)
-    med_d = sorted_dists[len(sorted_dists) // 2]
-    devs_d = sorted([abs(d - med_d) for d in dists])
-    mad_d = devs_d[len(devs_d) // 2]
-    sigma_d = 1.4826 * mad_d
-
-    outlier_floor_units = 1000.0 / scale
-    sigma_floor_units = 1e-3 / scale
-    inlier_xs, inlier_ys, inlier_zs = [], [], []
-    for x, y, z, d in zip(xs, ys, cam_zs, dists):
-        if sigma_d > sigma_floor_units and (d - med_d) > max(outlier_floor_units, 5.0 * sigma_d):
-            continue
-        inlier_xs.append(x)
-        inlier_ys.append(y)
-        inlier_zs.append(z)
-
-    if len(inlier_xs) < 2:
+    # Connected-component nearest-neighbor pruning so >1 km linear corridors & multi-building campuses survive
+    n_cams = len(cam_locs)
+    if n_cams >= 3:
+        nn_dists: list[float] = []
+        for i in range(n_cams):
+            best_d2 = float("inf")
+            for j in range(n_cams):
+                if i == j:
+                    continue
+                d2 = (xs[i] - xs[j]) ** 2 + (ys[i] - ys[j]) ** 2
+                if d2 < best_d2:
+                    best_d2 = d2
+            nn_dists.append(math.sqrt(best_d2))
+        med_nn = sorted(nn_dists)[len(nn_dists) // 2]
+        conn_thresh = max(1000.0 / scale, 10.0 * med_nn)
+        step_g = max(1e-3, conn_thresh)
+        r2_g = conn_thresh * conn_thresh
+        buckets: dict[tuple[int, int], list[int]] = defaultdict(list)
+        for i in range(n_cams):
+            buckets[(int(math.floor(xs[i] / step_g)), int(math.floor(ys[i] / step_g)))].append(i)
+        visited: set[int] = set()
+        comps: list[list[int]] = []
+        for start in range(n_cams):
+            if start in visited:
+                continue
+            comp: list[int] = []
+            q = deque([start])
+            visited.add(start)
+            while q:
+                u = q.popleft()
+                comp.append(u)
+                gx = int(math.floor(xs[u] / step_g))
+                gy = int(math.floor(ys[u] / step_g))
+                for dgx in (-1, 0, 1):
+                    for dgy in (-1, 0, 1):
+                        for v in buckets.get((gx + dgx, gy + dgy), ()):
+                            if v in visited:
+                                continue
+                            if ((xs[u] - xs[v]) ** 2 + (ys[u] - ys[v]) ** 2) <= r2_g:
+                                visited.add(v)
+                                q.append(v)
+            comps.append(comp)
+        min_keep = max(2, int(0.15 * n_cams))
+        keep_idxs = [i for c in comps if len(c) >= min_keep for i in c]
+        if len(keep_idxs) < 2:
+            keep_idxs = max(comps, key=len)
+        inlier_xs = [xs[i] for i in keep_idxs]
+        inlier_ys = [ys[i] for i in keep_idxs]
+        inlier_zs = [cam_zs[i] for i in keep_idxs]
+    else:
         inlier_xs, inlier_ys, inlier_zs = xs, ys, cam_zs
 
     best_area = float("inf")
@@ -366,17 +461,25 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         if chunk.tie_points
         else []
     )
+    pt_locals: list = []
     if pts:
-        coords = [Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w]) for p in pts]
-        pt_zs = sorted([(rot_t * v).z for v in coords])
+        pt_locals = [
+            rot_t * Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w]) for p in pts
+        ]
+        pt_zs = sorted([v.z for v in pt_locals])
         med_pz = pt_zs[len(pt_zs) // 2]
         devs_pz = sorted([abs(z - med_pz) for z in pt_zs])
         mad_pz = devs_pz[len(devs_pz) // 2]
         sigma_pz = 1.4826 * mad_pz
-        filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] if sigma_pz > 1e-3 else pt_zs
+        p005 = pt_zs[max(0, int(0.005 * (len(pt_zs) - 1)))]
+        p995 = pt_zs[min(len(pt_zs) - 1, int(0.995 * (len(pt_zs) - 1)))]
+        z_floor = min(med_pz - max(4.0 * sigma_pz, 5.0 / scale), p005)
+        z_ceil = max(med_pz + max(4.0 * sigma_pz, 5.0 / scale), p995)
+        filtered_pt_zs = [z for z in pt_zs if z_floor <= z <= z_ceil] if sigma_pz > (1e-3 / scale) else pt_zs
         all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)
-        med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
-        flight_height = abs(med_cam_z - med_pz)
+        zs_sorted = sorted(inlier_zs)
+        cam_z_75 = zs_sorted[min(len(zs_sorted) - 1, int(0.75 * (len(zs_sorted) - 1)))]
+        flight_height = abs(cam_z_75 - med_pz)
         min_z = min(all_zs)
         max_z = max(all_zs)
         span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))
@@ -398,8 +501,9 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
             orig_z_min = orig_mid_z - 0.5 * orig_span_z
             orig_z_max = orig_mid_z + 0.5 * orig_span_z
             all_zs = inlier_zs + [orig_z_min, orig_z_max]
-            med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]
-            flight_height = max(0.0, abs(med_cam_z - orig_mid_z))
+            zs_sorted = sorted(inlier_zs)
+            cam_z_75 = zs_sorted[min(len(zs_sorted) - 1, int(0.75 * (len(zs_sorted) - 1)))]
+            flight_height = max(0.0, abs(cam_z_75 - orig_mid_z))
             min_z = min(all_zs)
             max_z = max(all_zs)
             span_z = max(orig_span_z, (max_z - min_z) * (1.0 + 2.0 * padding))
@@ -414,22 +518,36 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
             span_z = (
                 max(float(size_z_val), fallback_span)
                 if isinstance(size_z_val, (int, float))
-                else max(10.0, fallback_span)
+                else max(10.0 / scale, fallback_span)
             )
             mid_z = (min_z + max_z) * 0.5
 
-    fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0
+    fov_margin = flight_height * 0.35 if flight_height > (1e-3 / scale) else 0.0
     margin_x = max(span_x * padding, fov_margin)
     margin_y = max(span_y * padding, fov_margin)
     min_side = 1.0 / scale
-    side_x = max(span_x + 2.0 * margin_x, min_side)
-    side_y = max(span_y + 2.0 * margin_y, min_side)
-
-    mid_rx = (min_rx + max_rx) * 0.5
-    mid_ry = (min_ry + max_ry) * 0.5
-
     cos_t = math.cos(best_theta)
     sin_t = math.sin(best_theta)
+
+    exp_min_rx = min_rx - margin_x
+    exp_max_rx = max_rx + margin_x
+    exp_min_ry = min_ry - margin_y
+    exp_max_ry = max_ry + margin_y
+    if pt_locals:
+        pt_rxs = sorted([v.x * cos_t + v.y * sin_t for v in pt_locals])
+        pt_rys = sorted([-v.x * sin_t + v.y * cos_t for v in pt_locals])
+        idx_p1 = max(0, int(0.01 * (len(pt_rxs) - 1)))
+        idx_p99 = min(len(pt_rxs) - 1, int(0.99 * (len(pt_rxs) - 1)))
+        exp_min_rx = min(exp_min_rx, pt_rxs[idx_p1])
+        exp_max_rx = max(exp_max_rx, pt_rxs[idx_p99])
+        exp_min_ry = min(exp_min_ry, pt_rys[idx_p1])
+        exp_max_ry = max(exp_max_ry, pt_rys[idx_p99])
+
+    side_x = max(exp_max_rx - exp_min_rx, min_side)
+    side_y = max(exp_max_ry - exp_min_ry, min_side)
+
+    mid_rx = (exp_min_rx + exp_max_rx) * 0.5
+    mid_ry = (exp_min_ry + exp_max_ry) * 0.5
     mid_x = mid_rx * cos_t - mid_ry * sin_t
     mid_y = mid_rx * sin_t + mid_ry * cos_t
 
@@ -478,14 +596,14 @@ def execute_usgs_gradual_selection(
     re_thresh: float = 0.50,
     min_rays: int = 2,
     max_removal_ratio: float = 0.10,
+    adaptive_fitting: bool = False,
 ) -> dict:
     """Executes gentle architectural-grade gradual selection refinement."""
     if not chunk.tie_points or not chunk.tie_points.points:
         print("  [Gradual Selection] No tie points present to filter; skipping.", flush=True)
         return {}
 
-    has_pts = bool(chunk.tie_points and getattr(chunk.tie_points, "points", None))
-    initial_pts = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True)) if has_pts else 0
+    initial_pts = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True))
     if initial_pts == 0:
         print("  [Gradual Selection] No valid tie points present to filter; skipping.", flush=True)
         return {}
@@ -509,8 +627,11 @@ def execute_usgs_gradual_selection(
                 continue
             cal = getattr(s, "calibration", None)
             if cal is not None:
+                s_type = str(getattr(s, "type", "") or "").lower()
+                is_wide_model = "fisheye" in s_type or "spherical" in s_type or "cylindrical" in s_type
                 try:
-                    cal.k4 = 0.0
+                    if not is_wide_model:
+                        cal.k4 = 0.0
                     cal.b1 = 0.0
                     cal.b2 = 0.0
                     s.calibration = cal
@@ -542,7 +663,7 @@ def execute_usgs_gradual_selection(
             fit_k4=False,
             fit_p1=False,
             fit_p2=False,
-            adaptive_fitting=False,
+            adaptive_fitting=bool(adaptive_fitting),
         )
         print(
             f"  [Pass 1/4] Reconstruction Uncertainty (RU <= {eff_ru:.1f}): Pruned low-intersection rays; optimized (f, cx, cy).",
@@ -574,7 +695,7 @@ def execute_usgs_gradual_selection(
             fit_k4=False,
             fit_p1=True,
             fit_p2=True,
-            adaptive_fitting=False,
+            adaptive_fitting=bool(adaptive_fitting),
         )
         print(
             f"  [Pass 2/4] Projection Accuracy (PA <= {eff_pa:.2f} px): Pruned correlation ambiguity; optimized (f, cx, cy, k1..k3, p1, p2).",
@@ -594,16 +715,7 @@ def execute_usgs_gradual_selection(
         else:
             eff_re = re_thresh
         f.removePoints(eff_re)
-        for s in getattr(chunk, "sensors", None) or []:
-            cal = getattr(s, "calibration", None)
-            if cal is not None:
-                try:
-                    cal.k4 = 0.0
-                    cal.b1 = 0.0
-                    cal.b2 = 0.0
-                    s.calibration = cal
-                except Exception:
-                    pass
+        _lock_unstable_lens_params()
         chunk.optimizeCameras(
             fit_f=True,
             fit_cx=True,
@@ -616,7 +728,7 @@ def execute_usgs_gradual_selection(
             fit_k4=False,
             fit_p1=True,
             fit_p2=True,
-            adaptive_fitting=False,
+            adaptive_fitting=bool(adaptive_fitting),
             tiepoint_covariance=True,
         )
         print(
@@ -634,7 +746,7 @@ def execute_usgs_gradual_selection(
         if min_rays > 1:
             vals_p4 = list(getattr(f, "values", []) or [])
             below_cnt = sum(1 for v in vals_p4 if v < min_rays)
-            if below_cnt > 0 and (not vals_p4 or (below_cnt / len(vals_p4)) <= max_removal_ratio):
+            if below_cnt > 0 and vals_p4 and (below_cnt / len(vals_p4)) <= max_removal_ratio:
                 f.selectPoints(min_rays - 1)
                 chunk.tie_points.removeSelectedPoints()
                 after_p4 = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True))
@@ -659,7 +771,7 @@ def execute_usgs_gradual_selection(
                 fit_k4=False,
                 fit_p1=True,
                 fit_p2=True,
-                adaptive_fitting=False,
+                adaptive_fitting=bool(adaptive_fitting),
                 tiepoint_covariance=True,
             )
         print(

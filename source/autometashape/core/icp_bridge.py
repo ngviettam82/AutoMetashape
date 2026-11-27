@@ -29,7 +29,7 @@ import zipfile
 from typing import Any
 
 from autometashape.core.alignment_hygiene import (
-    _camera_altitude_m,
+    _camera_altitude_with_frame,
     _evaluate_island_rigidity,
     _is_metric_crs,
     _median,
@@ -39,7 +39,13 @@ from autometashape.core.alignment_hygiene import (
     optimize_cameras_no_k4,
     sanitize_camera_gps,
 )
-from autometashape.core.telemetry import compute_utm_epsg
+from autometashape.core.crs_utils import (
+    classify_crs,
+    compute_metric_epsg,
+    crs_linear_unit_to_meters,
+    is_local_or_engineering_crs,
+    transform_wgs84_location_to_crs,
+)
 
 try:
     import Metashape
@@ -265,15 +271,17 @@ def convert_utm_transform_to_ecef(
     t_utm_4x4: list[list[float]],
     utm_crs: Any,
     shift_xyz: tuple[float, float, float],
+    probe_span_m: float = 20.0,
 ) -> tuple[list[list[float]], float]:
     """Convert a shifted-UTM 4x4 Sim(3) transform into an exact ECEF 4x4 Sim(3) matrix."""
+    s = max(2.0, min(200.0, float(probe_span_m))) / 20.0
     probes = (
         (0.0, 0.0, 0.0),
-        (20.0, 0.0, 0.0),
-        (0.0, 20.0, 0.0),
-        (0.0, 0.0, 20.0),
-        (-15.0, 15.0, -5.0),
-        (15.0, -15.0, 10.0),
+        (20.0 * s, 0.0, 0.0),
+        (0.0, 20.0 * s, 0.0),
+        (0.0, 0.0, 20.0 * s),
+        (-15.0 * s, 15.0 * s, -5.0 * s),
+        (15.0 * s, -15.0 * s, 10.0 * s),
     )
     sx, sy, sz = shift_xyz
     src_ecef: list[tuple[float, float, float]] = []
@@ -310,6 +318,7 @@ def evaluate_icp_quality_gate(
     max_scale: float = 1.10,
     max_tilt_deg: float = 5.0,
     max_allowed_k4: float = 0.05,
+    require_transform: bool = False,
 ) -> tuple[bool, list[str]]:
     """Evaluate strict Pre-MVS acceptance thresholds for a registered secondary island."""
     reasons: list[str] = []
@@ -372,7 +381,10 @@ def evaluate_icp_quality_gate(
         reasons.append(f"|k4|={abs(k4_val):.4f} >= {max_allowed_k4:.2f}")
 
     t_enu = metrics.get("T_enu")
-    if t_enu is not None:
+    if t_enu is None:
+        if require_transform:
+            reasons.append("T_enu=missing")
+    else:
         t_valid = (
             isinstance(t_enu, (list, tuple))
             and len(t_enu) == 4
@@ -769,8 +781,36 @@ def _clear_stage0_dense_assets(chunk: Any) -> None:
             pass
 
 
-def _build_stage0_cloud(chunk: Any) -> bool:
-    """Build fast downscale=4 uniform-sampled (4 cm) dense cloud purely for ICP registration.
+def _adaptive_stage0_spacing(chunk: Any, base_spacing: float = 0.04) -> float:
+    """Scale Stage-0 point spacing smoothly above 400 m site spans to bound peak RAM on large blocks."""
+    try:
+        t_mat = getattr(getattr(chunk, "transform", None), "matrix", None)
+        if t_mat is None:
+            return base_spacing
+        coords = []
+        for cam in getattr(chunk, "cameras", None) or []:
+            if not getattr(cam, "transform", None) or not getattr(cam, "enabled", True):
+                continue
+            ctr = getattr(cam, "center", None)
+            if ctr is None:
+                continue
+            pos = t_mat.mulp(ctr)
+            coords.append((float(pos.x), float(pos.y), float(pos.z)))
+        if len(coords) < 2:
+            return base_spacing
+        dx = max(c[0] for c in coords) - min(c[0] for c in coords)
+        dy = max(c[1] for c in coords) - min(c[1] for c in coords)
+        dz = max(c[2] for c in coords) - min(c[2] for c in coords)
+        span = math.sqrt(dx * dx + dy * dy + dz * dz)
+        if span <= 400.0:
+            return base_spacing
+        return min(0.12, base_spacing + (span - 400.0) / 800.0 * 0.08)
+    except Exception:
+        return base_spacing
+
+
+def _build_stage0_cloud(chunk: Any, points_spacing: float = 0.04) -> bool:
+    """Build fast downscale=4 uniform-sampled dense cloud purely for ICP registration.
 
     Using ``uniform_sampling=True, points_spacing=0.04`` cuts PLY size and Open3D peak memory by
     5-10x on large multi-building projects (critical on 32 GB RAM cluster workers) with zero
@@ -788,7 +828,7 @@ def _build_stage0_cloud(chunk: Any) -> bool:
                 point_colors=True,
                 point_confidence=False,
                 uniform_sampling=True,
-                points_spacing=0.04,
+                points_spacing=float(points_spacing),
                 keep_depth=False,
             )
         except (TypeError, NameError):
@@ -809,12 +849,12 @@ def _compute_island_utm_frame(
     island_chunk: Any,
     main_chunk: Any,
 ) -> tuple[Any, tuple[float, float, float], int] | None:
-    """Compute a local shifted UTM CRS centered on ``island_chunk`` aligned cameras."""
+    """Compute a local shifted UTM or Polar UPS CRS centered on ``island_chunk`` aligned cameras."""
     aligned = [c for c in island_chunk.cameras if c.transform and c.enabled]
     if not aligned or island_chunk.transform is None or island_chunk.transform.matrix is None:
         return None
     main_crs = getattr(main_chunk, "crs", None)
-    if main_crs is None or "LOCAL_CS" in str(getattr(main_crs, "wkt", "") or "").upper():
+    if main_crs is None or is_local_or_engineering_crs(main_crs):
         return None
     t_isl = island_chunk.transform.matrix
     ecefs = [t_isl.mulp(c.center) for c in aligned]
@@ -830,7 +870,7 @@ def _compute_island_utm_frame(
         # Always project ECEF via EPSG::4326 so projected main_chunk CRS (e.g. UTM/VN-2000) never corrupts lon/lat
         wgs84 = Metashape.CoordinateSystem("EPSG::4326")
         origin_wgs = wgs84.project(origin_ecef)
-        epsg = compute_utm_epsg(float(origin_wgs.x), float(origin_wgs.y))
+        epsg = compute_metric_epsg(float(origin_wgs.x), float(origin_wgs.y))
         utm_crs = Metashape.CoordinateSystem(f"EPSG::{epsg}")
         origin_utm = utm_crs.project(origin_ecef)
         shift_xyz = (round(float(origin_utm.x), 1), round(float(origin_utm.y), 1), round(float(origin_utm.z), 1))
@@ -967,10 +1007,49 @@ def _should_disable_island_rolling_shutter(chunk_obj: Any, global_rolling_shutte
     """Return True for close-range orbits (<25m AGL) where RS collapses scale; False for high-altitude surveys."""
     if not global_rolling_shutter:
         return True
-    ras = [v for c in (getattr(chunk_obj, "cameras", None) or []) if (v := _camera_altitude_m(c)) is not None]
-    if not ras:
+    agl_vals: list[float] = []
+    msl_vals: list[float] = []
+    for c in getattr(chunk_obj, "cameras", None) or []:
+        res = _camera_altitude_with_frame(c)
+        if res is None:
+            continue
+        alt, frame = res
+        if frame == "agl":
+            agl_vals.append(alt)
+        else:
+            msl_vals.append(alt)
+    if agl_vals:
+        return _median(agl_vals) < 25.0
+    if msl_vals:
+        # Never compare raw MSL elevation to 25m; estimate height above tie-point ground if available
+        pts_obj = getattr(getattr(chunk_obj, "tie_points", None), "points", None)
+        crs = getattr(chunk_obj, "crs", None)
+        t_mat = getattr(getattr(chunk_obj, "transform", None), "matrix", None)
+        if pts_obj and crs is not None and t_mat is not None and hasattr(crs, "project"):
+            try:
+                pts_list = list(pts_obj)
+                step = max(1, len(pts_list) // 500)
+                tie_zs: list[float] = []
+                for pt in pts_list[::step]:
+                    if not getattr(pt, "valid", True):
+                        continue
+                    coord = getattr(pt, "coord", None)
+                    w = float(getattr(coord, "w", 1.0))
+                    if coord is None or abs(w) <= 1e-12:
+                        continue
+                    p_local = Metashape.Vector([coord.x / w, coord.y / w, coord.z / w])
+                    p_crs = crs.project(t_mat.mulp(p_local))
+                    pz = float(p_crs.z)
+                    if math.isfinite(pz):
+                        tie_zs.append(pz)
+                if len(tie_zs) >= 20:
+                    unit_scale = crs_linear_unit_to_meters(crs) if _is_metric_crs(crs) else 1.0
+                    rel_h = (_median(msl_vals) - _median(tie_zs)) * unit_scale
+                    return rel_h < 25.0
+            except Exception:
+                pass
         return True
-    return _median(ras) < 25.0
+    return True
 
 
 def _apply_island_rolling_shutter_policy(chunk_obj: Any, global_rolling_shutter: bool) -> None:
@@ -986,6 +1065,40 @@ def _apply_island_rolling_shutter_policy(chunk_obj: Any, global_rolling_shutter:
             sensor.rolling_shutter = mode
         except Exception:
             pass
+
+
+def _set_cam_ref_vec(c_ref: Any, attr: str, xyz: tuple[float, float, float]) -> None:
+    try:
+        if Metashape is not None and hasattr(Metashape, "Vector"):
+            setattr(c_ref, attr, Metashape.Vector([float(xyz[0]), float(xyz[1]), float(xyz[2])]))
+        else:
+            setattr(c_ref, attr, (float(xyz[0]), float(xyz[1]), float(xyz[2])))
+    except Exception:
+        pass
+
+
+def _compute_island_probe_span(chunk: Any) -> float:
+    """Compute representative UTM->ECEF probe span in meters from island camera footprint."""
+    try:
+        t_mat = getattr(getattr(chunk, "transform", None), "matrix", None)
+        if t_mat is None:
+            return 20.0
+        coords = []
+        for cam in getattr(chunk, "cameras", None) or []:
+            if not getattr(cam, "transform", None) or not getattr(cam, "enabled", True):
+                continue
+            ctr = getattr(cam, "center", None)
+            if ctr is None:
+                continue
+            p = t_mat.mulp(ctr)
+            coords.append((float(p.x), float(p.y), float(p.z)))
+        if len(coords) < 2:
+            return 20.0
+        dx = max(c[0] for c in coords) - min(c[0] for c in coords)
+        dy = max(c[1] for c in coords) - min(c[1] for c in coords)
+        return max(20.0, min(200.0, 0.25 * math.hypot(dx, dy)))
+    except Exception:
+        return 20.0
 
 
 def bridge_disconnected_islands(
@@ -1004,6 +1117,10 @@ def bridge_disconnected_islands(
     guided_matching: bool = True,
     icp_timeout_s: float = 300.0,
     scratch_root: str = "",
+    keypoint_limit: int = 60000,
+    keypoint_limit_per_mpx: int = 0,
+    tiepoint_limit: int | None = None,
+    min_island_cams: int = 12,
 ) -> tuple[Any, dict[str, Any]]:
     """Register disconnected overlapping islands and unaligned close-range clusters via CPU Open3D ICP.
 
@@ -1017,20 +1134,42 @@ def bridge_disconnected_islands(
     if not bridge_candidates and not rescue_groups:
         return chunk, {"triggered": False, "accepted": 0, "rejected": 0}
 
+    eff_min_cams = max(3, int(min_island_cams))
     total_candidates = len(bridge_candidates) + len(rescue_groups)
 
-    # Pre-check georeferenced CRS BEFORE provisioning Open3D runtime or saving/building Stage-0 MVS clouds
-    # (unreferenced / LOCAL_CS chunks cannot construct a UTM frame and would otherwise waste I/O & compute).
+    # Pre-check georeferenced CRS BEFORE provisioning Open3D runtime or saving/building Stage-0 MVS clouds;
+    # on unreferenced / LOCAL_CS / ENGCRS chunks, still quarantine overlapping aligned candidates to prevent ghosts.
     orig_crs = getattr(chunk, "crs", None)
-    orig_wkt = str(getattr(orig_crs, "wkt", "") or "").upper()
-    orig_crs_name = str(getattr(orig_crs, "name", "") or "").upper()
-    is_explicit_local = orig_crs is not None and ("LOCAL_CS" in orig_wkt or "LOCAL COORDINATES" in orig_crs_name)
+    is_explicit_local = orig_crs is not None and is_local_or_engineering_crs(orig_crs)
     if is_explicit_local or (orig_crs is None and _compute_island_utm_frame(chunk, chunk) is None):
+        by_key = {c.key: c for c in getattr(chunk, "cameras", None) or []}
+        quarantined_cnt = 0
+        for comp in bridge_candidates:
+            for k in comp:
+                cam = by_key.get(k)
+                if cam is not None:
+                    cam.transform = None
+                    cam.enabled = False
+                    if getattr(cam, "reference", None) is not None:
+                        cam.reference.enabled = False
+                    quarantined_cnt += 1
+        if quarantined_cnt:
+            try:
+                optimize_cameras_no_k4(chunk, tiepoint_covariance=True)
+            except Exception:
+                pass
         print(
-            "  [ICP Bridge] Chunk has no georeferenced CRS (LOCAL_CS/unreferenced); skipping Stage-4 ICP bridge.",
+            "  [ICP Bridge] Chunk has no georeferenced CRS (LOCAL_CS/ENGCRS/unreferenced); "
+            f"skipping Stage-4 ICP bridge (quarantined {quarantined_cnt} overlapping cam(s)).",
             flush=True,
         )
-        return chunk, {"triggered": False, "accepted": 0, "rejected": total_candidates, "reason": "no_georef_crs"}
+        return chunk, {
+            "triggered": False,
+            "accepted": 0,
+            "rejected": total_candidates,
+            "reason": "no_georef_crs",
+            "quarantined_cameras": quarantined_cnt,
+        }
 
     print(
         f"\n[ICP Bridge] Triggered for {total_candidates} disconnected overlapping island(s) "
@@ -1073,12 +1212,40 @@ def bridge_disconnected_islands(
 
     _cam_identity = _camera_stable_identity
 
-    # Capture stable path-based identities BEFORE doc.save() (which reloads chunks in Metashape 2.2+)
+    # Capture stable path-based identities & projected/calibrated GPS priors BEFORE doc.save()
     pre_by_key = {c.key: c for c in chunk.cameras}
+    orig_cam_refs_by_path: dict[
+        str, tuple[tuple[float, float, float] | None, bool, tuple[float, float, float] | None]
+    ] = {}
+    for c in chunk.cameras:
+        c_path = getattr(getattr(c, "photo", None), "path", "") or ""
+        c_ref = getattr(c, "reference", None)
+        if not c_path or c_ref is None:
+            continue
+        norm_p = os.path.normcase(os.path.abspath(c_path))
+        loc = getattr(c_ref, "location", None)
+        loc_xyz = None
+        if loc is not None:
+            try:
+                loc_xyz = (float(loc.x), float(loc.y), float(loc.z))
+            except Exception:
+                loc_xyz = None
+        acc = getattr(c_ref, "accuracy", None)
+        acc_xyz = None
+        if acc is not None:
+            try:
+                acc_xyz = (float(acc.x), float(acc.y), float(acc.z))
+            except Exception:
+                acc_xyz = None
+        orig_cam_refs_by_path[norm_p] = (loc_xyz, bool(getattr(c_ref, "enabled", True)), acc_xyz)
+
     main_keep_keys: set[int] = set(audit_result.get("main_island") or [])
-    for dist_comp in audit_result.get("kept_distant") or []:
-        main_keep_keys.update(dist_comp)
     main_keep_ids = {_cam_identity(pre_by_key[k]) for k in main_keep_keys if k in pre_by_key}
+    distant_comp_ids: list[set[tuple[str, Any]]] = [
+        {_cam_identity(pre_by_key[k]) for k in dist_comp if k in pre_by_key}
+        for dist_comp in (audit_result.get("kept_distant") or [])
+        if dist_comp
+    ]
     bridge_candidate_ids: list[set[tuple[str, Any]]] = [
         {_cam_identity(pre_by_key[k]) for k in comp if k in pre_by_key} for comp in bridge_candidates
     ]
@@ -1089,7 +1256,7 @@ def bridge_disconnected_islands(
             for k in grp
             if k in pre_by_key and getattr(pre_by_key[k], "photo", None) and pre_by_key[k].photo.path
         ]
-        if len(paths) >= 12:
+        if len(paths) >= eff_min_cams:
             rescue_photo_groups.append(sorted(paths))
 
     # Ensure document is project-backed before building Stage-0 dense clouds; rebind chunk after save!
@@ -1102,6 +1269,7 @@ def bridge_disconnected_islands(
     orig_chunk = getattr(doc, "chunk", None) or (doc.chunks[0] if getattr(doc, "chunks", None) else chunk)
 
     temp_chunks: list[Any] = []
+    distant_chunks: list[Any] = []
     accepted_chunks: list[Any] = []
     bridged_cam_paths: set[str] = set()
     island_reports: list[dict[str, Any]] = []
@@ -1112,8 +1280,7 @@ def bridge_disconnected_islands(
     _cleanup_stale_icp_temp_dirs(max_age_hours=24.0, temp_root=icp_temp_base)
     tmp_icp_dir = tempfile.mkdtemp(prefix="autometashape_icp_", dir=icp_temp_base)
     try:
-        # 1. Build clean isolated initial main chunk (without building Stage-0 MVS yet in case a wider
-        # rescued/secondary block should become the primary target backbone!)
+        # 1. Build clean isolated initial main chunk + separate distant compound chunks
         ch_main = orig_chunk.copy()
         ch_main.label = "_ICP_Main_Block"
         temp_chunks.append(ch_main)
@@ -1132,6 +1299,17 @@ def bridge_disconnected_islands(
                 ch_main.resetRegion()
             except Exception:
                 pass
+
+        for d_idx, d_ids in enumerate(distant_comp_ids, 1):
+            if not d_ids:
+                continue
+            ch_dist = orig_chunk.copy()
+            ch_dist.label = f"_ICP_Distant_{d_idx}"
+            temp_chunks.append(ch_dist)
+            rm_dist = [c for c in ch_dist.cameras if _cam_identity(c) not in d_ids]
+            if rm_dist:
+                ch_dist.remove(rm_dist)
+            distant_chunks.append(ch_dist)
 
         # 2. Prepare all candidate island & rescue chunks BEFORE choosing Stage-0 target backbone
         candidate_chunks: list[tuple[str, Any]] = []
@@ -1163,7 +1341,7 @@ def bridge_disconnected_islands(
                         getattr(ch_isl, _fn)()
                     except Exception:
                         pass
-            isl_min_cams = min(12, len(comp_ids))
+            isl_min_cams = min(eff_min_cams, len(comp_ids))
             isolated_isl = _isolate_coherent_sub_islands(
                 ch_isl,
                 label_prefix=f"aligned_island_{idx}",
@@ -1177,37 +1355,77 @@ def bridge_disconnected_islands(
             else:
                 candidate_chunks.extend(isolated_isl)
 
+        orig_crs_ref = getattr(orig_chunk, "crs", None)
+        orig_crs_kind = classify_crs(orig_crs_ref) if orig_crs_ref is not None else "local"
+
         for idx, paths in enumerate(rescue_photo_groups, 1):
             ch_res = doc.addChunk()
             ch_res.label = f"_ICP_Rescue_{idx}"
             temp_chunks.append(ch_res)
             ch_res.addPhotos(paths)
-            if getattr(orig_chunk, "crs", None) is not None:
+            if orig_crs_ref is not None:
                 try:
-                    ch_res.crs = orig_chunk.crs
+                    ch_res.crs = orig_crs_ref
                 except Exception:
                     pass
+            # Sync projected/normalized GPS priors so addPhotos() WGS84 EXIF never teleports in projected chunks
+            for cam in ch_res.cameras:
+                c_ref = getattr(cam, "reference", None)
+                if c_ref is None:
+                    continue
+                c_path = getattr(getattr(cam, "photo", None), "path", "") or ""
+                norm_p = os.path.normcase(os.path.abspath(c_path)) if c_path else ""
+                if norm_p in orig_cam_refs_by_path:
+                    orig_loc_xyz, orig_ref_en, orig_acc_xyz = orig_cam_refs_by_path[norm_p]
+                    if orig_loc_xyz is not None:
+                        if (
+                            orig_crs_kind == "projected"
+                            and abs(orig_loc_xyz[0]) <= 180.0
+                            and abs(orig_loc_xyz[1]) <= 90.0
+                        ):
+                            conv = transform_wgs84_location_to_crs(orig_loc_xyz, orig_crs_ref, metashape_mod=Metashape)
+                            _set_cam_ref_vec(c_ref, "location", conv if conv is not None else orig_loc_xyz)
+                        else:
+                            _set_cam_ref_vec(c_ref, "location", orig_loc_xyz)
+                    c_ref.enabled = orig_ref_en
+                    if orig_acc_xyz is not None:
+                        _set_cam_ref_vec(c_ref, "accuracy", orig_acc_xyz)
+                elif orig_crs_kind == "projected":
+                    loc = getattr(c_ref, "location", None)
+                    if loc is not None:
+                        try:
+                            lx, ly, lz = float(loc.x), float(loc.y), float(loc.z)
+                            if abs(lx) <= 180.0 and abs(ly) <= 90.0:
+                                conv = transform_wgs84_location_to_crs(
+                                    (lx, ly, lz), orig_crs_ref, metashape_mod=Metashape
+                                )
+                                if conv is not None:
+                                    _set_cam_ref_vec(c_ref, "location", conv)
+                        except Exception:
+                            pass
+
             _apply_island_rolling_shutter_policy(ch_res, bool(rolling_shutter))
             sanitize_camera_gps(ch_res)
             normalize_flight_takeoff_z0(ch_res, anchor_z0_override=anchor_z0)
+            eff_tie_limit = int(tiepoint_limit) if tiepoint_limit is not None else (10000 if len(paths) > 150 else 0)
             try:
                 ch_res.matchPhotos(
                     downscale=align_downscale,
                     generic_preselection=True,
                     reference_preselection=True,
                     reference_preselection_mode=Metashape.ReferencePreselectionMode.ReferencePreselectionSource,
-                    keypoint_limit=60000,
-                    keypoint_limit_per_mpx=0,
-                    tiepoint_limit=0,
+                    keypoint_limit=int(keypoint_limit),
+                    keypoint_limit_per_mpx=int(keypoint_limit_per_mpx),
+                    tiepoint_limit=eff_tie_limit,
                     filter_stationary_points=filter_stationary_points,
                     guided_matching=guided_matching,
                 )
                 ch_res.alignCameras(adaptive_fitting=False)
                 al_cnt = sum(1 for c in ch_res.cameras if c.transform and c.enabled)
-                if al_cnt < 12:
+                if al_cnt < eff_min_cams:
                     print(
                         f"  [ICP Bridge] Rescue group #{idx} aligned only {al_cnt}/{len(ch_res.cameras)} "
-                        "cameras (< 12) — skipping.",
+                        f"cameras (< {eff_min_cams}) — skipping.",
                         flush=True,
                     )
                     island_reports.append({"id": f"rescue_{idx}", "passed": False, "reasons": ["insufficient_aligned"]})
@@ -1217,7 +1435,7 @@ def bridge_disconnected_islands(
                     ch_res,
                     label_prefix=f"rescue_{idx}",
                     temp_chunks=temp_chunks,
-                    min_cams=12,
+                    min_cams=eff_min_cams,
                 )
                 if not isolated_res:
                     island_reports.append(
@@ -1230,21 +1448,28 @@ def bridge_disconnected_islands(
                 island_reports.append({"id": f"rescue_{idx}", "passed": False, "reasons": [str(exc)]})
 
         # 2.5 Dynamic Backbone Promotion: if a rigid rescued/secondary chunk covers substantially wider
-        # spatial footprint than initial ch_main (e.g., Pass 1 aligned only compact Manual while Rescue
-        # recovered the full aerial site), promote it to ch_main BEFORE building Stage-0 target cloud!
+        # spatial footprint than initial ch_main, promote it to ch_main BEFORE building Stage-0 target cloud!
+        was_promoted = False
+        old_main: Any = None
         if candidate_chunks:
-            metric_crs = _is_metric_crs(getattr(ch_main, "crs", None))
+            main_crs_ref = getattr(ch_main, "crs", None)
+            metric_crs = _is_metric_crs(main_crs_ref)
+            unit_scale = crs_linear_unit_to_meters(main_crs_ref) if metric_crs else 1.0
             main_al = [c for c in ch_main.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)]
-            main_score, main_cells, main_n, main_has_sp = compute_block_backbone_score(main_al, metric_crs=metric_crs)
+            main_score, main_cells, main_n, main_has_sp = compute_block_backbone_score(
+                main_al, metric_crs=metric_crs, unit_to_m=unit_scale
+            )
             if main_has_sp:
                 best_promo: tuple[int, str, Any, float, int, int] | None = None
                 for c_idx, (c_id, ch_cand) in enumerate(candidate_chunks):
                     cand_al = [
                         c for c in ch_cand.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)
                     ]
-                    if len(cand_al) < 12:
+                    if len(cand_al) < eff_min_cams:
                         continue
-                    c_score, c_cells, c_n, c_has_sp = compute_block_backbone_score(cand_al, metric_crs=metric_crs)
+                    c_score, c_cells, c_n, c_has_sp = compute_block_backbone_score(
+                        cand_al, metric_crs=metric_crs, unit_to_m=unit_scale
+                    )
                     if not c_has_sp:
                         continue
                     rig = _evaluate_island_rigidity(ch_cand, [c.key for c in cand_al], {c.key: c for c in cand_al})
@@ -1265,28 +1490,84 @@ def bridge_disconnected_islands(
                     )
                     old_main = ch_main
                     ch_main = ch_best
-                    if len(main_al) >= 12:
+                    was_promoted = True
+                    # Harden newly promoted backbone via gradual selection and preserve GCP markers
+                    if getattr(ch_main, "tie_points", None) is not None and getattr(ch_main.tie_points, "points", None):
+                        try:
+                            from autometashape.core.filtering import execute_usgs_gradual_selection
+
+                            execute_usgs_gradual_selection(ch_main)
+                        except Exception as exc:
+                            print(f"  [ICP Bridge] Promoted backbone gradual selection note: {exc}", flush=True)
+                    orig_markers = list(getattr(orig_chunk, "markers", None) or [])
+                    has_no_markers = not list(getattr(ch_main, "markers", None) or [])
+                    if orig_markers and has_no_markers and hasattr(ch_main, "addMarker"):
+                        for mk in orig_markers:
+                            try:
+                                new_mk = ch_main.addMarker()
+                                if hasattr(mk, "label"):
+                                    new_mk.label = mk.label
+                                if hasattr(mk, "reference") and hasattr(new_mk, "reference"):
+                                    if getattr(mk.reference, "location", None) is not None:
+                                        new_mk.reference.location = mk.reference.location
+                                    new_mk.reference.enabled = getattr(mk.reference, "enabled", True)
+                            except Exception:
+                                pass
+                    if len(main_al) >= eff_min_cams:
                         candidate_chunks[b_idx] = ("demoted_initial_main", old_main)
                     else:
                         candidate_chunks.pop(b_idx)
 
-        # 2.6 Build Stage-0 Medium dense cloud on the selected primary target backbone
+        def _run_stage0(target_chunk: Any) -> bool:
+            spacing = _adaptive_stage0_spacing(target_chunk)
+            if spacing > 0.041:
+                try:
+                    return bool(_build_stage0_cloud(target_chunk, points_spacing=spacing))
+                except TypeError:
+                    pass
+            return bool(_build_stage0_cloud(target_chunk))
+
+        # 2.6 Build Stage-0 Medium dense cloud on the selected primary target backbone (fallback to old_main if needed)
         print(
             f"  [ICP Bridge] Building Stage-0 Medium (downscale=4) target cloud on main block "
             f"({len(ch_main.cameras)} cameras)...",
             flush=True,
         )
-        if not _build_stage0_cloud(ch_main):
+        stage0_ok = _run_stage0(ch_main)
+        if not stage0_ok and was_promoted and old_main is not None:
             print(
-                "  [ICP Bridge] [WARNING] Main block Stage-0 dense cloud failed; proceeding cleanly with main block only.",
+                "  [ICP Bridge] [WARNING] Promoted backbone Stage-0 dense cloud failed; "
+                "falling back cleanly to initial main block.",
+                flush=True,
+            )
+            failed_promo = ch_main
+            ch_main = old_main
+            was_promoted = False
+            candidate_chunks = [
+                (cid, ch) for cid, ch in candidate_chunks if ch is not old_main and ch is not failed_promo
+            ]
+            stage0_ok = _run_stage0(ch_main)
+
+        if not stage0_ok:
+            print(
+                "  [ICP Bridge] [WARNING] Main block Stage-0 dense cloud failed; "
+                "proceeding cleanly with main block only.",
                 flush=True,
             )
             _clear_stage0_dense_assets(ch_main)
-            ch_main.label = "Production_Reconstruction"
-            to_drop_fail = [orig_chunk] + [c for c in temp_chunks if c is not ch_main]
+            if distant_chunks:
+                for _dc in distant_chunks:
+                    _clear_stage0_dense_assets(_dc)
+                fallback_chunk = _merge_chunks_preserve_poses(doc, [ch_main.key] + [c.key for c in distant_chunks])
+                fallback_chunk.label = "Production_Reconstruction"
+                to_drop_fail = [orig_chunk] + temp_chunks
+            else:
+                ch_main.label = "Production_Reconstruction"
+                fallback_chunk = ch_main
+                to_drop_fail = [orig_chunk] + [c for c in temp_chunks if c is not ch_main]
             doc.remove(to_drop_fail)
-            doc.chunk = ch_main
-            return ch_main, {"triggered": True, "accepted": 0, "rejected": len(candidate_chunks)}
+            doc.chunk = fallback_chunk
+            return fallback_chunk, {"triggered": True, "accepted": 0, "rejected": len(candidate_chunks)}
 
         # 3. Register each candidate independently via CPU Open3D Sim(3) ICP + Quality Gate
         for isl_id, ch_isl in candidate_chunks:
@@ -1295,7 +1576,7 @@ def bridge_disconnected_islands(
                 f"  [ICP Bridge] Registering {isl_id} ({len(al_cams)} aligned cameras)...",
                 flush=True,
             )
-            if not _build_stage0_cloud(ch_isl):
+            if not _run_stage0(ch_isl):
                 island_reports.append({"id": isl_id, "passed": False, "reasons": ["stage0_cloud_failed"]})
                 continue
 
@@ -1372,7 +1653,7 @@ def bridge_disconnected_islands(
                             pass
 
             max_k4 = _max_chunk_abs_k4(ch_isl)
-            passed, reasons = evaluate_icp_quality_gate(metrics, max_abs_k4=max_k4)
+            passed, reasons = evaluate_icp_quality_gate(metrics, max_abs_k4=max_k4, require_transform=True)
             if not passed:
                 print(
                     f"  [ICP Quality Gate] REJECTED & QUARANTINED {isl_id}: {', '.join(reasons)}",
@@ -1381,7 +1662,10 @@ def bridge_disconnected_islands(
                 island_reports.append({"id": isl_id, "passed": False, "reasons": reasons, "metrics": metrics})
                 continue
 
-            t_ecef_list, fit_mm = convert_utm_transform_to_ecef(metrics["T_enu"], utm_crs, shift_xyz)
+            isl_probe_span = _compute_island_probe_span(ch_isl)
+            t_ecef_list, fit_mm = convert_utm_transform_to_ecef(
+                metrics["T_enu"], utm_crs, shift_xyz, probe_span_m=isl_probe_span
+            )
             if not math.isfinite(fit_mm) or fit_mm > 50.0:
                 print(
                     f"  [ICP Quality Gate] REJECTED {isl_id}: UTM->ECEF fit error {fit_mm:.2f}mm > 50.0mm.",
@@ -1405,12 +1689,13 @@ def bridge_disconnected_islands(
                     bridged_cam_paths.add(os.path.normcase(os.path.abspath(cam.photo.path)))
             island_reports.append({"id": isl_id, "passed": True, "fit_mm": fit_mm, "metrics": metrics})
 
-        # 4. Merge accepted islands with ch_main (or keep clean ch_main alone) and clean up temp chunks
-        if accepted_chunks:
+        # 4. Merge accepted & distant chunks with ch_main (or keep clean ch_main alone) and clean up temp chunks
+        merge_sources = accepted_chunks + distant_chunks
+        if merge_sources:
             # Clear temporary Stage-0 dense clouds & depth maps BEFORE mergeChunks so they are never copied/merged
             _clear_stage0_dense_assets(ch_main)
-            for _ac in accepted_chunks:
-                _clear_stage0_dense_assets(_ac)
+            for _mc in merge_sources:
+                _clear_stage0_dense_assets(_mc)
 
             # Capture main block's ground-to-sky region AND transform before mergeChunks(merge_tiepoints=False)
             saved_main_region = None
@@ -1428,7 +1713,7 @@ def bridge_disconnected_islands(
                 saved_main_region = None
                 saved_main_matrix = None
 
-            merge_keys = [ch_main.key] + [c.key for c in accepted_chunks]
+            merge_keys = [ch_main.key] + [c.key for c in merge_sources]
             merged = _merge_chunks_preserve_poses(doc, merge_keys)
             merged.label = "Production_Reconstruction"
             _clear_stage0_dense_assets(merged)
@@ -1453,13 +1738,15 @@ def bridge_disconnected_islands(
                     reg.center = new_center
                     reg.size = new_size
                     reg.rot = new_rot
-                    # Union-expand horizontally/vertically if accepted partial-overlap chunks extend beyond main box
+                    # Union-expand horizontally and vertically if accepted/distant chunks extend beyond main box
                     try:
                         rot_t = new_rot.t()
                         loc_c = rot_t * new_center
                         l_min = [loc_c.x - 0.5 * new_size.x, loc_c.y - 0.5 * new_size.y, loc_c.z - 0.5 * new_size.z]
                         l_max = [loc_c.x + 0.5 * new_size.x, loc_c.y + 0.5 * new_size.y, loc_c.z + 0.5 * new_size.z]
                         expanded = False
+                        pad_xy = 0.05 * max(new_size.x, new_size.y)
+                        pad_z = 0.05 * new_size.z
                         for cam in merged.cameras:
                             if not getattr(cam, "transform", None) or not getattr(cam, "enabled", True):
                                 continue
@@ -1467,8 +1754,7 @@ def bridge_disconnected_islands(
                             if c_pos is None:
                                 continue
                             lc = rot_t * c_pos
-                            pad_xy = 0.05 * max(new_size.x, new_size.y)
-                            for axis, pad in ((0, pad_xy), (1, pad_xy), (2, 0.0)):
+                            for axis, pad in ((0, pad_xy), (1, pad_xy), (2, pad_z)):
                                 val = lc[axis]
                                 if val - pad < l_min[axis]:
                                     l_min[axis] = val - pad
@@ -1486,7 +1772,7 @@ def bridge_disconnected_islands(
                 except Exception:
                     pass
 
-            # Disable noisy GPS reference on bridged island cameras so ICP-locked poses are never disturbed
+            # Disable noisy GPS reference strictly on bridged island cameras so ICP-locked poses are preserved
             disabled_gps = 0
             for cam in merged.cameras:
                 if (
@@ -1502,7 +1788,8 @@ def bridge_disconnected_islands(
             doc.chunk = merged
             print(
                 f"  [ICP Bridge] [OK] Merged main block + {len(accepted_chunks)} verified island(s) "
-                f"({len(merged.cameras)} cameras total; locked {disabled_gps} bridged camera GPS refs).",
+                f"+ {len(distant_chunks)} distant compound(s) ({len(merged.cameras)} cameras total; "
+                f"locked {disabled_gps} bridged camera GPS refs).",
                 flush=True,
             )
             final_chunk = merged

@@ -13,6 +13,8 @@ import os
 import re
 import sys
 
+from autometashape.core.crs_utils import classify_crs, compute_metric_epsg
+
 try:
     import Metashape
 except ImportError:
@@ -28,16 +30,7 @@ def is_projected_crs(crs: object) -> bool:
     """
     if crs is None:
         return False
-    wkt = getattr(crs, "wkt", None)
-    if isinstance(wkt, str) and wkt.strip():
-        upper = wkt.lstrip().upper()
-        if upper.startswith(("PROJCS", "PROJCRS")):
-            return True
-        if upper.startswith(("COMPD_CS", "COMPOUNDCRS")):
-            return "PROJCS[" in upper or "PROJCRS[" in upper
-        return False
-    # Fallback for mock objects in tests that define .projcs directly
-    return bool(getattr(crs, "projcs", None))
+    return classify_crs(crs) == "projected"
 
 
 def _is_same_or_subpath(child: str, parent: str) -> bool:
@@ -374,13 +367,8 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
 
 
 def compute_utm_epsg(lon: float, lat: float) -> int:
-    """Calculates standard WGS 84 / UTM Zone EPSG code for longitude and latitude."""
-    if not (math.isfinite(lon) and math.isfinite(lat)):
-        raise ValueError(f"Non-finite coordinates for UTM EPSG calculation: lon={lon!r}, lat={lat!r}")
-    clamped_lon = max(-180.0, min(180.0, float(lon)))
-    zone = 60 if clamped_lon >= 180.0 else int((clamped_lon + 180.0) // 6.0) + 1
-    zone = max(1, min(zone, 60))
-    return 32600 + zone if lat >= 0.0 else 32700 + zone
+    """Calculates standard WGS 84 UTM or Polar Stereographic EPSG code for longitude and latitude."""
+    return compute_metric_epsg(lon, lat)
 
 
 def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
