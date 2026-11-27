@@ -13,9 +13,12 @@ and dense models without altering or clearing project data.
 from __future__ import annotations
 
 import argparse
+import io
+import json
 import os
 import subprocess
 import sys
+from contextlib import redirect_stdout
 from typing import Any, Dict, List
 
 try:
@@ -30,6 +33,9 @@ if _SOURCE_DIR not in sys.path:
     sys.path.insert(0, _SOURCE_DIR)
 
 from autometashape.cluster.hardware import find_metashape_path
+from autometashape.core.crs_utils import classify_crs
+from autometashape.core.pipeline import _get_model_texture_page_count
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -43,6 +49,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=str,
         required=True,
         help="Path to Metashape project archive (.psx)",
+    )
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Emit checkpoint summary as structured JSON",
     )
     parser.add_argument(
         "--no-reexec",
@@ -127,9 +138,26 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
                 model_faces = len(faces) if faces is not None else 0
                 model_vertices = len(verts) if verts is not None else 0
 
-            # Orthomosaic & Elevation
+            # Orthomosaic, Elevation, CRS, Sensors, Markers & Textures
             has_ortho = getattr(c, "orthomosaic", None) is not None
             has_elevation = getattr(c, "elevation", None) is not None
+            c_crs = getattr(c, "crs", None)
+            if c_crs is None:
+                crs_str = "None"
+                crs_kind = "local"
+            else:
+                crs_name = getattr(c_crs, "name", None)
+                crs_wkt = getattr(c_crs, "wkt", None)
+                if isinstance(crs_name, str) and crs_name.strip():
+                    crs_str = crs_name.strip()
+                elif isinstance(crs_wkt, str) and crs_wkt.strip():
+                    crs_str = crs_wkt.strip()[:80]
+                else:
+                    crs_str = "Unrecognized CRS"
+                crs_kind = classify_crs(c_crs)
+            sensor_count = len(getattr(c, "sensors", None) or [])
+            marker_count = len(getattr(c, "markers", None) or [])
+            texture_pages = _get_model_texture_page_count(model) if model is not None else 0
 
             c_data = {
                 "index": idx,
@@ -143,6 +171,11 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
                 "model_vertices": model_vertices,
                 "has_orthomosaic": has_ortho,
                 "has_elevation": has_elevation,
+                "crs": crs_str,
+                "crs_kind": crs_kind,
+                "sensor_count": sensor_count,
+                "marker_count": marker_count,
+                "texture_pages": texture_pages,
             }
             chunks_info.append(c_data)
 
@@ -152,11 +185,13 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
                 if total_cams
                 else "  - Cameras        : 0"
             )
+            print(f"  - CRS / Kind     : {crs_str} ({crs_kind})")
+            print(f"  - Sensors/Markers: {sensor_count} sensor(s), {marker_count} marker(s)")
             print(f"  - Tie Points     : {tie_points:,}")
             print(f"  - Depth Maps     : {depth_maps:,}")
             print(f"  - Dense Points   : {dense_points:,}")
             print(
-                f"  - 3D Mesh Model  : {model_faces:,} faces, {model_vertices:,} vertices"
+                f"  - 3D Mesh Model  : {model_faces:,} faces, {model_vertices:,} vertices ({texture_pages} tex page(s))"
                 if model_faces
                 else "  - 3D Mesh Model  : None"
             )
@@ -176,14 +211,7 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
 
 def main() -> int:
     """CLI entry point for checkpoint forensics."""
-    if sys.platform == "win32":
-        for _stream_name in ("stdout", "stderr"):
-            _stream = getattr(sys, _stream_name, None)
-            if _stream and hasattr(_stream, "reconfigure"):
-                try:
-                    _stream.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
+    configure_utf8_stdio()
 
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -205,7 +233,12 @@ def main() -> int:
         return 1
 
     try:
-        inspect_project(args.project)
+        if args.json:
+            with redirect_stdout(io.StringIO()):
+                info = inspect_project(args.project)
+            print(json.dumps(info, indent=2))
+        else:
+            inspect_project(args.project)
         return 0
     except Exception as e:
         print(f"[FATAL ERROR] Checkpoint inspection failed: {e}", file=sys.stderr, flush=True)

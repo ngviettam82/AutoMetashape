@@ -344,10 +344,26 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
             pass
 
 
+def _read_payload_meta_sha256(shared_root: str) -> str:
+    """Read cached SHA-256 hex digest from ``.cluster/update_payload.meta.json`` if present."""
+    if not shared_root:
+        return ""
+    meta_path = os.path.join(shared_root, ".cluster", "update_payload.meta.json")
+    if not os.path.isfile(meta_path):
+        return ""
+    try:
+        with open(meta_path, "r", encoding="utf-8") as mf:
+            obj = json.load(mf)
+        return str(obj.get("sha256") or "").strip().lower() if isinstance(obj, dict) else ""
+    except Exception:
+        return ""
+
+
 def generate_worker_updater_code(
     repo_url: str = DEFAULT_REPO_ARCHIVE_URL,
     expected_hostname: str = "",
     shared_cluster_dir: str = "",
+    expected_sha256: str = "",
 ) -> str:
     """Generate lightweight Python code executed on the remote worker node via RunScript.
 
@@ -356,17 +372,22 @@ def generate_worker_updater_code(
     and re-execute its process image upon quitWorker.
     """
     clean_expected = expected_hostname.strip().lower()
+    clean_sha = expected_sha256.strip().lower()
     return f"""import json
 import os
 import socket
 import sys
+import tempfile
 import time
 
 log = []
 node_name = (os.environ.get("COMPUTERNAME") or "").strip() or socket.gethostname() or "unknown"
+node_low = node_name.strip().lower()
+node_short = node_low.split(".", 1)[0]
 expected_node = {clean_expected!r}
 if expected_node and expected_node != "unknown":
-    if node_name.strip().lower() != expected_node:
+    exp_short = expected_node.split(".", 1)[0]
+    if node_low != expected_node and node_short != exp_short:
         err_msg = f"Target node mismatch: task assigned to {{node_name}}, expected {{expected_node}}"
         log.append(f"FATAL: {{err_msg}}")
         raise RuntimeError(err_msg)
@@ -375,14 +396,17 @@ log.append(f"Received worker update trigger on {{node_name}} at {{time.ctime()}}
 log.append(f"Python: {{sys.executable}}")
 
 # 1. Resolve target directory: prioritize AUTOMETASHAPE_DIR env from launcher, fallback to Documents/AutoMetashape
-target_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
-if not target_dir or not os.path.isdir(target_dir):
-    user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
-    target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+env_dir = os.environ.get("AUTOMETASHAPE_DIR", "").strip()
+user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
+default_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
+has_known_dir = bool(env_dir and os.path.isdir(env_dir))
+target_dir = env_dir if has_known_dir else default_dir
+if not has_known_dir and os.path.isdir(default_dir):
+    has_known_dir = True
 os.makedirs(target_dir, exist_ok=True)
 log.append(f"Target AutoMetashape directory: {{target_dir}}")
 
-# 2. Write .update_pending signal file atomically in target directory for persistent supervisor detection
+# 2. Write .update_pending signal file atomically in target directory (plus temp fallback for custom dirs)
 flag_file = os.path.join(target_dir, {UPDATE_SIGNAL_FILENAME!r})
 shared_dir = {shared_cluster_dir!r}
 flag_data = {{
@@ -393,10 +417,17 @@ flag_data = {{
     "timestamp": time.time(),
     "target_dir": target_dir,
 }}
-tmp_flag = f"{{flag_file}}.tmp.{{os.getpid()}}"
-with open(tmp_flag, "w", encoding="utf-8") as f:
-    json.dump(flag_data, f, indent=2)
-os.replace(tmp_flag, flag_file)
+expected_sha = {clean_sha!r}
+if expected_sha:
+    flag_data["sha256"] = expected_sha
+signal_targets = [flag_file]
+if not has_known_dir:
+    signal_targets.append(os.path.join(tempfile.gettempdir(), f"{UPDATE_SIGNAL_FILENAME}_{{node_short}}"))
+for dest_flag in signal_targets:
+    tmp_flag = f"{{dest_flag}}.tmp.{{os.getpid()}}"
+    with open(tmp_flag, "w", encoding="utf-8") as f:
+        json.dump(flag_data, f, indent=2)
+    os.replace(tmp_flag, dest_flag)
 log.append(f"Registered update signal file: {{flag_file}}")
 
 # 3. Write status to shared cluster directory for coordinator inspection
@@ -680,6 +711,7 @@ def update_remote_worker(
     # Stage fresh update payload BEFORE pausing any batches or workers
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
     stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url, force_refresh=True)
+    payload_sha = _read_payload_meta_sha256(shared_root)
 
     try:
         # Pre-flight Check: Is target worker currently busy?
@@ -876,6 +908,7 @@ def update_remote_worker(
             repo_url=repo_url,
             expected_hostname=result["hostname"] or "",
             shared_cluster_dir=cluster_shared_dir,
+            expected_sha256=payload_sha,
         )
         net_task = task.toNetworkTask()
 
@@ -960,6 +993,11 @@ def update_remote_worker(
         # mirror code with Git-parity, and re-execute fresh process image (including GPU probe).
         if restart:
             try:
+                pre_restart_ids = {
+                    w.get("worker_id") for w in current_fleet if w.get("worker_id") is not None
+                }
+                if wid is not None:
+                    pre_restart_ids.add(wid)
                 client.quitWorker(wid)
                 reconnect_deadline = time.time() + max(60.0, timeout)
                 reconnected = False
@@ -979,10 +1017,12 @@ def update_remote_worker(
                         match_hname = bool(result["hostname"] and cw_hname == str(result["hostname"]).strip().lower())
                         cw_ip = _extract_host_ip(cw_addr)
                         match_ip = bool(
-                            target_host_ip and target_host_ip != "127.0.0.1" and cw_ip == target_host_ip.lower()
+                            target_host_ip
+                            and target_host_ip not in ("127.0.0.1", "::1")
+                            and cw_ip == target_host_ip.lower()
                         )
 
-                        if cw_id != wid and (match_hname or match_ip) and cw_state == "ready":
+                        if cw_id not in pre_restart_ids and (match_hname or match_ip) and cw_state == "ready":
                             result["relaunched"] = True
                             result["new_worker_id"] = cw_id
                             result["new_hostaddr"] = cw.get("hostaddr")
@@ -1034,6 +1074,7 @@ def update_all_workers_parallel(
 
     # 1. Stage fresh update payload once BEFORE pausing any batches or workers
     stage_cluster_update_payload(shared_root, repo_url, force_refresh=True)
+    payload_sha = _read_payload_meta_sha256(shared_root)
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
 
     paused_existing_batches: list[int] = []
@@ -1212,6 +1253,7 @@ def update_all_workers_parallel(
                     repo_url=repo_url,
                     expected_hostname=hname,
                     shared_cluster_dir=cluster_shared_dir,
+                    expected_sha256=payload_sha,
                 )
                 net_task = task.toNetworkTask()
                 batch_id = client.createBatch(rel_project, [net_task])
@@ -1282,6 +1324,8 @@ def update_all_workers_parallel(
                     pass
 
         # 5. Read result logs and issue quitWorker in parallel for all completed workers
+        pre_restart_ids = {w.get("worker_id") for w in workers if w.get("worker_id") is not None}
+        claimed_new_ids: set[Any] = set()
         relaunching_nodes = []
         for nr in worker_batches:
             if nr.get("success"):
@@ -1312,7 +1356,6 @@ def update_all_workers_parallel(
                 for nr in relaunching_nodes:
                     if nr.get("relaunched"):
                         continue
-                    old_wid = nr.get("worker_id")
                     target_hname = str(nr.get("hostname", "")).strip().lower()
                     target_ip = _extract_host_ip(str(nr.get("hostaddr") or ""))
 
@@ -1324,12 +1367,21 @@ def update_all_workers_parallel(
 
                         match_hname = bool(target_hname and cw_hname == target_hname)
                         cw_ip = _extract_host_ip(cw_addr)
-                        match_ip = bool(target_ip and target_ip != "127.0.0.1" and cw_ip == target_ip.lower())
+                        match_ip = bool(
+                            target_ip and target_ip not in ("127.0.0.1", "::1") and cw_ip == target_ip.lower()
+                        )
 
-                        if cw_id != old_wid and (match_hname or match_ip) and cw_state == "ready":
+                        if (
+                            cw_id not in pre_restart_ids
+                            and cw_id not in claimed_new_ids
+                            and (match_hname or match_ip)
+                            and cw_state == "ready"
+                        ):
                             nr["relaunched"] = True
                             nr["new_worker_id"] = cw_id
                             nr["new_hostaddr"] = cw.get("hostaddr")
+                            if cw_id is not None:
+                                claimed_new_ids.add(cw_id)
                             if orig_paused_by_host.get(target_hname) and cw_id is not None:
                                 orig_worker_paused[cw_id] = True
                             break

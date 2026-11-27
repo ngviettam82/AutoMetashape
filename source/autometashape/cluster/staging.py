@@ -196,6 +196,32 @@ def check_scratch_disk_headroom(scratch_dir: str, min_free_gb: float = 100.0) ->
         return (False, 0.0)
 
 
+def _is_linux_tmpfs_path(path: str) -> bool:
+    """Return True if ``path`` resolves onto a RAM-backed ``tmpfs`` filesystem on Linux."""
+    if not sys.platform.startswith("linux"):
+        return False
+    try:
+        target = os.path.realpath(path if os.path.exists(path) else os.path.dirname(os.path.abspath(path)))
+        best_mount = ""
+        best_fstype = ""
+        with open("/proc/mounts", "r", encoding="utf-8", errors="ignore") as mf:
+            for line in mf:
+                parts = line.split()
+                if len(parts) < 3:
+                    continue
+                mnt_point = parts[1].replace("\\040", " ")
+                fs_type = parts[2].lower()
+                if target == mnt_point or (
+                    mnt_point == "/" or target.startswith(mnt_point.rstrip("/") + "/")
+                ):
+                    if len(mnt_point) > len(best_mount):
+                        best_mount = mnt_point
+                        best_fstype = fs_type
+        return best_fstype == "tmpfs"
+    except OSError:
+        return False
+
+
 def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
     """Dynamically discover and prepare the highest-capacity fast local drive for scratch data.
 
@@ -210,6 +236,9 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
         Absolute normalized path to verified, writable local scratch directory.
     """
     candidate_dirs: list[str] = []
+    env_scratch = os.environ.get("AUTOMETASHAPE_SCRATCH_DIR", "").strip()
+    if env_scratch:
+        candidate_dirs.append(os.path.normpath(env_scratch))
 
     if sys.platform == "win32":
         sys_drive = os.environ.get("SystemDrive", "C:")[0].upper()
@@ -242,24 +271,30 @@ def get_optimal_local_scratch_dir(min_free_gb: float = 100.0) -> str:
             )
             candidate_dirs.extend(c[2] for c in (valid_non_system + valid_system + under_threshold))
     else:
-        linux_candidates = ["/mnt/scratch", "/var/tmp", "/tmp", os.path.expanduser("~/AutoMetashape_Scratch")]
-        ranked_linux: list[tuple[float, str]] = []
-        for cand in linux_candidates:
+        raw_linux = ["/var/tmp", "/tmp", os.path.expanduser("~/AutoMetashape_Scratch")]
+        if os.path.isdir("/mnt/scratch"):
+            raw_linux.insert(0, "/mnt/scratch")
+        ranked_linux: list[tuple[bool, float, str]] = []
+        for cand in raw_linux:
+            if not os.path.exists(cand) and not cand.endswith("AutoMetashape_Scratch"):
+                continue
             probe_p = cand if os.path.exists(cand) else os.path.dirname(cand)
             if os.path.exists(probe_p):
                 try:
                     u = shutil.disk_usage(probe_p)
                     f_gb = u.free / (1024**3)
+                    is_disk = not _is_linux_tmpfs_path(probe_p)
                     target_p = (
-                        os.path.join(cand, "AutoMetashape_Scratch")
-                        if not cand.endswith("AutoMetashape_Scratch")
-                        else cand
+                        cand if cand.endswith("AutoMetashape_Scratch") else os.path.join(cand, "AutoMetashape_Scratch")
                     )
-                    ranked_linux.append((f_gb, target_p))
+                    ranked_linux.append((is_disk, f_gb, target_p))
                 except Exception:
                     continue
-        ranked_linux.sort(key=lambda x: x[0], reverse=True)
-        candidate_dirs.extend(p for _, p in ranked_linux)
+        # Prefer disk-backed volumes before RAM-backed tmpfs, then highest free space
+        ranked_linux.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        for _, _, p in ranked_linux:
+            if p not in candidate_dirs:
+                candidate_dirs.append(p)
 
     fallback = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
     if fallback not in candidate_dirs:
@@ -429,7 +464,7 @@ def reconcile_staged_psx_chunk_id(
     renamed = False
     dst_bak = f"{dst_dir}.reconcile_bak_{os.getpid()}"
     backed_up_dst = False
-    tmp_pz = local_pz + ".reconcile.tmp"
+    tmp_pz = f"{local_pz}.reconcile.{os.getpid()}.tmp"
     try:
         if old_dir != target_id:
             if os.path.isdir(dst_bak):
@@ -531,7 +566,21 @@ def _sync_directory_atomic(s_path: str, d_path: str, uniq_tag: str, ignore_fn) -
                 shutil.rmtree(old_d, ignore_errors=True)
             os.rename(d_path, old_d)
             moved_old = True
-        os.rename(tmp_d, d_path)
+        last_rename_err: OSError | None = None
+        for delay_s in (0.2, 0.5, 0.0):
+            try:
+                os.rename(tmp_d, d_path)
+                last_rename_err = None
+                break
+            except OSError as exc_rn:
+                last_rename_err = exc_rn
+                if _is_disk_full_error(exc_rn) or delay_s <= 0.0:
+                    break
+                import time
+
+                time.sleep(delay_s)
+        if last_rename_err is not None:
+            raise last_rename_err
         if os.path.isdir(old_d):
             shutil.rmtree(old_d, ignore_errors=True)
     except OSError as e_swap:

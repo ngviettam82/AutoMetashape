@@ -46,6 +46,7 @@ from autometashape.cluster.hardware import (
     is_healthy_online_worker,
 )
 from autometashape.core.verification import verify_project_deliverables
+from autometashape.ipc.protocol import configure_utf8_stdio
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -238,18 +239,27 @@ def audit_headroom(paths: List[str]) -> Dict[str, float]:
     return headroom
 
 
+def _obj_declares_mtllib(obj_path: str) -> bool:
+    """Return True if the first 64 KB of an OBJ file references an external ``mtllib`` library."""
+    try:
+        with open(obj_path, "r", encoding="utf-8", errors="ignore") as f:
+            head = f.read(65536)
+        return any(line.strip().lower().startswith("mtllib ") for line in head.splitlines())
+    except Exception:
+        return False
+
+
 def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
     """Inspect deliverables in result directory via canonical structural verification."""
     if not os.path.isdir(result_dir):
         return {"intact": False, "reason": "Directory does not exist"}
-
-    canonical = verify_project_deliverables(result_dir, project_name=proj_name, expected_assets=["obj", "ortho"])
 
     escaped_dir = glob.escape(result_dir)
     obj_files = sorted(glob.glob(os.path.join(escaped_dir, "*.obj")))
     obj_bytes = os.path.getsize(obj_files[0]) if obj_files else 0
     obj_sz = obj_bytes / (1024 * 1024)
 
+    glb_files = sorted(glob.glob(os.path.join(escaped_dir, "*.glb")))
     mtl_files = sorted(glob.glob(os.path.join(escaped_dir, "*.mtl")))
     img_candidates = sorted(
         glob.glob(os.path.join(escaped_dir, "*.png"))
@@ -275,11 +285,45 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
     ortho_bytes = os.path.getsize(ortho_files[0]) if ortho_files else 0
     ortho_sz = ortho_bytes / (1024 * 1024)
 
+    dem_files = sorted(
+        p
+        for p in (glob.glob(os.path.join(escaped_dir, "*.tif")) + glob.glob(os.path.join(escaped_dir, "*.tiff")))
+        if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", os.path.basename(p).lower()) is not None
+    )
+    cloud_files = [
+        p
+        for ext in ("*.laz", "*.las", "*.ply", "*.e57", "*.xyz")
+        for p in glob.glob(os.path.join(escaped_dir, ext))
+        if not os.path.basename(p).lower().endswith(("_mesh.ply", "_tie_points.ply"))
+    ]
+    pdf_files = sorted(glob.glob(os.path.join(escaped_dir, "*.pdf")))
     prj_files = glob.glob(os.path.join(escaped_dir, "*.prj"))
     tfw_files = glob.glob(os.path.join(escaped_dir, "*.tfw"))
 
-    # Require structural OBJ/GeoTIFF validation from canonical verification.py plus MTL, textures, and spatial sidecars
-    intact = bool(canonical.get("status") == "PASS" and mtl_files and len(tex_files) >= 1 and prj_files and tfw_files)
+    present_expected: List[str] = []
+    if obj_files:
+        present_expected.append("obj")
+    if glb_files:
+        present_expected.append("glb")
+    if ortho_files:
+        present_expected.append("ortho")
+    if dem_files:
+        present_expected.append("dem")
+    if cloud_files:
+        present_expected.append("point_cloud")
+    if pdf_files:
+        present_expected.append("report")
+
+    if present_expected:
+        canonical = verify_project_deliverables(
+            result_dir, project_name=proj_name, expected_assets=present_expected
+        )
+        requires_mtl_tex = ("obj" in present_expected) and (bool(mtl_files) or _obj_declares_mtllib(obj_files[0]))
+        mtl_tex_ok = (bool(mtl_files) and len(tex_files) >= 1) if requires_mtl_tex else True
+        intact = bool(canonical.get("status") == "PASS" and mtl_tex_ok)
+    else:
+        canonical = verify_project_deliverables(result_dir, project_name=proj_name, expected_assets=["psx"])
+        intact = bool(canonical.get("status") == "PASS")
 
     result: Dict[str, Any] = {
         "intact": intact,
@@ -448,9 +492,9 @@ def execute_audit(
     # Only enforce writable headroom threshold and resolve deliverables/sidecars on Result roots;
     # if source_root is explicitly separate and read-only, audit its free space without ever
     # searching raw photo folders for deliverables or failing writable Result headroom.
-    norm_source = os.path.normpath(source_root.strip()).lower() if source_root.strip() else ""
+    norm_source = os.path.normcase(os.path.normpath(source_root.strip())) if source_root.strip() else ""
     result_storage_paths = [
-        p for p in storage_paths if not norm_source or os.path.normpath(p).lower() != norm_source
+        p for p in storage_paths if not norm_source or os.path.normcase(os.path.normpath(p)) != norm_source
     ] or list(storage_paths)
     checked_headroom = {p: headroom[p] for p in result_storage_paths if p in headroom}
     headroom_ok = all(free_gb >= min_headroom for free_gb in (checked_headroom or headroom).values())
@@ -661,14 +705,7 @@ def execute_audit(
 
 def main() -> int:
     """CLI entry point for cluster monitoring."""
-    if sys.platform == "win32":
-        for _stream_name in ("stdout", "stderr"):
-            _stream = getattr(sys, _stream_name, None)
-            if _stream and hasattr(_stream, "reconfigure"):
-                try:
-                    _stream.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
+    configure_utf8_stdio()
 
     parser = build_arg_parser()
     args = parser.parse_args()

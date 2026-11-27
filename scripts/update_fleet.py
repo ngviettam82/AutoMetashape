@@ -32,6 +32,7 @@ from autometashape.cluster.config import load_cluster_config
 from autometashape.cluster.hardware import find_metashape_path, get_primary_lan_ip
 from autometashape.cluster.updater import (
     DEFAULT_REPO_ARCHIVE_URL,
+    _extract_host_ip,
     list_online_workers,
     update_all_workers_parallel,
     update_remote_worker,
@@ -244,7 +245,7 @@ def main() -> int:
             target_low = target_arg.lower()
             for w in online_workers:
                 haddr = str(w.get("hostaddr", "")).strip().lower()
-                hip = haddr.rsplit(":", 1)[0] if ":" in haddr else haddr
+                hip = _extract_host_ip(haddr)
                 if (
                     str(w.get("worker_id")) == target_arg
                     or str(w.get("hostname", "")).lower() == target_low
@@ -262,15 +263,17 @@ def main() -> int:
         success_count = 0
         fail_count = 0
         for node in targets:
-            target_name = node.get("hostname") or str(node.get("worker_id"))
-            # Re-query current online workers: match by hostname first so shifted/reassigned worker_ids
-            # never target a different physical machine.
+            target_hostname = str(node.get("hostname") or "").strip()
+            target_name = target_hostname or str(node.get("worker_id"))
+            # Re-query current online workers: match by hostname so shifted/reassigned worker_ids
+            # never redirect updates onto a different physical machine.
             fresh_workers = list_online_workers(client)
-            matched = next(
-                (fw for fw in fresh_workers if str(fw.get("hostname", "")).lower() == str(target_name).lower()),
-                None,
-            )
-            if matched is None:
+            if target_hostname:
+                matched = next(
+                    (fw for fw in fresh_workers if str(fw.get("hostname", "")).lower() == target_hostname.lower()),
+                    None,
+                )
+            else:
                 matched = next(
                     (fw for fw in fresh_workers if str(fw.get("worker_id")) == str(node.get("worker_id"))),
                     None,

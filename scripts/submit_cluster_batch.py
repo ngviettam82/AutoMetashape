@@ -38,6 +38,7 @@ from autometashape.cluster.dual_share import (
     discover_dual_share_projects,
     extract_path_leaf_name,
     is_subpath,
+    relpath_under,
     resolve_result_network_root,
     validate_dual_share_topology,
 )
@@ -52,7 +53,12 @@ from autometashape.cluster.orchestrator import (
     resolve_batch_canonical_path,
     safe_create_cluster_batch,
 )
-from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
+from autometashape.core.telemetry import (
+    SUPPORTED_IMAGE_EXTS,
+    _is_ignored_survey_dir,
+    _is_supported_image_file,
+    parse_exclude_folder_patterns,
+)
 from autometashape.ipc.protocol import configure_utf8_stdio
 
 IMAGE_EXTENSIONS = SUPPORTED_IMAGE_EXTS
@@ -61,10 +67,13 @@ IMAGE_EXTENSIONS = SUPPORTED_IMAGE_EXTS
 def get_cluster_relative_path(target_path: str, shared_root: str) -> str:
     """Compute cluster-relative POSIX path for Metashape Network Server."""
     if shared_root and is_subpath(target_path, shared_root):
+        rel = relpath_under(target_path, shared_root)
+        if rel and rel != ".":
+            return rel
         try:
-            rel = os.path.relpath(target_path, shared_root).replace("\\", "/")
-            if not rel.startswith(".."):
-                return rel
+            rel_fb = os.path.relpath(target_path, shared_root).replace("\\", "/")
+            if not rel_fb.startswith(".."):
+                return rel_fb
         except Exception:
             pass
     return target_path.replace("\\", "/")
@@ -214,6 +223,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Opt in to hidden .cluster/tickets/ fallback if server still holds a duplicate canonical path",
     )
     parser.add_argument(
+        "--min-headroom",
+        type=float,
+        default=50.0,
+        help="Minimum free disk space (GB) required on Result share before submission (default: 50.0)",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -222,17 +237,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def find_photos_in_directory(images_dir: str, exclude_folders: str = "") -> List[str]:
-    """Recursively search for supported image files in images_dir, skipping excluded folders."""
+    """Recursively search for supported image files in images_dir, skipping ignored/excluded folders."""
     photos: List[str] = []
     if not os.path.isdir(images_dir):
         return photos
-    excl_pats = tuple(tok.strip().lower() for tok in (exclude_folders or "").split(",") if tok.strip())
+    excl_pats = parse_exclude_folder_patterns(exclude_folders)
     for root, dirs, files in os.walk(images_dir):
-        if excl_pats:
-            dirs[:] = [d for d in dirs if not any(p in d.lower() for p in excl_pats)]
+        dirs[:] = [
+            d
+            for d in dirs
+            if not _is_ignored_survey_dir(d) and not any(p in d.lower() for p in excl_pats)
+        ]
         for f in sorted(files):
-            ext = os.path.splitext(f)[1].lower()
-            if ext in IMAGE_EXTENSIONS:
+            if _is_supported_image_file(f):
                 photos.append(os.path.normpath(os.path.join(root, f)))
     return photos
 
@@ -361,7 +378,7 @@ def submit_batch(
                 "queued",
                 "paused",
             ) and not (b.get("failed") or b.get("aborted"))
-            if not force and is_active and b_err == 0:
+            if not force and is_active and b_err == 0 and b.get("batch_id") is not None:
                 bid = int(b.get("batch_id"))
                 print(
                     f"  [OK] Project '{proj_name}' already has healthy active Batch #{bid} ({b_state}); "
@@ -551,7 +568,7 @@ def main() -> int:
                 args.source_share,
                 result_share,
                 result_network_root=args.root,
-                min_headroom_gb=50.0,
+                min_headroom_gb=args.min_headroom,
             )
             if not topo["valid"]:
                 for err in topo["errors"]:
@@ -566,13 +583,17 @@ def main() -> int:
                 result_share,
                 result_network_root=resolved_root,
             )
-            excl_pats = tuple(tok.strip().lower() for tok in (args.exclude_folders or "").split(",") if tok.strip())
+            excl_pats = parse_exclude_folder_patterns(args.exclude_folders)
             if excl_pats and projects:
                 filtered_projects = []
                 for proj in projects:
-                    rel_parts = (
-                        os.path.relpath(proj.images_dir, args.source_share).replace("\\", "/").lower().split("/")
-                    )
+                    rel_p = relpath_under(proj.images_dir, args.source_share)
+                    if rel_p is None:
+                        try:
+                            rel_p = os.path.relpath(proj.images_dir, args.source_share).replace("\\", "/")
+                        except ValueError:
+                            rel_p = proj.images_dir.replace("\\", "/")
+                    rel_parts = rel_p.lower().split("/")
                     if any(any(pat in seg for pat in excl_pats) for seg in rel_parts):
                         continue
                     filtered_projects.append(proj)

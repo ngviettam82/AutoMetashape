@@ -43,7 +43,7 @@ from autometashape.cluster.orchestrator import (
     safe_create_cluster_batch,
 )
 from autometashape.cluster.staging import get_optimal_local_scratch_dir
-from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
+from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS, _is_supported_image_file
 from autometashape.core.verification import verify_project_deliverables
 from autometashape.ipc.protocol import configure_utf8_stdio
 
@@ -92,7 +92,7 @@ def _derive_default_expected_assets(extra_args: Optional[Dict[str, Any]] = None)
         assets.append("point_cloud")
     if extra.get("export_report", False):
         assets.append("report")
-    return assets
+    return assets if assets else ["psx"]
 
 
 class QueueJob:
@@ -535,6 +535,7 @@ class ClusterSupervisor:
                 pass
 
             active_batches: Dict[int, QueueJob] = {}
+            owned_batch_ids: set[int] = set()
             batch_status_files: Dict[int, str] = {}
             completed_results: List[Dict[str, Any]] = []
 
@@ -623,6 +624,8 @@ class ClusterSupervisor:
                     )
                     job.status = "RUNNING"
                     active_batches[batch_id] = job
+                    if not was_attached:
+                        owned_batch_ids.add(batch_id)
                     batch_status_files[batch_id] = status_file
                     attach_str = "attached to existing" if was_attached else "created new"
                     print(
@@ -722,9 +725,16 @@ class ClusterSupervisor:
                         if job.status != "COMPLETED" and self.stop_on_failure:
                             print("  [SUPERVISOR] Halting remaining batches due to verification failure.", flush=True)
                             for rem_b_id in list(active_batches.keys()):
-                                _safe_abort_batch(net_client, rem_b_id, is_paused=True)
                                 rem_j = active_batches[rem_b_id]
-                                rem_j.status = "ABORTED"
+                                if rem_b_id in owned_batch_ids:
+                                    _safe_abort_batch(net_client, rem_b_id, is_paused=True)
+                                    rem_j.status = "ABORTED"
+                                else:
+                                    print(
+                                        f"  [SUPERVISOR] Leaving pre-existing attached Batch #{rem_b_id} untouched "
+                                        "(Operator Authority Gate).",
+                                        flush=True,
+                                    )
                                 completed_results.append(rem_j.to_dict())
                                 completed_job_ids.add(id(rem_j))
                             active_batches.clear()
@@ -754,9 +764,16 @@ class ClusterSupervisor:
                                 flush=True,
                             )
                             for rem_b_id in list(active_batches.keys()):
-                                _safe_abort_batch(net_client, rem_b_id, is_paused=True)
                                 rem_j = active_batches[rem_b_id]
-                                rem_j.status = "ABORTED"
+                                if rem_b_id in owned_batch_ids:
+                                    _safe_abort_batch(net_client, rem_b_id, is_paused=True)
+                                    rem_j.status = "ABORTED"
+                                else:
+                                    print(
+                                        f"  [SUPERVISOR] Leaving pre-existing attached Batch #{rem_b_id} untouched "
+                                        "(Operator Authority Gate).",
+                                        flush=True,
+                                    )
                                 completed_results.append(rem_j.to_dict())
                                 completed_job_ids.add(id(rem_j))
                             active_batches.clear()
@@ -827,7 +844,7 @@ def discover_dataset_projects(
                     wd for wd in walk_dirs if not wd.startswith((".", "$")) and not wd.lower().endswith(".files")
                 ]
                 for f in files:
-                    if f.lower().endswith(SUPPORTED_IMAGE_EXTS):
+                    if _is_supported_image_file(f):
                         count += 1
                         if count >= 1:
                             return count
@@ -885,7 +902,7 @@ def discover_dataset_projects(
         root_images = [
             f
             for f in os.listdir(scan_dir)
-            if os.path.isfile(os.path.join(scan_dir, f)) and f.lower().endswith(SUPPORTED_IMAGE_EXTS)
+            if os.path.isfile(os.path.join(scan_dir, f)) and _is_supported_image_file(f)
         ]
         if root_images:
             project_name = extract_path_leaf_name(scan_dir)
@@ -970,7 +987,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expect",
         nargs="+",
-        choices=["obj", "glb", "dem", "ortho", "point_cloud", "report"],
+        choices=["obj", "glb", "dem", "ortho", "point_cloud", "report", "psx"],
         default=None,
         help="List of deliverable asset types that must be present and verified",
     )
@@ -1055,7 +1072,10 @@ def main() -> int:
             entry_script = (
                 os.path.abspath(sys.argv[0]) if sys.argv and os.path.isfile(sys.argv[0]) else os.path.abspath(__file__)
             )
-            cmd = [ms_exe, "-r", entry_script] + sys.argv[1:] + ["--no-reexec"]
+            cmd = [ms_exe]
+            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+                cmd.extend(["-platform", "offscreen"])
+            cmd.extend(["-r", entry_script, "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
             return res.returncode
         print(
@@ -1154,9 +1174,19 @@ def main() -> int:
             print("[FATAL] Manifest JSON must be a list of dataset job objects.", file=sys.stderr)
             return 1
 
-        for item in queue_data:
+        for idx_m, item in enumerate(queue_data):
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("images_dir"), str)
+                or not item["images_dir"].strip()
+            ):
+                print(
+                    f"[FATAL] Manifest entry #{idx_m} must be a dict with non-empty 'images_dir'.",
+                    file=sys.stderr,
+                )
+                return 1
             merged_extra = dict(extra_args)
-            if item.get("extra_args"):
+            if isinstance(item.get("extra_args"), dict):
                 merged_extra.update(item["extra_args"])
             supervisor.add_job(
                 images_dir=item["images_dir"],

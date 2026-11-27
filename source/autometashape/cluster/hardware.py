@@ -59,6 +59,12 @@ def is_healthy_online_worker(worker: Any) -> bool:
 
 def find_metashape_path() -> str | None:
     """Locate Agisoft Metashape Pro executable dynamically across platforms."""
+    # 0. Explicit operator environment override
+    for env_key in ("AUTOMETASHAPE_METASHAPE_PATH", "METASHAPE_EXE"):
+        env_val = os.environ.get(env_key, "").strip().strip('"')
+        if env_val and os.path.isfile(env_val):
+            return os.path.normpath(env_val)
+
     # 1. Bundled relative to current Python if running inside Metashape's embedded Python
     py_dir = os.path.dirname(sys.executable)
     for rel_cand in (
@@ -284,16 +290,17 @@ def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
 
 def get_primary_lan_ip() -> str:
     """Detect the host machine's primary LAN IPv4 address (e.g. 192.168.x.x or 10.x.x.x)."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        if ip and not ip.startswith("127."):
-            return ip
-    except Exception:
-        pass
-    finally:
-        s.close()
+    for probe_target in (("8.8.8.8", 80), ("10.255.255.255", 1), ("192.168.0.1", 1), ("172.16.0.1", 1)):
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            s.connect(probe_target)
+            ip = s.getsockname()[0]
+            if ip and not ip.startswith("127."):
+                return ip
+        except Exception:
+            pass
+        finally:
+            s.close()
 
     # Airgapped / offline LAN fallback: inspect hostname IP resolution across all IPv4 addresses
     try:
@@ -626,6 +633,11 @@ def generate_worker_bat_content(
     target_port = target_port or "5840"
     if not target_port.isdigit() or not (1 <= int(target_port) <= 65535):
         raise ValueError(f"Invalid worker port: {target_port!r}")
+    host_port = (
+        f"[{target_host}]:{target_port}"
+        if (":" in target_host and not target_host.startswith("["))
+        else f"{target_host}:{target_port}"
+    )
     cpu_flag_val = 1 if int(cpu_enable) else 0
     target_root = root_path.strip()
     if _BATCH_UNSAFE_CHARS_RE.search(target_root):
@@ -651,7 +663,7 @@ title Metashape Distributed Cluster Worker Node
 
 echo =======================================================================
 echo   AutoMetashape Distributed Cluster - Worker Node Launcher
-echo   Cluster Target Server : {target_host}:{target_port}
+echo   Cluster Target Server : {host_port}
 echo =======================================================================
 echo.
 
@@ -699,12 +711,12 @@ if "%METASHAPE_EXE%"=="" (
 )
 
 echo [OK] Using Metashape binary: "%METASHAPE_EXE%"
-echo [CONNECTING] Connecting worker node to {target_host}:{target_port}...
+echo [CONNECTING] Connecting worker node to {host_port}...
 echo [READY] Worker is online and waiting for jobs from the server.
 echo Press Ctrl+C in this window at any time to disconnect this worker node.
 echo.
 
-"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_flag_val}{gpu_flag}
+"%METASHAPE_EXE%" --worker --host {host_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_flag_val}{gpu_flag}
 
 if !errorlevel! neq 0 (
     echo.

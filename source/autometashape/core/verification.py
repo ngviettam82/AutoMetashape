@@ -14,11 +14,29 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import re
 import struct
 import sys
+import zipfile
 from typing import Any, Dict, List, Optional, Tuple
+
+_GENERIC_ASSET_STEMS = frozenset(
+    {
+        "model",
+        "building_reconstruction",
+        "orthomosaic",
+        "ortho",
+        "dem",
+        "dsm",
+        "elevation",
+        "point_cloud",
+        "points",
+        "report",
+        "quality_report",
+    }
+)
 
 _MTL_MAP_OPT_ARITY = {
     "-blendu": 1,
@@ -140,10 +158,16 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
         errors.append("OBJ file contains no face ('f ') polygon definitions.")
 
     # Validate Material & Texture Links
+    base_real = os.path.realpath(base_dir)
     for mtl_name in mtl_filenames:
-        mtl_path = os.path.join(base_dir, mtl_name)
-        if not os.path.isfile(mtl_path):
-            errors.append(f"Linked MTL material library does not exist: {mtl_path}")
+        mtl_parts = [p for p in mtl_name.replace("\\", "/").split("/") if p]
+        mtl_path = os.path.join(base_dir, *mtl_parts) if mtl_parts else ""
+        try:
+            mtl_ok = bool(mtl_path) and os.path.commonpath([base_real, os.path.realpath(mtl_path)]) == base_real
+        except ValueError:
+            mtl_ok = False
+        if not mtl_ok or not os.path.isfile(mtl_path):
+            errors.append(f"Linked MTL material library does not exist or escapes base dir: {mtl_path or mtl_name}")
             continue
 
         try:
@@ -151,9 +175,17 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
                 for mline in mf:
                     tex_file = _extract_mtl_map_kd_filename(mline)
                     if tex_file:
-                        tex_path = os.path.join(base_dir, tex_file)
-                        if not os.path.isfile(tex_path):
-                            errors.append(f"MTL references missing texture atlas file: {tex_path}")
+                        tex_parts = [p for p in tex_file.replace("\\", "/").split("/") if p]
+                        tex_path = os.path.join(base_dir, *tex_parts) if tex_parts else ""
+                        try:
+                            tex_in_base = (
+                                bool(tex_path)
+                                and os.path.commonpath([base_real, os.path.realpath(tex_path)]) == base_real
+                            )
+                        except ValueError:
+                            tex_in_base = False
+                        if not tex_in_base or not os.path.isfile(tex_path):
+                            errors.append(f"MTL references missing texture atlas file: {tex_path or tex_file}")
                         elif os.path.getsize(tex_path) < 1000:
                             errors.append(f"Referenced texture file is undersized/empty: {tex_path}")
         except Exception as m_exc:
@@ -179,10 +211,19 @@ def verify_glb_model(glb_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
             glb_version, declared_len = struct.unpack("<II", hdr[4:12])
             if glb_version != 2:
                 return False, [f"Unsupported/invalid GLB version: expected 2, got {glb_version}"]
-            if declared_len != size:
+            if declared_len < 12 or declared_len != size:
                 return False, [
                     f"Truncated/corrupted GLB container: header declares {declared_len} bytes, file is {size} bytes"
                 ]
+            if size >= 20:
+                hdr0 = f.read(8)
+                if len(hdr0) == 8:
+                    chunk_len, chunk_type = struct.unpack("<I4s", hdr0)
+                    if chunk_len > 0 or chunk_type != b"\x00\x00\x00\x00":
+                        if chunk_type != b"JSON" or 20 + chunk_len > declared_len:
+                            return False, [
+                                f"Invalid/truncated GLB JSON chunk header: type={chunk_type!r}, len={chunk_len}"
+                            ]
     except Exception as exc:
         return False, [f"Failed to read GLB binary header: {exc}"]
 
@@ -237,6 +278,31 @@ def verify_point_cloud(cloud_path: str, min_size_bytes: int = 50000) -> Tuple[bo
             elif ext == ".e57":
                 if header != b"ASTM-E57":
                     return False, [f"Invalid E57 magic header: expected b'ASTM-E57', got {header!r}"]
+            elif ext == ".xyz":
+                f.seek(0)
+                sample = f.read(16384)
+                if b"\x00" in sample[:4096]:
+                    return False, ["Invalid XYZ point cloud: binary NUL bytes in ASCII point stream"]
+                valid_pts = 0
+                lines_checked = 0
+                for raw_line in sample.decode("utf-8", errors="ignore").splitlines():
+                    line = raw_line.strip()
+                    if not line or line.startswith(("#", "//")):
+                        continue
+                    lines_checked += 1
+                    parts = [p for p in re.split(r"[\s,;]+", line) if p]
+                    if len(parts) >= 3:
+                        try:
+                            vals = [float(parts[i]) for i in range(3)]
+                            if all(math.isfinite(v) for v in vals):
+                                valid_pts += 1
+                                break
+                        except ValueError:
+                            pass
+                    if lines_checked >= 64:
+                        break
+                if valid_pts == 0:
+                    return False, ["Invalid XYZ point cloud: no valid X Y Z numeric coordinate triples found"]
     except Exception as exc:
         return False, [f"Failed to read point cloud header: {exc}"]
 
@@ -263,6 +329,37 @@ def verify_pdf_report(pdf_path: str, min_size_bytes: int = 15000) -> Tuple[bool,
                 return False, ["Truncated/corrupted PDF report: missing '%%EOF' trailer marker."]
     except Exception as exc:
         return False, [f"Failed to read PDF report header: {exc}"]
+
+    return True, []
+
+
+def verify_psx_project(psx_path: str) -> Tuple[bool, List[str]]:
+    """Validate a Metashape .psx XML manifest and its companion .files/project.zip archive."""
+    if not os.path.isfile(psx_path):
+        return False, [f"PSX file not found: {psx_path}"]
+    if os.path.getsize(psx_path) <= 0:
+        return False, [f"PSX file is empty: {psx_path}"]
+    try:
+        with open(psx_path, "r", encoding="utf-8", errors="replace") as f:
+            xml_txt = f.read(65536)
+        if "<document" not in xml_txt:
+            return False, [f"Invalid PSX manifest (missing '<document'): {psx_path}"]
+    except Exception as exc:
+        return False, [f"Failed to read PSX manifest '{psx_path}': {exc}"]
+
+    files_dir = psx_path[:-4] + ".files" if psx_path.lower().endswith(".psx") else psx_path + ".files"
+    project_zip = os.path.join(files_dir, "project.zip")
+    if not os.path.isfile(project_zip):
+        return False, [f"Missing Metashape project archive: {project_zip}"]
+    try:
+        with zipfile.ZipFile(project_zip, "r") as zf:
+            bad = zf.testzip()
+            if bad is not None:
+                return False, [f"Corrupt ZIP entry '{bad}' in {project_zip}"]
+            if "doc.xml" not in zf.namelist():
+                return False, [f"Missing doc.xml inside {project_zip}"]
+    except Exception as exc:
+        return False, [f"Failed to read project.zip '{project_zip}': {exc}"]
 
     return True, []
 
@@ -299,17 +396,23 @@ def verify_project_deliverables(
     # Gather sorted regular files in deliverables directory (skip subdirs & broken symlinks)
     all_files = sorted(f for f in os.listdir(deliverables_dir) if os.path.isfile(os.path.join(deliverables_dir, f)))
 
-    def _prefer_project_match(candidates: List[str]) -> str:
-        if project_name and candidates:
-            pref = project_name.lower()
-            exact_or_delim = [
-                f
-                for f in candidates
-                if os.path.splitext(f)[0].lower() == pref or f.lower().startswith((pref + ".", pref + "_", pref + "-"))
-            ]
-            if exact_or_delim:
-                return exact_or_delim[0]
-        return candidates[0]
+    def _prefer_project_match(candidates: List[str]) -> Optional[str]:
+        if not candidates:
+            return None
+        if not project_name:
+            return candidates[0]
+        pref = project_name.lower()
+        exact_or_delim = [
+            f
+            for f in candidates
+            if os.path.splitext(f)[0].lower() == pref or f.lower().startswith((pref + ".", pref + "_", pref + "-"))
+        ]
+        if exact_or_delim:
+            return exact_or_delim[0]
+        generic = [f for f in candidates if os.path.splitext(f)[0].lower() in _GENERIC_ASSET_STEMS]
+        if generic:
+            return generic[0]
+        return None
 
     # Collect texture filenames referenced by MTL libraries so TIFF textures are never misclassified as DEM/Ortho
     mtl_referenced_tifs: set[str] = set()
@@ -319,14 +422,14 @@ def verify_project_deliverables(
                 for mline in mf:
                     tex_file = _extract_mtl_map_kd_filename(mline)
                     if tex_file:
-                        mtl_referenced_tifs.add(os.path.basename(tex_file).lower())
+                        mtl_referenced_tifs.add(os.path.basename(tex_file.replace("\\", "/")).lower())
         except Exception:
             pass
 
     # 1. 3D Model: OBJ + MTL
     obj_files = [f for f in all_files if f.lower().endswith(".obj")]
-    if obj_files:
-        target_obj = _prefer_project_match(obj_files)
+    target_obj = _prefer_project_match(obj_files)
+    if target_obj:
         obj_full = os.path.join(deliverables_dir, target_obj)
         ok, errs = verify_obj_model(obj_full)
         assets_checked["obj"] = {
@@ -343,8 +446,8 @@ def verify_project_deliverables(
 
     # 2. 3D Model: GLB
     glb_files = [f for f in all_files if f.lower().endswith(".glb")]
-    if glb_files:
-        target_glb = _prefer_project_match(glb_files)
+    target_glb = _prefer_project_match(glb_files)
+    if target_glb:
         glb_full = os.path.join(deliverables_dir, target_glb)
         ok, errs = verify_glb_model(glb_full)
         assets_checked["glb"] = {
@@ -378,8 +481,8 @@ def verify_project_deliverables(
             f for f in dem_candidates if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", f.lower()) is not None
         ]
 
-    if dem_files:
-        target_dem = _prefer_project_match(dem_files)
+    target_dem = _prefer_project_match(dem_files)
+    if target_dem:
         dem_full = os.path.join(deliverables_dir, target_dem)
         ok, errs = verify_geotiff(dem_full)
         assets_checked["dem"] = {
@@ -394,8 +497,8 @@ def verify_project_deliverables(
     elif expected_assets and "dem" in expected_assets:
         errors.append("Expected GeoTIFF DEM file not found in deliverables directory.")
 
-    if ortho_files:
-        target_ortho = _prefer_project_match(ortho_files)
+    target_ortho = _prefer_project_match(ortho_files)
+    if target_ortho:
         ortho_full = os.path.join(deliverables_dir, target_ortho)
         ok, errs = verify_geotiff(ortho_full)
         assets_checked["ortho"] = {
@@ -415,8 +518,8 @@ def verify_project_deliverables(
     dense_clouds = [
         f for f in cloud_files if not f.lower().endswith("_mesh.ply") and not f.lower().endswith("_tie_points.ply")
     ]
-    if dense_clouds:
-        target_cloud = _prefer_project_match(dense_clouds)
+    target_cloud = _prefer_project_match(dense_clouds)
+    if target_cloud:
         cloud_full = os.path.join(deliverables_dir, target_cloud)
         ok, errs = verify_point_cloud(cloud_full)
         assets_checked["point_cloud"] = {
@@ -433,8 +536,8 @@ def verify_project_deliverables(
 
     # 5. Quality PDF Report
     pdf_files = [f for f in all_files if f.lower().endswith(".pdf")]
-    if pdf_files:
-        target_pdf = _prefer_project_match(pdf_files)
+    target_pdf = _prefer_project_match(pdf_files)
+    if target_pdf:
         pdf_full = os.path.join(deliverables_dir, target_pdf)
         ok, errs = verify_pdf_report(pdf_full)
         assets_checked["report"] = {
@@ -449,8 +552,30 @@ def verify_project_deliverables(
     elif expected_assets and "report" in expected_assets:
         errors.append("Expected official PDF calibration report not found in deliverables directory.")
 
+    # 6. Native Metashape Project Archive (.psx + .files/project.zip)
+    psx_files = [f for f in all_files if f.lower().endswith(".psx")]
+    should_check_psx = bool(expected_assets and "psx" in expected_assets) or (
+        bool(psx_files) and not assets_checked and not expected_assets
+    )
+    if should_check_psx:
+        target_psx = _prefer_project_match(psx_files)
+        if target_psx:
+            psx_full = os.path.join(deliverables_dir, target_psx)
+            ok, errs = verify_psx_project(psx_full)
+            assets_checked["psx"] = {
+                "filename": target_psx,
+                "path": psx_full,
+                "size_bytes": os.path.getsize(psx_full),
+                "status": "PASS" if ok else "FAIL",
+                "errors": errs,
+            }
+            if not ok:
+                errors.extend(errs)
+        elif expected_assets and "psx" in expected_assets:
+            errors.append("Expected Metashape project (.psx) not found in deliverables directory.")
+
     if not assets_checked and not errors:
-        warnings.append("No recognizable photogrammetry assets (.obj, .glb, .tif, .laz, .pdf) found to verify.")
+        warnings.append("No recognizable photogrammetry assets (.obj, .glb, .tif, .laz, .pdf, .psx) found to verify.")
 
     status = "PASS" if len(errors) == 0 and len(assets_checked) > 0 else "FAIL"
 
@@ -482,7 +607,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--expect",
         nargs="+",
-        choices=["obj", "glb", "dem", "ortho", "point_cloud", "report"],
+        choices=["obj", "glb", "dem", "ortho", "point_cloud", "report", "psx"],
         default=None,
         help="List of deliverable asset types that must be present",
     )
