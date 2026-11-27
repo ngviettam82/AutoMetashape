@@ -56,7 +56,7 @@ ruff check .
 ## Validation
 
 Verify code compliance before committing:
-1. Run pre-commit checks or formatting scripts (`./format_code.bat` or `format_code.bat`).
+1. Run pre-commit checks or formatting scripts (`./format_code.sh` on Linux/macOS or `.\format_code.bat` on Windows).
 2. Run license and SPDX audit:
    ```powershell
    python tools/check_licenses.py

@@ -18,7 +18,7 @@ Canonical operational runbook for Agisoft Metashape Professional distributed pro
 Use this skill when:
 - Deploying or starting the central Cluster Coordinator Server (`launch_server.bat`) or remote worker nodes (`launch_worker.bat`, `worker_config.json`) across single-share or Dual-SSD topologies.
 - Diagnosing TCP port 5840 reachability, UNC share permissions, dynamic GPU bitmask probing (`enumGPUDevices()`), local NVMe scratch staging, or offline `.cluster/bridge_runtime/` Open3D provisioning.
-- Submitting single or multi-dataset cluster batches (`scripts/submit_cluster_batch.py`, `scripts/cluster_supervisor.py`) with pre-flight `.psx` materialization, `--start-paused` staging, or hidden `.cluster/tickets/` failover.
+- Submitting single or multi-dataset cluster batches (`scripts/submit_cluster_batch.py`, `scripts/cluster_supervisor.py`) with pre-flight `.psx` materialization, `--start-paused` staging, canonical folder-name batch dispatch, and post-release stale lock cleanup.
 - Monitoring multi-hour cluster telemetry, storage headroom (`>= 50 GB`, Win32 Error 112 defense), passive `std::bad_alloc` / OOM audits, and deliverable integrity (`scripts/verify_deliverables.py`) in strict read-only reporting mode under the **Operator Authority Gate**.
 - Executing operator-authorized queue/worker controls (`scripts/manage_queue.py`), signal-based worker aborts (`scripts/cluster_abort.py`), targeted GUI `.files/lock` PID forensics, or canary/selective remote fleet updates (`scripts/update_fleet.py`).
 
@@ -104,7 +104,7 @@ Never compose ad-hoc dispatch scripts in chat or scratch directories — strictl
    - **Pre-Flight Physical Materialization Invariant**: Validates images, saves `<project>.psx` on Result Share, verifies `os.path.isfile(psx_path)`, releases locks via `doc.clear()`, and dispatches through idempotent `safe_create_cluster_batch()`.
    - Defaults to `pro` preset (`50K` keypoints, `40K` tiepoints, `2K/MPx`, `k4=b1=b2=0`, 16×8K textures, 5 cm/px ortho, dense point cloud opt-in), `worker_limit=1`, `local_scratch=True`, and all folders included (natively bridging `Manual/` via hygiene + Open3D ICP; optional `--exclude-folders` includes a legacy-worker shim).
    - **Staged Pausing**: Pass `--start-paused` to hold newly queued batches behind a pending remote fleet update until all target workers reboot onto the new commit.
-   - **Hidden `.cluster/tickets/` Recovery**: Always submits the canonical `<project>.psx` (attaching safely unless `--force` is passed). If Metashape Server 2.2.2 retains an un-evictable hard-killed aborted batch key (`Duplicate batch`), `safe_create_cluster_batch()` automatically dispatches via `<root>/.cluster/tickets/<slug>_<ts>_<pid>.psx` + `.ticket.json` — keeping `Result/<project>/` spotless without `_dispatch_*.psx` stubs while `cluster_monitor.py` resolves the real deliverable folder.
+   - **Canonical Folder-Name Dispatch & Post-Release Lock Cleanup**: Always submits under the exact canonical folder-name `<project>.psx` (attaching safely unless `--force` is passed, and preserving operator-paused batches on `not force`). When `--force` replaces a batch or clears an aborted server entry, `safe_create_cluster_batch()` deterministically reaps any holding worker via watchdog `.abort`, polls `findBatch(rel_psx) is None`, and removes any leftover `<project>.files/lock` ONLY after release (failing cleanly on `WinError 32` if still held). Silent renaming to `.cluster/tickets/` is disabled by default (`--allow-hidden-ticket` is explicit opt-in only).
    ```powershell
    python scripts/submit_cluster_batch.py `
        --images "\\HOST_PC\DataSSD\Survey_0167" `
@@ -133,8 +133,8 @@ Never compose ad-hoc dispatch scripts in chat or scratch directories — strictl
    ```powershell
    python scripts/cluster_monitor.py --server 10.5.10.202 --result-share "\\HOST_PC\ResultSSD" --source-share "\\HOST_PC\DataSSD"
    ```
-   - Reports accurate scaled CPU % and RAM GB from Metashape 2.x `workerList()` (`(memory_usage / 100.0) * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM auditing.
-   - Strictly isolates read-only `--source-share` from deliverable/sidecar checks and skips internal `.cluster/` maintenance batches.
+   - Reports accurate scaled CPU % and RAM GB from Metashape 2.x `workerList()` (`(memory_usage / 100.0) * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM auditing across both singular `task` and plural `tasks` schemas.
+   - Strictly isolates read-only `--source-share` from deliverable/sidecar checks, skips internal `.cluster/` maintenance batches, delegates structural OBJ/GeoTIFF validation to `verification.py`, and exits with code `1` when unhealthy (pass `--advisory` for exit `0`).
 2. **Storage Headroom Watchdog (Win32 Error 112 Defense)**:
    - Minimum safe free space: **50.0 GB** on the writable Result Share (`check_storage_headroom(path, 50.0)`). Below 50 GB, `cluster_supervisor.py` holds new dispatches in `PAUSED_LOW_DISK` and alerts the operator immediately rather than risking `ERROR_DISK_FULL` corruption.
 3. **Deliverable Integrity & Checkpoint Gates**:
@@ -175,9 +175,9 @@ Never compose ad-hoc dispatch scripts in chat or scratch directories — strictl
    .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node Admin-pc --no-restart
    ```
 3. **Decoupled Handshake, Watchdog-First Force Abort & Stale-ID Recovery**:
-   - **Watchdog-First `--force` Abort**: Aborts only the target worker's active `batch_id` and dispatches `dispatch_abort_signal(node_name=..., shared_root=...)` **before** `quitWorker` so C++ `RunScript`-blocked workers cleanly reap while unrelated workers keep running.
-   - **Per-Worker Maintenance Isolation**: Uses distinct `.cluster/maintenance_<slug>.psx` archives (real ZIP `project.zip/doc.xml`, `doc.clear()`, `worker_limit=1`), pauses non-target workers during `<50 ms` `.update_pending` signal registration, and restores all workers in a guaranteed `finally` block.
-   - **ZIP-Parity Mirror & Clean Re-Exec**: On child exit, `launch_worker.py` pulls `.cluster/update_payload.zip` (verified via `testzip()`, falling back to GitHub `main.zip`), mirrors files while preserving `worker_config.json`, `server_config.json`, `.agents/`, logs, and signal files, then re-execs cleanly (`subprocess.run` + `sys.exit` on Windows; `os.execv` on POSIX) with fresh GPU probing.
+   - **Watchdog-First `--force` Abort**: Aborts only the target worker's active `batch_id` and dispatches `dispatch_abort_signal(node_name=..., shared_root=...)` sequentially with a 10 s reconnect grace window before falling back to `quitWorker` (eliminating double-restart races while keeping unrelated workers running).
+   - **Per-Worker Maintenance Isolation**: Stages the SHA-256-verified `.cluster/update_payload.zip` BEFORE pausing workers/batches, uses distinct `.cluster/maintenance_<slug>.psx` archives (real ZIP `project.zip/doc.xml`, `doc.clear()`, `worker_limit=1`), pauses non-target workers during `<50 ms` `.update_pending` signal registration, and restores all worker/batch pause states in a guaranteed outer `finally` block.
+   - **ZIP-Parity Mirror & Clean Re-Exec**: On child exit, `launch_worker.py` verifies `.cluster/update_payload.zip` SHA-256 + safe extraction (blocking Zip Slip/symlinks), mirrors files while preserving `worker_config.json`, `server_config.json`, `.agents/`, logs, and signal files, then re-execs cleanly (`subprocess.Popen` + `wait()` on Windows; `os.execv` on POSIX) with fresh GPU probing.
    - **Stale Worker-ID `.update_pending` Recovery**: If a worker double-restarts during abort and `update_fleet.py` reports a restart-confirmation timeout (`Can't quit worker` on stale ID), `.update_pending` remains staged on disk. Check the worker's fresh ID and active batch, then run operator-approved `scripts/cluster_abort.py --node <name> --batch <active_bid> --root <share>` so `launch_worker.py` recycles the worker and applies `.update_pending`.
 
 ### 6. Signal-Based Worker Abort, GUI Lock Forensics & Self-Healing Watchdog

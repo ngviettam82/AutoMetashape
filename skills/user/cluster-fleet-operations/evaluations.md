@@ -120,18 +120,18 @@ This evaluation suite defines benchmark scenarios to verify that autonomous agen
 
 ---
 
-### Scenario 7: Canonical Dual-SSD Batch Dispatch with Pre-Flight `.psx` Materialization & Hidden Ticket Failover
+### Scenario 7: Canonical Dual-SSD Batch Dispatch with Pre-Flight `.psx` Materialization & Deterministic Lock Release
 
-- **User Query**: *"Dispatch a multi-project batch reading raw survey photos from read-only SSD #1 (`\\CLUSTER_SHARE\DataSSD`) and writing `.psx` archives and 5 cm/px orthomosaics to writable SSD #2 (`\\CLUSTER_SHARE\ResultSSD`) via `scripts/submit_cluster_batch.py`, even if Metashape Server retains an aborted duplicate batch key in RAM."*
+- **User Query**: *"Dispatch a multi-project batch reading raw survey photos from read-only SSD #1 (`\\CLUSTER_SHARE\DataSSD`) and writing `.psx` archives and 5 cm/px orthomosaics to writable SSD #2 (`\\CLUSTER_SHARE\ResultSSD`) via `scripts/submit_cluster_batch.py`, ensuring every dispatched batch retains its exact canonical folder-name `.psx` even when replacing an aborted prior attempt."*
 - **Expected Agent Action**:
   1. Validate `DataSSD` read-only and verify `ResultSSD` writability + headroom (`>= 50 GB`), anchoring Metashape `--root` strictly to `ResultSSD`.
-  2. Materialize `<project>.psx` physically on `ResultSSD` (`doc.save(psx_path)` + `assert os.path.isfile(psx_path)` + `doc.clear()`) before calling `safe_create_cluster_batch()`.
-  3. Dispatch with canonical `pro` defaults (`worker_limit=1`, `--local-scratch-staging`, `tiepoint_limit=40000`, `keypoint_limit_per_mpx=2000`, `ortho_resolution=0.05`, dense point cloud disabled).
-  4. If Metashape Server raises `Duplicate batch` for a stale aborted key, seamlessly fall back to a hidden ticket under `<root>/.cluster/tickets/<slug>_<ts>_<pid>.psx` + `.ticket.json` so `Result/<project>/` stays free of `_dispatch_*.psx` stubs.
+  2. On `--force`, abort any active batch, reap holding workers via watchdog `.abort`, wait for `findBatch(rel_psx) is None`, and clear any leftover `<project>.files/lock` before saving.
+  3. Materialize `<project>.psx` physically on `ResultSSD` (`doc.save(psx_path)` + `assert os.path.isfile(psx_path)` + `doc.clear()`) before calling `safe_create_cluster_batch()`.
+  4. Dispatch with canonical `pro` defaults (`worker_limit=1`, `--local-scratch-staging`, `tiepoint_limit=40000`, `keypoint_limit_per_mpx=2000`, `ortho_resolution=0.05`, dense point cloud disabled) under the exact canonical `<project>.psx` path (refusing silent `.cluster/tickets/` renames unless `--allow-hidden-ticket` is explicitly passed).
 - **Pass Criteria**:
   - Zero files written into `DataSSD`.
   - `.psx` exists physically on `ResultSSD` with locks released prior to `createBatch()`.
-  - `Result/<project>/` contains only a single canonical `<project>.psx`, and `cluster_monitor.py` resolves deliverables transparently.
+  - Every submitted batch carries the exact folder-name `<project>.psx`, `Result/<project>/` stays free of `_dispatch_*.psx` stubs, and `cluster_monitor.py` verifies deliverables transparently.
 - **Fail Criteria**:
   - Composing an ad-hoc dispatch script in chat/scratch or skipping `doc.save()` / `doc.clear()`.
-  - Writing `_dispatch_*.psx` clutter into `Result/<project>/` or writing anything into read-only `DataSSD`.
+  - Silently renaming a batch to `.cluster/tickets/` or writing `_dispatch_*.psx` clutter into `Result/<project>/`, or writing anything into read-only `DataSSD`.

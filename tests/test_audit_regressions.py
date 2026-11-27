@@ -53,7 +53,8 @@ class TestAuditRegressions(unittest.TestCase):
     def test_pro_plan_defaults_tiepoints_40k_no_point_cloud_ortho_5cm(self) -> None:
         """Verify pro plan enforces tiepoint_limit=40000, keypoint_limit_per_mpx=2000, no dense cloud, 5cm ortho."""
         physics = {
-            "shutter_type": "mechanical",
+            "shutter": "mechanical",
+            "has_gps": True,
             "shadow_clip_pct": 2.0,
             "relief_ratio": 0.05,
             "gsd_cm": 1.2,
@@ -64,6 +65,8 @@ class TestAuditRegressions(unittest.TestCase):
         self.assertEqual(plan["tiepoint_limit"], 40000)
         self.assertEqual(plan["keypoint_limit_per_mpx"], 2000)
         self.assertFalse(plan["build_point_cloud"])
+        self.assertFalse(plan["rolling_shutter"])
+        self.assertEqual(plan["crop_method"], "gps-square")
         self.assertAlmostEqual(plan["ortho_resolution"], 0.05)
 
         # CLI parser defaults align with pro production defaults
@@ -585,18 +588,6 @@ class TestAuditRegressions(unittest.TestCase):
             def removePoints(self, threshold):
                 pass
 
-        fake_ms = SimpleNamespace(
-            TiePoints=SimpleNamespace(
-                Filter=SimpleNamespace(
-                    ReconstructionUncertainty=1,
-                    ProjectionAccuracy=2,
-                    ReprojectionError=3,
-                    ImageCount=4,
-                    __call__=lambda self=None: _FakeFilter(),
-                )
-            )
-        )
-
         # Provide callable Filter class with enum attributes
         class _FilterClass(_FakeFilter):
             ReconstructionUncertainty = 1
@@ -866,8 +857,8 @@ class TestAuditRegressions(unittest.TestCase):
                 self.assertEqual(status_data["status"], "completed")
                 self.assertEqual(status_data["stage_key"], "complete")
                 self.assertAlmostEqual(status_data["progress"], 100.0)
-                # Local staging directory must stay deleted (never recreated by IPC_COMPLETE)
-                self.assertFalse(os.path.exists(os.path.join(scratch_dir, "SiteStatus_local_stage")))
+                # All isolated local staging directories must stay deleted (never recreated by IPC_COMPLETE)
+                self.assertEqual([d for d in os.listdir(scratch_dir) if "_local_stage" in d], [])
 
     def test_cluster_monitor_skips_maintenance_batches_and_isolates_source_share(self) -> None:
         """Verify cluster_monitor skips .cluster/ maintenance batches and never checks source_root for deliverables."""
@@ -936,6 +927,12 @@ class TestAuditRegressions(unittest.TestCase):
             self.assertNotIn(65, data["deliverables"])
             self.assertIn(71, data["deliverables"])
             self.assertTrue(data["deliverables"][71]["intact"])
+
+            # Corrupt OBJ (vertices only, no 'f ' faces) MUST fail cluster_monitor.verify_deliverables
+            with open(os.path.join(res_site, "SiteA.obj"), "wb") as f:
+                f.write(b"v 0 0 0\n" * 200)
+            corrupt_res = monitor_mod.verify_deliverables(res_site, "SiteA")
+            self.assertFalse(corrupt_res["intact"])
 
     def test_no_resume_midrun_branch_never_deletes_shared_psx_stub(self) -> None:
         """Verify --no-resume never deletes shared .psx/.files in the post-Document branch either."""

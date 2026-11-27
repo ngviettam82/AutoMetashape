@@ -4,10 +4,10 @@
 
 Always read the workspace root `AGENTS.md` and relevant sections of the project's contribution guide (`CONTRIBUTING.md`):
 
-- [Agent Development](CONTRIBUTING.md#agent-development) for bounded search, context reuse, worktree isolation, and validation discipline.
-- [Coding Style](CONTRIBUTING.md#coding-style) for repository-specific standards, formatting, and import hygiene.
-- [Unit Testing](CONTRIBUTING.md#unit-testing) for test quality, authoring gates, and mutation verification; consult repository test skills (`skills/developer/test-audit/SKILL.md`).
-- [Build & Validation Tools](CONTRIBUTING.md#build--validation-tools) for project launchers (`build.bat`, `format_code.bat`, pre-commit hooks).
+- [Agent Development](CONTRIBUTING.md#2-agent-development) for bounded search, context reuse, worktree isolation, and validation discipline.
+- [Coding Style](CONTRIBUTING.md#3-coding-style) for repository-specific standards, formatting, and import hygiene.
+- [Testing & Validation](CONTRIBUTING.md#4-testing--validation) for test quality, authoring gates, and mutation verification; consult repository test skills (`skills/developer/test-audit/SKILL.md`).
+- [Build & Validation Tools](CONTRIBUTING.md#5-build--validation-tools) for project launchers (`build.bat`, `format_code.bat`, pre-commit hooks).
 - [Cluster Operations & Safeguards](CONTRIBUTING.md#6-cluster-operations--safeguards) for operator authority gates, PID process isolation, pre-flight `doc.save` materialization, and canonical scripts.
 
 The project contribution guide owns shared rules. Follow them instead of assuming global defaults.
@@ -38,5 +38,5 @@ The project contribution guide owns shared rules. Follow them instead of assumin
 
 - Keep repository-owned skills in canonical `skills/`; do not duplicate their contents in tool-specific discovery directories.
 - Validate skill changes using the project's skill validator (`python tools/skills/cli.py check`).
-- Universal discovery symlinks or aliases reside in `.agents/skills/<name>/` pointing back to canonical skill directories under `skills/`.
+- Universal discovery symlinks (or Git 1-line text shims on Windows when symlinks are disabled) reside in `.agents/skills/<name>` pointing back to canonical skill directories under `skills/`.
 - Keep skills concise and point to maintained documentation and source examples.

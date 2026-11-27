@@ -75,14 +75,15 @@ class TestFleetUpdater(unittest.TestCase):
             self.assertIn("maintenance.files", content)
 
     def test_stage_cluster_update_payload(self) -> None:
-        """Verify update payload staging to shared network directory."""
+        """Verify update payload staging to shared network directory validates real ZIP payload."""
+        import zipfile
+
         with tempfile.TemporaryDirectory() as tmp_dir:
             cluster_dir = os.path.join(tmp_dir, ".cluster")
             os.makedirs(cluster_dir, exist_ok=True)
             payload_path = os.path.join(cluster_dir, "update_payload.zip")
-            # Create a valid pre-existing dummy zip
-            with open(payload_path, "wb") as f:
-                f.write(b"PK" + b"\x00" * 2048)
+            with zipfile.ZipFile(payload_path, "w") as zf:
+                zf.writestr("AutoMetashape-main/launch_worker.bat", "@echo off\n" + ("rem pad\n" * 250))
 
             staged = stage_cluster_update_payload(tmp_dir)
             self.assertEqual(staged, payload_path)
@@ -371,11 +372,12 @@ class TestFleetUpdater(unittest.TestCase):
 
             flag_file = os.path.join(tmp_dir, UPDATE_SIGNAL_FILENAME)
             with open(flag_file, "w", encoding="utf-8") as f:
-                f.write('{"repo_url": "https://example.com/repo.zip", "shared_cluster_dir": "C:\\temp"}')
+                f.write('{"repo_url": "https://example.com/repo.zip", "shared_cluster_dir": "C:\\\\temp"}')
 
             data = check_update_pending(tmp_dir)
             self.assertIsNotNone(data)
             self.assertEqual(data.get("repo_url"), "https://example.com/repo.zip")
+            self.assertEqual(data.get("shared_cluster_dir"), r"C:\temp")
             self.assertEqual(data.get("_flag_path"), flag_file)
 
     def test_find_metashape_python_path(self) -> None:
@@ -433,6 +435,114 @@ class TestFleetUpdater(unittest.TestCase):
         }
         online = list_online_workers(mock_client)
         self.assertEqual([w["worker_id"] for w in online], [17])
+
+    def test_updater_security_url_validation_zip_slip_and_sha256_update(self) -> None:
+        """Verify HTTPS-only URL check, Zip Slip rejection, and end-to-end perform_worker_codebase_update."""
+        import hashlib
+        import zipfile
+
+        from autometashape.cluster.updater import _safe_extract_update_zip, _validate_archive_url
+
+        # 1. URL scheme validation
+        _validate_archive_url("https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip")
+        for bad_url in ("file:///etc/passwd", "http://example.com/repo.zip", "ftp://example.com/repo.zip"):
+            with self.assertRaises(ValueError):
+                _validate_archive_url(bad_url)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            # 2. Zip Slip rejection
+            bad_zip = os.path.join(tmp, "slip.zip")
+            extract_dir = os.path.join(tmp, "out")
+            os.makedirs(extract_dir, exist_ok=True)
+            with zipfile.ZipFile(bad_zip, "w") as zf:
+                zf.writestr("../escape.py", "pwned")
+            with self.assertRaises(ValueError):
+                _safe_extract_update_zip(bad_zip, extract_dir)
+            self.assertFalse(os.path.exists(os.path.join(tmp, "escape.py")))
+
+            # 3. End-to-end perform_worker_codebase_update with SHA-256 verification
+            shared_cluster = os.path.join(tmp, "share", ".cluster")
+            worker_dir = os.path.join(tmp, "worker_repo")
+            os.makedirs(shared_cluster, exist_ok=True)
+            os.makedirs(worker_dir, exist_ok=True)
+            with open(os.path.join(worker_dir, "worker_config.json"), "w", encoding="utf-8") as cf:
+                cf.write('{"host": "10.0.0.1"}')
+            with open(os.path.join(worker_dir, "obsolete.py"), "w", encoding="utf-8") as of:
+                of.write("# old\n")
+
+            payload_zip = os.path.join(shared_cluster, "update_payload.zip")
+            with zipfile.ZipFile(payload_zip, "w") as zf:
+                zf.writestr("AutoMetashape-main/launch_worker.bat", "@echo off\n" + ("rem pad\n" * 200))
+                zf.writestr("AutoMetashape-main/new_module.py", "VERSION = 2\n")
+            with open(payload_zip, "rb") as pf:
+                digest = hashlib.sha256(pf.read()).hexdigest()
+
+            flag_path = os.path.join(worker_dir, UPDATE_SIGNAL_FILENAME)
+            with open(flag_path, "w", encoding="utf-8") as ff:
+                ff.write("{}")
+
+            # Wrong SHA-256 must reject without deleting obsolete.py
+            bad_ok = perform_worker_codebase_update(
+                {
+                    "shared_cluster_dir": shared_cluster,
+                    "repo_url": "file:///invalid",
+                    "sha256": "0" * 64,
+                    "_flag_path": flag_path,
+                },
+                worker_dir,
+            )
+            self.assertFalse(bad_ok)
+            self.assertTrue(os.path.isfile(os.path.join(worker_dir, "obsolete.py")))
+
+            # Valid SHA-256 succeeds, mirrors new_module.py, prunes obsolete.py, preserves worker_config.json
+            with open(flag_path, "w", encoding="utf-8") as ff:
+                ff.write("{}")
+            good_ok = perform_worker_codebase_update(
+                {
+                    "shared_cluster_dir": shared_cluster,
+                    "repo_url": DEFAULT_REPO_ARCHIVE_URL,
+                    "sha256": digest,
+                    "_flag_path": flag_path,
+                },
+                worker_dir,
+            )
+            self.assertTrue(good_ok)
+            self.assertTrue(os.path.isfile(os.path.join(worker_dir, "new_module.py")))
+            self.assertFalse(os.path.exists(os.path.join(worker_dir, "obsolete.py")))
+            self.assertTrue(os.path.isfile(os.path.join(worker_dir, "worker_config.json")))
+
+    def test_update_all_workers_parallel_restores_pauses_on_exception(self) -> None:
+        """Verify update_all_workers_parallel restores worker/batch pause states inside outer finally on error."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "Worker-A", "state": "ready", "paused": False},
+                {"worker_id": 2, "hostname": "Worker-B", "state": "ready", "paused": False},
+            ]
+        }
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 50, "state": "pending", "paused": False}]}
+        mock_client.createBatch.side_effect = RuntimeError("Server RPC error")
+
+        mock_metashape = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("autometashape.cluster.updater.Metashape", mock_metashape),
+                patch("autometashape.cluster.updater.stage_cluster_update_payload", return_value=""),
+            ):
+                results = update_all_workers_parallel(
+                    client=mock_client,
+                    shared_root=tmp_dir,
+                    timeout=2.0,
+                    restart=False,
+                    poll_interval=0.01,
+                )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(not r["success"] for r in results))
+        # Batch 50 and workers 1, 2 were restored from paused=True back to paused=False
+        mock_client.setBatchPaused.assert_any_call(50, False)
+        mock_client.setWorkerPaused.assert_any_call(1, False)
+        mock_client.setWorkerPaused.assert_any_call(2, False)
 
 
 if __name__ == "__main__":

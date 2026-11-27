@@ -975,6 +975,20 @@ def bridge_disconnected_islands(
         return chunk, {"triggered": False, "accepted": 0, "rejected": 0}
 
     total_candidates = len(bridge_candidates) + len(rescue_groups)
+
+    # Pre-check georeferenced CRS BEFORE provisioning Open3D runtime or saving/building Stage-0 MVS clouds
+    # (unreferenced / LOCAL_CS chunks cannot construct a UTM frame and would otherwise waste I/O & compute).
+    orig_crs = getattr(chunk, "crs", None)
+    orig_wkt = str(getattr(orig_crs, "wkt", "") or "").upper()
+    orig_crs_name = str(getattr(orig_crs, "name", "") or "").upper()
+    is_explicit_local = orig_crs is not None and ("LOCAL_CS" in orig_wkt or "LOCAL COORDINATES" in orig_crs_name)
+    if is_explicit_local or (orig_crs is None and _compute_island_utm_frame(chunk, chunk) is None):
+        print(
+            "  [ICP Bridge] Chunk has no georeferenced CRS (LOCAL_CS/unreferenced); skipping Stage-4 ICP bridge.",
+            flush=True,
+        )
+        return chunk, {"triggered": False, "accepted": 0, "rejected": total_candidates, "reason": "no_georef_crs"}
+
     print(
         f"\n[ICP Bridge] Triggered for {total_candidates} disconnected overlapping island(s) "
         f"({len(bridge_candidates)} aligned + {len(rescue_groups)} unaligned rescue group(s)).",
@@ -1043,19 +1057,6 @@ def bridge_disconnected_islands(
             pass
 
     orig_chunk = getattr(doc, "chunk", None) or (doc.chunks[0] if getattr(doc, "chunks", None) else chunk)
-
-    # Pre-check georeferenced CRS before building expensive Stage-0 MVS clouds (unreferenced / LOCAL_CS
-    # chunks cannot construct a UTM frame and would otherwise waste Stage-0 compute).
-    orig_crs = getattr(orig_chunk, "crs", None)
-    orig_wkt = str(getattr(orig_crs, "wkt", "") or "").upper()
-    orig_crs_name = str(getattr(orig_crs, "name", "") or "").upper()
-    is_explicit_local = orig_crs is not None and ("LOCAL_CS" in orig_wkt or "LOCAL COORDINATES" in orig_crs_name)
-    if is_explicit_local or (orig_crs is None and _compute_island_utm_frame(orig_chunk, orig_chunk) is None):
-        print(
-            "  [ICP Bridge] Chunk has no georeferenced CRS (LOCAL_CS/unreferenced); skipping Stage-4 ICP bridge.",
-            flush=True,
-        )
-        return orig_chunk, {"triggered": False, "accepted": 0, "rejected": total_candidates, "reason": "no_georef_crs"}
 
     temp_chunks: list[Any] = []
     accepted_chunks: list[Any] = []

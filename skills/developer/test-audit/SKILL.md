@@ -35,12 +35,21 @@ Before adding any test, answer and verify:
 4. Is the test hermetic, deterministic, and free of order-dependent state?
 
 ### 2. Elimination of 15 Junk Patterns
-- No tautological assertions (`assert True`, `assert x == x`).
-- No assertion-free smoke tests.
-- No loose exception catches without verifying error messages or types.
-- No sleep-based synchronization; use deterministic polling or reactive events.
-- No hardcoded absolute file system paths.
-- Enforce cross-platform POSIX/Windows parity: tests run on both `ubuntu-latest` and `windows-latest` in CI (`.github/workflows/test.yml`); never assume `os.path` uses `ntpath` or `sys.platform == "win32"` when testing UNC/Windows paths or `subprocess` lifecycles.
+1. Tautological assertions (`assert True`, `assert x == x`, or `a or mock.called` hiding failures).
+2. Assertion-free smoke tests that only check "did not crash".
+3. Testing local inline helper duplicates instead of importing real production code.
+4. Testing mock return values rather than production logic.
+5. Loose exception catches (`except Exception:` or `assertRaises(Exception)`) without verifying error types/messages.
+6. Live host side effects (calling real `taskkill`, mutating shared `%TEMP%/*.pid`, or writing dummy files into repo root).
+7. Hardcoded LAN IPs, UNC shares, or absolute local filesystem paths (`\\10.5.10.202\...`, `C:\Users\...`).
+8. Global monkeypatches (`patch("os.path.isfile", return_value=True)`) that corrupt unrelated code paths.
+9. Cross-test global/module state leakage without `try/finally` restoration.
+10. Sleep-based synchronization instead of deterministic mocks or polling.
+11. Silent `if available:` skips that hide zero executed assertions.
+12. Unseeded nondeterminism or clock/timezone-dependent failures.
+13. Invalid/degenerate test fixtures (e.g. face-less `.obj`, invalid ZIP bytes, truncated GLB/PDF headers) masking real gates.
+14. Stale/dead assertions checking obsolete filenames or unused dictionary keys.
+15. Platform-coupled assumptions (`ntpath` vs `posixpath`, `sys.platform == "win32"`) breaking Linux/Windows CI parity (`.github/workflows/test.yml`).
 
 ### 3. Execution
 Run test verification suites using the canonical unittest runner (matching CI and `build.bat`):

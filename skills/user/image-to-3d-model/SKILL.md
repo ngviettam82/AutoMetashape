@@ -4,7 +4,7 @@ description: "Reconstructs high-precision 3D models (OBJ, GLB, FBX, PLY), dense 
 audience: user
 status: stable
 owners:
-  - core-engineering
+  - "@autometashape-maintainers"
 ---
 
 # High-Precision 3D Photogrammetry, Survey Physics Engine & Complete Metashape Processing
@@ -53,7 +53,7 @@ flowchart TD
     E --> J["9. Opt-In DEM & Topographic Contours<br/>(--build-dem + --build-contours: Metric UTM GeoTIFF, SHP, DXF, GeoJSON)"]
     F --> K["10. Metric GeoTIFF Orthomosaic<br/>(5 cm/px Default, Automatic UTM CRS, BigTIFF LZW + TFW/PRJ)"]
     E --> L["11. Executive Geomatics Engineering Certification<br/>(exportReport: GSD, RMS error reduction, covariance, camera residuals)"]
-    G --> M["Production Deliverables: <output_dir>/<br/>• 3D Models: <project>.obj/.mtl/.png, <project>.glb, .fbx, .ply, .dxf<br/>• Opt-In Dense Cloud: <project>.laz, <project>_tie_points.ply<br/>• 3D Tiles: <project>_tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: <project>_dem.tif, <project>_contours.shp/.dxf<br/>• Ortho & Report: <project>_orthomosaic.tif (+ .tfw/.prj), <project>_report.pdf<br/>• Project Archive: <project>.psx + <project>.files/"]
+    G --> M["Production Deliverables: <output_dir>/<br/>• 3D Models: <project>.obj/.mtl/.png, <project>.glb, .fbx, _mesh.ply, .dxf<br/>• Opt-In Dense Cloud: <project>_point_cloud.laz, <project>_tie_points.ply<br/>• 3D Tiles: <project>_tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: <project>_dem.tif, <project>_contours.shp/.dxf<br/>• Ortho & Report: <project>_orthomosaic.tif (+ .tfw/.prj), <project>_report.pdf<br/>• Project Archive: <project>.psx + <project>.files/"]
     H --> M
     I --> M
     J --> M
@@ -67,8 +67,8 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
 1. **Never guess or cite rigid presets**: Analyze the raw image headers and telemetry to extract physical sensor properties and flight geometry.
 2. **Execute the Survey Physics Audit First**: Run `--profile` or compute the optics metrics before proposing or executing a reconstruction.
 3. **Respect Camera Shutter Physics**:
-   - For **Mechanical Leaf / Global Shutters** (e.g. DJI Phantom 4 Pro `FC6310`, Mavic 3 Enterprise Wide `FC3411`, Zenmuse P1, Phase One, Hasselblad): **Rolling shutter compensation must be DISABLED**. Enabling rolling shutter compensation on mechanical leaf shutters introduces ill-conditioned parameters into bundle adjustment and causes synthetic elevation drift.
-   - For **Electronic CMOS Rolling Shutters** (e.g. DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`, DJI Mini series, Mavic Air, Air 2S, consumer smartphones): Enable `Metashape.Shutter.Model.Regularized` on high-altitude aerial flight lines to eliminate flight-velocity shear.
+   - For **Mechanical Leaf / Global Shutters** (e.g. DJI Phantom 4 Pro `FC6310`, Mavic 3 Enterprise Wide `M3E`, Mavic 4 Enterprise `M4E`, Zenmuse P1, Zenmuse L2, Phase One): **Rolling shutter compensation must be DISABLED**. Enabling rolling shutter compensation on mechanical leaf shutters introduces ill-conditioned parameters into bundle adjustment and causes synthetic elevation drift.
+   - For **Electronic CMOS Rolling Shutters** (e.g. DJI Air 2S `FC3411`, Air 3S `FC9113` / `FC9589`, Hasselblad Mavic 3 `L2D-20c`, DJI Mini series, Mavic Air, consumer smartphones): Enable `Metashape.Shutter.Model.Regularized` on high-altitude aerial flight lines to eliminate flight-velocity shear.
    - **Close-Range Hovering Orbit Exception (`icp_bridge.py`)**: On isolated low-altitude / slow-hovering manual island orbits, explicitly force `Metashape.Shutter.Model.Disabled` before bundle adjustment. Empirical testing confirmed that `Regularized` rolling shutter estimation collapses isolated manual orbit scale by 30–46%.
 4. **Execute the USGS 4-Pass Gradual Selection Protocol (`k4 = b1 = b2 = 0` Lens Lock)**:
    Never accept raw sparse tie points. Staged parameter unfreezing with a `<= 10%` per-pass removal cap protects thin structures while cleaning outliers, and **strictly locks `fit_k4=False, fit_b1=False, fit_b2=False, adaptive_fitting=False`** across alignment and all 4 passes to prevent wide-angle consumer UAV radial dome blowup:
@@ -93,8 +93,8 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
    ================================================================================
      AUTOMETASHAPE: PRO PHOTOGRAMMETRY & GEOMATICS ENGINEERING REPORT
    ================================================================================
-     Sensor Hardware:     DJI Mavic 3 Enterprise Wide (FC3411)
-     Sensor Geometry:     17.3 x 13.0 mm  |  Pixel Pitch: 3.28 µm
+     Sensor Hardware:     DJI Mavic 3 Enterprise Wide (M3E)
+     Sensor Geometry:     17.3 x 13.0 mm  |  Pixel Pitch: 3.30 µm
      Shutter Physics:     Mechanical Leaf / Global Shutter [RS Comp: DISABLED]
      Optics & Altitude:   Focal Length: 12.29 mm  |  Flying Height: 85.0 m AGL  |  GSD: 2.26 cm/px
      Overlap Geometry:    Forward: 82.4%  |  Lateral: 68.2% [PASS]
@@ -185,7 +185,7 @@ In high-throughput multi-project workflows, exporting assets (glTF baking, OBJ f
 
 The **Pipelined Compute-Export Overlap Engine** decouples reconstruction from asset exporting:
 1. **Reconstruction Export Flag Suppression**:
-   - When batch mode runs with pipelined overlap enabled, the GUI passes `--no-export-glb --no-export-obj --no-export-dem --no-export-ortho` to the reconstruction command.
+   - When batch mode runs with pipelined overlap enabled, the caller passes `--no-export-glb --no-export-obj --no-export-dem --no-export-ortho` to `scripts/metashape_reconstruction.py`.
    - As soon as 3D meshing and texturing are saved in `Project_N.psx`, the cluster releases all GPU worker nodes immediately.
 2. **Immediate Cluster Advancement**:
    - The coordinator instantly dispatches `Project_N+1` to the GPU cluster workers.
@@ -284,9 +284,9 @@ Reconstruction outputs must satisfy the following quality criteria:
 2. **Camera Registration**: At least $90\%$ of active input images must be successfully registered in space.
 3. **Reprojection Residuals & Lens Lock**: Bundle adjustment gradual selection targets gentle architectural thresholds (`RU <= 15.0`, `PA <= 3.0 px`, `RE <= 0.50 px`, capped at `<= 10%` removal per pass) with **`k4 = b1 = b2 = 0` and `adaptive_fitting = False` verified locked** across all sensors.
 4. **Tie-Point Multiplicity & Alignment Hygiene**: Multi-ray intersections maintain multiplicity $\ge 2$ rays across structural geometry; `pt.valid`-filtered tie-graph audit (`edge >= 15`) cuts fragile cross-regime 1-edge hinges, quarantines torn rogue strips and neighbor-discontinuous GPS spikes (preserving smooth multi-battery barometer drift), and isolates unaligned physical flight bands.
-5. **Shutter Mechanics Conformance**: Rolling shutter compensation verified as DISABLED for mechanical leaf shutters (e.g. DJI FC3411, FC6310, Zenmuse P1, Zenmuse L2) and isolated close-range hovering ICP islands, and ENABLED (`Regularized`) for aerial CMOS rolling shutters (e.g. DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`).
+5. **Shutter Mechanics Conformance**: Rolling shutter compensation verified as DISABLED for mechanical leaf shutters (e.g. DJI `M3E`, `M4E`, `FC6310`, Zenmuse P1, Zenmuse L2) and isolated close-range hovering ICP islands, and ENABLED (`Regularized`) for aerial CMOS rolling shutters (e.g. DJI Air 2S `FC3411`, Air 3S `FC9113` / `FC9589`, Hasselblad Mavic 3 `L2D-20c`).
 6. **Zero-Neural ICP Bridge Pre-MVS Quality Gate** (when disconnected overlapping orbits are bridged): Every aligned candidate and `_ICP_Rescue` chunk passes `_isolate_coherent_sub_islands()` (zero `< 12`-cam detached internal fragments leaked), satisfies `fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`, disables bridged camera GPS references, and clears Stage-0 dense assets before unified MVS.
-7. **Point Cloud Integrity**: When opt-in `--build-point-cloud --export-point-cloud` is requested, `<project>.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
+7. **Point Cloud Integrity**: When opt-in `--build-point-cloud --export-point-cloud` is requested, `<project>_point_cloud.laz` (or `.las`, `.ply`, `.e57`) must be generated and non-empty.
 8. **Surface Topology**: Arbitrary (`2,000,000` faces default in `pro`) or HeightField surface mesh free from degenerate zero-area faces.
 9. **8K Texture Atlas**: Deterministic 16-page 8K ($16 \times 8192 \times 8192$) atlas with zero unmapped black voids (reused on `--resume` without redundant re-baking).
 10. **Elevation Models & Contours**: GeoTIFF orthomosaic (`<project>_orthomosaic.tif` at `5 cm/px` default in metric UTM CRS) and optional `<project>_dem.tif` / `<project>_contours.shp` exported with accompanying `.tfw` / `.prj` files.

@@ -141,14 +141,34 @@ class TestWorkerAbort(unittest.TestCase):
             self.assertFalse(os.path.exists(lock2))
 
     def test_kill_worker_process_graceful_and_force(self) -> None:
-        """Verify kill_worker_process calls terminate, kill, and taskkill appropriately."""
+        """Verify kill_worker_process calls terminate, kill on timeout, and mocks OS process tools hermetically."""
         mock_proc = MagicMock()
         mock_proc.poll.side_effect = [None, None, 0]
         mock_proc.pid = 9999
 
-        res = kill_worker_process(mock_proc, timeout=0.2)
+        with (
+            patch("autometashape.cluster.abort._enumerate_windows_descendant_pids", return_value=[]),
+            patch("autometashape.cluster.abort.subprocess.run", return_value=MagicMock(returncode=0)),
+            patch("autometashape.cluster.abort.os.killpg", create=True),
+        ):
+            res = kill_worker_process(mock_proc, timeout=0.2)
         self.assertTrue(res)
         mock_proc.terminate.assert_called_once()
+        mock_proc.kill.assert_not_called()
+
+        # Force-kill path when process never exits within timeout
+        stuck_proc = MagicMock()
+        stuck_proc.poll.return_value = None
+        stuck_proc.pid = 9998
+        with (
+            patch("autometashape.cluster.abort._enumerate_windows_descendant_pids", return_value=[]),
+            patch("autometashape.cluster.abort.subprocess.run", return_value=MagicMock(returncode=0)),
+            patch("autometashape.cluster.abort.os.killpg", create=True),
+            patch("autometashape.cluster.abort.time.sleep", return_value=None),
+        ):
+            res_force = kill_worker_process(stuck_proc, timeout=0.0)
+        self.assertTrue(res_force)
+        stuck_proc.kill.assert_called_once()
 
     def test_kill_worker_process_windows_reaps_tree_and_children_before_terminate(self) -> None:
         """On Windows, taskkill /F /T and child reaping MUST run before proc.terminate() to prevent stdio orphans."""
@@ -220,34 +240,128 @@ class TestWorkerAbort(unittest.TestCase):
             self.assertTrue(result["reconnected"])
 
     def test_supervisor_watchdog_loop_reaction(self) -> None:
-        """Verify supervisor watchdog terminates stuck child process upon detecting signal."""
-        mock_proc = MagicMock()
-        mock_proc.poll.side_effect = [None, None, 0]
-        mock_proc.pid = 1234
+        """Verify real launch_worker supervisor loop detects abort signal, kills child, cleans locks, and acks."""
+        import launch_worker as lw
 
-        with (
-            patch("autometashape.cluster.abort.check_abort_signal") as mock_check,
-            patch("autometashape.cluster.abort.kill_worker_process") as mock_kill,
-            patch("autometashape.cluster.abort.cleanup_scratch_locks") as mock_clean,
-            patch("autometashape.cluster.abort.acknowledge_abort_signal") as mock_ack,
-        ):
-            mock_check.side_effect = [None, {"action": "abort_and_restart", "batch_id": 99}]
+        with tempfile.TemporaryDirectory() as tmpdir:
+            shared_root = os.path.join(tmpdir, "share")
+            target_dir = os.path.join(tmpdir, "repo")
+            cfg_file = os.path.join(tmpdir, "worker_config.json")
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            os.makedirs(shared_root, exist_ok=True)
+            os.makedirs(target_dir, exist_ok=True)
+            with open(fake_ms, "w", encoding="utf-8") as f:
+                f.write("stub")
 
-            aborted = False
-            # Simulate watchdog tick
-            while mock_proc.poll() is None:
-                sig = mock_check()
-                if sig is not None:
-                    mock_kill(mock_proc)
-                    aborted = True
-                    mock_clean()
-                    mock_ack(sig)
-                    break
+            lock_file = os.path.join(target_dir, "project.files", "lock")
+            os.makedirs(os.path.dirname(lock_file), exist_ok=True)
+            with open(lock_file, "w", encoding="utf-8") as f:
+                f.write("locked")
 
-            self.assertTrue(aborted)
+            dispatch_abort_signal(node_name="watchdog-node", batch_id=99, shared_root=shared_root)
+
+            mock_proc = MagicMock()
+            mock_proc.pid = 4321
+            mock_proc.returncode = -1
+            poll_state = {"killed": False}
+
+            def _poll():
+                return -1 if poll_state["killed"] else None
+
+            def _kill(proc):
+                poll_state["killed"] = True
+                return True
+
+            mock_proc.poll.side_effect = _poll
+
+            with (
+                patch.dict(os.environ, {"AUTOMETASHAPE_DIR": target_dir}),
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(1, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("autometashape.cluster.abort.get_local_hostname", return_value="watchdog-node"),
+                patch("cluster_utils.get_local_hostname", return_value="watchdog-node"),
+                patch("cluster_utils.kill_worker_process", side_effect=_kill) as mock_kill,
+                patch("subprocess.Popen", return_value=mock_proc),
+                patch("time.sleep", return_value=None),
+                patch(
+                    "sys.argv",
+                    [
+                        "launch_worker.py",
+                        "--headless",
+                        "--no-reconnect",
+                        "--host",
+                        "127.0.0.1",
+                        "--root",
+                        shared_root,
+                        "--config",
+                        cfg_file,
+                    ],
+                ),
+            ):
+                lw._run_worker_lifecycle()
+
             mock_kill.assert_called_once_with(mock_proc)
-            mock_clean.assert_called_once()
-            mock_ack.assert_called_once()
+            self.assertFalse(os.path.exists(lock_file))
+            ack_path = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME, "watchdog-node.abort_ack")
+            self.assertTrue(os.path.isfile(ack_path))
+            self.assertIsNone(check_abort_signal(root_path=shared_root, node_name="watchdog-node"))
+
+    def test_all_abort_broadcast_acknowledges_per_node_without_deleting_for_siblings(self) -> None:
+        """Verify all.abort leaves broadcast intact for sibling workers while preventing self double-kill."""
+        with tempfile.TemporaryDirectory() as shared_root:
+            aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME)
+            os.makedirs(aborts_dir, exist_ok=True)
+            all_abort = os.path.join(aborts_dir, "all.abort")
+            with open(all_abort, "w", encoding="utf-8") as f:
+                json.dump({"action": "abort_and_restart", "batch_id": 77, "timestamp": time.time() - 5.0}, f)
+
+            sig_a = check_abort_signal(root_path=shared_root, node_name="NodeA")
+            self.assertIsNotNone(sig_a)
+            acknowledge_abort_signal(sig_a)
+
+            # Broadcast file still exists for sibling NodeB, but NodeA does NOT re-trigger
+            self.assertTrue(os.path.isfile(all_abort))
+            self.assertIsNone(check_abort_signal(root_path=shared_root, node_name="NodeA"))
+            sig_b = check_abort_signal(root_path=shared_root, node_name="NodeB")
+            self.assertIsNotNone(sig_b)
+
+    def test_abort_remote_worker_fallback_passes_args_via_argv_not_code_interpolation(self) -> None:
+        """Verify Metashape subprocess fallback in abort_remote_worker never interpolates untrusted strings into code."""
+        captured_cmd: list[str] = []
+        captured_script: list[str] = []
+
+        def _fake_run(cmd, **kwargs):
+            captured_cmd.extend(cmd)
+            if "-r" in cmd:
+                script_p = cmd[cmd.index("-r") + 1]
+                with open(script_p, "r", encoding="utf-8") as sf:
+                    captured_script.append(sf.read())
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        with tempfile.TemporaryDirectory() as shared_root:
+            fake_ms = os.path.join(shared_root, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as f:
+                f.write("stub")
+            evil_host = "127.0.0.1'); import os; os.system('calc')#:5840"
+            with (
+                patch("autometashape.cluster.abort.Metashape", None),
+                patch("autometashape.cluster.hardware.find_metashape_path", return_value=fake_ms),
+                patch("autometashape.cluster.abort.subprocess.run", side_effect=_fake_run),
+                patch("time.sleep", return_value=None),
+            ):
+                abort_remote_worker(
+                    node_name="node1",
+                    batch_id=12,
+                    shared_root=shared_root,
+                    server_host=evil_host,
+                    timeout=0.05,
+                )
+
+            self.assertEqual(len(captured_script), 1)
+            self.assertNotIn("os.system", captured_script[0])
+            self.assertIn("sys.argv", captured_script[0])
 
     def test_remote_abort_never_executes_local_taskkill(self) -> None:
         """Verify remote abort targeting another node never runs local process kill commands."""

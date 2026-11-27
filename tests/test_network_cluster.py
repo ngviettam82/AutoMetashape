@@ -59,257 +59,141 @@ class TestNetworkCluster(unittest.TestCase):
             self.assertTrue(server.lower().endswith("metashape-server.exe") or server.endswith("metashape-server"))
 
     def test_cluster_relative_path_resolution(self) -> None:
-        """Verify project path conversion to shared storage relative path across local and UNC paths."""
+        """Verify real production relative path resolution across local and UNC shared roots."""
+        from autometashape.cluster.dual_share import relpath_under
 
-        def calc_rel(psx_out: str, network_path: str) -> str:
-            if network_path:
-                norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
-                norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
-                try:
-                    abs_psx = os.path.abspath(psx_out)
-                    abs_net = os.path.abspath(network_path)
-                    if os.path.commonpath([abs_psx, abs_net]).lower() == abs_net.lower():
-                        return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
-                except Exception:
-                    pass
+        from scripts.submit_cluster_batch import get_cluster_relative_path
 
-                net_parts = [p for p in norm_net.split("/") if p]
-                if net_parts:
-                    share_name = net_parts[-1].lower()
-                    psx_parts = [p for p in norm_psx.split("/") if p]
-                    psx_lower = [p.lower() for p in psx_parts]
-                    if share_name in psx_lower:
-                        idx = psx_lower.index(share_name)
-                        rel = "/".join(psx_parts[idx + 1 :])
-                        if rel:
-                            return rel
-
-                for i in range(len(net_parts) - 1, -1, -1):
-                    sub = net_parts[i].lower()
-                    psx_parts = [p for p in norm_psx.split("/") if p]
-                    psx_lower = [p.lower() for p in psx_parts]
-                    if sub in psx_lower:
-                        idx = psx_lower.index(sub)
-                        rel = "/".join(psx_parts[idx + 1 :])
-                        if rel:
-                            return rel
-            return os.path.basename(psx_out.replace("\\", "/"))
-
-        # Case 1: When network_path is empty, returns file basename
-        self.assertEqual(calc_rel(r"C:\Projects\Scan1\project.psx", ""), "project.psx")
-
-        # Case 2: When network_path exists and contains psx_out
         test_dir = os.path.dirname(os.path.abspath(__file__))
         sub_psx = os.path.join(test_dir, "sub", "project.psx")
-        rel = calc_rel(sub_psx, test_dir)
-        self.assertEqual(rel, "sub/project.psx")
-
-        # Case 3: UNC network path matching local drive psx file
-        unc_rel = calc_rel(
-            r"C:\Projects\SharedSurveys\061126\218\metashape\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys"
+        self.assertEqual(get_cluster_relative_path(sub_psx, test_dir), "sub/project.psx")
+        self.assertEqual(
+            relpath_under(r"\\CLUSTER_STORAGE\SharedSurveys\061126\218\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys"),
+            "061126/218/218.psx",
         )
-        self.assertEqual(unc_rel, "061126/218/metashape/218.psx")
+        # Sibling share prefix collision must NOT be treated as relative subpath
+        self.assertIsNone(
+            relpath_under(r"\\CLUSTER_STORAGE\SharedSurveys2\218.psx", r"\\CLUSTER_STORAGE\SharedSurveys")
+        )
 
     def test_cluster_export_path_resolution(self) -> None:
-        """Verify export task path resolution generates valid absolute UNC or local paths."""
+        """Verify build_monolithic_runscript_task relativizes UNC/local paths without prefix collision."""
+        import metashape_reconstruction as mr
 
-        def calc_rel(tgt: str, network_path: str) -> str:
-            norm_tgt = os.path.abspath(tgt).replace(r"\\", "/").replace("\\", "/")
-            norm_net = network_path.strip().replace(r"\\", "/").replace("\\", "/").rstrip("/")
-            try:
-                abs_tgt = os.path.abspath(tgt)
-                abs_net = os.path.abspath(network_path)
-                if os.path.commonpath([abs_tgt, abs_net]).lower() == abs_net.lower():
-                    return os.path.relpath(abs_tgt, abs_net).replace("\\", "/")
-            except Exception:
-                pass
-            net_parts = [p for p in norm_net.split("/") if p]
-            if net_parts:
-                share_name = net_parts[-1].lower()
-                tgt_parts = [p for p in norm_tgt.split("/") if p]
-                tgt_lower = [p.lower() for p in tgt_parts]
-                if share_name in tgt_lower:
-                    idx = tgt_lower.index(share_name)
-                    rel = "/".join(tgt_parts[idx + 1 :])
-                    if rel:
-                        return rel
-            return os.path.basename(tgt.replace("\\", "/"))
+        with tempfile.TemporaryDirectory() as tmp_net:
+            img_dir = os.path.join(tmp_net, "061126", "218")
+            out_dir = os.path.join(tmp_net, "061126", "Result", "218")
+            os.makedirs(img_dir, exist_ok=True)
+            os.makedirs(out_dir, exist_ok=True)
 
-        def calc_exp(target_file: str, network_path: str) -> str:
-            norm_tgt = os.path.abspath(target_file).replace("\\", "/")
-            if network_path:
-                is_unc = network_path.startswith(r"\\") or network_path.startswith("//")
-                clean_net = network_path.strip().replace("\\", "/").rstrip("/")
-                if is_unc:
-                    clean_net = "//" + clean_net.lstrip("/")
-                rel = calc_rel(target_file, network_path)
-                if rel and rel != norm_tgt and not rel.startswith(clean_net):
-                    return f"{clean_net}/{rel}"
-            return norm_tgt
+            task, _, _ = mr.build_monolithic_runscript_task(
+                images_dir=img_dir,
+                output_dir=out_dir,
+                project_name="218",
+                network_path=tmp_net,
+            )
+            args_str = getattr(task, "args", "").replace("\\", "/")
+            self.assertIn("--images 061126/218", args_str)
+            self.assertIn("--output 061126/Result/218", args_str)
 
-        # Case 1: Empty network path returns local absolute path
-        p1 = calc_exp("output.obj", "")
-        self.assertTrue(os.path.isabs(p1))
-        self.assertTrue(p1.endswith("/output.obj"))
+    def test_network_client_worker_pause_and_online_filter(self) -> None:
+        """Verify real manage_queue pause/unpause and is_healthy_online_worker filtering."""
+        from autometashape.cluster.hardware import is_healthy_online_worker
 
-        # Case 2: UNC network path with local drive target resolves to full UNC path
-        p2 = calc_exp(r"C:\Projects\SharedSurveys\061126\218\metashape\218.obj", r"\\CLUSTER_STORAGE\SharedSurveys")
-        self.assertEqual(p2, "//CLUSTER_STORAGE/SharedSurveys/061126/218/metashape/218.obj")
+        from scripts.manage_queue import cmd_set_worker_paused
 
-        # Case 3: Local storage path preserved as valid absolute path
-        p3 = calc_exp(r"C:\ClusterData\Scan1\model.obj", r"C:\ClusterData")
-        self.assertEqual(p3, "C:/ClusterData/Scan1/model.obj")
-
-    def test_network_client_worker_auto_unpause(self) -> None:
-        """Verify newly connected worker nodes have pause cleared automatically for both dict and obj."""
         client = MagicMock()
-        dict_response = {
-            "next_revision": 0,
+        client.workerList.return_value = {
             "workers": [
-                {"worker_id": 1, "hostname": "Node1", "paused": True, "cpu_enabled": True},
-                {"worker_id": 2, "hostname": "Node2", "paused": False, "cpu_enabled": True},
-            ],
-        }
-        client.workerList.return_value = dict_response
-
-        raw_workers = client.workerList()
-        workers = raw_workers.get("workers", []) if isinstance(raw_workers, dict) else raw_workers
-        for w in workers:
-            w_id = w.get("worker_id") if isinstance(w, dict) else getattr(w, "id", None)
-            w_paused = w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False)
-            if w_paused and w_id is not None:
-                client.setWorkerPaused(w_id, False)
-
-        client.setWorkerPaused.assert_called_once_with(1, False)
-
-    def test_cluster_batch_progress_tracking(self) -> None:
-        """Verify composite progress calculation for single and multi-task batches."""
-        # Single task batch
-        b_info_single = {
-            "id": 10,
-            "state": "running",
-            "tasks": [{"id": 1, "name": "BuildDepthMaps", "progress": 68.5, "state": "running"}],
-        }
-        tasks = b_info_single["tasks"]
-        single_prog = sum(t["progress"] for t in tasks) / len(tasks)
-        self.assertAlmostEqual(single_prog, 68.5)
-
-        # Multi-task batch (e.g. BuildUV + BuildTexture)
-        b_info_multi = {
-            "id": 11,
-            "state": "running",
-            "tasks": [
-                {"id": 1, "name": "BuildUV", "progress": 100.0, "state": "completed"},
-                {"id": 2, "name": "BuildTexture", "progress": 50.0, "state": "running"},
-            ],
-        }
-        multi_tasks = b_info_multi["tasks"]
-        multi_prog = sum(t["progress"] for t in multi_tasks) / len(multi_tasks)
-        self.assertAlmostEqual(multi_prog, 75.0)
-
-    def test_cluster_batch_failure_fallback_detection(self) -> None:
-        """Verify cluster task failures are cleanly detected with error reporting."""
-        b_info_failed = {
-            "id": 12,
-            "state": "failed",
-            "tasks": [
-                {"id": 1, "name": "MatchPhotos", "progress": 12.0, "state": "failed", "errors": ["Out of memory"]}
-            ],
-        }
-        self.assertEqual(b_info_failed["state"], "failed")
-        errors = b_info_failed["tasks"][0]["errors"]
-        self.assertIn("Out of memory", errors)
-
-    def test_cluster_bad_alloc_handoff_mechanism(self) -> None:
-        """Verify bad allocation triggers worker isolation, handoff batch creation, and worker unpause."""
-        client_mock = MagicMock()
-        client_mock.workerList.return_value = {
-            "workers": [
-                {"worker_id": 1, "hostname": "NodeA_16GB", "paused": False},
-                {"worker_id": 2, "hostname": "NodeB_64GB", "paused": False},
+                {"worker_id": 1, "hostname": "Node1", "state": "ready", "paused": True},
+                {"worker_id": 2, "hostname": "Node2", "state": "offline", "paused": False},
+                {"worker_id": 3, "hostname": "Node1", "state": "inprogress", "aborted": True},
             ]
         }
-        client_mock.createBatch.return_value = 202
+        self.assertTrue(is_healthy_online_worker(client.workerList.return_value["workers"][0]))
+        self.assertFalse(is_healthy_online_worker(client.workerList.return_value["workers"][1]))
+        self.assertFalse(is_healthy_online_worker(client.workerList.return_value["workers"][2]))
 
-        tasks_info = [
-            {"id": 1, "name": "MatchPhotos", "state": "completed", "errors": []},
-            {"id": 2, "name": "BuildDepthMaps", "state": "completed", "errors": []},
-            {"id": 3, "name": "BuildModel", "state": "completed", "errors": []},
+        rc = cmd_set_worker_paused(client, paused=False, hostname="Node1")
+        self.assertEqual(rc, 0)
+        client.setWorkerPaused.assert_called_once_with(1, False)
+
+    def test_cluster_batch_progress_and_failure_evaluation(self) -> None:
+        """Verify real evaluate_cluster_batch_info distinguishes running, completed, cancelled, and failed batches."""
+        from autometashape.cluster.orchestrator import evaluate_cluster_batch_info
+
+        st_run, ok_run, err_run = evaluate_cluster_batch_info(
             {
-                "id": 4,
-                "name": "BuildTexture",
-                "state": "failed",
-                "worker_id": 1,
-                "errors": ["std::bad_alloc: out of memory"],
-            },
-            {"id": 5, "name": "ExportModel", "state": "unassigned", "errors": []},
-        ]
-
-        is_bad_alloc = any(
-            any(term in str(e).lower() for term in ("bad allocation", "bad_alloc", "out of memory"))
-            for t in tasks_info
-            for e in t.get("errors", [])
+                "state": "running",
+                "tasks": [{"name": "BuildDepthMaps", "progress": 68.5, "state": "running"}],
+            }
         )
-        self.assertTrue(is_bad_alloc)
+        self.assertEqual(st_run, "running")
+        self.assertFalse(ok_run)
+        self.assertEqual(err_run, "")
 
-        # Identify failing task & worker
-        failed_idx = next(i for i, t in enumerate(tasks_info) if t.get("state") in ("failed", "aborted"))
-        failed_worker = tasks_info[failed_idx].get("worker_id")
-        self.assertEqual(failed_idx, 3)
-        self.assertEqual(failed_worker, 1)
+        st_fail, ok_fail, err_fail = evaluate_cluster_batch_info(
+            {
+                "state": "failed",
+                "tasks": [{"name": "MatchPhotos", "state": "failed", "errors": ["Out of memory"]}],
+            }
+        )
+        self.assertEqual(st_fail, "failed")
+        self.assertFalse(ok_fail)
+        self.assertIn("Out of memory", err_fail)
 
-        # 1. Host isolates failing worker
-        client_mock.setWorkerPaused(failed_worker, True)
+        st_cancel, ok_cancel, _ = evaluate_cluster_batch_info({"state": "cancelled", "tasks": []})
+        self.assertEqual(st_cancel, "aborted")
+        self.assertFalse(ok_cancel)
 
-        # 2. Host discovers remaining other workers
-        raw_w = client_mock.workerList()
-        other_workers = [w for w in raw_w["workers"] if w["worker_id"] != failed_worker and not w["paused"]]
-        self.assertEqual(len(other_workers), 1)
-        self.assertEqual(other_workers[0]["worker_id"], 2)
+    def test_cluster_bad_alloc_fault_detection_in_monitor(self) -> None:
+        """Verify real cluster_monitor.audit_memory_allocation_faults detects std::bad_alloc across plural tasks."""
+        from scripts.cluster_monitor import audit_memory_allocation_faults
 
-        # 3. Host dispatches handoff continuation batch with remaining tasks
-        rem_tasks = tasks_info[failed_idx:]
-        self.assertEqual(len(rem_tasks), 2)  # BuildTexture + ExportModel
-        handoff_batch = client_mock.createBatch("project.psx", rem_tasks)
-        client_mock.setBatchWorkerLimit(handoff_batch, 1)
-
-        # 4. Host immediately unpauses failed worker so it can proceed to the next project
-        client_mock.setWorkerPaused(failed_worker, False)
-
-        # Assert correct order of operations
-        calls = client_mock.setWorkerPaused.call_args_list
-        self.assertEqual(calls[0], ((1, True),))
-        self.assertEqual(calls[1], ((1, False),))
-        client_mock.createBatch.assert_called_with("project.psx", rem_tasks)
-        client_mock.setBatchWorkerLimit.assert_called_with(202, 1)
+        batches = [
+            {
+                "batch_id": 12,
+                "path": "Result/SiteOOM/SiteOOM.psx",
+                "state": "failed",
+                "failed": True,
+                "tasks": [
+                    {"name": "BuildDepthMaps", "state": "completed", "errors": []},
+                    {
+                        "name": "BuildTexture",
+                        "state": "failed",
+                        "errors": [{"type": "generic-error", "message": "std::bad_alloc: out of memory"}],
+                    },
+                ],
+            }
+        ]
+        faults = audit_memory_allocation_faults(batches, [])
+        self.assertEqual(len(faults), 1)
+        self.assertEqual(faults[0]["batch_id"], 12)
+        self.assertEqual(faults[0]["project"], "SiteOOM")
+        self.assertTrue(any("bad_alloc" in r.lower() for r in faults[0]["reasons"]))
 
     def test_cluster_independent_worker_mode_batch_limit(self) -> None:
-        """Verify Independent Project Mode applies setBatchWorkerLimit(batch_id, 1)."""
-        from unittest.mock import MagicMock, patch
+        """Verify real safe_create_cluster_batch locks worker_limit=1 before unpausing."""
+        from autometashape.cluster.orchestrator import safe_create_cluster_batch
 
+        call_order: list[str] = []
         mock_client = MagicMock()
+        mock_client.findBatch.return_value = -1
+        mock_client.batchList.return_value = {"batches": []}
         mock_client.createBatch.return_value = 101
+        mock_client.setBatchWorkerLimit.side_effect = lambda bid, lim: call_order.append(f"limit:{bid}:{lim}")
+        mock_client.setBatchPaused.side_effect = lambda bid, p: call_order.append(f"paused:{bid}:{p}")
 
-        batch_id = mock_client.createBatch("relative/path/project.psx", [])
-        network_independent_workers = True
-        if network_independent_workers:
-            mock_client.setBatchWorkerLimit(batch_id, 1)
-
-        mock_client.setBatchWorkerLimit.assert_called_once_with(101, 1)
-
-    def test_cluster_export_fallback_suppression(self) -> None:
-        """Verify that when cluster worker exports deliverables, host skips local export."""
-        cluster_exported = True
-        local_executed = False
-        export_glb = True
-        if (not cluster_exported) and export_glb:
-            local_executed = True
-        self.assertFalse(local_executed)
-
-        cluster_exported = False
-        if (not cluster_exported) and export_glb:
-            local_executed = True
-        self.assertTrue(local_executed)
+        bid, attached = safe_create_cluster_batch(
+            mock_client,
+            "relative/path/project.psx",
+            [MagicMock()],
+            worker_limit=1,
+            force_fresh=False,
+        )
+        self.assertEqual(bid, 101)
+        self.assertFalse(attached)
+        self.assertEqual(call_order, ["limit:101:1", "paused:101:False"])
 
     def test_build_cluster_gradual_selection_tasks(self) -> None:
         """Verify build_cluster_gradual_selection_tasks returns 8 CleanTiePoints and OptimizeCameras tasks."""

@@ -297,20 +297,26 @@ class TestCliArgs(unittest.TestCase):
             self.assertEqual(fmt_args.texture_format, fmt)
 
     def test_metashape_cluster_binary_discovery(self) -> None:
-        """Verify metashape-server and monitor binary discovery functions."""
-        from cluster_utils import find_metashape_monitor_path, find_metashape_path, find_metashape_server_path
+        """Verify metashape-server and monitor binary discovery functions deterministically."""
+        import tempfile
 
-        ms_exe = find_metashape_path()
-        if ms_exe and os.path.isfile(ms_exe):
-            server_bin = find_metashape_server_path(ms_exe)
-            if server_bin:
-                self.assertTrue(os.path.isfile(server_bin))
-                self.assertIn("server", os.path.basename(server_bin).lower())
+        from cluster_utils import find_metashape_monitor_path, find_metashape_server_path
 
-            monitor_bin = find_metashape_monitor_path(ms_exe)
-            if monitor_bin:
-                self.assertTrue(os.path.isfile(monitor_bin))
-                self.assertIn("monitor", os.path.basename(monitor_bin).lower())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            ms_name = "metashape.exe" if sys.platform == "win32" else "metashape"
+            srv_name = "metashape-server.exe" if sys.platform == "win32" else "metashape-server"
+            mon_name = "monitor.exe" if sys.platform == "win32" else "monitor"
+            ms_exe = os.path.join(tmpdir, ms_name)
+            srv_exe = os.path.join(tmpdir, srv_name)
+            mon_exe = os.path.join(tmpdir, mon_name)
+            for p in (ms_exe, srv_exe, mon_exe):
+                with open(p, "w", encoding="utf-8") as fh:
+                    fh.write("stub")
+
+            found_srv = find_metashape_server_path(ms_exe)
+            self.assertEqual(os.path.normpath(found_srv), os.path.normpath(srv_exe))
+            found_mon = find_metashape_monitor_path(ms_exe)
+            self.assertEqual(os.path.normpath(found_mon), os.path.normpath(mon_exe))
 
     def test_generate_worker_bat_content(self) -> None:
         """Verify automated launcher batch file generation."""
@@ -424,15 +430,16 @@ class TestCliArgs(unittest.TestCase):
 
     def test_server_launcher_missing_standalone_server_rejects_legacy_embedded(self) -> None:
         """Verify launch_server rejects Metashape 1.x embedded fallback and exits 1 if metashape-server.exe is absent."""
+        import tempfile
         from unittest.mock import patch
 
         import launch_server as ls
 
-        dummy_ms = os.path.abspath("dummy_metashape.exe")
-        with open(dummy_ms, "w") as f:
-            f.write("mock")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dummy_ms = os.path.join(tmpdir, "dummy_metashape.exe")
+            with open(dummy_ms, "w", encoding="utf-8") as f:
+                f.write("mock")
 
-        try:
             with patch("sys.argv", ["launch_server.py", "--host", "127.0.0.1", "--port", "5840"]):
                 with patch("cluster_utils.find_metashape_path", return_value=dummy_ms):
                     with patch("cluster_utils.find_metashape_server_path", return_value=None):
@@ -440,21 +447,19 @@ class TestCliArgs(unittest.TestCase):
                             code = ls._run_server_lifecycle()
                             self.assertEqual(code, 1)
                             mock_popen.assert_not_called()
-        finally:
-            if os.path.exists(dummy_ms):
-                os.remove(dummy_ms)
 
     def test_server_launcher_standalone_mode_command_structure(self) -> None:
         """Verify launch_server uses standalone syntax when metashape-server.exe is found."""
+        import tempfile
         from unittest.mock import MagicMock, patch
 
         import launch_server as ls
 
-        dummy_srv = os.path.abspath("dummy_metashape_server.exe")
-        with open(dummy_srv, "w") as f:
-            f.write("mock")
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dummy_srv = os.path.join(tmpdir, "dummy_metashape_server.exe")
+            with open(dummy_srv, "w", encoding="utf-8") as f:
+                f.write("mock")
 
-        try:
             with patch("sys.argv", ["launch_server.py", "--host", "0.0.0.0", "--port", "5840"]):
                 with patch("cluster_utils.find_metashape_server_path", return_value=dummy_srv):
                     with patch("cluster_utils.test_tcp_connection", return_value=False):
@@ -472,31 +477,38 @@ class TestCliArgs(unittest.TestCase):
                             self.assertIn("0.0.0.0:5840", cmd)
                             self.assertIn("--no-database", cmd)
                             self.assertIn("--resume-workers", cmd)
-        finally:
-            if os.path.exists(dummy_srv):
-                os.remove(dummy_srv)
 
     def test_server_launcher_pid_recording_and_cleanup(self) -> None:
-        """Verify server launcher correctly records and purges PID tracking file."""
+        """Verify server launcher records and purges its PID tracking file in an isolated temp path."""
+        import tempfile
+        from unittest.mock import patch
+
         import launch_server as ls
 
-        ls.record_server_pid()
-        self.assertTrue(os.path.isfile(ls.PID_FILE_PATH))
-        with open(ls.PID_FILE_PATH, "r", encoding="utf-8") as f:
-            pid = int(f.read().strip())
-        self.assertEqual(pid, os.getpid())
+        with tempfile.TemporaryDirectory() as tmpdir:
+            iso_pid_path = os.path.join(tmpdir, "autometashape_server.pid")
+            with patch.object(ls, "PID_FILE_PATH", iso_pid_path):
+                ls.record_server_pid()
+                self.assertTrue(os.path.isfile(iso_pid_path))
+                with open(iso_pid_path, "r", encoding="utf-8") as f:
+                    pid = int(f.read().strip())
+                self.assertEqual(pid, os.getpid())
 
-        ls.clear_server_pid()
-        self.assertFalse(os.path.isfile(ls.PID_FILE_PATH))
+                ls.clear_server_pid()
+                self.assertFalse(os.path.isfile(iso_pid_path))
 
     def test_worker_launcher_loads_and_prioritizes_worker_config(self) -> None:
-        """Verify launch_worker resolves parameters from worker_config.json with CLI override."""
+        """Verify launch_worker._run_worker_lifecycle resolves worker_config.json and honors CLI overrides."""
         import json
         import tempfile
+        from unittest.mock import patch
 
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "worker_config.json")
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump(
@@ -510,57 +522,42 @@ class TestCliArgs(unittest.TestCase):
                     f,
                 )
 
-            parser = lw.build_arg_parser()
+            def _run_with(argv: list[str]) -> list[str]:
+                with (
+                    patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                    patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                    patch("cluster_utils.test_tcp_connection", return_value=True),
+                    patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                    patch("subprocess.Popen") as mock_popen,
+                    patch("sys.argv", argv),
+                ):
+                    mock_proc = mock_popen.return_value
+                    mock_proc.wait.return_value = 0
+                    mock_proc.returncode = 0
+                    mock_proc.poll.return_value = 0
+                    self.assertEqual(lw._run_worker_lifecycle(), 0)
+                    return mock_popen.call_args[0][0]
 
-            # Case A: CLI args omitted -> should resolve from config file
-            args = parser.parse_args(["--config", cfg_file])
-            saved_config = lw.cu.load_cluster_config(args.config)
-            host = args.host or saved_config.get("host", "")
-            port = args.port or saved_config.get("port", "5840")
-            root_path = args.root or saved_config.get("root", "")
-            cpu_enable = args.cpu_enable if args.cpu_enable is not None else saved_config.get("cpu_enable", 1)
-            raw_gpu = args.gpu_mask if args.gpu_mask is not None else saved_config.get("gpu_mask", None)
-            gpu_mask = str(raw_gpu).strip() if raw_gpu is not None else None
-            if gpu_mask and gpu_mask.lower() in ("auto", "none", "", "default"):
-                gpu_mask = None
+            # Case A: CLI args omitted -> resolves from config file
+            cmd_a = _run_with(["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_file])
+            self.assertIn("10.0.0.5:5842", cmd_a)
+            self.assertIn(r"\\NAS\MetashapeData", cmd_a)
+            self.assertEqual(cmd_a[cmd_a.index("--cpu-enable") + 1], "0")
+            self.assertEqual(cmd_a[cmd_a.index("--gpu-mask") + 1], "2")
 
-            self.assertEqual(host, "10.0.0.5")
-            self.assertEqual(port, "5842")
-            self.assertEqual(root_path, r"\\NAS\MetashapeData")
-            self.assertEqual(cpu_enable, 0)
-            self.assertEqual(gpu_mask, "2")
-
-            # Case B: CLI args provided -> should override config file
-            args_override = parser.parse_args(["--config", cfg_file, "--cpu", "1", "--gpu", "3"])
-            cpu_override = (
-                args_override.cpu_enable if args_override.cpu_enable is not None else saved_config.get("cpu_enable", 1)
+            # Case B: CLI args provided -> overrides config file
+            cmd_b = _run_with(
+                ["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_file, "--cpu", "1", "--gpu", "3"]
             )
-            raw_gpu_override = (
-                args_override.gpu_mask if args_override.gpu_mask is not None else saved_config.get("gpu_mask", None)
-            )
-            gpu_override = str(raw_gpu_override).strip() if raw_gpu_override is not None else None
+            self.assertEqual(cmd_b[cmd_b.index("--cpu-enable") + 1], "1")
+            self.assertEqual(cmd_b[cmd_b.index("--gpu-mask") + 1], "3")
 
-            self.assertEqual(cpu_override, 1)
-            self.assertEqual(gpu_override, "3")
-
-            # Case C: Dynamic auto-detect when gpu_mask is omitted or auto
+            # Case C: gpu_mask="auto" -> purged from command when probe returns None
             cfg_auto = os.path.join(tmpdir, "worker_auto.json")
             with open(cfg_auto, "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "host": "10.0.0.5",
-                        "root": r"\\NAS\MetashapeData",
-                        "gpu_mask": "auto",
-                    },
-                    f,
-                )
-            args_auto = parser.parse_args(["--config", cfg_auto])
-            saved_auto = lw.cu.load_cluster_config(args_auto.config)
-            raw_gpu_auto = args_auto.gpu_mask if args_auto.gpu_mask is not None else saved_auto.get("gpu_mask", None)
-            gpu_auto = str(raw_gpu_auto).strip() if raw_gpu_auto is not None else None
-            if gpu_auto and gpu_auto.lower() in ("auto", "none", "", "default"):
-                gpu_auto = None
-            self.assertIsNone(gpu_auto)
+                json.dump({"host": "10.0.0.5", "root": r"\\NAS\MetashapeData", "gpu_mask": "auto"}, f)
+            cmd_c = _run_with(["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_auto])
+            self.assertNotIn("--gpu-mask", cmd_c)
 
     def test_worker_launcher_non_interactive_flags(self) -> None:
         """Verify launch_worker parser accepts --non-interactive and --headless flags."""
@@ -597,30 +594,33 @@ class TestCliArgs(unittest.TestCase):
             "AUTOMETASHAPE_CLUSTER_ROOT": r"\\SERVER\ClusterStorage",
         }
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "empty_worker_config.json")
-            with patch.dict(os.environ, env_vars):
-                with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                    with patch("os.path.isfile", return_value=True):
-                        with patch("cluster_utils.test_tcp_connection", return_value=True):
-                            with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                                with patch("subprocess.Popen") as mock_popen:
-                                    mock_proc = mock_popen.return_value
-                                    mock_proc.wait.return_value = 0
-                                    mock_proc.returncode = 0
-                                    mock_proc.poll.return_value = 0
+            with (
+                patch.dict(os.environ, env_vars),
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("subprocess.Popen") as mock_popen,
+            ):
+                mock_proc = mock_popen.return_value
+                mock_proc.wait.return_value = 0
+                mock_proc.returncode = 0
+                mock_proc.poll.return_value = 0
 
-                                    with patch(
-                                        "sys.argv",
-                                        ["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_file],
-                                    ):
-                                        ret = lw._run_worker_lifecycle()
-                                        self.assertEqual(ret, 0)
-                                        # Verify command built uses the env-resolved values
-                                        cmd = mock_popen.call_args[0][0]
-                                        self.assertIn("192.168.1.100:5840", cmd)
-                                        self.assertIn(r"\\SERVER\ClusterStorage", cmd)
-                                        # STRICT INVARIANT: Do not pass --gpu-mask when omitted by user
-                                        self.assertNotIn("--gpu-mask", cmd)
+                with patch(
+                    "sys.argv",
+                    ["launch_worker.py", "--headless", "--no-reconnect", "--config", cfg_file],
+                ):
+                    ret = lw._run_worker_lifecycle()
+                    self.assertEqual(ret, 0)
+                    cmd = mock_popen.call_args[0][0]
+                    self.assertIn("192.168.1.100:5840", cmd)
+                    self.assertIn(r"\\SERVER\ClusterStorage", cmd)
+                    self.assertNotIn("--gpu-mask", cmd)
 
     def test_worker_launcher_auto_persists_config_without_hardcoded_gpu(self) -> None:
         """Verify launch_worker auto-persists valid host/root without injecting hardcoded gpu_mask."""
@@ -631,41 +631,44 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "worker_config.json")
-            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                with patch("os.path.isfile", return_value=True):
-                    with patch("cluster_utils.test_tcp_connection", return_value=True):
-                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = mock_popen.return_value
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_proc.poll.return_value = 0
+            with (
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("subprocess.Popen") as mock_popen,
+            ):
+                mock_proc = mock_popen.return_value
+                mock_proc.wait.return_value = 0
+                mock_proc.returncode = 0
+                mock_proc.poll.return_value = 0
 
-                                with patch(
-                                    "sys.argv",
-                                    [
-                                        "launch_worker.py",
-                                        "--headless",
-                                        "--no-reconnect",
-                                        "--host",
-                                        "192.168.1.100",
-                                        "--root",
-                                        r"\\SERVER\ClusterStorage",
-                                        "--config",
-                                        cfg_file,
-                                    ],
-                                ):
-                                    ret = lw._run_worker_lifecycle()
-                                    self.assertEqual(ret, 0)
+                with patch(
+                    "sys.argv",
+                    [
+                        "launch_worker.py",
+                        "--headless",
+                        "--no-reconnect",
+                        "--host",
+                        "192.168.1.100",
+                        "--root",
+                        r"\\SERVER\ClusterStorage",
+                        "--config",
+                        cfg_file,
+                    ],
+                ):
+                    ret = lw._run_worker_lifecycle()
+                    self.assertEqual(ret, 0)
 
-            # Check persisted file contents
             self.assertTrue(os.path.isfile(cfg_file))
             with open(cfg_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             self.assertEqual(saved["host"], "192.168.1.100")
             self.assertEqual(saved["root"], r"\\SERVER\ClusterStorage")
-            # STRICT INVARIANT: gpu_mask MUST NOT be in saved config when not explicitly requested
             self.assertNotIn("gpu_mask", saved)
 
     def test_worker_launcher_purges_legacy_hardcoded_gpu_from_config(self) -> None:
@@ -677,8 +680,10 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "worker_config.json")
-            # Write a legacy config with hardcoded gpu_mask 1
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
@@ -691,30 +696,31 @@ class TestCliArgs(unittest.TestCase):
                     f,
                 )
 
-            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                with patch("os.path.isfile", return_value=True):
-                    with patch("cluster_utils.test_tcp_connection", return_value=True):
-                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = mock_popen.return_value
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_proc.poll.return_value = 0
+            with (
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("subprocess.Popen") as mock_popen,
+            ):
+                mock_proc = mock_popen.return_value
+                mock_proc.wait.return_value = 0
+                mock_proc.returncode = 0
+                mock_proc.poll.return_value = 0
 
-                                with patch(
-                                    "sys.argv",
-                                    [
-                                        "launch_worker.py",
-                                        "--headless",
-                                        "--no-reconnect",
-                                        "--config",
-                                        cfg_file,
-                                    ],
-                                ):
-                                    ret = lw._run_worker_lifecycle()
-                                    self.assertEqual(ret, 0)
+                with patch(
+                    "sys.argv",
+                    [
+                        "launch_worker.py",
+                        "--headless",
+                        "--no-reconnect",
+                        "--config",
+                        cfg_file,
+                    ],
+                ):
+                    ret = lw._run_worker_lifecycle()
+                    self.assertEqual(ret, 0)
 
-            # Check that legacy gpu_mask has been purged from disk
             with open(cfg_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             self.assertNotIn("gpu_mask", saved)
@@ -728,8 +734,10 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "worker_config.json")
-            # Write a custom config with explicit non-legacy gpu_mask 2
             with open(cfg_file, "w", encoding="utf-8") as f:
                 json.dump(
                     {
@@ -742,34 +750,35 @@ class TestCliArgs(unittest.TestCase):
                     f,
                 )
 
-            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                with patch("os.path.isfile", return_value=True):
-                    with patch("cluster_utils.test_tcp_connection", return_value=True):
-                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = mock_popen.return_value
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_proc.poll.return_value = 0
+            with (
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("subprocess.Popen") as mock_popen,
+            ):
+                mock_proc = mock_popen.return_value
+                mock_proc.wait.return_value = 0
+                mock_proc.returncode = 0
+                mock_proc.poll.return_value = 0
 
-                                with patch(
-                                    "sys.argv",
-                                    [
-                                        "launch_worker.py",
-                                        "--headless",
-                                        "--no-reconnect",
-                                        "--config",
-                                        cfg_file,
-                                    ],
-                                ):
-                                    ret = lw._run_worker_lifecycle()
-                                    self.assertEqual(ret, 0)
-                                    cmd = mock_popen.call_args[0][0]
-                                    self.assertIn("--gpu-mask", cmd)
-                                    idx = cmd.index("--gpu-mask")
-                                    self.assertEqual(cmd[idx + 1], "2")
+                with patch(
+                    "sys.argv",
+                    [
+                        "launch_worker.py",
+                        "--headless",
+                        "--no-reconnect",
+                        "--config",
+                        cfg_file,
+                    ],
+                ):
+                    ret = lw._run_worker_lifecycle()
+                    self.assertEqual(ret, 0)
+                    cmd = mock_popen.call_args[0][0]
+                    self.assertIn("--gpu-mask", cmd)
+                    idx = cmd.index("--gpu-mask")
+                    self.assertEqual(cmd[idx + 1], "2")
 
-            # Check that custom non-legacy gpu_mask is preserved on disk
             with open(cfg_file, "r", encoding="utf-8") as f:
                 saved = json.load(f)
             self.assertEqual(saved.get("gpu_mask"), "2")
@@ -782,39 +791,44 @@ class TestCliArgs(unittest.TestCase):
         import launch_worker as lw
 
         with tempfile.TemporaryDirectory() as tmpdir:
+            fake_ms = os.path.join(tmpdir, "metashape.exe")
+            with open(fake_ms, "w", encoding="utf-8") as fh:
+                fh.write("stub")
             cfg_file = os.path.join(tmpdir, "worker_config.json")
-            with patch("cluster_utils.find_metashape_path", return_value="dummy_metashape.exe"):
-                with patch("os.path.isfile", return_value=True):
-                    with patch("cluster_utils.test_tcp_connection", return_value=True):
-                        with patch("cluster_utils.test_unc_path", return_value=(True, "")):
-                            with patch("subprocess.Popen") as mock_popen:
-                                mock_proc = mock_popen.return_value
-                                mock_proc.wait.return_value = 0
-                                mock_proc.returncode = 0
-                                mock_proc.poll.return_value = 0
+            with (
+                patch("cluster_utils.find_metashape_path", return_value=fake_ms),
+                patch("cluster_utils.probe_metashape_gpu_mask", return_value=(None, [])),
+                patch("cluster_utils.test_tcp_connection", return_value=True),
+                patch("cluster_utils.test_unc_path", return_value=(True, "")),
+                patch("subprocess.Popen") as mock_popen,
+            ):
+                mock_proc = mock_popen.return_value
+                mock_proc.wait.return_value = 0
+                mock_proc.returncode = 0
+                mock_proc.poll.return_value = 0
 
-                                with patch(
-                                    "sys.argv",
-                                    [
-                                        "launch_worker.py",
-                                        "--headless",
-                                        "--no-reconnect",
-                                        "--host",
-                                        "192.168.1.100",
-                                        "--root",
-                                        r"\\SERVER\ClusterStorage",
-                                        "--gpu-mask",
-                                        "2",
-                                        "--config",
-                                        cfg_file,
-                                    ],
-                                ):
-                                    ret = lw._run_worker_lifecycle()
-                                    self.assertEqual(ret, 0)
-                                    cmd = mock_popen.call_args[0][0]
-                                    self.assertIn("--gpu-mask", cmd)
-                                    idx = cmd.index("--gpu-mask")
-                                    self.assertEqual(cmd[idx + 1], "2")
+                with patch(
+                    "sys.argv",
+                    [
+                        "launch_worker.py",
+                        "--headless",
+                        "--no-reconnect",
+                        "--host",
+                        "192.168.1.100",
+                        "--root",
+                        r"\\SERVER\ClusterStorage",
+                        "--gpu-mask",
+                        "2",
+                        "--config",
+                        cfg_file,
+                    ],
+                ):
+                    ret = lw._run_worker_lifecycle()
+                    self.assertEqual(ret, 0)
+                    cmd = mock_popen.call_args[0][0]
+                    self.assertIn("--gpu-mask", cmd)
+                    idx = cmd.index("--gpu-mask")
+                    self.assertEqual(cmd[idx + 1], "2")
 
     def test_local_scratch_staging_cli_defaults_and_opt_out(self) -> None:
         """Verify local_scratch_staging is enabled by default and supports explicit opt-out."""

@@ -133,6 +133,80 @@ class TestIcpBridge(unittest.TestCase):
         # Worker reported failure
         self.assertFalse(ib.evaluate_icp_quality_gate({"ok": False, "reason": "insufficient_roi_overlap"})[0])
 
+        # Non-finite NaN / Inf metrics MUST be rejected (never silently pass float comparisons)
+        for bad_key in ("fitness_15cm", "median_15cm_m", "scale", "tilt_deg"):
+            for bad_val in (float("nan"), float("inf"), float("-inf")):
+                ok_nf, reasons_nf = ib.evaluate_icp_quality_gate({**good, bad_key: bad_val})
+                self.assertFalse(ok_nf, f"Expected {bad_key}={bad_val} to fail quality gate")
+                self.assertTrue(reasons_nf)
+        self.assertFalse(ib.evaluate_icp_quality_gate(good, max_abs_k4=float("nan"))[0])
+
+    def test_ensure_bridge_runtime_rejects_zip_slip_and_traversal_manifest(self) -> None:
+        """Verify runtime provisioner blocks Zip Slip archive entries and path traversal in manifest.json."""
+        with tempfile.TemporaryDirectory() as tmp:
+            bundle_dir = os.path.join(tmp, "nas_bundle")
+            cache_dir = os.path.join(tmp, "local_cache")
+            os.makedirs(bundle_dir, exist_ok=True)
+
+            # 1. Zip Slip payload
+            zip_path = os.path.join(bundle_dir, "evil.zip")
+            with zipfile.ZipFile(zip_path, "w") as zf:
+                zf.writestr("../pwned.txt", "escape")
+                zf.writestr("python.exe", "stub")
+            with open(zip_path, "rb") as fh:
+                digest = hashlib.sha256(fh.read()).hexdigest()
+            with open(os.path.join(bundle_dir, "manifest.json"), "w", encoding="utf-8") as mf:
+                json.dump(
+                    {"version": "9.9.9", "filename": "evil.zip", "python_relpath": "python.exe", "sha256": digest}, mf
+                )
+            env = {
+                "AUTOMETASHAPE_BRIDGE_PYTHON": "",
+                "AUTOMETASHAPE_BRIDGE_RUNTIME_DIR": bundle_dir,
+                "AUTOMETASHAPE_BRIDGE_CACHE_DIR": cache_dir,
+            }
+            cache_prefix = os.path.normcase(os.path.abspath(cache_dir))
+
+            def _only_cache_python(py_path: str) -> bool:
+                return bool(py_path) and os.path.normcase(os.path.abspath(py_path)).startswith(cache_prefix)
+
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(ib, "_verify_bridge_python", side_effect=_only_cache_python):
+                    self.assertIsNone(ib.ensure_bridge_runtime())
+            self.assertFalse(os.path.exists(os.path.join(cache_dir, "pwned.txt")))
+
+            # 2. Manifest python_relpath traversal
+            with open(os.path.join(bundle_dir, "manifest.json"), "w", encoding="utf-8") as mf:
+                json.dump(
+                    {
+                        "version": "9.9.8",
+                        "filename": "../evil.zip",
+                        "python_relpath": "../../python.exe",
+                        "sha256": digest,
+                    },
+                    mf,
+                )
+            with patch.dict(os.environ, env, clear=False):
+                with patch.object(ib, "_verify_bridge_python", side_effect=_only_cache_python):
+                    self.assertIsNone(ib.ensure_bridge_runtime())
+
+    def test_bridge_short_circuits_cleanly_on_local_cs_without_provisioning(self) -> None:
+        """Verify non-georeferenced LOCAL_CS chunks skip runtime provisioning cleanly."""
+        chunk = SimpleNamespace(
+            label="LocalScan",
+            crs=SimpleNamespace(wkt='LOCAL_CS["Local Coordinates"]'),
+            cameras=[],
+        )
+        with patch.object(ib, "ensure_bridge_runtime") as mock_rt:
+            out_chunk, stats = ib.bridge_disconnected_islands(
+                doc=SimpleNamespace(),
+                chunk=chunk,
+                audit_result={"main_island": [1, 2], "bridge_candidates": [[3, 4]]},
+                unaligned_groups=[],
+            )
+        self.assertIs(out_chunk, chunk)
+        self.assertFalse(stats["triggered"])
+        mock_rt.assert_not_called()
+
     def test_ensure_bridge_runtime_provisions_offline_zip_and_checks_sha256(self) -> None:
         """Verify atomic offline provisioning from NAS bundle zip and SHA-256 tamper protection."""
         with tempfile.TemporaryDirectory() as tmp:
@@ -719,7 +793,7 @@ class TestIcpBridge(unittest.TestCase):
 
     def test_icp_worker_end_to_end_on_synthetic_building_cloud(self) -> None:
         """Integration test running real icp_worker.py via portable Open3D runtime if available."""
-        bridge_py = ib.ensure_bridge_runtime(network_path=r"\\10.5.10.202\catp")
+        bridge_py = ib.ensure_bridge_runtime(network_path=os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", ""))
         if not bridge_py:
             self.skipTest("Portable Open3D bridge runtime not available in this environment.")
 

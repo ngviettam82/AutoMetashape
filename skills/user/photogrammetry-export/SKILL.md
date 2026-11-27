@@ -1,6 +1,6 @@
 ---
 name: photogrammetry-export
-description: "Exports photogrammetric 3D reconstructions into production formats including GLB, OBJ with 8K TIFF textures, Autodesk FBX, Stanford PLY, dense point clouds (LAZ, LAS, PLY, E57), hierarchical 3D tiles (Cesium, TLS, SLPK), GeoTIFF elevation models (DEM), topographic contours (SHP, DXF), orthomosaics, and PDF calibration reports. Supports standalone texture re-baking and delighting without recomputing depth maps. Use when exporting, converting, or packaging photogrammetry deliverables from an existing or GUI-modified project."
+description: "Exports photogrammetric 3D reconstructions into production formats including GLB, OBJ with 8K PNG/TIFF textures, Autodesk FBX, Stanford PLY, dense point clouds (LAZ, LAS, PLY, E57), hierarchical 3D tiles (Cesium, TLS, SLPK), GeoTIFF elevation models (DEM), topographic contours (SHP, DXF), orthomosaics, and PDF calibration reports. Supports standalone texture re-baking and delighting without recomputing depth maps. Use when exporting, converting, or packaging photogrammetry deliverables from an existing or GUI-modified project."
 audience: user
 status: stable
 owners:
@@ -9,7 +9,7 @@ owners:
 
 # Photogrammetry Production Asset Export
 
-Lightweight export and packaging workflow converting existing or GUI-modified Agisoft Metashape projects (`.psx`) into production 3D assets (`.glb`, `.obj`, `.mtl`, `.tif`, `.fbx`, `.ply`, `.dxf`), dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK, OSGB), Digital Elevation Models (`dem.tif`), topographic contour shapefiles (`.shp`, `.dxf`), GeoTIFF orthomosaics (`orthomosaic.tif`), and calibration quality reports (`report.pdf`) without re-running hours of camera matching or depth maps.
+Lightweight export and packaging workflow converting existing or GUI-modified Agisoft Metashape projects (`.psx`) into production 3D assets (`.glb`, `.obj`, `.mtl`, `.png`/`.tif`, `.fbx`, `_mesh.ply`, `.dxf`), dense point clouds (`<project>_point_cloud.laz`/`.las`/`.ply`/`.e57`), hierarchical 3D Tiled Models (`<project>_tiled_model/tileset.json`, `.tls`, `.slpk`, `.osgb`), Digital Elevation Models (`<project>_dem.tif`), topographic contour vector maps (`<project>_contours.shp`/`.dxf`), GeoTIFF orthomosaics (`<project>_orthomosaic.tif`), and calibration quality reports (`<project>_report.pdf`) without re-running hours of camera matching or depth maps.
 
 ---
 
@@ -105,15 +105,15 @@ In the AutoMetashape distributed pipeline, `scripts/metashape_export.py` functio
 - **Hierarchical 3D Tiled Model**: Cesium 3D Tiles (`tiled_model/tileset.json` + `.b3dm`), Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), OpenSceneGraph (`.osgb`).
 - **Topographic Contours (`.shp`, `.dxf`, `.geojson`, `.kml`)**: Vector contour polylines with metric elevation attributes (on-demand DEM generation automatically applies projected metric UTM CRS for geographic chunks).
 - **Elevation Model (`dem.tif`)**: BigTIFF LZW GeoTIFF with ESRI `.tfw` world file.
-- **Orthomosaic (`orthomosaic.tif`)**: BigTIFF LZW GeoTIFF with alpha channel, automatic metric UTM projection (via WKT `PROJCS` detection), default **5 cm/px (`--ortho-resolution 0.05`)**, and `.tfw` / `.prj` files.
-- **Quality Report (`report.pdf`)**: Camera calibration, reprojection errors, and survey statistics.
+- **Orthomosaic (`<project>_orthomosaic.tif`)**: BigTIFF LZW GeoTIFF with alpha channel, automatic metric UTM projection (via WKT `PROJCS`/`COMPD_CS` detection), default **5 cm/px (`--ortho-resolution 0.05`)**, `.tfw` / `.prj` files, and `--export-orthomosaic` / `--export-ortho` aliases.
+- **Quality Report (`<project>_report.pdf`)**: Camera calibration, reprojection errors, and survey statistics.
 
 ---
 
 ## Validation
 
 Verify exported assets:
-1. File existence: verify requested assets (`model.glb`, `model.obj`, `model.fbx`, `point_cloud.laz`, `dem.tif`, `contours.shp`, `tileset.json`, `orthomosaic.tif`, `report.pdf`) exist in the target directory.
+1. File existence: verify requested assets (`<project>.glb`, `<project>.obj`, `<project>.fbx`, `<project>_point_cloud.laz`, `<project>_dem.tif`, `<project>_contours.shp`, `<project>_tiled_model/tileset.json`, `<project>_orthomosaic.tif`, `<project>_report.pdf`) exist in the target directory and pass `scripts/verify_deliverables.py`.
 2. Integrity check: load `.glb` in a 3D viewer or Cesium 3D Tiles in CesiumJS to confirm LOD hierarchies and textures render without errors.
 3. Coordinate verification: confirm mesh vertex coordinates, contours, and point clouds match expected metric scale.
 

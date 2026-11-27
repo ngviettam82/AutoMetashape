@@ -2,12 +2,12 @@
 
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 [![Release](https://img.shields.io/badge/Release-v1.4.0-green.svg)](https://github.com/ngviettam82/AutoMetashape/releases/tag/v1.4.0)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-informational.svg)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.9%2B-informational.svg)](https://www.python.org/)
 [![Hardware](https://img.shields.io/badge/CUDA-Accelerated-76B900.svg?logo=nvidia)](https://developer.nvidia.com/cuda-zone)
-[![Platform](https://img.shields.io/badge/Platform-Windows-lightgrey.svg)]()
+[![Platform](https://img.shields.io/badge/Platform-Windows%20%7C%20Linux-lightgrey.svg)]()
 [![Engine](https://img.shields.io/badge/Engine-Agisoft%20Metashape%20Pro%202.x-orange.svg)](https://www.agisoft.com/)
 
-**AutoMetashape** is an autonomous, high-precision photogrammetry and aerial survey pipeline that transforms drone imagery and ground camera captures into millimeter-accurate 3D models (`.obj`, `.mtl`, `.glb`, `.fbx`, `.ply`), classified dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK), Digital Elevation Models (`dem.tif`), topographic contour vector maps (`.shp`, `.dxf`), GeoTIFF orthomosaics (`.tif`, `.tfw`), executive calibration reports (`report.pdf`), and native Agisoft Metashape projects (`.psx`) with **NVIDIA CUDA** GPU acceleration.
+**AutoMetashape** is an autonomous, high-precision photogrammetry and aerial survey pipeline that transforms drone imagery and ground camera captures into millimeter-accurate 3D models (`.obj`, `.mtl`, `.glb`, `.fbx`, `.ply`), classified dense point clouds (`.laz`, `.las`, `.ply`, `.e57`), hierarchical 3D Tiled Models (Cesium 3D Tiles, TLS, SLPK), Digital Elevation Models (`<project>_dem.tif`), topographic contour vector maps (`.shp`, `.dxf`), GeoTIFF orthomosaics (`<project>_orthomosaic.tif`, `.tfw`, `.prj`), executive calibration reports (`<project>_report.pdf`), and native Agisoft Metashape projects (`<project>.psx`) with **NVIDIA CUDA** GPU acceleration.
 
 Available as a scriptable command-line engine, autonomous cluster supervisor, and browser telemetry dashboard.
 
@@ -63,7 +63,7 @@ Executes directly through Agisoft Metashape's embedded Python runtime:
 ```
 
 #### Option B: Standard Python (Automatic Runtime Auto-Handoff)
-Executes under standard Python, which automatically discovers `metashape.exe` across `%ProgramFiles%` and all drives (`C:`, `D:`, `E:`, `F:`, `G:`) and delegates execution into Metashape's embedded runtime with zero path configuration:
+Executes under standard Python, which automatically discovers `metashape.exe` across `%ProgramFiles%`, `%LOCALAPPDATA%`, and fixed drives (`C:`–`Z:` in Python discovery; `C:`–`G:` in `.bat` launchers) and delegates execution into Metashape's embedded runtime with zero path configuration:
 ```powershell
 python scripts/metashape_reconstruction.py --images "C:/path/to/your/images" --preset pro
 ```
@@ -107,34 +107,35 @@ AutoMetashape supports all core photogrammetric operations in Agisoft Metashape 
 - **🌐 Hierarchical 3D Tiled Models (`--build-tiled-model`, `--tiled-model-format`)**: Generates multiresolution LOD tilesets in Cesium 3D Tiles (`tileset.json` + `b3dm`) for streaming in CesiumJS and Unreal Engine, Agisoft TLS (`.tls`), Esri Scene Layer Package (`.slpk`), or OpenSceneGraph (`.osgb`).
 - **🗺️ Digital Elevation Models (DEM) & Topographic Contours (`--build-dem`, `--build-contours`)**: Reconstructs metric elevation rasters (GeoTIFF with BigTIFF LZW) and vector contour lines at custom intervals (0.5m, 1m, 2m, 5m) exported as ESRI Shapefile (`.shp`), AutoCAD (`.dxf`), GeoJSON, or KML.
 - **☀️ Texture Delighting / Shadow Removal (`--remove-lighting`)**: Removes harsh sunlight shadows and ambient occlusion using `chunk.removeLighting()` to output true photographic diffuse albedo textures for game engines and VFX.
-- **📐 Mesh Topology, Smoothing & Multi-Format Export**: Arbitrary or HeightField meshing, planar hole closing (`closeHoles`), Laplacian mesh smoothing (`--smooth-mesh`), decimation (`--decimate-mesh`), and exports to Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`), binary glTF (`.glb`), and Wavefront OBJ (`.obj` + `.mtl` + `.tif`).
+- **📐 Mesh Topology, Smoothing & Multi-Format Export**: Arbitrary (default) or HeightField meshing, planar hole closing (`closeHoles`), Laplacian mesh smoothing (`--smooth-mesh`), decimation (`--decimate-mesh`), and exports to Autodesk FBX (`.fbx`), Stanford PLY (`.ply`), AutoCAD DXF (`.dxf`), binary glTF (`.glb`), and Wavefront OBJ (`.obj` + `.mtl` + `.png` default, or `.tif` / `.jpg` via `--texture-format`).
 
 ### 2. Pro Photogrammetry & Geomatics Engine
 - **🔬 Survey Physics & Optics Telemetry Audit (`--profile`, `--preset pro`, Default)**:
   - Audits physical sensor geometry, pixel pitch in $\mu\text{m}$, mean flying height $H_{AGL}$, and calculates the exact Ground Sampling Distance (GSD in cm/pixel).
   - Evaluates pairwise camera baselines to estimate forward and lateral overlap percentages.
-  - Samples luminance histograms to detect underexposed shadows ($Y < 20$) and highlight clipping ($Y > 235$), triggering texture delighting when shadow clipping exceeds $15\%$.
+  - Samples luminance histograms to detect underexposed shadows ($Y < 20$) and highlight clipping ($Y > 235$) and reports lighting diagnostics in the engineering summary (opt into shadow removal via `--remove-lighting`).
 - **⚙️ Camera Shutter Physics Conformance**:
-  - Automatically identifies mechanical leaf shutters (e.g. DJI FC3411, Phantom 4 Pro FC6310, Zenmuse P1, Phase One, Hasselblad) and **disables rolling shutter compensation** to eliminate synthetic bundle adjustment drift.
-  - Enables `Regularized` rolling shutter compensation on aerial CMOS rolling shutter payloads (DJI Air 3S `FC9113`, `FC9589`, Hasselblad Mavic 3 `L2D-20c`, Mini/Air series, consumer smartphones), while **explicitly disabling rolling shutter on isolated close-range hovering ICP island orbits** to prevent bundle-adjustment scale collapse.
+  - Automatically identifies mechanical leaf shutters (e.g. DJI Mavic 3 Enterprise Wide `M3E`, Mavic 4 Enterprise `M4E`, Phantom 4 Pro `FC6310`, Zenmuse P1, Zenmuse L2, Phase One) and **disables rolling shutter compensation** to eliminate synthetic bundle adjustment drift.
+  - Enables `Regularized` rolling shutter compensation on aerial CMOS rolling shutter payloads (DJI Air 2S `FC3411`, Air 3S `FC9113` / `FC9589`, Hasselblad Mavic 3 `L2D-20c`, Mini/Air series, consumer smartphones), while **explicitly disabling rolling shutter on isolated close-range hovering ICP island orbits** to prevent bundle-adjustment scale collapse.
 - **📐 USGS 4-Pass Gradual Selection Bundle Adjustment (`k4=b1=b2=0` Lens Lock)**:
   - Staged parameter unfreezing schedule with gentle architectural thresholds (`<= 10%` removal cap per pass): Pass 1 (RU $\le 15.0 \to f, cx, cy$) $\to$ Pass 2 (PA $\le 3.0\text{ px} \to f, cx, cy, k_1..k_3, p_1, p_2$) $\to$ Pass 3 (RE $\le 0.50\text{ px} \to f, cx, cy, k_1..k_3, p_1, p_2$ with tie-point covariance) $\to$ Pass 4 (Image multiplicity $\ge 2$).
   - **Hard-locks `k4 = b1 = b2 = 0` and `adaptive_fitting = False`** across alignment and all 4 optimization passes to eliminate consumer UAV wide-angle radial dome blowup (`--adaptive-fitting` remains available as an explicit opt-in override).
   - Reports initial vs optimized RMS reprojection errors with reduction percentages.
-- **🎨 1:1 Ground Texel Density Budgeting**:
-  - Dynamically calculates the exact 8K texture atlas page count needed to match optical camera resolution on the 3D mesh surface, preventing blurry textures or bloated empty UV sheets.
-- **⛰️ Slope-Adaptive Ground Point Filtering & Morphological Meshing**:
-  - Derives terrain relief ratio $R = \Delta Z / D_{diag}$: sets planar sites ($R < 0.08$) to `HeightField` meshing with large ground cell sizes ($35\text{m}$), and complex 3D structures ($R \ge 0.08$) to `Arbitrary` meshing with steep slope angles ($28^\circ$).
-- **🏢 Building Preset (`--preset building`)**:
-  - 600K polygon faces, 16-page 8K texture atlas, Level-30 planar hole closing, and `gps-square` bounding box.
-- **🗺️ Aerial Map Preset (`--preset map`)**:
-  - 2M polygon faces, 4-page 8K texture atlas, full uncropped terrain extent, and GeoTIFF orthomosaic.
+- **🎨 Deterministic 16× 8K Texture Atlas Baking**:
+  - Bakes a deterministic 16-page $8192\times 8192$ mosaic-blended texture atlas in `pro` and `building` presets (customizable via `--texture-pages`), and reuses existing Metashape 2.2.2 `BuildUV/page_count` atlases automatically on `--resume`.
+- **⛰️ Arbitrary 3D Meshing Default & Opt-In Ground Filtering**:
+  - Defaults to `Arbitrary` 3D surface meshing (`2,000,000` faces, `gps-square` crop) in `pro` so vertical walls, eaves, and complex structures reconstruct cleanly (`--surface-type heightfield` remains available for planar terrain).
+  - When `--build-point-cloud --classify-ground` is enabled, classifies bare-earth ground points (`cell_size=12.0m`, `max_angle=28.0 deg`, `max_distance=0.3m` defaults, tunable via CLI).
+- **🏢 Supported Presets (`--preset pro|building|custom`)**:
+  - `pro` (default): 2M-face Arbitrary mesh, 16-page 8K texture atlas, 5 cm/px metric orthomosaic, opt-in dense point cloud, `gps-square` crop.
+  - `building`: Architectural preset with Level-30 planar hole closing (`--close-holes`), 16-page 8K texture atlas, and `gps-square` crop.
+  - `custom`: Full manual control over all alignment, depth map, mesh, texture, and export flags.
 
 ### 3. Zero-Neural Universal Alignment Hygiene & Open3D ICP Bridge
 - **Single-Chunk Global Alignment (Default, `--multi-chunk disable`)**: Loads all photos across subfolders into a unified chunk while automatically deduplicating exact duplicate photos, skipping stray `.files` directories, registering DJI Air 3S (`FC9113`) optics, and supporting optional `--exclude-folders`.
 - **Pre-Alignment GPS & Barometer Hygiene (`--alignment-hygiene`, Default: On)**:
   - Neutralizes Null-Island `(0, 0)` and `> 5 km` GPS outliers before matching.
-  - Normalizes per-flight barometer datum drift via `TakeoffZ0 = AbsoluteAltitude - RelativeAltitude` keyed by full parent directory path, while preserving RTK Fixed surveys untouched and setting anisotropic `(5, 5, 15) m` non-RTK GPS accuracy.
+  - Normalizes per-flight barometer datum drift via folder- and time-agnostic 1D gap clustering (`gap > 1.0 m`) on `TakeoffZ0 = AbsoluteAltitude - RelativeAltitude` with pure physics aerial anchor selection (`RA >= 25 m`) and idempotent `Z = ref_z0 + RelativeAltitude`, while preserving RTK Fixed surveys untouched and setting anisotropic `(5, 5, 15) m` non-RTK GPS accuracy.
   - Hard-locks `k4 = b1 = b2 = 0` and `adaptive_fitting = False` to prevent radial dome distortion on wide-angle UAV sensors.
 - **Tie-Graph Topology Audit & Quarantine**: Builds the shared-track camera graph (`edge >= 15`) after global alignment to quarantine torn/folded/tiny rogue strips and main-block GPS spikes (`|dZ| > 7 m` or `dXY > 10 m`), while preserving coherent distant compounds and automatically queueing disconnected overlapping rigid islands (`>= 12` cameras) or unaligned close-range folders (`< 35%` aligned) regardless of folder naming.
 - **Zero-Neural CPU Open3D Sim(3) ICP Bridge (`--icp-bridge`, Default: On)**:
@@ -160,7 +161,7 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
   - First-run interactive setup wizard with LAN auto-discovery.
   - **Dynamic Metashape GPU Bitmask Probing**: Queries `Metashape.app.enumGPUDevices()` at startup to pass the exact discrete GPU `--gpu-mask` (excluding Intel/AMD iGPUs and overriding poisoned `HKCU gpu_mask=0`), while honoring explicit operator overrides (`--gpu-mask <N>`).
   - Built-in pre-flight health diagnostics (Metashape executable discovery, TCP port 5840 reachability test, and Shared UNC storage access check).
-  - Resilient auto-reconnect loop with non-git ZIP-parity self-updates (`update.bat` / `update_fleet.bat`) and hidden `.cluster/tickets/` failover (keeping `Result/<project>/` clean with a single canonical `<project>.psx`).
+  - Resilient auto-reconnect loop with non-git ZIP-parity self-updates (`update.bat` / `update_fleet.bat`) and canonical `<project>.psx` folder-name batch dispatch (with deterministic post-release stale `.files/lock` cleanup and explicit `--allow-hidden-ticket` opt-in).
 - **Dual Shared Folder (Multi-SSD) Topology**:
   - Supports separating **Data Source Share** (SSD #1, read-only raw survey photos via `--source-share`) from **Result Share** (SSD #2, writable `.psx` + deliverables acting as Metashape `--root` via `--result-share`), doubling aggregate storage I/O bandwidth and protecting raw captures.
 - **Pro Production Defaults (`--preset pro`)**:
@@ -193,7 +194,7 @@ flowchart TD
     F --> K["10. Opt-In DEM & Topographic Contours<br/>(--build-dem + --build-contours: GeoTIFF, SHP, DXF, GeoJSON)"]
     H --> L["11. Metric GeoTIFF Orthomosaic<br/>(5 cm/px Default UTM CRS, BigTIFF LZW + TFW/PRJ)"]
     D2 --> M["12. Executive PDF Calibration Report<br/>(exportReport: camera errors, overlap, GSD)"]
-    G --> N["Output Directory: <output_dir>/<br/>• 3D Models: <project>.obj/.mtl/.png, .glb, .fbx, .ply, .dxf<br/>• Opt-In Dense Cloud: <project>.laz, tie_points.ply<br/>• 3D Tiles: tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: dem.tif, contours.shp, contours.dxf<br/>• Ortho & Report: <project>_orthomosaic.tif (+ .tfw/.prj), report.pdf<br/>• Project Archive: <project>.psx + <project>.files/"]
+    G --> N["Output Directory: <output_dir>/<br/>• 3D Models: <project>.obj/.mtl/.png, .glb, .fbx, _mesh.ply, .dxf<br/>• Opt-In Dense Cloud: <project>_point_cloud.laz, <project>_tie_points.ply<br/>• 3D Tiles: <project>_tiled_model/tileset.json (Cesium), .tls, .slpk<br/>• Elevation & Contours: <project>_dem.tif, <project>_contours.shp/.dxf<br/>• Ortho & Report: <project>_orthomosaic.tif (+ .tfw/.prj), <project>_report.pdf<br/>• Project Archive: <project>.psx + <project>.files/"]
     H --> N
     I --> N
     J --> N
@@ -206,22 +207,22 @@ flowchart TD
 
 ## Production Deliverables
 
-All outputs are automatically organized inside the dedicated `<images_dir>/model/` folder:
+All outputs are written into `<output_dir>/` (defaulting to `<images_dir>/<project>/`):
 
 | File | Format | Description |
 |---|---|---|
-| `model.obj` + `model.mtl` | Wavefront OBJ | Metric polygonal mesh with vertex normals and material definitions |
-| `model.tif` (pages 1..N) | 8K TIFF | Uncompressed $8192\times 8192$ multi-page photogrammetric texture atlas |
-| `model.glb` | Binary glTF | Standalone 3D model with embedded PBR textures for instant web and viewer loading |
-| `model.fbx` | Autodesk FBX | Production 3D asset with embedded textures for 3ds Max, Maya, Blender, and Unreal |
-| `model_mesh.ply` | Stanford PLY | Metric 3D mesh with vertex normals and vertex color definitions |
-| `point_cloud.laz` (or `.las`, `.ply`, `.e57`) | Dense Point Cloud | 3D point cloud with RGB colors, normals, confidence, and ASPRS ground/semantic classifications |
-| `tiled_model/tileset.json` | Cesium 3D Tiles | Multiresolution hierarchical LOD 3D tileset for streaming web GIS viewers |
-| `dem.tif` + `dem.tfw` | GeoTIFF DEM | Digital Elevation Model (DSM/DTM) raster with BigTIFF LZW compression and world file |
-| `contours.shp` (or `.dxf`) | Topographic Contours | Vector elevation contour polylines with metric height attributes |
-| `orthomosaic.tif` + `orthomosaic.tfw` | GeoTIFF Ortho | Geo-referenced orthomosaic raster with LZW BigTIFF compression and world file |
-| `report.pdf` | PDF Report | Executive processing, camera calibration, reprojection error, and flight overlap report |
-| `building_reconstruction.psx` | Agisoft PSX | Native editable Metashape Professional project preserving all calibrations and depth maps |
+| `<project>.obj` + `<project>.mtl` | Wavefront OBJ | Metric polygonal mesh with vertex normals and material definitions |
+| `<project>.png` (or `.tif`/`.jpg`, pages 1..N) | 8K Texture Atlas | $8192\times 8192$ multi-page photogrammetric texture atlas (`png` default; `tiff`/`jpg` via `--texture-format`) |
+| `<project>.glb` | Binary glTF | Standalone 3D model with embedded PBR textures for instant web and viewer loading |
+| `<project>.fbx` | Autodesk FBX | Production 3D asset with embedded textures for 3ds Max, Maya, Blender, and Unreal |
+| `<project>_mesh.ply` | Stanford PLY | Metric 3D mesh with vertex normals and vertex color definitions |
+| `<project>_point_cloud.laz` (or `.las`, `.ply`, `.e57`) | Dense Point Cloud | Opt-in 3D point cloud with RGB colors, normals, confidence, and ASPRS ground/semantic classifications |
+| `<project>_tiled_model/tileset.json` | Cesium 3D Tiles | Multiresolution hierarchical LOD 3D tileset for streaming web GIS viewers |
+| `<project>_dem.tif` + `.tfw` | GeoTIFF DEM | Opt-in Digital Elevation Model (DSM/DTM) raster with BigTIFF LZW compression and world file |
+| `<project>_contours.shp` (or `.dxf`) | Topographic Contours | Vector elevation contour polylines with metric height attributes |
+| `<project>_orthomosaic.tif` + `.tfw` + `.prj` | GeoTIFF Ortho | Geo-referenced 5 cm/px metric UTM orthomosaic raster with LZW BigTIFF compression |
+| `<project>_report.pdf` | PDF Report | Executive processing, camera calibration, reprojection error, and flight overlap report |
+| `<project>.psx` + `<project>.files/` | Agisoft PSX | Native editable Metashape Professional project preserving all calibrations and depth maps |
 
 ---
 
@@ -248,9 +249,9 @@ python tools/skills/cli.py check
 
 - **Operating System**: Windows 10/11 (64-bit) or Linux (Ubuntu 20.04/22.04 LTS).
 - **Engine**: Agisoft Metashape Professional 2.0 or 2.1+ (verified on 2.2.2 Pro, build 20889).
-- **Python**: Python 3.10, 3.11, or 3.12 (or Metashape bundled Python environment).
+- **Python**: Python 3.9, 3.10, 3.11, or 3.12 (including Metashape Pro 2.2.2's bundled Python 3.9.13).
 - **GPU**: NVIDIA GPU with CUDA support (RTX 30-series, RTX 40-series, RTX 50-series, or Quadro/Tesla).
-- **RAM**: 32 GB RAM recommended for Building preset; 32-64 GB RAM recommended for 2M-face Map presets and dense point clouds.
+- **RAM**: 32 GB RAM recommended for standard surveys; 32–64 GB RAM recommended for 2M-face `pro` surveys and dense point clouds.
 
 ---
 

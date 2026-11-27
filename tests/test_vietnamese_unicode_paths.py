@@ -90,35 +90,19 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
             self.assertEqual(groups["Chuyến bay 2 - Chiều"][0], img2)
 
     def test_calc_rel_cluster_vietnamese_paths(self) -> None:
-        """Verify cluster relative path calculation handles Vietnamese paths across drives and UNC shares."""
+        """Verify real production cluster relative path helpers preserve Vietnamese Unicode segments."""
+        from autometashape.cluster.dual_share import relpath_under
 
-        def calc_rel(psx_out: str, network_path: str) -> str:
-            norm_psx = os.path.abspath(psx_out).replace("\\\\", "/").replace("\\", "/")
-            norm_net = network_path.strip().replace("\\\\", "/").replace("\\", "/").rstrip("/")
-            try:
-                abs_psx = os.path.abspath(psx_out)
-                abs_net = os.path.abspath(network_path)
-                if os.path.commonpath([abs_psx, abs_net]).lower() == abs_net.lower():
-                    return os.path.relpath(abs_psx, abs_net).replace("\\", "/")
-            except Exception:
-                pass
-            net_parts = [p for p in norm_net.split("/") if p]
-            if net_parts:
-                share_name = net_parts[-1].lower()
-                psx_parts = [p for p in norm_psx.split("/") if p]
-                psx_lower = [p.lower() for p in psx_parts]
-                if share_name in psx_lower:
-                    idx = psx_lower.index(share_name)
-                    rel = "/".join(psx_parts[idx + 1 :])
-                    if rel:
-                        return rel
-            return os.path.basename(psx_out)
+        from scripts.submit_cluster_batch import get_cluster_relative_path
 
-        rel1 = calc_rel(r"C:\Khảo sát\Đà Nẵng\0152.psx", r"C:\Khảo sát")
+        rel1 = relpath_under(r"C:\Khảo sát\Đà Nẵng\0152.psx", r"C:\Khảo sát")
         self.assertEqual(rel1, "Đà Nẵng/0152.psx")
 
-        rel2 = calc_rel(r"\\HOST_PC\Khảo sát\Đà Nẵng\0152.psx", r"\\HOST_PC\Khảo sát")
+        rel2 = relpath_under(r"\\HOST_PC\Khảo sát\Đà Nẵng\0152.psx", r"\\HOST_PC\Khảo sát")
         self.assertEqual(rel2, "Đà Nẵng/0152.psx")
+
+        rel3 = get_cluster_relative_path(r"\\HOST_PC\Khảo sát\Đà Nẵng\0152.psx", r"\\HOST_PC\Khảo sát")
+        self.assertEqual(rel3, "Đà Nẵng/0152.psx")
 
     def test_parse_ipc_line_vietnamese_descriptions(self) -> None:
         """Verify parse_ipc_line preserves Vietnamese characters in milestone descriptions."""
@@ -136,19 +120,21 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
         self.assertIn(r"\\HOST\Dự án Khảo sát Đà Nẵng", bat)
 
     def test_dashboard_telemetry_vietnamese_preservation(self) -> None:
-        """Verify dynamic dashboard JSON telemetry preserves literal Vietnamese text with ensure_ascii=False."""
-        profiled = [
-            {
-                "id": "proj-01",
-                "name": "Khảo sát Cầu Rồng - Đà Nẵng",
-                "photos": 250,
-                "status": "Ready",
-                "gsd": 1.25,
-            }
-        ]
-        dumped = json.dumps(profiled, indent=2, ensure_ascii=False)
-        self.assertIn("Khảo sát Cầu Rồng - Đà Nẵng", dumped)
-        self.assertNotIn("\\u", dumped)
+        """Verify real IPC sidecar status writer preserves literal Vietnamese UTF-8 text without ASCII escaping."""
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            status_path = os.path.join(tmp_dir, "Khảo sát Cầu Rồng", "_autometashape_status.json")
+            mr.set_active_status_file(status_path)
+            try:
+                mr.emit_ipc_stage("ingest", "Khảo sát Cầu Rồng - Đà Nẵng", progress=12.5)
+            finally:
+                mr.set_active_status_file(None)
+
+            with open(status_path, "r", encoding="utf-8") as fh:
+                raw_text = fh.read()
+            self.assertIn("Khảo sát Cầu Rồng - Đà Nẵng", raw_text)
+            self.assertNotIn("\\u", raw_text)
+            parsed = json.loads(raw_text)
+            self.assertEqual(parsed["stage_desc"], "Khảo sát Cầu Rồng - Đà Nẵng")
 
     def test_run_reconstruction_vietnamese_dataset_mock(self) -> None:
         """Verify full run_reconstruction workflow with Vietnamese paths and dataset names."""

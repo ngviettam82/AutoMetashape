@@ -77,8 +77,8 @@ All human contributors and autonomous agents managing Agisoft Metashape distribu
 ### 6.4 Action-as-Code: Canonical Script Standard
 - **Ban on Ad-Hoc Freehand Scripting**: Agents must never author improvised Python scripts in chat or scratch folders to manipulate the cluster queue or submit tasks.
 - All cluster operations must strictly use the canonical, battle-tested utilities under `scripts/`:
-  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation, active-batch attach guard (`--force` to replace, `--start-paused`), optional `--exclude-folders`, and hidden `.cluster/tickets/` failover when Metashape Server retains un-evictable aborted keys (keeping `Result/<project>/` free of `_dispatch_*.psx` stubs).
-  - `scripts/cluster_monitor.py`: Autonomous read-only telemetry, headroom audit, GPU bitmask reporting, hidden-ticket/legacy-stub resolution, and deliverable verification.
+  - `scripts/submit_cluster_batch.py`: Batch creation with guaranteed pre-flight `doc.save()` validation, active-batch attach guard (`--force` to replace, `--start-paused`), optional `--exclude-folders`, deterministic canonical folder-name `<project>.psx` dispatch (with worker reap + post-release stale `<project>.files/lock` cleanup and explicit `--allow-hidden-ticket` opt-in).
+  - `scripts/cluster_monitor.py`: Autonomous read-only telemetry, headroom audit, GPU bitmask reporting, legacy ticket/stub resolution, and structural deliverable verification (exits `1` when unhealthy; pass `--advisory` for exit `0`).
   - `scripts/manage_queue.py`: Operator-directed queue and worker manipulation (`list`, `pause`, `unpause`, `set-priority`, `abort`, `pause-worker`, `unpause-worker`, `clear-worker --only-aborted`, `set-worker-gpu-mask`).
   - `scripts/inspect_checkpoint.py`: Non-destructive read-only inspection of `.psx` archives.
   - `scripts/cluster_abort.py`: Signal-based worker abort and self-healing restart.

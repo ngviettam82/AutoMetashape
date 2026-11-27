@@ -89,7 +89,7 @@ def _write_status_sidecar_atomic(status_path: str, data: dict) -> None:
     tmp_path = f"{status_path}.tmp.{os.getpid()}.{threading.get_ident()}"
     try:
         with open(tmp_path, "w", encoding="utf-8") as sf:
-            json.dump(data, sf, indent=2)
+            json.dump(data, sf, indent=2, ensure_ascii=False)
         for attempt in range(3):
             try:
                 os.replace(tmp_path, status_path)

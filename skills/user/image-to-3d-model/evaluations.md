@@ -52,43 +52,43 @@
 - **Query**: "I have an aerial survey folder at `data/survey/quarry_inspection`. Do not use a hardcoded preset; act as a senior photogrammetrist, audit the survey optics, calculate the true GSD, run USGS gradual selection bundle adjustment, and reconstruct 3D assets with dense point cloud, DEM, and quality report."
 - **Expected behavior**:
   - Uses `--preset pro` (or `--profile`), inspecting image telemetry, sensor hardware pitch, optical GSD in cm/px, flying height $H_{AGL}$, forward/lateral overlap, and shutter mechanism.
-  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI FC3411, Phantom 4 Pro, or Zenmuse L2; preserves rolling shutter on aerial CMOS payloads like DJI Air 3S `FC9113` and Hasselblad Mavic 3 `L2D-20c`).
+  - Automatically identifies camera shutter physics (e.g. disables rolling shutter compensation on mechanical leaf shutters like DJI `M3E`, `M4E`, Phantom 4 Pro `FC6310`, or Zenmuse L2; preserves rolling shutter on aerial CMOS payloads like DJI Air 2S `FC3411`, Air 3S `FC9113`, and Hasselblad Mavic 3 `L2D-20c`).
   - Executes the USGS 4-Pass Gradual Selection protocol (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `ImageCount >= 2`, capped at `<= 10%` per pass) with staged camera parameter unfreezing ($f, cx, cy \to f, cx, cy, k_1..k_3, p_1..p_2$ with tie point covariance) while keeping `k_4 = b_1 = b_2 = 0` and `adaptive_fitting = False` hard-locked across all passes.
   - Opts into `buildPointCloud` (`--build-point-cloud --export-point-cloud`), slope-adaptive ground classification (`--classify-ground`), `buildDem` (`--build-dem --export-dem`), `buildOrthomosaic` (`--export-ortho`), and exports an executive PDF quality report (`--export-report`).
   - Outputs the executive Geomatics Engineering Summary with initial vs optimized RMS reprojection errors.
 - **Pass/fail criteria**:
-  - Pass: Profiling audits optics and GSD correctly; executes USGS 4-pass optimization reducing RMS reprojection error; deliverables include `<project_name>.laz`, `<project_name>_dem.tif`, `<project_name>_orthomosaic.tif`, `<project_name>_report.pdf`, `<project_name>.obj`, and `<project_name>.psx`.
+  - Pass: Profiling audits optics and GSD correctly; executes USGS 4-pass optimization reducing RMS reprojection error; deliverables include `<project_name>_point_cloud.laz`, `<project_name>_dem.tif`, `<project_name>_orthomosaic.tif`, `<project_name>_report.pdf`, `<project_name>.obj`, and `<project_name>.psx`.
   - Fail: Blindly falling back to rigid manual presets; failing to extract EXIF telemetry; fitting distortion coefficients to high-uncertainty tie points; crashing during point cloud or DEM generation.
 
 ### Scenario 6: Dense Point Cloud Generation & Ground Point Classification
 - **Query**: "Process this drone photogrammetry dataset at `data/survey/forest_clearing` to generate a 3D point cloud with automatic bare-earth ground classification and export it to compressed LAZ format."
 - **Expected behavior**:
-  - Runs with `--build-point-cloud --point-cloud-format laz --classify-ground`.
+  - Runs with `--build-point-cloud --export-point-cloud --point-cloud-format laz --classify-ground`.
   - Generates dense point cloud from depth maps with RGB vertex colors and confidence indices.
-  - Executes `chunk.point_cloud.classifyGroundPoints(max_angle=15.0, max_distance=1.0, cell_size=50.0)`.
-  - Exports georeferenced point cloud to `model/point_cloud.laz` with embedded classification, confidence, colors, and normal vectors.
+  - Executes `chunk.point_cloud.classifyGroundPoints(...)` with configured ground filtering thresholds.
+  - Exports georeferenced point cloud to `<output_dir>/<project_name>_point_cloud.laz` with embedded classification, confidence, colors, and normal vectors.
 - **Pass/fail criteria**:
-  - Pass: `point_cloud.laz` is exported and non-empty; ground points classified into ASPRS Class 2 (Ground); project checkpoint saved.
+  - Pass: `<project_name>_point_cloud.laz` is exported and non-empty; ground points classified into ASPRS Class 2 (Ground); project checkpoint saved.
   - Fail: Point cloud missing; ground classification skipped; unhandled exception during export.
 
 
 ### Scenario 7: Hierarchical 3D Tiled Model (Cesium 3D Tiles) & Topographic Contours
 - **Query**: "Process this open-pit mine drone survey to generate streaming Cesium 3D Tiles and 1-meter topographic contour vectors for our GIS portal."
 - **Expected behavior**:
-  - Executes with `--build-tiled-model --tiled-model-format cesium --build-dem --build-contours --contour-interval 1.0 --contours-format shp`.
-  - Builds multiresolution hierarchical LOD 3D tiles and exports `model/tiled_model/tileset.json` with `.b3dm` tile payloads.
-  - Builds DEM and generates vector contour polylines with 1.0m elevation intervals, exporting `model/contours.shp` (or `.dxf`).
+  - Executes with `--build-tiled-model --tiled-model-format cesium --build-dem --export-dem --build-contours --contour-interval 1.0 --contours-format shp`.
+  - Builds multiresolution hierarchical LOD 3D tiles and exports `<output_dir>/<project_name>_tiled_model/tileset.json` with `.b3dm` tile payloads.
+  - Builds DEM and generates vector contour polylines with 1.0m elevation intervals, exporting `<output_dir>/<project_name>_contours.shp` (or `.dxf`).
 - **Pass/fail criteria**:
-  - Pass: `tileset.json` created with valid LOD bounding hierarchy; `contours.shp` exported with elevation attributes; project saved in `.psx`.
+  - Pass: `tileset.json` created with valid LOD bounding hierarchy; `<project_name>_contours.shp` exported with elevation attributes; project saved in `.psx`.
   - Fail: Missing tileset or unhandled contour generation crash.
 
 ### Scenario 8: Target Marker Detection, GCP Georeferencing & Texture Delighting
 - **Query**: "Reconstruct this heritage temple facade. We placed circular 12-bit coded targets and have ground surveyed GCP coordinates in `gcps.csv`. Also remove harsh direct sunlight shadows from the texture atlas."
 - **Expected behavior**:
-  - Executes with `--detect-markers --target-type circular12 --import-reference "gcps.csv" --remove-lighting --export-fbx`.
+  - Executes with `--detect-markers --target-type circular12 --import-reference "gcps.csv" --remove-lighting --export-fbx --export-glb --export-obj`.
   - Automatically identifies circular coded targets on photos, loads CSV reference coordinates, and updates bundle adjustment transformation.
   - Generates 8K texture atlas and applies `chunk.removeLighting()` to eliminate cast shadows and ambient occlusion.
-  - Exports production assets including `model.fbx`, `model.glb`, and `model.obj`.
+  - Exports production assets including `<project_name>.fbx`, `<project_name>.glb`, and `<project_name>.obj`.
 - **Pass/fail criteria**:
   - Pass: Markers detected; reference imported; diffuse albedo texture delighted; FBX and GLB exported.
   - Fail: Failing to detect targets; crashing on reference CSV import; shadow removal failure.

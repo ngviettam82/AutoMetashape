@@ -16,6 +16,6 @@ Evaluation scenarios assessing test suite audit quality.
 
 ## Scenario 3: Hermetic Cleanup Verification
 - **Query**: Audit tests creating temporary directories or mock datasets.
-- **Expected Behavior**: Ensures tests use pytest fixtures like `tmp_path` and leave zero residual files.
+- **Expected Behavior**: Ensures tests isolate temporary artifacts using `unittest` + `tempfile.TemporaryDirectory()` (or `setUp`/`tearDown` cleanup) and leave zero residual files in the workspace or live `%TEMP%` PID paths.
 - **Pass Criteria**: Zero residual test artifacts left in workspace after test execution.
 - **Fail Criteria**: Creates uncleaned temporary files or leaves dangling background handles.

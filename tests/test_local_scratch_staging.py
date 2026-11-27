@@ -238,13 +238,17 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
                         )
 
             # 6. Verify System Invariants:
-            # Invariant 1: Central network share receives the completed project .psx
-            final_psx = os.path.join(nas_output, "Bridge_Recon.psx")
-            self.assertTrue(os.path.isfile(final_psx) or mock_doc.save.called)
+            # Invariant 1: Worker saved project inside isolated local scratch before syncing to central share
+            self.assertTrue(mock_doc.save.called)
+            saved_paths = [c.args[0] for c in mock_doc.save.call_args_list if c.args]
+            self.assertTrue(
+                any(os.path.abspath(p).startswith(os.path.abspath(worker_nvme)) for p in saved_paths),
+                msg=f"Expected local scratch save under {worker_nvme}, got {saved_paths}",
+            )
 
-            # Invariant 2: Local worker staging folder is cleanly purged after sync
-            staged_folder = os.path.join(worker_nvme, "Bridge_Recon_local_stage")
-            self.assertFalse(os.path.exists(staged_folder))
+            # Invariant 2: All PID/hash-isolated local staging folders under worker_nvme are purged after sync
+            remaining_stages = [d for d in os.listdir(worker_nvme) if "_local_stage" in d]
+            self.assertEqual(remaining_stages, [])
 
     def test_low_scratch_headroom_gracefully_falls_back_to_direct_output(self) -> None:
         """Verify worker gracefully falls back to direct network share output if local SSD space is low."""
@@ -281,9 +285,10 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
                         build_texture=False,
                     )
 
-            # Fallback invariant: Project saved directly into central output directory
-            expected_psx = os.path.join(nas_output, "Low_Disk_Job.psx")
-            self.assertTrue(os.path.exists(expected_psx) or mock_doc.save.called)
+            # Fallback invariant: Project saved directly into central output directory (not scratch)
+            expected_psx = os.path.normcase(os.path.abspath(os.path.join(nas_output, "Low_Disk_Job.psx")))
+            saved_paths = [os.path.normcase(os.path.abspath(c.args[0])) for c in mock_doc.save.call_args_list if c.args]
+            self.assertIn(expected_psx, saved_paths)
 
     def test_resume_existing_project_with_local_staging(self) -> None:
         """Verify existing central network project is staged to local NVMe SSD and resumes seamlessly."""

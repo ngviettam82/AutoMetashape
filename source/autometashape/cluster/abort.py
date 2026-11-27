@@ -217,7 +217,8 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             if child_pid != proc_pid:
                 cleanup_stale_worker_processes(child_pid)
 
-        # 4. Fallback terminate/wait if handle still reports alive (or in unit-test mocks)
+        # 4. Fallback terminate/wait + force-kill escalation if handle still reports alive
+        exited_gracefully = False
         still_running = not callable(poll_fn) or poll_fn() is None
         if still_running and callable(terminate_fn):
             try:
@@ -225,10 +226,18 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
                 wait_deadline = time.time() + timeout
                 while time.time() < wait_deadline:
                     if callable(poll_fn) and poll_fn() is not None:
+                        exited_gracefully = True
                         break
                     time.sleep(0.05)
             except Exception:
                 pass
+        if still_running and not exited_gracefully and callable(poll_fn) and poll_fn() is None:
+            kill_fn = getattr(proc, "kill", None)
+            if callable(kill_fn):
+                try:
+                    kill_fn()
+                except Exception:
+                    pass
         wait_fn = getattr(proc, "wait", None)
         if callable(wait_fn):
             try:
