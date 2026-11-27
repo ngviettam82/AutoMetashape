@@ -13,6 +13,13 @@ set "UPDATER_PY=%SCRIPT_DIR%scripts\update_fleet.py"
 set "PYTHON_EXE="
 set "PYTHON_ARGS="
 
+if not defined PYTHON_EXE if defined AUTOMETASHAPE_PYTHON_EXE if exist "%AUTOMETASHAPE_PYTHON_EXE%" set "PYTHON_EXE=%AUTOMETASHAPE_PYTHON_EXE%"
+if not defined PYTHON_EXE if defined AUTOMETASHAPE_METASHAPE_PATH (
+    for %%P in ("%AUTOMETASHAPE_METASHAPE_PATH%") do if exist "%%~dpPpython\python.exe" set "PYTHON_EXE=%%~dpPpython\python.exe"
+)
+if not defined PYTHON_EXE if defined METASHAPE_EXE (
+    for %%P in ("%METASHAPE_EXE%") do if exist "%%~dpPpython\python.exe" set "PYTHON_EXE=%%~dpPpython\python.exe"
+)
 if not defined PYTHON_EXE if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
 if not defined PYTHON_EXE if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_EXE=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"
 if not defined PYTHON_EXE if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_EXE=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\python\python.exe"

@@ -184,16 +184,19 @@ class TestVietnameseUnicodePaths(unittest.TestCase):
             }
             mock_meta.NetworkClient.return_value = mock_net_client
 
-            with patch.object(mr, "Metashape", mock_meta):
-                mr.run_reconstruction(
-                    images_dir=survey_dir,
-                    output_dir=out_dir,
-                    network_enable=True,
-                    network_independent_workers=True,
-                    multi_chunk="disable",
-                    export_glb=True,
-                    export_obj=True,
-                )
+            try:
+                with patch.object(mr, "Metashape", mock_meta):
+                    mr.run_reconstruction(
+                        images_dir=survey_dir,
+                        output_dir=out_dir,
+                        network_enable=True,
+                        network_independent_workers=True,
+                        multi_chunk="disable",
+                        export_glb=True,
+                        export_obj=True,
+                    )
+            finally:
+                mr._sync_state()
 
             self.assertTrue(mock_net_client.createBatch.called)
             call_args = mock_net_client.createBatch.call_args

@@ -813,45 +813,39 @@ def discover_dataset_projects(
     preset: str = "pro",
     expected_assets: Optional[List[str]] = None,
     extra_args: Optional[Dict[str, Any]] = None,
+    discovery_depth: int = 1,
+    include_all_folders: bool = False,
 ) -> List[QueueJob]:
     """Recursively scans a root directory to discover discrete survey dataset projects.
 
-    If scan_dir contains image-bearing subdirectories, each subfolder is queued as a separate project.
-    If scan_dir directly contains survey images, it is queued as a single project.
-
-    Args:
-        scan_dir: Root directory to scan for datasets.
-        output_root: Optional target directory where output deliverables folders will be placed.
-        preset: Reconstruction preset ('pro', 'custom', 'building').
-        expected_assets: Optional list of asset types expected for deliverable verification.
-        extra_args: Additional CLI/pipeline arguments forwarded to run_reconstruction.
-
-    Returns:
-        List of initialized QueueJob objects.
+    If ``scan_dir`` directly contains survey images (including mixed root + subfolder trees),
+    it is queued as a single unified project. Otherwise descends container folders up to
+    ``discovery_depth`` (``0`` = recursive leaf descent).
     """
+    from autometashape.cluster.dual_share import _dir_contains_images, _dir_has_direct_images
+
     scan_dir = os.path.abspath(scan_dir)
     if not os.path.isdir(scan_dir):
         raise ValueError(f"Scan directory does not exist or is not a directory: {scan_dir}")
+    if discovery_depth < 0:
+        raise ValueError(f"discovery_depth must be >= 0 (got {discovery_depth})")
 
     extra = extra_args or {}
+    if _dir_has_direct_images(scan_dir):
+        project_name = extract_path_leaf_name(scan_dir)
+        out_dir = os.path.join(output_root, project_name) if output_root else os.path.join(scan_dir, project_name)
+        return [
+            QueueJob(
+                images_dir=scan_dir,
+                output_dir=out_dir,
+                project_name=project_name,
+                preset=preset,
+                expected_assets=expected_assets,
+                extra_args=dict(extra),
+            )
+        ]
+
     jobs: List[QueueJob] = []
-
-    def count_images_in_dir(d: str) -> int:
-        count = 0
-        try:
-            for _root, walk_dirs, files in os.walk(d):
-                walk_dirs[:] = [
-                    wd for wd in walk_dirs if not wd.startswith((".", "$")) and not wd.lower().endswith(".files")
-                ]
-                for f in files:
-                    if _is_supported_image_file(f):
-                        count += 1
-                        if count >= 1:
-                            return count
-        except Exception:
-            pass
-        return count
-
     excluded_names = {
         "model",
         "models",
@@ -866,57 +860,64 @@ def discover_dataset_projects(
         "tmp",
         "__pycache__",
     }
+    excluded_prefixes = ("output_", "outputs_", "result_", "results_", "temp_", "tmp_")
 
-    # 1. Inspect immediate subdirectories
-    subdirs = []
-    try:
-        for entry in sorted(os.listdir(scan_dir)):
-            full_p = os.path.join(scan_dir, entry)
-            if os.path.isdir(full_p) and not entry.startswith((".", "$")):
-                entry_l = entry.lower()
-                if (
-                    entry_l not in excluded_names
-                    and not entry_l.startswith(("output_", "outputs_", "result_", "results_", "temp_", "tmp_"))
-                    and not entry_l.endswith(".files")
-                ):
-                    subdirs.append((entry, full_p))
-    except Exception as exc:
-        raise ValueError(f"Failed to list scan directory '{scan_dir}': {exc}") from exc
+    def _scan_dir(current_dir: str, depth: int) -> None:
+        try:
+            entries = sorted(os.listdir(current_dir))
+        except Exception as exc:
+            if depth == 1:
+                raise ValueError(f"Failed to list scan directory '{current_dir}': {exc}") from exc
+            return
 
-    for folder_name, folder_path in subdirs:
-        img_count = count_images_in_dir(folder_path)
-        if img_count > 0:
-            out_dir = os.path.join(output_root, folder_name) if output_root else os.path.join(folder_path, folder_name)
-            job = QueueJob(
-                images_dir=folder_path,
-                output_dir=out_dir,
-                project_name=folder_name,
-                preset=preset,
-                expected_assets=expected_assets,
-                extra_args=dict(extra),
-            )
-            jobs.append(job)
+        for entry in entries:
+            full_p = os.path.join(current_dir, entry)
+            if not os.path.isdir(full_p) or entry.startswith((".", "$")):
+                continue
+            entry_l = entry.lower()
+            if entry_l.endswith(".files"):
+                continue
+            if not include_all_folders and (
+                entry_l in excluded_names or entry_l.startswith(excluded_prefixes)
+            ):
+                if _dir_contains_images(full_p):
+                    print(
+                        f"  [Supervisor Notice] Skipped folder '{entry}' matching default exclusion pattern "
+                        "(pass include_all_folders=True to include).",
+                        flush=True,
+                    )
+                continue
 
-    # 2. If no subdirectories had images, check if root itself contains images
-    if not jobs:
-        root_images = [
-            f
-            for f in os.listdir(scan_dir)
-            if os.path.isfile(os.path.join(scan_dir, f)) and _is_supported_image_file(f)
-        ]
-        if root_images:
-            project_name = extract_path_leaf_name(scan_dir)
-            out_dir = os.path.join(output_root, project_name) if output_root else os.path.join(scan_dir, project_name)
-            job = QueueJob(
-                images_dir=scan_dir,
-                output_dir=out_dir,
-                project_name=project_name,
-                preset=preset,
-                expected_assets=expected_assets,
-                extra_args=dict(extra),
-            )
-            jobs.append(job)
+            if _dir_has_direct_images(full_p):
+                rel_p = os.path.relpath(full_p, scan_dir)
+                out_dir = os.path.join(output_root, rel_p) if output_root else os.path.join(full_p, entry)
+                jobs.append(
+                    QueueJob(
+                        images_dir=full_p,
+                        output_dir=out_dir,
+                        project_name=entry,
+                        preset=preset,
+                        expected_assets=expected_assets,
+                        extra_args=dict(extra),
+                    )
+                )
+            elif discovery_depth == 0 or depth < discovery_depth:
+                _scan_dir(full_p, depth + 1)
+            elif _dir_contains_images(full_p):
+                rel_p = os.path.relpath(full_p, scan_dir)
+                out_dir = os.path.join(output_root, rel_p) if output_root else os.path.join(full_p, entry)
+                jobs.append(
+                    QueueJob(
+                        images_dir=full_p,
+                        output_dir=out_dir,
+                        project_name=entry,
+                        preset=preset,
+                        expected_assets=expected_assets,
+                        extra_args=dict(extra),
+                    )
+                )
 
+    _scan_dir(scan_dir, 1)
     return jobs
 
 
@@ -951,6 +952,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         "--output-root",
         default=None,
         help="Root directory where output deliverables folders will be created for auto-discovered datasets",
+    )
+    parser.add_argument(
+        "--discovery-depth",
+        type=int,
+        default=1,
+        help="Folder discovery depth for --scan-dir/--source-share (1=immediate subdirs, 0=recursive leaf dirs)",
     )
     parser.add_argument(
         "--result-share",
@@ -1142,13 +1149,18 @@ def main() -> int:
             return 1
         extra_args["network_path"] = validation["result_network_root"]
         try:
+            disc_kwargs: Dict[str, Any] = {
+                "preset": args.preset,
+                "expected_assets": args.expect,
+                "extra_args": extra_args,
+                "result_network_root": validation["result_network_root"],
+            }
+            if args.discovery_depth != 1:
+                disc_kwargs["discovery_depth"] = args.discovery_depth
             jobs = discover_dual_share_projects(
                 source_share=validation["source_share"],
                 result_share=validation["result_share"],
-                preset=args.preset,
-                expected_assets=args.expect,
-                extra_args=extra_args,
-                result_network_root=validation["result_network_root"],
+                **disc_kwargs,
             )
         except Exception as exc:
             print(f"[FATAL] Failed to discover dual-share datasets in '{args.source_share}': {exc}", file=sys.stderr)
@@ -1199,13 +1211,16 @@ def main() -> int:
 
     elif args.scan_dir:
         try:
-            jobs = discover_dataset_projects(
-                scan_dir=args.scan_dir,
-                output_root=args.output_root,
-                preset=args.preset,
-                expected_assets=args.expect,
-                extra_args=extra_args,
-            )
+            scan_kwargs: Dict[str, Any] = {
+                "scan_dir": args.scan_dir,
+                "output_root": args.output_root,
+                "preset": args.preset,
+                "expected_assets": args.expect,
+                "extra_args": extra_args,
+            }
+            if args.discovery_depth != 1:
+                scan_kwargs["discovery_depth"] = args.discovery_depth
+            jobs = discover_dataset_projects(**scan_kwargs)
         except Exception as exc:
             print(f"[FATAL] Failed to discover datasets in '{args.scan_dir}': {exc}", file=sys.stderr)
             return 1

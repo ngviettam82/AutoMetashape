@@ -56,7 +56,9 @@ class TestNetworkCluster(unittest.TestCase):
         server = find_metashape_server_path(None)
         if server is not None:
             self.assertTrue(os.path.isfile(server))
-            self.assertTrue(server.lower().endswith("metashape-server.exe") or server.endswith("metashape-server"))
+            self.assertTrue(
+                server.lower().endswith(("metashape-server.exe", "metashape-server", "metashape-server.sh"))
+            )
 
     def test_cluster_relative_path_resolution(self) -> None:
         """Verify real production relative path resolution across local and UNC shared roots."""

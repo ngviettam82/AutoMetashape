@@ -181,14 +181,24 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
 
     print("=" * 72)
     print("  AutoMetashape Distributed Cluster - Server Daemon Launcher")
-    print(f"  Bind Control IP : {host}:{port}")
+    print(f"  Bind Control IP : {cu.format_host_port(host, port_num)}")
     if shared_root:
         print(f"  Shared Root     : {shared_root}")
     print(f"  Coordinator LAN : {lan_ip}")
     print(f"  Server Binary   : {server_bin}")
     print("=" * 72)
 
-    if cu.test_tcp_connection("127.0.0.1", port_num, timeout=1.0):
+    clean_probe_host = str(host or "").strip()
+    if clean_probe_host.startswith("[") and clean_probe_host.endswith("]"):
+        clean_probe_host = clean_probe_host[1:-1].strip()
+    if clean_probe_host in ("0.0.0.0", ""):
+        probe_host = "127.0.0.1"
+    elif clean_probe_host == "::":
+        probe_host = "::1"
+    else:
+        probe_host = clean_probe_host
+
+    if cu.test_tcp_connection(probe_host, port_num, timeout=1.0):
         print(f"\n[ERROR] Port {port_num} is ALREADY IN USE on this PC!", file=sys.stderr)
         print(
             "A Metashape Server or other service is already active on this port. Aborting duplicate launch.",
@@ -204,7 +214,7 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
         server_cmd = [
             server_bin,
             "--host",
-            f"{host}:{port}",
+            cu.format_host_port(host, port_num),
             "--no-database",
             "--resume-workers",
         ]

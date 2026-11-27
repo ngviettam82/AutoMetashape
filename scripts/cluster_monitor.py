@@ -40,10 +40,13 @@ from autometashape.cluster.config import (
     load_cluster_config,
 )
 from autometashape.cluster.hardware import (
+    connect_network_client,
     extract_unc_root,
     find_metashape_path,
+    format_host_port,
     get_primary_lan_ip,
     is_healthy_online_worker,
+    normalize_rpc_list_response,
 )
 from autometashape.core.verification import verify_project_deliverables
 from autometashape.ipc.protocol import configure_utf8_stdio
@@ -95,6 +98,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Always exit with code 0 even when cluster health issues are detected",
     )
     parser.add_argument(
+        "--export-dashboard",
+        type=str,
+        default="",
+        help="Optional path to write web dashboard telemetry (e.g. web/projects_data.js)",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -106,16 +115,16 @@ def resolve_server_address(cli_server: str) -> str:
     """Dynamically determine server host and port without hardcoded IPs."""
     if cli_server.strip():
         host, port = _split_host_port(cli_server.strip(), 5840)
-        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return format_host_port(host, port)
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("host") and cfg.get("host") != "0.0.0.0":
         host, port = _split_host_port(str(cfg["host"]), int(cfg.get("port", 5840) or 5840))
-        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return format_host_port(host, port)
 
     lan_ip = get_primary_lan_ip()
     if lan_ip and lan_ip != "127.0.0.1":
-        return f"{lan_ip}:5840"
+        return format_host_port(lan_ip, 5840)
 
     return "127.0.0.1:5840"
 
@@ -352,16 +361,20 @@ def format_worker_resource_usage(worker: Dict[str, Any]) -> Tuple[float, float]:
     Metashape Pro 2.x (empirically verified on 2.2.2 build 20889) reports both
     ``resource_usage.cpu_usage`` and ``resource_usage.memory_usage`` directly as
     ``0.0–100.0`` percentages relative to total CPU capacity and ``worker.memory_size`` (bytes).
+    Falls back safely when ``memory_usage`` is reported in raw bytes (``> 100``) or
+    ``memory_size`` is unavailable.
     """
     res = worker.get("resource_usage", {}) or {}
     cpu_pct = float(res.get("cpu_usage", 0.0) or 0.0)
 
     raw_mem_pct = float(res.get("memory_usage", 0.0) or 0.0)
     mem_size_bytes = float(worker.get("memory_size", 0.0) or 0.0)
-    if mem_size_bytes > 0.0:
+    if raw_mem_pct > 100.0:
+        ram_gb = raw_mem_pct / (1024.0**3)
+    elif mem_size_bytes > 0.0:
         ram_gb = (raw_mem_pct / 100.0) * (mem_size_bytes / (1024.0**3))
     else:
-        ram_gb = raw_mem_pct
+        ram_gb = 0.0
     return cpu_pct, ram_gb
 
 
@@ -469,16 +482,13 @@ def execute_audit(
     resolved_server = resolve_server_address(server_host)
     srv_ip, srv_port = _split_host_port(resolved_server, 5840)
 
-    client = Metashape.NetworkClient()
-    client.connect(srv_ip, srv_port)
+    client = connect_network_client(Metashape.NetworkClient(), srv_ip, srv_port)
     try:
-        # 1. Query Workers
-        w_resp = client.workerList() or {}
-        workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
+        # 1. Query Workers (supports dict, list, or attr-based RPC returns)
+        workers: List[Dict[str, Any]] = normalize_rpc_list_response(client.workerList(), "workers")
 
         # 2. Query Batches
-        b_resp = client.batchList() or {}
-        batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
+        batches: List[Dict[str, Any]] = normalize_rpc_list_response(client.batchList(), "batches")
     finally:
         if hasattr(client, "disconnect"):
             try:
@@ -533,11 +543,15 @@ def execute_audit(
             if bid in oom_batch_ids:
                 res["intact"] = False
                 res["oom_fault"] = True
+            res.setdefault("project", pname)
+            res.setdefault("path", rdir)
             deliverable_results[bid] = res
         else:
             deliverable_results[bid] = {
                 "intact": False,
                 "reason": "Deliverables directory not found",
+                "project": pname,
+                "path": bpath,
                 "obj": None,
                 "obj_sz_mb": 0.0,
                 "mtl": False,
@@ -583,7 +597,7 @@ def execute_audit(
     }
 
     if json_output:
-        print(json.dumps(audit_data, indent=2))
+        print(json.dumps(audit_data, indent=2, default=str))
         return audit_data
 
     # Human-Readable Formatting
@@ -703,6 +717,102 @@ def execute_audit(
     return audit_data
 
 
+def export_dashboard_telemetry(audit_data: Dict[str, Any], output_path: str) -> str:
+    """Atomically write dashboard telemetry JSON/JS snapshot from monitor audit results."""
+    entries: List[Dict[str, Any]] = []
+    seen_ids: set[str] = set()
+
+    for bid, d in (audit_data.get("deliverables") or {}).items():
+        if not isinstance(d, dict):
+            continue
+        pname = str(d.get("project") or f"Batch_{bid}")
+        ppath = str(d.get("path") or "")
+        deliv_parts = []
+        if d.get("obj"):
+            deliv_parts.append(str(d["obj"]))
+        if d.get("ortho"):
+            deliv_parts.append(str(d["ortho"]))
+        if d.get("textures_count"):
+            deliv_parts.append(f"{d['textures_count']} tex")
+        uid = f"batch-{bid}"
+        seen_ids.add(uid)
+        intact = bool(d.get("intact"))
+        psx_path = (
+            os.path.join(ppath, f"{pname}.psx") if ppath and not ppath.lower().endswith(".psx") else ppath
+        )
+        entries.append(
+            {
+                "id": uid,
+                "name": pname,
+                "path": ppath,
+                "psxPath": psx_path,
+                "sensor": "Cluster Survey",
+                "photos": 0,
+                "aligned": 0,
+                "gsd": None,
+                "faces": None,
+                "status": "completed" if intact else "ready",
+                "statusLabel": "Verified" if intact else "Attention",
+                "deliverables": ", ".join(deliv_parts) or str(d.get("reason") or "--"),
+                "meshDefault": f"{d.get('obj_sz_mb', 0)} MB" if d.get("obj") else "--",
+                "texMem": f"{d.get('textures_count', 0)} files" if d.get("textures_count") else "--",
+                "selected": False,
+            }
+        )
+
+    for b in audit_data.get("running_batches") or []:
+        if not isinstance(b, dict):
+            continue
+        bid = b.get("batch_id")
+        uid = f"batch-{bid}"
+        if uid in seen_ids:
+            continue
+        bpath = str(b.get("path") or "")
+        pname = os.path.splitext(os.path.basename(bpath.replace("\\", "/")))[0] or f"Batch_{bid}"
+        entries.append(
+            {
+                "id": uid,
+                "name": pname,
+                "path": os.path.dirname(bpath) if bpath.lower().endswith(".psx") else bpath,
+                "psxPath": bpath,
+                "sensor": "Cluster Survey",
+                "photos": 0,
+                "aligned": 0,
+                "gsd": None,
+                "faces": None,
+                "status": "processing",
+                "statusLabel": str(b.get("state") or "Processing"),
+                "deliverables": "In progress",
+                "meshDefault": "--",
+                "texMem": "--",
+                "selected": False,
+            }
+        )
+
+    abs_out = os.path.abspath(output_path)
+    out_dir = os.path.dirname(abs_out)
+    if out_dir:
+        os.makedirs(out_dir, exist_ok=True)
+    tmp_path = f"{abs_out}.tmp.{os.getpid()}"
+    payload = (
+        "// AutoMetashape Studio - Survey Projects Telemetry Data\n"
+        "// Generated by: scripts/cluster_monitor.py --export-dashboard\n"
+        f"window.SURVEY_PROJECTS = {json.dumps(entries, indent=2, ensure_ascii=False)};\n"
+    )
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            fh.write(payload)
+        os.replace(tmp_path, abs_out)
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
+    return abs_out
+
+
 def main() -> int:
     """CLI entry point for cluster monitoring."""
     configure_utf8_stdio()
@@ -715,7 +825,7 @@ def main() -> int:
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
             cmd = [ms_exe]
-            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            if sys.platform.startswith("linux"):
                 cmd.extend(["-platform", "offscreen"])
             cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)
@@ -734,6 +844,10 @@ def main() -> int:
             json_output=args.json,
             source_root=args.source_root,
         )
+        if getattr(args, "export_dashboard", ""):
+            out_dash = export_dashboard_telemetry(audit_data, args.export_dashboard)
+            if not args.json:
+                print(f"[Dashboard] Exported telemetry snapshot to: {out_dash}")
         return 0 if (audit_data.get("healthy") or args.advisory) else 1
     except Exception as e:
         print(f"[FATAL ERROR] Cluster monitor audit failed: {e}", file=sys.stderr, flush=True)

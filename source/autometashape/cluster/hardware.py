@@ -17,7 +17,18 @@ import string
 import subprocess
 import sys
 import tempfile
+import unicodedata
 from typing import Any
+
+
+def _get_metashape_home_candidates() -> list[str]:
+    """Return operator-specified Metashape home directories from environment variables."""
+    dirs: list[str] = []
+    for key in ("AUTOMETASHAPE_METASHAPE_HOME", "METASHAPE_HOME"):
+        val = os.environ.get(key, "").strip().strip('"')
+        if val and os.path.isdir(val):
+            dirs.append(os.path.normpath(val))
+    return dirs
 
 
 def _is_fixed_local_drive_fast(drive_letter: str) -> bool:
@@ -64,6 +75,19 @@ def find_metashape_path() -> str | None:
         env_val = os.environ.get(env_key, "").strip().strip('"')
         if env_val and os.path.isfile(env_val):
             return os.path.normpath(env_val)
+
+    for home_dir in _get_metashape_home_candidates():
+        for rel_bin in (
+            "metashape.exe",
+            "metashape",
+            "metashape.sh",
+            "MetashapePro",
+            os.path.join("Contents", "MacOS", "MetashapePro"),
+            "photoscan.exe",
+        ):
+            cand = os.path.normpath(os.path.join(home_dir, rel_bin))
+            if os.path.isfile(cand):
+                return cand
 
     # 1. Bundled relative to current Python if running inside Metashape's embedded Python
     py_dir = os.path.dirname(sys.executable)
@@ -142,10 +166,25 @@ def find_metashape_python_path(metashape_exe: str | None = None) -> str | None:
     if not metashape_exe:
         metashape_exe = find_metashape_path()
 
+    py_rel_candidates = (
+        os.path.join("..", "Frameworks", "Python.framework", "Versions", "Current", "bin", "python3"),
+        os.path.join("Contents", "Frameworks", "Python.framework", "Versions", "Current", "bin", "python3"),
+        os.path.join("python", "python.exe"),
+        os.path.join("python", "bin", "python3"),
+        os.path.join("python", "bin", "python"),
+        "python.exe",
+    )
+
     if metashape_exe and os.path.isfile(metashape_exe):
         exe_dir = os.path.dirname(metashape_exe)
-        for sub in ("python/python.exe", "python/bin/python3", "python/bin/python", "python.exe"):
+        for sub in py_rel_candidates:
             cand = os.path.normpath(os.path.join(exe_dir, sub))
+            if os.path.isfile(cand):
+                return cand
+
+    for home_dir in _get_metashape_home_candidates():
+        for sub in py_rel_candidates:
+            cand = os.path.normpath(os.path.join(home_dir, sub))
             if os.path.isfile(cand):
                 return cand
 
@@ -176,6 +215,10 @@ def find_metashape_python_path(metashape_exe: str | None = None) -> str | None:
             ):
                 if os.path.isfile(sub):
                     return sub
+    elif sys.platform == "darwin":
+        cand = "/Applications/MetashapePro.app/Contents/Frameworks/Python.framework/Versions/Current/bin/python3"
+        if os.path.isfile(cand):
+            return cand
 
     # Fallback to sys.executable if it is located inside a Metashape folder
     if "metashape" in sys.executable.lower():
@@ -185,15 +228,25 @@ def find_metashape_python_path(metashape_exe: str | None = None) -> str | None:
 
 
 def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
-    """Locate Metashape Server binary (metashape-server.exe or metashape-server)."""
+    """Locate Metashape Server binary (metashape-server.exe, metashape-server.sh, or metashape-server)."""
+    srv_names = ("metashape-server.exe", "metashape-server")
+    if sys.platform != "win32":
+        srv_names = ("metashape-server.sh", "metashape-server")
+
     if metashape_exe and os.path.isfile(metashape_exe):
         exe_dir = os.path.dirname(metashape_exe)
-        for name in ("metashape-server.exe", "metashape-server"):
+        for name in srv_names:
             cand = os.path.join(exe_dir, name)
             if os.path.isfile(cand):
                 return cand
 
-    for name in ("metashape-server.exe", "metashape-server"):
+    for home_dir in _get_metashape_home_candidates():
+        for name in (os.path.join("Contents", "MacOS", "metashape-server"), *srv_names):
+            cand = os.path.normpath(os.path.join(home_dir, name))
+            if os.path.isfile(cand):
+                return cand
+
+    for name in srv_names:
         p = shutil.which(name)
         if p and os.path.isfile(p):
             return p
@@ -228,6 +281,7 @@ def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
             return cand
     else:
         for cand in (
+            "/opt/metashape-pro/metashape-server.sh",
             "/opt/metashape-pro/metashape-server",
             "/usr/local/bin/metashape-server",
             "/usr/bin/metashape-server",
@@ -239,15 +293,25 @@ def find_metashape_server_path(metashape_exe: str | None = None) -> str | None:
 
 
 def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
-    """Locate Agisoft Metashape Network Monitor GUI binary (monitor.exe or monitor)."""
+    """Locate Agisoft Metashape Network Monitor GUI binary (monitor.exe, monitor.sh, or monitor)."""
+    mon_names = ("monitor.exe", "monitor")
+    if sys.platform != "win32":
+        mon_names = ("monitor.sh", "monitor")
+
     if metashape_exe and os.path.isfile(metashape_exe):
         exe_dir = os.path.dirname(metashape_exe)
-        for name in ("monitor.exe", "monitor"):
+        for name in mon_names:
             cand = os.path.join(exe_dir, name)
             if os.path.isfile(cand):
                 return cand
 
-    for name in ("monitor.exe", "monitor"):
+    for home_dir in _get_metashape_home_candidates():
+        for name in (os.path.join("Contents", "MacOS", "monitor"), *mon_names):
+            cand = os.path.normpath(os.path.join(home_dir, name))
+            if os.path.isfile(cand):
+                return cand
+
+    for name in mon_names:
         p = shutil.which(name)
         if p and os.path.isfile(p):
             return p
@@ -281,7 +345,11 @@ def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
         if os.path.isfile(cand):
             return cand
     else:
-        for cand in ("/opt/metashape-pro/monitor", "/usr/local/bin/monitor"):
+        for cand in (
+            "/opt/metashape-pro/monitor.sh",
+            "/opt/metashape-pro/monitor",
+            "/usr/local/bin/monitor",
+        ):
             if os.path.isfile(cand):
                 return cand
 
@@ -290,12 +358,16 @@ def find_metashape_monitor_path(metashape_exe: str | None = None) -> str | None:
 
 def get_primary_lan_ip() -> str:
     """Detect the host machine's primary LAN IPv4 address (e.g. 192.168.x.x or 10.x.x.x)."""
+    override_ip = os.environ.get("AUTOMETASHAPE_LAN_IP", "").strip()
+    if override_ip:
+        return override_ip
+
     for probe_target in (("8.8.8.8", 80), ("10.255.255.255", 1), ("192.168.0.1", 1), ("172.16.0.1", 1)):
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         try:
             s.connect(probe_target)
             ip = s.getsockname()[0]
-            if ip and not ip.startswith("127."):
+            if ip and not ip.startswith(("127.", "169.254.")):
                 return ip
         except Exception:
             pass
@@ -306,11 +378,11 @@ def get_primary_lan_ip() -> str:
     try:
         host_name = socket.gethostname()
         ip = socket.gethostbyname(host_name)
-        if ip and not ip.startswith("127."):
+        if ip and not ip.startswith(("127.", "169.254.")):
             return ip
         for res in socket.getaddrinfo(host_name, None, socket.AF_INET):
             cand = res[4][0]
-            if cand and not cand.startswith("127."):
+            if cand and not cand.startswith(("127.", "169.254.")):
                 return cand
     except Exception:
         pass
@@ -320,7 +392,8 @@ def get_primary_lan_ip() -> str:
 
 _TRADEMARK_RE = re.compile(r"(?:\(r\)|\(tm\)|[®™])", re.IGNORECASE)
 _AMD_IGPU_RE = re.compile(r"\b(?:610m|660m|680m|740m|760m|780m|820m|840m|860m|880m|890m)\b")
-_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc\s+(?:[ab]\d{3}m?|pro)\b")
+_AMD_DISCRETE_VEGA_RE = re.compile(r"\b(?:rx\s+vega\s+(?:56|64|nano)|pro\s+vega|vega\s+frontier)\b")
+_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc\s+(?:[a-z]\d{3}m?|pro)\b")
 _INTEL_IGPU_RE = re.compile(r"\bintel\s+(?:uhd|hd|iris)\b")
 
 
@@ -345,16 +418,16 @@ def is_integrated_gpu(name: str) -> bool:
     # Software / virtual renderers
     if any(sw in lower for sw in ("microsoft basic render", "llvmpipe", "swiftshader", "softpipe")):
         return True
-    # Discrete Intel Arc A-series / B-series / mobile M / Pro GPUs are NOT integrated
+    # Discrete Intel Arc A/B/C-series / mobile M / Pro GPUs are NOT integrated
     if _INTEL_DISCRETE_ARC_RE.search(lower):
         return False
-    # Integrated Intel Arc Graphics (Core Ultra laptop/desktop iGPU without A###/B###/Pro model)
+    # Integrated Intel Arc Graphics (Core Ultra laptop/desktop iGPU without [a-z]###/Pro model)
     if "intel" in lower and "arc" in lower:
         return True
     if _INTEL_IGPU_RE.search(lower):
         return True
-    # Discrete AMD RX Vega / Radeon Pro Vega / Vega Frontier are NOT integrated
-    if any(dv in lower for dv in ("rx vega", "pro vega", "vega frontier")):
+    # Discrete AMD RX Vega 56/64/Nano / Radeon Pro Vega / Vega Frontier are NOT integrated
+    if _AMD_DISCRETE_VEGA_RE.search(lower):
         return False
     # Integrated AMD Ryzen mobile/desktop APUs (610M-890M, Vega iGPU, generic Radeon Graphics)
     if "radeon" in lower and _AMD_IGPU_RE.search(lower):
@@ -388,6 +461,9 @@ def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dic
     non_igpu_fallback: list[tuple[int, dict[str, Any]]] = []
 
     for i, g in enumerate(gpus):
+        if i >= 31:
+            # Guard Metashape 32-bit signed --gpu-mask overflow on >=32-device nodes
+            break
         if not isinstance(g, dict):
             continue
         raw_name = str(g.get("name", f"GPU {i}")).strip()
@@ -470,7 +546,8 @@ def probe_metashape_gpu_mask(
 
     probe_code = (
         "import json, Metashape\n"
-        "gpus = Metashape.app.enumGPUDevices() if hasattr(Metashape, 'app') and hasattr(Metashape.app, 'enumGPUDevices') else []\n"
+        "gpus = Metashape.app.enumGPUDevices() "
+        "if hasattr(Metashape, 'app') and hasattr(Metashape.app, 'enumGPUDevices') else []\n"
         "print('===AM_GPUS_START===')\n"
         "print(json.dumps(list(gpus), default=str))\n"
         "print('===AM_GPUS_END===')\n"
@@ -482,9 +559,9 @@ def probe_metashape_gpu_mask(
             fh.write(probe_code)
         probe_cmd = [exe]
         probe_env = os.environ.copy()
-        if sys.platform.startswith("linux") and not probe_env.get("DISPLAY"):
+        if sys.platform.startswith("linux"):
             probe_cmd.extend(["-platform", "offscreen"])
-            probe_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+            probe_env["QT_QPA_PLATFORM"] = "offscreen"
         probe_cmd.extend(["-r", tmp_path])
         res = subprocess.run(
             probe_cmd,
@@ -604,7 +681,19 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
                         continue
                     lower = _normalize_gpu_name(clean_name)
                     if _INTEL_DISCRETE_ARC_RE.search(lower) or any(
-                        k in lower for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc")
+                        k in lower
+                        for k in (
+                            "nvidia",
+                            "geforce",
+                            "rtx",
+                            "gtx",
+                            "quadro",
+                            "tesla",
+                            "radeon",
+                            "firepro",
+                            "instinct",
+                            "intel arc",
+                        )
                     ):
                         devices.append({"index": len(devices), "name": clean_name, "mem_mb": 0})
                 if devices:
@@ -613,6 +702,52 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
             pass
 
     return []
+
+
+def format_host_port(host: str, port: int | str = 5840) -> str:
+    """Format host and port with bracketed IPv6 support (e.g. ``[::1]:5840``)."""
+    clean = str(host or "").strip()
+    if clean.startswith("[") and clean.endswith("]"):
+        clean = clean[1:-1].strip()
+    port_str = str(port).strip() if port is not None else "5840"
+    port_str = port_str or "5840"
+    return f"[{clean}]:{port_str}" if ":" in clean else f"{clean}:{port_str}"
+
+
+def normalize_rpc_list_response(resp: Any, key: str) -> list[dict[str, Any]]:
+    """Normalize dict, list, or attribute-based RPC responses into a list of dicts."""
+    if resp is None:
+        return []
+    if isinstance(resp, dict):
+        raw_items = resp.get(key, [])
+    elif isinstance(resp, (list, tuple)):
+        raw_items = resp
+    else:
+        raw_items = getattr(resp, key, None)
+        if raw_items is None:
+            return []
+    if not isinstance(raw_items, (list, tuple)):
+        return []
+    normalized: list[dict[str, Any]] = []
+    for item in raw_items:
+        if isinstance(item, dict):
+            normalized.append(item)
+        elif item is not None and hasattr(item, "__dict__"):
+            normalized.append(dict(vars(item)))
+    return normalized
+
+
+def connect_network_client(client: Any, host: str, port: int | str = 5840) -> Any:
+    """Connect a Metashape NetworkClient cleanly, with 1-arg string fallback."""
+    clean_host = str(host or "").strip()
+    if clean_host.startswith("[") and clean_host.endswith("]"):
+        clean_host = clean_host[1:-1].strip()
+    port_num = int(port) if port is not None and str(port).strip() else 5840
+    try:
+        client.connect(clean_host, port_num)
+    except TypeError:
+        client.connect(format_host_port(clean_host, port_num))
+    return client
 
 
 _BATCH_UNSAFE_CHARS_RE = re.compile(r'[\r\n&|<>^"%`]')
@@ -633,11 +768,7 @@ def generate_worker_bat_content(
     target_port = target_port or "5840"
     if not target_port.isdigit() or not (1 <= int(target_port) <= 65535):
         raise ValueError(f"Invalid worker port: {target_port!r}")
-    host_port = (
-        f"[{target_host}]:{target_port}"
-        if (":" in target_host and not target_host.startswith("["))
-        else f"{target_host}:{target_port}"
-    )
+    host_port = format_host_port(target_host, target_port)
     cpu_flag_val = 1 if int(cpu_enable) else 0
     target_root = root_path.strip()
     if _BATCH_UNSAFE_CHARS_RE.search(target_root):
@@ -646,7 +777,10 @@ def generate_worker_bat_content(
     if target_root:
         root_init = f'set "TARGET_ROOT={target_root}"'
     else:
-        root_init = r'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT="Enter Shared Network Storage path (e.g. \\HOST_PC\SharedMetashape or Z:\): "'
+        root_init = (
+            'if "%TARGET_ROOT%"=="" set /p TARGET_ROOT='
+            r'"Enter Shared Network Storage path (e.g. \\HOST_PC\SharedMetashape or Z:\): "'
+        )
 
     gpu_flag = ""
     if gpu_mask is not None:
@@ -658,7 +792,7 @@ def generate_worker_bat_content(
 
     return f"""@echo off
 chcp 65001 > nul
-setlocal
+setlocal DisableDelayedExpansion
 title Metashape Distributed Cluster Worker Node
 
 echo =======================================================================
@@ -667,7 +801,7 @@ echo   Cluster Target Server : {host_port}
 echo =======================================================================
 echo.
 
-:: Configure and validate Shared Network Storage root path (before EnableDelayedExpansion so '!' is preserved)
+:: Configure and validate Shared Network Storage root path (DisableDelayedExpansion preserves '!')
 {root_init}
 if "%TARGET_ROOT%"=="" (
     echo [ERROR] Shared network root path cannot be empty.
@@ -675,9 +809,8 @@ if "%TARGET_ROOT%"=="" (
     exit /b 1
 )
 
-echo [OK] Shared Network Root   : %TARGET_ROOT%
+echo [OK] Shared Network Root   : "%TARGET_ROOT%"
 
-setlocal enabledelayedexpansion
 :: Detect Metashape installation dynamically across environment paths and mounted drives
 set "METASHAPE_EXE="
 if exist "%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe" (
@@ -698,7 +831,7 @@ if "%METASHAPE_EXE%"=="" (
 
 if "%METASHAPE_EXE%"=="" (
     where metashape.exe >nul 2>nul
-    if !errorlevel! equ 0 (
+    if not errorlevel 1 (
         set "METASHAPE_EXE=metashape.exe"
     )
 )
@@ -710,17 +843,29 @@ if "%METASHAPE_EXE%"=="" (
     exit /b 1
 )
 
+set "CLI_ROOT=%TARGET_ROOT%"
+if "%CLI_ROOT:~-1%"=="\\" goto :fix_root_slash
+goto :root_ready
+:fix_root_slash
+if "%CLI_ROOT:~1,2%"==":\\" if "%CLI_ROOT:~3%"=="" goto :double_drive_slash
+set "CLI_ROOT=%CLI_ROOT:~0,-1%"
+goto :root_ready
+:double_drive_slash
+set "CLI_ROOT=%CLI_ROOT%\\"
+:root_ready
+
 echo [OK] Using Metashape binary: "%METASHAPE_EXE%"
 echo [CONNECTING] Connecting worker node to {host_port}...
 echo [READY] Worker is online and waiting for jobs from the server.
 echo Press Ctrl+C in this window at any time to disconnect this worker node.
 echo.
 
-"%METASHAPE_EXE%" --worker --host {host_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_flag_val}{gpu_flag}
+"%METASHAPE_EXE%" --worker --host {host_port} --root "%CLI_ROOT%" --cpu-enable {cpu_flag_val}{gpu_flag}
+set "WORKER_EXIT=%ERRORLEVEL%"
 
-if !errorlevel! neq 0 (
+if not "%WORKER_EXIT%"=="0" (
     echo.
-    echo [DISCONNECTED] Worker node disconnected with status code !errorlevel!.
+    echo [DISCONNECTED] Worker node disconnected with status code %WORKER_EXIT%.
     pause
 )
 """
@@ -742,8 +887,10 @@ def normalize_unicode_path(path: str) -> str:
     """Normalize and resolve cross-platform paths containing Unicode or diacritics."""
     if not path:
         return ""
-    norm = os.path.normpath(path.strip())
-    return norm
+    stripped = path.strip()
+    if not stripped:
+        return ""
+    return os.path.normpath(unicodedata.normalize("NFC", stripped))
 
 
 def test_tcp_connection(host: str, port: int, timeout: float = 3.0) -> bool:

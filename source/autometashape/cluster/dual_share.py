@@ -23,11 +23,35 @@ import re
 import shutil
 import sys
 import tempfile
+import unicodedata
 from typing import Any, Dict, List, Optional
 
 from autometashape.cluster.hardware import extract_unc_root
 
 _INVALID_LEAF_CHARS_RE = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
+_POSIX_ROOT_DIRS = frozenset(
+    {
+        "mnt",
+        "tmp",
+        "var",
+        "home",
+        "users",
+        "volumes",
+        "opt",
+        "etc",
+        "srv",
+        "media",
+        "data",
+        "workspace",
+        "root",
+        "private",
+    }
+)
+
+
+def _nfc(text: str) -> str:
+    """Normalize Unicode strings to NFC so macOS NFD paths match Windows/CLI NFC strings."""
+    return unicodedata.normalize("NFC", text)
 
 
 def extract_path_leaf_name(path: str, fallback: str = "Project") -> str:
@@ -67,6 +91,9 @@ def _unc_escapes_share_root(raw_path: str) -> bool:
     cleaned = (raw_path or "").strip()
     if not is_unc_path(cleaned):
         return False
+    low = cleaned.lower()
+    if low.startswith("\\\\?\\unc\\") or low.startswith("//?/unc/"):
+        cleaned = "\\\\" + cleaned[8:]
     parts = [p for p in cleaned.lstrip("\\/").replace("/", "\\").split("\\") if p]
     if len(parts) < 2:
         return True
@@ -99,9 +126,9 @@ def is_subpath(child: str, parent: str, case_insensitive: Optional[bool] = None)
     """Return True if ``child`` is equal to or nested beneath ``parent``.
 
     Compares normalized drive/UNC share roots and exact path segments with Windows/SMB
-    case-folding, eliminating both prefix-collision bugs (``\\\\SRV\\Data2`` vs
-    ``\\\\SRV\\Data``), UNC ``..`` traversal escapes, and cross-platform ``posixpath``/``ntpath``
-    discrepancies.
+    case-folding and Unicode NFC normalization, eliminating prefix collisions
+    (``\\\\SRV\\Data2`` vs ``\\\\SRV\\Data``), UNC ``..`` traversal escapes, and
+    cross-platform ``posixpath``/``ntpath`` discrepancies.
     """
     if not child or not parent:
         return False
@@ -119,8 +146,8 @@ def is_subpath(child: str, parent: str, case_insensitive: Optional[bool] = None)
             or _is_windows_drive_path(abs_parent)
         )
         fold_case = (sys.platform == "win32" or win_style) if case_insensitive is None else case_insensitive
-        cmp_child = abs_child.lower() if fold_case else abs_child
-        cmp_parent = abs_parent.lower() if fold_case else abs_parent
+        cmp_child = _nfc(abs_child.lower() if fold_case else abs_child)
+        cmp_parent = _nfc(abs_parent.lower() if fold_case else abs_parent)
         drv_c, segs_c = _split_drive_and_segments(cmp_child, win_style=win_style)
         drv_p, segs_p = _split_drive_and_segments(cmp_parent, win_style=win_style)
         if drv_c != drv_p:
@@ -134,7 +161,7 @@ def relpath_under(child: str, parent: str, case_insensitive: Optional[bool] = No
     """Return POSIX-slash relative path from ``parent`` to ``child`` if nested, else ``None``.
 
     Preserves original segment casing from ``child`` even when matching case-insensitively
-    across Windows SMB shares or mixed-case paths on POSIX runners.
+    and across NFC/NFD Unicode representations.
     """
     if not is_subpath(child, parent, case_insensitive=case_insensitive):
         return None
@@ -157,22 +184,56 @@ def relpath_under(child: str, parent: str, case_insensitive: Optional[bool] = No
 def is_unc_path(path: str) -> bool:
     """Return True if ``path`` is a Windows/POSIX UNC network share path."""
     cleaned = (path or "").strip()
-    return cleaned.startswith(r"\\") or cleaned.startswith("//")
+    if not cleaned:
+        return False
+    low = cleaned.lower()
+    if low.startswith("\\\\?\\unc\\") or low.startswith("//?/unc/"):
+        rest = [p for p in cleaned[8:].replace("/", "\\").split("\\") if p]
+        return len(rest) >= 2
+    if low.startswith(("\\\\?\\", "//?/", "\\\\.\\", "//./")):
+        return False
+    if cleaned.startswith(r"\\"):
+        rest = [p for p in cleaned[2:].replace("/", "\\").split("\\") if p]
+        return len(rest) >= 1
+    if cleaned.startswith("//"):
+        rest = [p for p in cleaned[2:].split("/") if p]
+        if not rest:
+            return False
+        if sys.platform == "win32":
+            return True
+        if rest[0].lower() in _POSIX_ROOT_DIRS or os.path.exists("/" + cleaned.lstrip("/")):
+            return False
+        return True
+    return False
 
 
 def normalize_share_path(path: str) -> str:
-    """Normalize a local or UNC share path without collapsing the leading UNC prefix."""
+    """Normalize a local, extended Win32, or UNC share path cleanly across platforms."""
     raw = (path or "").strip()
     if not raw:
         return ""
+    low = raw.lower()
+    if low.startswith("\\\\?\\unc\\") or low.startswith("//?/unc/"):
+        body = raw[8:].lstrip("\\/").replace("/", "\\")
+        if not body:
+            return ""
+        normed = ntpath.normpath(f"\\\\{body}")
+        return normed.rstrip("\\")
+    if low.startswith(("\\\\?\\", "//?/")):
+        raw_local = raw[4:].replace("/", "\\")
+        if _is_windows_drive_path(raw_local):
+            return ntpath.normpath(raw_local)
+        return os.path.normpath(raw_local)
     if is_unc_path(raw):
         body = raw.lstrip("\\/").replace("/", "\\")
         if not body:
             return ""
         normed = ntpath.normpath(f"\\\\{body}")
-        return normed.rstrip("\\") if normed.count("\\") > 3 else normed.rstrip("\\")
+        return normed.rstrip("\\")
     if _is_windows_drive_path(raw):
         return ntpath.normpath(raw.replace("/", "\\"))
+    if raw.startswith("//"):
+        return os.path.normpath(os.path.abspath("/" + raw.lstrip("/")))
     return os.path.normpath(os.path.abspath(raw))
 
 
@@ -216,10 +277,14 @@ def map_source_to_result_dir(
             return os.path.normpath(os.path.join(norm_res_root, *rel.split("/")))
 
     use_nt = is_unc_path(norm_res_root) or _is_windows_drive_path(norm_res_root)
+    fold_case = sys.platform == "win32" or use_nt
     inferred_name = (project_name or "").strip() or extract_path_leaf_name(norm_src_proj)
     res_base = ntpath.basename(norm_res_root.rstrip("\\/")) if use_nt else os.path.basename(norm_res_root.rstrip("\\/"))
-    if inferred_name and res_base.lower() == inferred_name.lower():
-        return norm_res_root
+    if inferred_name:
+        cmp_base = _nfc(res_base.lower() if fold_case else res_base)
+        cmp_name = _nfc(inferred_name.lower() if fold_case else inferred_name)
+        if cmp_base == cmp_name:
+            return norm_res_root
     if not inferred_name:
         return norm_res_root
     if use_nt:
@@ -363,15 +428,34 @@ def validate_dual_share_topology(
     }
 
 
-def _dir_contains_images(directory: str) -> bool:
+def _dir_has_direct_images(directory: str) -> bool:
+    """Return True if ``directory`` directly contains at least one non-hidden supported image file."""
+    from autometashape.core.telemetry import _is_supported_image_file
+
+    try:
+        for entry in os.listdir(directory):
+            if _is_supported_image_file(entry) and os.path.isfile(os.path.join(directory, entry)):
+                return True
+    except Exception:
+        return False
+    return False
+
+
+def _dir_contains_images(directory: str, exclude_patterns: tuple[str, ...] = ()) -> bool:
     """Return True as soon as any supported survey image is found under ``directory``."""
-    from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
+    from autometashape.core.telemetry import _is_ignored_survey_dir, _is_supported_image_file
 
     try:
         for _root, dirs, files in os.walk(directory):
-            dirs[:] = [d for d in dirs if not d.startswith((".", "$")) and not d.lower().endswith(".files")]
+            dirs[:] = [
+                d
+                for d in dirs
+                if not d.startswith("$")
+                and not _is_ignored_survey_dir(d)
+                and not any(pat in _nfc(d).lower() for pat in exclude_patterns)
+            ]
             for fname in files:
-                if fname.lower().endswith(SUPPORTED_IMAGE_EXTS):
+                if _is_supported_image_file(fname):
                     return True
     except Exception:
         return False
@@ -385,24 +469,31 @@ def discover_dual_share_projects(
     expected_assets: Optional[List[str]] = None,
     extra_args: Optional[Dict[str, Any]] = None,
     result_network_root: str = "",
+    exclude_folders: str = "",
+    discovery_depth: int = 1,
+    include_all_folders: bool = False,
 ) -> List[Any]:
     """Discover discrete survey projects under ``source_share`` and map outputs to ``result_share``.
 
-    Supports both:
-    - Multi-project folders (each immediate image-bearing subfolder under ``source_share``
-      becomes a queued job mirrored onto ``result_share\\<Subfolder>``).
-    - Single-project folders (if ``source_share`` directly contains survey photos, queues
-      one project mapped onto ``result_share\\<ProjectName>``).
+    Supports:
+    - Single-project / mixed root+subfolder trees: if ``source_share`` directly contains
+      survey photos, queues one unified project preserving both root and subfolder images.
+    - Multi-project trees up to ``discovery_depth`` (``0`` = recursive leaf descent):
+      descends image-free container directories and mirrors relative hierarchy onto
+      ``result_share``, keeping multi-site trees separated.
 
     Every job has ``extra_args["network_path"]`` pinned to the resolved ``result_network_root``
     (SSD #2), while ``job.images_dir`` retains the full path on ``source_share`` (SSD #1).
     """
     from autometashape.cluster.supervisor import QueueJob
+    from autometashape.core.telemetry import parse_exclude_folder_patterns
 
     norm_source = normalize_share_path(source_share)
     norm_result = normalize_share_path(result_share)
     if not norm_source or not os.path.isdir(norm_source):
         raise ValueError(f"Data source shared folder does not exist or is not a directory: {source_share}")
+    if discovery_depth < 0:
+        raise ValueError(f"discovery_depth must be >= 0 (got {discovery_depth})")
 
     resolved_net_root = resolve_result_network_root(norm_result, result_network_root)
     base_extra = dict(extra_args or {})
@@ -411,7 +502,7 @@ def discover_dual_share_projects(
     base_extra.setdefault("source_share", norm_source)
     base_extra.setdefault("result_share", norm_result)
 
-    from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
+    excl_patterns = tuple(_nfc(p) for p in parse_exclude_folder_patterns(exclude_folders))
 
     excluded_names = {
         "model",
@@ -428,67 +519,110 @@ def discover_dual_share_projects(
         "__pycache__",
     }
     excluded_prefixes = ("output_", "outputs_", "result_", "results_", "temp_", "tmp_")
+
+    if _dir_has_direct_images(norm_source):
+        try:
+            has_img_sub = any(
+                os.path.isdir(os.path.join(norm_source, e))
+                and not e.startswith((".", "$"))
+                and not e.lower().endswith(".files")
+                and _dir_contains_images(os.path.join(norm_source, e), excl_patterns)
+                for e in os.listdir(norm_source)
+            )
+        except Exception:
+            has_img_sub = False
+        if has_img_sub:
+            print(
+                f"  [Dual-Share Notice] '{norm_source}' contains root photos alongside subfolder(s); "
+                "queuing as one unified project to preserve root photos.",
+                flush=True,
+            )
+        project_name = extract_path_leaf_name(norm_source)
+        out_dir = map_source_to_result_dir(
+            source_project_dir=norm_source,
+            source_share=norm_source,
+            result_share=norm_result,
+            project_name=project_name,
+        )
+        return [
+            QueueJob(
+                images_dir=norm_source,
+                output_dir=out_dir,
+                project_name=project_name,
+                preset=preset,
+                expected_assets=expected_assets,
+                extra_args=dict(base_extra),
+            )
+        ]
+
     jobs: List[QueueJob] = []
 
-    try:
-        entries = sorted(os.listdir(norm_source))
-    except Exception as exc:
-        raise ValueError(f"Failed to list data source shared folder '{norm_source}': {exc}") from exc
+    def _scan_dir(current_dir: str, depth: int) -> None:
+        try:
+            entries = sorted(os.listdir(current_dir))
+        except Exception as exc:
+            if depth == 1:
+                raise ValueError(f"Failed to list data source shared folder '{current_dir}': {exc}") from exc
+            return
 
-    subdirs = []
-    for entry in entries:
-        full_p = os.path.join(norm_source, entry)
-        if os.path.isdir(full_p) and not entry.startswith((".", "$")):
-            entry_l = entry.lower()
-            if (
-                entry_l not in excluded_names
-                and not entry_l.startswith(excluded_prefixes)
-                and not entry_l.endswith(".files")
+        for entry in entries:
+            full_p = os.path.join(current_dir, entry)
+            if not os.path.isdir(full_p) or entry.startswith((".", "$")):
+                continue
+            entry_l = _nfc(entry).lower()
+            if entry_l.endswith(".files"):
+                continue
+            if excl_patterns and any(pat in entry_l for pat in excl_patterns):
+                continue
+            if not include_all_folders and (
+                entry_l in excluded_names or entry_l.startswith(excluded_prefixes)
             ):
-                subdirs.append((entry, full_p))
+                if _dir_contains_images(full_p, excl_patterns):
+                    print(
+                        f"  [Dual-Share Notice] Skipped folder '{entry}' matching default exclusion pattern "
+                        "(pass include_all_folders=True to include).",
+                        flush=True,
+                    )
+                continue
 
-    for folder_name, folder_path in subdirs:
-        if _dir_contains_images(folder_path):
-            out_dir = map_source_to_result_dir(
-                source_project_dir=folder_path,
-                source_share=norm_source,
-                result_share=norm_result,
-                project_name=folder_name,
-            )
-            jobs.append(
-                QueueJob(
-                    images_dir=folder_path,
-                    output_dir=out_dir,
-                    project_name=folder_name,
-                    preset=preset,
-                    expected_assets=expected_assets,
-                    extra_args=dict(base_extra),
+            if _dir_has_direct_images(full_p):
+                out_dir = map_source_to_result_dir(
+                    source_project_dir=full_p,
+                    source_share=norm_source,
+                    result_share=norm_result,
+                    project_name=entry,
                 )
-            )
-
-    if not jobs:
-        root_has_images = any(
-            os.path.isfile(os.path.join(norm_source, f)) and f.lower().endswith(SUPPORTED_IMAGE_EXTS) for f in entries
-        )
-        if root_has_images:
-            project_name = extract_path_leaf_name(norm_source)
-            out_dir = map_source_to_result_dir(
-                source_project_dir=norm_source,
-                source_share=norm_source,
-                result_share=norm_result,
-                project_name=project_name,
-            )
-            jobs.append(
-                QueueJob(
-                    images_dir=norm_source,
-                    output_dir=out_dir,
-                    project_name=project_name,
-                    preset=preset,
-                    expected_assets=expected_assets,
-                    extra_args=dict(base_extra),
+                jobs.append(
+                    QueueJob(
+                        images_dir=full_p,
+                        output_dir=out_dir,
+                        project_name=entry,
+                        preset=preset,
+                        expected_assets=expected_assets,
+                        extra_args=dict(base_extra),
+                    )
                 )
-            )
+            elif discovery_depth == 0 or depth < discovery_depth:
+                _scan_dir(full_p, depth + 1)
+            elif _dir_contains_images(full_p, excl_patterns):
+                out_dir = map_source_to_result_dir(
+                    source_project_dir=full_p,
+                    source_share=norm_source,
+                    result_share=norm_result,
+                    project_name=entry,
+                )
+                jobs.append(
+                    QueueJob(
+                        images_dir=full_p,
+                        output_dir=out_dir,
+                        project_name=entry,
+                        preset=preset,
+                        expected_assets=expected_assets,
+                        extra_args=dict(base_extra),
+                    )
+                )
 
+    _scan_dir(norm_source, 1)
     return jobs
 
 
@@ -518,6 +652,9 @@ def run_dual_share_cluster_pipeline(
     extra_args: Optional[Dict[str, Any]] = None,
     execute_fn: Optional[Any] = None,
     poll_interval: float = 2.0,
+    exclude_folders: str = "",
+    discovery_depth: int = 1,
+    include_all_folders: bool = False,
 ) -> Dict[str, Any]:
     """Execute end-to-end distributed photogrammetry across two separate shared folders (Multi-SSD).
 
@@ -576,6 +713,14 @@ def run_dual_share_cluster_pipeline(
     if extra_args:
         merged_extra.update(extra_args)
 
+    disc_kwargs: Dict[str, Any] = {}
+    if exclude_folders:
+        disc_kwargs["exclude_folders"] = exclude_folders
+    if discovery_depth != 1:
+        disc_kwargs["discovery_depth"] = discovery_depth
+    if include_all_folders:
+        disc_kwargs["include_all_folders"] = include_all_folders
+
     jobs = discover_dual_share_projects(
         source_share=validation["source_share"],
         result_share=validation["result_share"],
@@ -583,6 +728,7 @@ def run_dual_share_cluster_pipeline(
         expected_assets=expected_assets,
         extra_args=merged_extra,
         result_network_root=validation["result_network_root"],
+        **disc_kwargs,
     )
 
     if not jobs:

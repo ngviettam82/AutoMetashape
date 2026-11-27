@@ -10,6 +10,13 @@ set "FMT_EXIT=0"
 REM Detect Agisoft Metashape Python or system Python
 set "PYTHON_CMD="
 set "PYTHON_ARGS="
+if not defined PYTHON_CMD if defined AUTOMETASHAPE_PYTHON_EXE if exist "%AUTOMETASHAPE_PYTHON_EXE%" set "PYTHON_CMD=%AUTOMETASHAPE_PYTHON_EXE%"
+if not defined PYTHON_CMD if defined AUTOMETASHAPE_METASHAPE_PATH (
+    for %%P in ("%AUTOMETASHAPE_METASHAPE_PATH%") do if exist "%%~dpPpython\python.exe" set "PYTHON_CMD=%%~dpPpython\python.exe"
+)
+if not defined PYTHON_CMD if defined METASHAPE_EXE (
+    for %%P in ("%METASHAPE_EXE%") do if exist "%%~dpPpython\python.exe" set "PYTHON_CMD=%%~dpPpython\python.exe"
+)
 if not defined PYTHON_CMD if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_CMD=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
 if not defined PYTHON_CMD if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_CMD=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"
 if not defined PYTHON_CMD if defined ProgramFiles(x86) if exist "%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_CMD=%ProgramFiles(x86)%\Agisoft\Metashape Pro\python\python.exe"

@@ -229,6 +229,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Minimum free disk space (GB) required on Result share before submission (default: 50.0)",
     )
     parser.add_argument(
+        "--discovery-depth",
+        type=int,
+        default=1,
+        help="Folder discovery depth in --source-share mode (1=immediate subdirs, 0=recursive leaf dirs)",
+    )
+    parser.add_argument(
         "--no-reexec",
         action="store_true",
         help=argparse.SUPPRESS,
@@ -578,10 +584,19 @@ def main() -> int:
                 print(f"[WARNING] {warn}", flush=True)
 
             resolved_root = resolve_result_network_root(result_share, explicit_root=args.root)
+            if args.discovery_depth < 0:
+                print(
+                    f"[FATAL ERROR] --discovery-depth must be >= 0 (got {args.discovery_depth}).",
+                    file=sys.stderr,
+                )
+                return 1
+            disc_kwargs: dict[str, Any] = {"result_network_root": resolved_root}
+            if args.discovery_depth != 1:
+                disc_kwargs["discovery_depth"] = args.discovery_depth
             projects = discover_dual_share_projects(
                 args.source_share,
                 result_share,
-                result_network_root=resolved_root,
+                **disc_kwargs,
             )
             excl_pats = parse_exclude_folder_patterns(args.exclude_folders)
             if excl_pats and projects:

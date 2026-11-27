@@ -66,10 +66,14 @@ set "WORKER_PID_FILE=%TEMP%\autometashape_worker.pid"
 set "SERVER_PID_FILE=%TEMP%\autometashape_server.pid"
 
 echo [1/4] Stopping tracked AutoMetashape cluster processes (PID-isolated)...
-:: Terminate tracked worker Python process tree by PID (preserves unrelated interactive Metashape GUI sessions)
+:: Terminate tracked worker Python process tree by PID only if process image matches Python/Metashape
 if exist "%WORKER_PID_FILE%" (
     for /f "usebackq delims=" %%p in ("%WORKER_PID_FILE%") do (
-        if not "%%p"=="" taskkill /F /T /PID %%p >nul 2>&1
+        if not "%%p"=="" (
+            set "AM_CHK_PID=%%p"
+            powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+                "try { $pr = Get-Process -Id ([int]$env:AM_CHK_PID) -ErrorAction Stop; if ($pr.ProcessName -match '^(python|py|metashape)') { taskkill /F /T /PID $pr.Id | Out-Null } } catch {}" >nul 2>&1
+        )
     )
     del /f /q "%WORKER_PID_FILE%" >nul 2>&1
 )
@@ -78,7 +82,11 @@ if exist "%WORKER_PID_FILE%" (
 if /i "%ACTION_FLAG%"=="--server" (
     if exist "%SERVER_PID_FILE%" (
         for /f "usebackq delims=" %%p in ("%SERVER_PID_FILE%") do (
-            if not "%%p"=="" taskkill /F /T /PID %%p >nul 2>&1
+            if not "%%p"=="" (
+                set "AM_CHK_PID=%%p"
+                powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+                    "try { $pr = Get-Process -Id ([int]$env:AM_CHK_PID) -ErrorAction Stop; if ($pr.ProcessName -match '^(python|py|metashape)') { taskkill /F /T /PID $pr.Id | Out-Null } } catch {}" >nul 2>&1
+            )
         )
         del /f /q "%SERVER_PID_FILE%" >nul 2>&1
     )
@@ -108,17 +116,25 @@ set "AM_REPO_ZIP_URL=%REPO_ZIP_URL%"
 set "AM_TEMP_ZIP=%TEMP_ZIP%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
     "[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; " ^
-    "try { $wc = New-Object System.Net.WebClient; $wc.DownloadFile($env:AM_REPO_ZIP_URL, $env:AM_TEMP_ZIP) } " ^
-    "catch { Write-Host '[ERROR] Download exception:' $_.Exception.Message; exit 1 }"
+    "try { " ^
+    "    $uri = [uri]$env:AM_REPO_ZIP_URL; " ^
+    "    if ($uri.Scheme -ine 'https') { throw ('Refusing non-HTTPS archive URL: ' + $env:AM_REPO_ZIP_URL) } " ^
+    "    $wc = New-Object System.Net.WebClient; $wc.DownloadFile($env:AM_REPO_ZIP_URL, $env:AM_TEMP_ZIP); " ^
+    "    $expectedSha = ($env:AUTOMETASHAPE_REPO_ZIP_SHA256 + '').Trim().ToLowerInvariant(); " ^
+    "    if ($expectedSha) { " ^
+    "        $actualSha = (Get-FileHash -LiteralPath $env:AM_TEMP_ZIP -Algorithm SHA256).Hash.ToLowerInvariant(); " ^
+    "        if ($actualSha -ne $expectedSha) { throw ('SHA-256 mismatch: expected ' + $expectedSha + ', got ' + $actualSha) } " ^
+    "    } " ^
+    "} catch { Write-Host '[ERROR] Download exception:' $_.Exception.Message; exit 1 }"
 
 if errorlevel 1 (
-    echo [ERROR] Failed to download latest AutoMetashape release from upstream: %REPO_ZIP_URL%
+    echo [ERROR] Failed to download latest AutoMetashape release from upstream: "%REPO_ZIP_URL%"
     echo [ERROR] Silent fallback is disabled. Please verify internet access and proxy settings.
     goto :fail_cleanup
 )
 
 if not exist "%TEMP_ZIP%" (
-    echo [ERROR] Downloaded package file missing: %TEMP_ZIP%
+    echo [ERROR] Downloaded package file missing: "%TEMP_ZIP%"
     echo [ERROR] Silent fallback is disabled.
     goto :fail_cleanup
 )
@@ -127,8 +143,21 @@ echo [3/4] Extracting archive natively via PowerShell Expand-Archive...
 if exist "%TEMP_EXTRACT%" rmdir /s /q "%TEMP_EXTRACT%"
 set "AM_TEMP_EXTRACT=%TEMP_EXTRACT%"
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "try { Expand-Archive -LiteralPath $env:AM_TEMP_ZIP -DestinationPath $env:AM_TEMP_EXTRACT -Force } " ^
-    "catch { Write-Host '[ERROR] Extract exception:' $_.Exception.Message; exit 1 }"
+    "try { " ^
+    "    Add-Type -AssemblyName System.IO.Compression.FileSystem; " ^
+    "    $destFull = [System.IO.Path]::GetFullPath($env:AM_TEMP_EXTRACT); " ^
+    "    $destPrefix = if ($destFull.EndsWith([System.IO.Path]::DirectorySeparatorChar)) { $destFull } else { $destFull + [System.IO.Path]::DirectorySeparatorChar }; " ^
+    "    $zip = [System.IO.Compression.ZipFile]::OpenRead($env:AM_TEMP_ZIP); " ^
+    "    try { " ^
+    "        foreach ($entry in $zip.Entries) { " ^
+    "            $resolved = [System.IO.Path]::GetFullPath((Join-Path $destFull $entry.FullName)); " ^
+    "            if (-not ($resolved.StartsWith($destPrefix, [System.StringComparison]::OrdinalIgnoreCase) -or $resolved.Equals($destFull, [System.StringComparison]::OrdinalIgnoreCase))) { " ^
+    "                throw ('Zip Slip path traversal detected: ' + $entry.FullName) " ^
+    "            } " ^
+    "        } " ^
+    "    } finally { $zip.Dispose() } " ^
+    "    Expand-Archive -LiteralPath $env:AM_TEMP_ZIP -DestinationPath $env:AM_TEMP_EXTRACT -Force " ^
+    "} catch { Write-Host '[ERROR] Extract exception:' $_.Exception.Message; exit 1 }"
 if errorlevel 1 (
     echo [ERROR] Failed to extract archive.
     goto :fail_cleanup
@@ -151,7 +180,7 @@ if not defined EXTRACT_SOURCE (
     goto :fail_cleanup
 )
 
-echo [4/4] Replacing codebase in %TARGET_DIR% (Purging obsolete files, preserving config)...
+echo [4/4] Replacing codebase in "%TARGET_DIR%" (Purging obsolete files, preserving config)...
 if not exist "%TARGET_DIR%" mkdir "%TARGET_DIR%"
 
 :: Backup existing configuration files with unique run nonce
@@ -205,15 +234,18 @@ if %ROBO_CODE% GEQ 8 (
 
 echo =========================================================================
 echo   [SUCCESS] AutoMetashape codebase cleanly replaced and updated in-place!
-echo   Target: %TARGET_DIR%
+echo   Target: "%TARGET_DIR%"
 echo =========================================================================
 
 if /i "%ACTION_FLAG%"=="--worker" (
     echo Launching cluster worker daemon...
     cd /d "%TARGET_DIR%"
 
-    :: Smart UNC Share Auto-Inference: if no --host/--root/--result-share passed and SCRIPT_DIR is a UNC path
-    if "%SCRIPT_DIR:~0,2%"=="\\" (
+    :: Smart UNC Share Auto-Inference: only infer if worker_config.json is absent or override is set
+    set "ALLOW_UNC_INFER=0"
+    if not exist "%TARGET_DIR%\worker_config.json" set "ALLOW_UNC_INFER=1"
+    if defined AUTOMETASHAPE_INFER_HOST_FROM_UNC set "ALLOW_UNC_INFER=1"
+    if "%ALLOW_UNC_INFER%"=="1" if "%SCRIPT_DIR:~0,2%"=="\\" (
         for /f "tokens=1,2 delims=\\" %%i in ("%SCRIPT_DIR:~2%") do (
             if "%HAS_HOST%"=="0" (
                 set "INFERRED_HOST=%%i"
@@ -221,7 +253,7 @@ if /i "%ACTION_FLAG%"=="--worker" (
             )
             if "%HAS_ROOT%"=="0" (
                 set "INFERRED_ROOT=\\%%i\%%j"
-                echo [AUTO-INFERRED] Inferred storage root: \\%%i\%%j
+                echo [AUTO-INFERRED] Inferred storage root: "\\%%i\%%j"
             )
         )
     )
@@ -231,20 +263,20 @@ if /i "%ACTION_FLAG%"=="--worker" (
     :: Ensure non-interactive execution for headless node updates
     if "%HAS_NON_INT%"=="0" set "FORWARD_ARGS=--non-interactive %FORWARD_ARGS%"
 
-    start "AutoMetashape Cluster Worker Node" cmd.exe /c "launch_worker.bat %FORWARD_ARGS%"
+    start "AutoMetashape Cluster Worker Node" cmd.exe /c ""%TARGET_DIR%\launch_worker.bat" %FORWARD_ARGS%"
 ) else if /i "%ACTION_FLAG%"=="--server" (
     echo Launching cluster server daemon...
     cd /d "%TARGET_DIR%"
-    start "AutoMetashape Cluster Server Daemon" cmd.exe /c "launch_server.bat %FORWARD_ARGS%"
+    start "AutoMetashape Cluster Server Daemon" cmd.exe /c ""%TARGET_DIR%\launch_server.bat" %FORWARD_ARGS%"
 ) else (
-    echo Node files are ready in %TARGET_DIR%.
+    echo Node files are ready in "%TARGET_DIR%".
 )
 exit /b 0
 
 :parse_args
 set "_ARG_IDX=0"
 :parse_loop
-if "%~1"=="" goto :eof
+if [%1]==[] goto :eof
 set "_CUR=%~1"
 set "_CUR_RAW=%1"
 if /i "%_CUR%"=="--non-interactive" (
@@ -256,9 +288,13 @@ if /i "%_CUR%"=="--headless" (
     set "HAS_NON_INT=1"
 )
 if /i "%_CUR%"=="--host" set "HAS_HOST=1"
+if /i "%_CUR:~0,7%"=="--host=" set "HAS_HOST=1"
 if /i "%_CUR%"=="--root" set "HAS_ROOT=1"
+if /i "%_CUR:~0,7%"=="--root=" set "HAS_ROOT=1"
 if /i "%_CUR%"=="--result-root" set "HAS_ROOT=1"
+if /i "%_CUR:~0,14%"=="--result-root=" set "HAS_ROOT=1"
 if /i "%_CUR%"=="--result-share" set "HAS_ROOT=1"
+if /i "%_CUR:~0,15%"=="--result-share=" set "HAS_ROOT=1"
 if "%_ARG_IDX%"=="0" (
     set "_ARG_IDX=1"
 ) else (

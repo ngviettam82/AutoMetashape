@@ -4,9 +4,6 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>AutoMetashape — Multi-Project Studio</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600;700&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
   <style>
     :root {
       --ground: #f8f8f8;
@@ -665,27 +662,27 @@
       </div>
 
       <div class="nav-label">Workspaces</div>
-      <a href="#" class="nav-link active">
+      <a href="#projects" class="nav-link active" data-nav-filter="all">
         <span>Survey Projects</span>
         <span class="nav-badge" id="badge-total">0</span>
       </a>
-      <a href="#" class="nav-link">
+      <a href="#queued" class="nav-link" data-nav-filter="queued">
         <span>Batch Execution</span>
         <span class="nav-badge" id="badge-queue">0</span>
       </a>
-      <a href="#" class="nav-link">
+      <a href="#completed" class="nav-link" data-nav-filter="completed">
         <span>Asset Catalog</span>
       </a>
 
       <div class="nav-label">Presets</div>
-      <a href="#" class="nav-link">
+      <a href="#preset-pro" class="nav-link" data-preset="pro">
         <span>Pro Geomatics</span>
       </a>
-      <a href="#" class="nav-link">
+      <a href="#preset-building" class="nav-link" data-preset="building">
         <span>Building 16-page</span>
       </a>
-      <a href="#" class="nav-link">
-        <span>Aerial Map 2M</span>
+      <a href="#preset-custom" class="nav-link" data-preset="custom">
+        <span>Custom Reconstruction</span>
       </a>
     </aside>
 
@@ -765,7 +762,7 @@
               <th class="col-check">
                 <input type="checkbox" class="checkbox" id="check-all" checked>
               </th>
-              <th>Project Name & Scope</th>
+              <th>Project Name &amp; Scope</th>
               <th>Hardware Sensor</th>
               <th class="num">Photos</th>
               <th class="num">GSD (cm/px)</th>
@@ -789,7 +786,7 @@
       </div>
 
       <div class="drawer-section">
-        <div class="drawer-subtitle">Sensor & Optics Telemetry</div>
+        <div class="drawer-subtitle">Sensor &amp; Optics Telemetry</div>
         <div class="metric-row">
           <span class="metric-label">Sensor Model</span>
           <span class="metric-val" id="drawer-sensor">--</span>
@@ -813,7 +810,7 @@
       </div>
 
       <div class="drawer-section">
-        <div class="drawer-subtitle">Survey Geometry & Bundle Adjustment</div>
+        <div class="drawer-subtitle">Survey Geometry &amp; Bundle Adjustment</div>
         <div class="metric-row">
           <span class="metric-label">Forward / Lateral Overlap</span>
           <span class="metric-val" id="drawer-overlap">--</span>
@@ -835,11 +832,11 @@
       <div class="drawer-section">
         <div class="drawer-subtitle">Solved Mesh Deliverables</div>
         <div class="metric-row">
-          <span class="metric-label">Model 1 (Default)</span>
+          <span class="metric-label">Primary Mesh</span>
           <span class="metric-val" id="drawer-mesh-default">--</span>
         </div>
         <div class="metric-row">
-          <span class="metric-label">Model 2 (High-Res 5M)</span>
+          <span class="metric-label">Secondary / Dense</span>
           <span class="metric-val" id="drawer-mesh-5m">--</span>
         </div>
         <div class="metric-row">
@@ -850,10 +847,10 @@
 
       <div class="drawer-section" style="margin-top: auto;">
         <button class="btn btn-primary" style="width: 100%; margin-bottom: 8px;" id="btn-open-metashape">
-          Open in Metashape Pro
+          Copy Metashape Launch CLI
         </button>
         <button class="btn" style="width: 100%;" id="btn-inspect-folder">
-          Browse Project Assets
+          Copy Project Path
         </button>
       </div>
     </aside>
@@ -863,11 +860,16 @@
       <div class="batch-info">
         <span id="selected-count-label">0 projects selected</span>
         <span style="opacity: 0.5;">·</span>
-        <span style="opacity: 0.85;">Preset: Pro Photogrammetry (Default & 5M)</span>
+        <label for="shell-select" style="opacity: 0.85;">CLI:</label>
+        <select id="shell-select" style="height: 26px; border-radius: 4px; border: 1px solid var(--bar-btn-secondary-border); background: transparent; color: var(--bar-text); padding: 0 6px; font-size: 12px;">
+          <option value="powershell" style="color: #0a0a0a;">PowerShell</option>
+          <option value="bash" style="color: #0a0a0a;">Bash / POSIX</option>
+          <option value="cmd" style="color: #0a0a0a;">CMD</option>
+        </select>
       </div>
       <div class="batch-actions">
         <button class="btn-batch-secondary" id="btn-copy-cli">Copy Batch CLI</button>
-        <button class="btn-batch-primary" id="btn-execute-batch">Execute Batch Queue</button>
+        <button class="btn-batch-primary" id="btn-execute-batch">Copy Supervisor CLI</button>
       </div>
     </div>
   </div>
@@ -881,129 +883,28 @@
       : DEFAULT_PROJECTS;
 
     let activeFilter = "all";
+    let activePreset = "pro";
     let activeProjectId = projects.length > 0 ? projects[0].id : null;
 
-    function updateKpiStrip() {
-      const totalPhotos = projects.reduce((acc, p) => acc + (parseInt(p.photos) || 0), 0);
-      const totalAligned = projects.reduce((acc, p) => acc + (parseInt(p.aligned) || 0), 0);
-      const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "0.0%";
-      const completedCount = projects.filter(p => p.status === 'completed').length;
-      const queuedCount = projects.filter(p => p.status === 'queued').length;
-      const activeCount = projects.filter(p => p.status === 'processing').length;
-
-      const elPhotos = document.getElementById("kpi-photos");
-      if (elPhotos) elPhotos.textContent = totalPhotos.toLocaleString();
-      const elReg = document.getElementById("kpi-registered");
-      if (elReg) elReg.textContent = regPct;
-
-      const allCount = projects.length;
-      const elProjects = document.getElementById("kpi-projects");
-      if (elProjects) elProjects.textContent = allCount;
-      const elProjMeta = document.getElementById("kpi-projects-meta");
-      if (elProjMeta) elProjMeta.textContent = `${completedCount} completed · ${queuedCount} queued · ${activeCount} active`;
-
-      const elBadgeTotal = document.getElementById("badge-total");
-      if (elBadgeTotal) elBadgeTotal.textContent = allCount;
-      const elBadgeQueue = document.getElementById("badge-queue");
-      if (elBadgeQueue) elBadgeQueue.textContent = queuedCount;
-
-      const elCountAll = document.getElementById("count-all");
-      if (elCountAll) elCountAll.textContent = allCount;
-      const elCountCompleted = document.getElementById("count-completed");
-      if (elCountCompleted) elCountCompleted.textContent = completedCount;
-      const elCountQueued = document.getElementById("count-queued");
-      if (elCountQueued) elCountQueued.textContent = queuedCount;
-      const elCountProcessing = document.getElementById("count-processing");
-      if (elCountProcessing) elCountProcessing.textContent = activeCount;
-
-      let deliverableCount = 0;
-      let totalFacesNum = 0;
-      let hasFaceData = false;
-      projects.forEach(p => {
-        if (p.deliverables && !p.deliverables.toLowerCase().includes("none") && !p.deliverables.toLowerCase().includes("raw")) {
-          deliverableCount++;
-        }
-        if (p.faces && typeof p.faces === 'string') {
-          const match = p.faces.match(/([0-9.,]+)\s*M/i);
-          if (match) {
-            totalFacesNum += parseFloat(match[1]) * 1000000;
-            hasFaceData = true;
-          } else {
-            const rawNum = parseInt(p.faces.replace(/[^0-9]/g, ''));
-            if (!isNaN(rawNum) && rawNum > 0) {
-              totalFacesNum += rawNum;
-              hasFaceData = true;
-            }
-          }
-        } else if (typeof p.faces === 'number') {
-          totalFacesNum += p.faces;
-          hasFaceData = true;
-        }
-      });
-
-      const elFaces = document.getElementById("kpi-faces");
-      if (elFaces) {
-        if (hasFaceData && totalFacesNum > 0) {
-          elFaces.textContent = totalFacesNum >= 1000000
-            ? (totalFacesNum / 1000000).toFixed(1) + "M"
-            : totalFacesNum.toLocaleString();
-        } else {
-          elFaces.textContent = projects.length > 0 ? "Pending" : "0";
-        }
-      }
-      const elFacesMeta = document.getElementById("kpi-faces-meta");
-      if (elFacesMeta) {
-        elFacesMeta.textContent = `Across ${deliverableCount} deliverable${deliverableCount === 1 ? '' : 's'}`;
-      }
-
-      let totalAtlasPages = 0;
-      projects.forEach(p => {
-        if (p.meshDefault && p.meshDefault.includes("8K")) {
-          const m = p.meshDefault.match(/(\d+)x\s*8K/i);
-          totalAtlasPages += m ? parseInt(m[1]) : 8;
-        }
-      });
-      const elTextures = document.getElementById("kpi-textures");
-      if (elTextures) {
-        elTextures.innerHTML = `${totalAtlasPages > 0 ? totalAtlasPages : '0'} <span style="font-size: 14px; font-weight: 400; color: var(--muted);">pages</span>`;
-      }
-
-      const svg = document.getElementById("gsd-svg-bars");
-      if (svg) {
-        const lineHtml = '<line x1="0" y1="72" x2="600" y2="72" stroke="var(--border)" stroke-width="1" />';
-        if (projects.length === 0) {
-          svg.innerHTML = lineHtml + '<text x="300" y="40" text-anchor="middle" font-size="12" font-family="var(--font)" fill="var(--muted)">No active survey datasets</text>';
-        } else {
-          const slice = projects.slice(0, 8);
-          const barWidth = Math.min(56, Math.max(32, Math.floor(520 / slice.length) - 14));
-          const gap = Math.floor((560 - slice.length * barWidth) / (slice.length + 1));
-          let barsHtml = lineHtml;
-          let optimalCount = 0;
-
-          slice.forEach((p, idx) => {
-            const gsdVal = parseFloat(p.gsd) || 1.0;
-            if (gsdVal < 1.5) optimalCount++;
-            const x = gap + idx * (barWidth + gap);
-            const h = Math.max(20, Math.min(58, Math.round(58 * (1.8 / Math.max(0.5, gsdVal)))));
-            const y = 72 - h;
-            const isSel = (p.id === activeProjectId);
-            const fill = isSel ? "#1d5fbf" : (p.status === "completed" ? "#2e7d32" : "#71717a");
-            const opacity = isSel ? "1.0" : "0.85";
-            barsHtml += `<rect x="${x}" y="${y}" width="${barWidth}" height="${h}" rx="2" fill="${fill}" opacity="${opacity}" />`;
-            barsHtml += `<text x="${x + barWidth / 2}" y="${Math.max(12, y - 5)}" text-anchor="middle" font-size="11" font-family="'Geist Mono', monospace" fill="${fill}">${gsdVal.toFixed(2)}</text>`;
-          });
-          svg.innerHTML = barsHtml;
-
-          const elGsdMeta = document.getElementById("gsd-summary-meta");
-          if (elGsdMeta) {
-            elGsdMeta.textContent = `${optimalCount} of ${projects.length} surveyed (< 1.5 cm/px)`;
-          }
-        }
-      }
+    const shellSelect = document.getElementById("shell-select");
+    if (shellSelect) {
+      const isWin = (navigator.platform || "").toLowerCase().includes("win");
+      shellSelect.value = isWin ? "powershell" : "bash";
     }
 
-    function psQuote(val) {
-      return "'" + String(val || "").replace(/'/g, "''") + "'";
+    function getShellMode() {
+      return shellSelect ? shellSelect.value : "powershell";
+    }
+
+    function shellQuote(val, mode) {
+      const s = String(val ?? "");
+      if (mode === "bash") {
+        return "'" + s.replace(/'/g, "'\"'\"'") + "'";
+      }
+      if (mode === "cmd") {
+        return '"' + s.replace(/"/g, '""') + '"';
+      }
+      return "'" + s.replace(/'/g, "''") + "'";
     }
 
     function safeStatusClass(status) {
@@ -1043,6 +944,186 @@
       return Array.isArray(parsed) ? parsed : [];
     }
 
+    function applyFilterSelection(nextFilter) {
+      activeFilter = nextFilter || "all";
+      document.querySelectorAll(".tab-btn").forEach(b => {
+        b.classList.toggle("active", b.getAttribute("data-filter") === activeFilter);
+      });
+      renderTable();
+    }
+
+    function updateKpiStrip() {
+      const totalPhotos = projects.reduce((acc, p) => acc + (parseInt(p.photos) || 0), 0);
+      const totalAligned = projects.reduce((acc, p) => acc + (parseInt(p.aligned) || 0), 0);
+      const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "0.0%";
+      const completedCount = projects.filter(p => p.status === 'completed').length;
+      const queuedCount = projects.filter(p => p.status === 'queued').length;
+      const activeCount = projects.filter(p => p.status === 'processing').length;
+
+      const elPhotos = document.getElementById("kpi-photos");
+      if (elPhotos) elPhotos.textContent = totalPhotos.toLocaleString();
+      const elReg = document.getElementById("kpi-registered");
+      if (elReg) elReg.textContent = regPct;
+
+      const allCount = projects.length;
+      const elProjects = document.getElementById("kpi-projects");
+      if (elProjects) elProjects.textContent = allCount;
+      const elProjMeta = document.getElementById("kpi-projects-meta");
+      if (elProjMeta) elProjMeta.textContent = `${completedCount} completed · ${queuedCount} queued · ${activeCount} active`;
+
+      const elBadgeTotal = document.getElementById("badge-total");
+      if (elBadgeTotal) elBadgeTotal.textContent = allCount;
+      const elBadgeQueue = document.getElementById("badge-queue");
+      if (elBadgeQueue) elBadgeQueue.textContent = queuedCount;
+
+      const elCountAll = document.getElementById("count-all");
+      if (elCountAll) elCountAll.textContent = allCount;
+      const elCountCompleted = document.getElementById("count-completed");
+      if (elCountCompleted) elCountCompleted.textContent = completedCount;
+      const elCountQueued = document.getElementById("count-queued");
+      if (elCountQueued) elCountQueued.textContent = queuedCount;
+      const elCountProcessing = document.getElementById("count-processing");
+      if (elCountProcessing) elCountProcessing.textContent = activeCount;
+
+      let deliverableCount = 0;
+      let totalFacesNum = 0;
+      let hasFaceData = false;
+      projects.forEach(p => {
+        if (p.deliverables && !String(p.deliverables).toLowerCase().includes("none") && !String(p.deliverables).toLowerCase().includes("raw")) {
+          deliverableCount++;
+        }
+        if (p.faces && typeof p.faces === 'string') {
+          const match = p.faces.match(/([0-9.,]+)\s*M/i);
+          if (match) {
+            totalFacesNum += parseFloat(match[1]) * 1000000;
+            hasFaceData = true;
+          } else {
+            const rawNum = parseInt(p.faces.replace(/[^0-9]/g, ''));
+            if (!isNaN(rawNum) && rawNum > 0) {
+              totalFacesNum += rawNum;
+              hasFaceData = true;
+            }
+          }
+        } else if (typeof p.faces === 'number') {
+          totalFacesNum += p.faces;
+          hasFaceData = true;
+        }
+      });
+
+      const elFaces = document.getElementById("kpi-faces");
+      if (elFaces) {
+        if (hasFaceData && totalFacesNum > 0) {
+          elFaces.textContent = totalFacesNum >= 1000000
+            ? (totalFacesNum / 1000000).toFixed(1) + "M"
+            : totalFacesNum.toLocaleString();
+        } else {
+          elFaces.textContent = projects.length > 0 ? "Pending" : "0";
+        }
+      }
+      const elFacesMeta = document.getElementById("kpi-faces-meta");
+      if (elFacesMeta) {
+        elFacesMeta.textContent = `Across ${deliverableCount} deliverable${deliverableCount === 1 ? '' : 's'}`;
+      }
+
+      let totalAtlasPages = 0;
+      projects.forEach(p => {
+        if (p.meshDefault && String(p.meshDefault).includes("8K")) {
+          const m = String(p.meshDefault).match(/(\d+)x\s*8K/i);
+          totalAtlasPages += m ? parseInt(m[1]) : 8;
+        }
+      });
+      const elTextures = document.getElementById("kpi-textures");
+      if (elTextures) {
+        const countNode = document.createTextNode(`${totalAtlasPages > 0 ? totalAtlasPages : "0"} `);
+        const unitSpan = document.createElement("span");
+        unitSpan.style.cssText = "font-size: 14px; font-weight: 400; color: var(--muted);";
+        unitSpan.textContent = "pages";
+        elTextures.replaceChildren(countNode, unitSpan);
+      }
+
+      const svg = document.getElementById("gsd-svg-bars");
+      if (svg) {
+        const ns = "http://www.w3.org/2000/svg";
+        const nodes = [];
+        const baseLine = document.createElementNS(ns, "line");
+        baseLine.setAttribute("x1", "0");
+        baseLine.setAttribute("y1", "72");
+        baseLine.setAttribute("x2", "600");
+        baseLine.setAttribute("y2", "72");
+        baseLine.setAttribute("stroke", "var(--border)");
+        baseLine.setAttribute("stroke-width", "1");
+        nodes.push(baseLine);
+
+        const elGsdMeta = document.getElementById("gsd-summary-meta");
+        if (projects.length === 0) {
+          const emptyTxt = document.createElementNS(ns, "text");
+          emptyTxt.setAttribute("x", "300");
+          emptyTxt.setAttribute("y", "40");
+          emptyTxt.setAttribute("text-anchor", "middle");
+          emptyTxt.setAttribute("font-size", "12");
+          emptyTxt.setAttribute("font-family", "var(--font)");
+          emptyTxt.setAttribute("fill", "var(--muted)");
+          emptyTxt.textContent = "No active survey datasets";
+          nodes.push(emptyTxt);
+          if (elGsdMeta) elGsdMeta.textContent = "Live telemetry";
+        } else {
+          let optimalCount = 0;
+          let validGsdCount = 0;
+          projects.forEach(p => {
+            const v = Number.parseFloat(p.gsd);
+            if (Number.isFinite(v) && v > 0) {
+              validGsdCount++;
+              if (v < 1.5) optimalCount++;
+            }
+          });
+
+          const slice = projects.slice(0, 8);
+          const barWidth = Math.min(56, Math.max(32, Math.floor(520 / slice.length) - 14));
+          const gap = Math.floor((560 - slice.length * barWidth) / (slice.length + 1));
+
+          slice.forEach((p, idx) => {
+            const rawGsd = Number.parseFloat(p.gsd);
+            const hasGsd = Number.isFinite(rawGsd) && rawGsd > 0;
+            const x = gap + idx * (barWidth + gap);
+            const h = hasGsd ? Math.max(20, Math.min(58, Math.round(58 * (1.8 / Math.max(0.5, rawGsd))))) : 12;
+            const y = 72 - h;
+            const isSel = (p.id === activeProjectId);
+            const fill = !hasGsd
+              ? "#9ca3af"
+              : (isSel ? "#1d5fbf" : (p.status === "completed" ? "#2e7d32" : "#71717a"));
+            const opacity = !hasGsd ? "0.45" : (isSel ? "1.0" : "0.85");
+
+            const rect = document.createElementNS(ns, "rect");
+            rect.setAttribute("x", String(x));
+            rect.setAttribute("y", String(y));
+            rect.setAttribute("width", String(barWidth));
+            rect.setAttribute("height", String(h));
+            rect.setAttribute("rx", "2");
+            rect.setAttribute("fill", fill);
+            rect.setAttribute("opacity", opacity);
+            nodes.push(rect);
+
+            const lbl = document.createElementNS(ns, "text");
+            lbl.setAttribute("x", String(x + barWidth / 2));
+            lbl.setAttribute("y", String(Math.max(12, y - 5)));
+            lbl.setAttribute("text-anchor", "middle");
+            lbl.setAttribute("font-size", "11");
+            lbl.setAttribute("font-family", "var(--mono)");
+            lbl.setAttribute("fill", fill);
+            lbl.textContent = hasGsd ? rawGsd.toFixed(2) : "N/A";
+            nodes.push(lbl);
+          });
+
+          if (elGsdMeta) {
+            elGsdMeta.textContent = validGsdCount > 0
+              ? `${optimalCount} of ${validGsdCount} surveyed (< 1.5 cm/px)`
+              : `0 of ${projects.length} surveyed`;
+          }
+        }
+        svg.replaceChildren(...nodes);
+      }
+    }
+
     function renderTable() {
       const tbody = document.getElementById("projects-table-body");
       tbody.replaceChildren();
@@ -1068,7 +1149,7 @@
         const subDiv = document.createElement("div");
         subDiv.style.cssText = "font-size: 13px;";
         subDiv.textContent = projects.length === 0
-          ? "Run scripts/cluster_supervisor.py or scripts/submit_cluster_batch.py to process datasets and populate projects_data.js telemetry."
+          ? "Run scripts/cluster_monitor.py --export-dashboard web/projects_data.js to populate telemetry."
           : "No projects match the current filter or search criteria.";
         td.append(titleDiv, subDiv);
         tr.appendChild(td);
@@ -1202,6 +1283,21 @@
       }
     }
 
+    async function copySelectedBatchCli() {
+      const selected = projects.filter(p => p.selected);
+      if (selected.length === 0) {
+        alert("Select one or more projects first.");
+        return;
+      }
+      const mode = getShellMode();
+      const pyBin = mode === "bash" ? "python3" : "python";
+      const cmds = selected.map(p => {
+        const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
+        return `${pyBin} scripts/metashape_reconstruction.py --images ${shellQuote(p.path, mode)} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
+      }).join("\n");
+      await copyToClipboard(cmds, `Copied batch reconstruction commands (${mode}) for ${selected.length} project(s)!`);
+    }
+
     document.getElementById("check-all").addEventListener("change", (e) => {
       const isChecked = e.target.checked;
       projects.forEach(p => p.selected = isChecked);
@@ -1210,46 +1306,65 @@
 
     document.querySelectorAll(".tab-btn").forEach(btn => {
       btn.addEventListener("click", () => {
-        document.querySelectorAll(".tab-btn").forEach(b => b.classList.remove("active"));
-        btn.classList.add("active");
-        activeFilter = btn.getAttribute("data-filter");
-        renderTable();
+        applyFilterSelection(btn.getAttribute("data-filter"));
+      });
+    });
+
+    document.querySelectorAll(".nav-link").forEach(link => {
+      link.addEventListener("click", (e) => {
+        e.preventDefault();
+        const navFilter = link.getAttribute("data-nav-filter");
+        const navPreset = link.getAttribute("data-preset");
+        if (navFilter) {
+          document.querySelectorAll('.nav-link[data-nav-filter]').forEach(l => l.classList.remove("active"));
+          link.classList.add("active");
+          applyFilterSelection(navFilter);
+        } else if (navPreset) {
+          document.querySelectorAll('.nav-link[data-preset]').forEach(l => l.classList.remove("active"));
+          link.classList.add("active");
+          activePreset = navPreset;
+        }
       });
     });
 
     document.getElementById("search-input").addEventListener("input", renderTable);
 
-    document.getElementById("btn-copy-cli").addEventListener("click", async () => {
+    document.getElementById("btn-copy-cli").addEventListener("click", copySelectedBatchCli);
+
+    const btnBatchRunTop = document.getElementById("btn-batch-run");
+    if (btnBatchRunTop) {
+      btnBatchRunTop.addEventListener("click", copySelectedBatchCli);
+    }
+
+    document.getElementById("btn-execute-batch").addEventListener("click", async () => {
       const selected = projects.filter(p => p.selected);
       if (selected.length === 0) {
         alert("No projects selected.");
         return;
       }
+      const mode = getShellMode();
+      const pyBin = mode === "bash" ? "python3" : "python";
       const cmds = selected.map(p => {
         const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
-        return `python scripts\\metashape_reconstruction.py --images ${psQuote(p.path)} --project-name ${psQuote(projName)} --preset pro`;
+        return `${pyBin} scripts/submit_cluster_batch.py --images ${shellQuote(p.path, mode)} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
       }).join("\n");
-      await copyToClipboard(cmds, `Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
-    });
-
-    document.getElementById("btn-execute-batch").addEventListener("click", () => {
-      const selected = projects.filter(p => p.selected);
-      if (selected.length === 0) {
-        alert("No projects selected.");
-        return;
-      }
-      const names = selected.map(p => "- " + (p.name || p.path)).join("\n");
-      alert(`Queued ${selected.length} projects for sequential autonomous reconstruction:\n${names}`);
+      await copyToClipboard(cmds, `Copied cluster submit CLI (${mode}) for ${selected.length} project(s)!`);
     });
 
     const btnOpenMetashape = document.getElementById("btn-open-metashape");
     if (btnOpenMetashape) {
       btnOpenMetashape.addEventListener("click", async () => {
         const p = projects.find(x => x.id === activeProjectId);
-        if (p && p.path) {
+        const target = p && (p.psxPath || p.path);
+        if (target) {
+          const mode = getShellMode();
+          const quotedTarget = shellQuote(target, mode);
+          const launchCmd = mode === "powershell"
+            ? `& 'metashape.exe' ${quotedTarget}`
+            : (mode === "cmd" ? `"metashape.exe" ${quotedTarget}` : `metashape ${quotedTarget}`);
           await copyToClipboard(
-            `& 'metashape.exe' ${psQuote(p.path)}`,
-            `Project path copied to clipboard:\n${p.path}\n\nYou can launch Metashape Pro with this project directly.`
+            launchCmd,
+            `Metashape launch command copied (${mode}):\n${launchCmd}`
           );
         } else {
           alert("Please select a project first.");
@@ -1269,6 +1384,34 @@
       });
     }
 
+    function applyReloadedProjects(parsed) {
+      window.SURVEY_PROJECTS = parsed;
+      projects.length = 0;
+      projects.push(...parsed);
+      renderTable();
+      if (projects.length > 0) {
+        selectProject(projects[0].id);
+      } else {
+        selectProject(null);
+      }
+    }
+
+    function loadViaScriptTag() {
+      return new Promise((resolve, reject) => {
+        const prev = document.querySelector('script[data-am-reload="1"]');
+        if (prev) prev.remove();
+        const s = document.createElement("script");
+        s.setAttribute("data-am-reload", "1");
+        s.src = `projects_data.js?t=${Date.now()}`;
+        s.onload = () => {
+          const loaded = Array.isArray(window.SURVEY_PROJECTS) ? window.SURVEY_PROJECTS : [];
+          resolve(loaded);
+        };
+        s.onerror = () => reject(new Error("Failed to load projects_data.js via script element"));
+        document.body.appendChild(s);
+      });
+    }
+
     async function reloadTelemetry() {
       const btn = document.getElementById("btn-reload-data");
       const origText = btn ? btn.textContent : "Reload Telemetry";
@@ -1277,22 +1420,23 @@
         btn.disabled = true;
       }
       try {
-        const resp = await fetch(`projects_data.js?t=${Date.now()}`);
-        if (resp.ok) {
-          const text = await resp.text();
-          const parsed = parseProjectsDataJs(text);
-          window.SURVEY_PROJECTS = parsed;
-          projects.length = 0;
-          projects.push(...parsed);
-          renderTable();
-          if (projects.length > 0) {
-            selectProject(projects[0].id);
-          } else {
-            selectProject(null);
+        if (window.location.protocol === "file:") {
+          const parsed = await loadViaScriptTag();
+          applyReloadedProjects(parsed);
+        } else {
+          const resp = await fetch(`projects_data.js?t=${Date.now()}`);
+          if (resp.ok) {
+            const text = await resp.text();
+            applyReloadedProjects(parseProjectsDataJs(text));
           }
         }
       } catch (err) {
-        console.warn("Could not reload telemetry via fetch:", err);
+        try {
+          const parsed = await loadViaScriptTag();
+          applyReloadedProjects(parsed);
+        } catch (fallbackErr) {
+          console.warn("Could not reload telemetry:", err, fallbackErr);
+        }
       } finally {
         if (btn) {
           btn.textContent = origText;
@@ -1309,7 +1453,7 @@
     const btnScan = document.getElementById("btn-scan");
     if (btnScan) {
       btnScan.addEventListener("click", () => {
-        alert("To add survey projects and launch cluster reconstructions:\n\n1. Submit datasets via the canonical Cluster Supervisor (single or dual-SSD shares):\n   python scripts/cluster_supervisor.py --source-share \"\\\\SERVER\\DataSSD\" --result-share \"\\\\SERVER\\ResultSSD\"\n2. Or submit an individual batch:\n   python scripts/submit_cluster_batch.py --images \"\\\\SERVER\\DataSSD\\SiteA\" --output \"\\\\SERVER\\ResultSSD\\SiteA\"\n3. Monitor live progress:\n   python scripts/cluster_monitor.py --result-share \"\\\\SERVER\\ResultSSD\"\n\nTelemetry automatically syncs to this dashboard via projects_data.js.");
+        alert("To populate dashboard telemetry:\n\n1. Run cluster monitor export:\n   python scripts/cluster_monitor.py --result-share \"\\\\SERVER\\ResultSSD\" --export-dashboard web/projects_data.js\n2. Or submit batches via scripts/cluster_supervisor.py or scripts/submit_cluster_batch.py.\n3. Click 'Reload Telemetry' in this dashboard.");
       });
     }
 

@@ -428,26 +428,24 @@ def build_monolithic_runscript_task(
         relpath_under(status_file, norm_net, case_insensitive=True) if norm_net else None
     ) or status_file.replace("\\", "/")
 
-    worker_args = [
-        "--images",
-        rel_images,
-        "--output",
-        rel_output,
-        "--project-name",
-        project_name,
-        "--preset",
-        preset,
-        "--align-quality",
-        align_quality,
-        "--depth-quality",
-        depth_quality,
-        "--texture-format",
-        texture_format,
-        "--ortho-resolution",
-        str(ortho_resolution if ortho_resolution is not None else 0.05),
-        "--status-file",
-        rel_status,
-    ]
+    def _append_flag(args_list: list[str], flag: str, value: Any) -> None:
+        val_str = str(value)
+        if val_str.startswith("-"):
+            args_list.append(f"{flag}={val_str}")
+        else:
+            args_list.extend([flag, val_str])
+
+    worker_args: list[str] = []
+    _append_flag(worker_args, "--images", rel_images)
+    _append_flag(worker_args, "--output", rel_output)
+    _append_flag(worker_args, "--project-name", project_name)
+    _append_flag(worker_args, "--preset", preset)
+    _append_flag(worker_args, "--align-quality", align_quality)
+    _append_flag(worker_args, "--depth-quality", depth_quality)
+    _append_flag(worker_args, "--texture-format", texture_format)
+    _append_flag(worker_args, "--ortho-resolution", str(ortho_resolution if ortho_resolution is not None else 0.05))
+    _append_flag(worker_args, "--status-file", rel_status)
+
     if depth_filtering is not None:
         worker_args.extend(["--depth-filtering", depth_filtering])
     if custom_faces is not None:
@@ -509,13 +507,13 @@ def build_monolithic_runscript_task(
     if ortho_cull_faces is False:
         worker_args.append("--no-ortho-cull-faces")
     if report_title:
-        worker_args.extend(["--report-title", report_title])
+        _append_flag(worker_args, "--report-title", report_title)
     if scratch_dir:
-        worker_args.extend(["--scratch-dir", scratch_dir])
+        _append_flag(worker_args, "--scratch-dir", scratch_dir)
     if min_scratch_free_gb is not None:
         worker_args.extend(["--min-scratch-free-gb", str(min_scratch_free_gb)])
     if network_path:
-        worker_args.extend(["--network-path", network_path])
+        _append_flag(worker_args, "--network-path", network_path)
     if resume:
         worker_args.append("--resume")
     else:
@@ -593,7 +591,7 @@ def build_monolithic_runscript_task(
         rel_ref = (
             relpath_under(import_reference, norm_net, case_insensitive=True) if norm_net else None
         ) or import_reference.replace("\\", "/")
-        worker_args.extend(["--import-reference", rel_ref])
+        _append_flag(worker_args, "--import-reference", rel_ref)
     if smooth_mesh:
         worker_args.extend(["--smooth-mesh", "--smooth-strength", str(smooth_strength)])
     if decimate_mesh and decimate_mesh > 0:
@@ -636,20 +634,21 @@ def build_monolithic_runscript_task(
         excl_csv = ",".join(excl_tokens)
         exclude_setup_code = f"""os.environ["AUTOMETASHAPE_EXCLUDE_FOLDERS"] = {excl_csv!r}
 import inspect as _am_ins
+import unicodedata as _am_ud
 import autometashape.core.telemetry as _am_tel
 if "exclude_folders" not in _am_ins.signature(_am_tel.discover_image_subfolder_groups).parameters:
     _am_orig_disc = getattr(_am_tel, "_orig_discover_image_subfolder_groups", _am_tel.discover_image_subfolder_groups)
     _am_tel._orig_discover_image_subfolder_groups = _am_orig_disc
     def _am_filtered_disc(images_dir, output_dir=None, **_extra):
         _res = _am_orig_disc(images_dir, output_dir=output_dir)
-        _raw = os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS", "")
+        _raw = _am_ud.normalize("NFC", os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS", ""))
         _pats = tuple(p.strip().lower() for p in _raw.split(",") if p.strip())
         if not _pats:
             return _res
         _out = {{}}
         _skipped_imgs = 0
         for _g, _paths in _res.items():
-            if any(p in _g.lower() for p in _pats):
+            if any(p in _am_ud.normalize("NFC", _g).lower() for p in _pats):
                 _skipped_imgs += len(_paths)
                 continue
             _kept = []
@@ -658,7 +657,7 @@ if "exclude_folders" not in _am_ins.signature(_am_tel.discover_image_subfolder_g
                     _rel_dir = os.path.relpath(os.path.dirname(_fp), images_dir).replace("\\\\", "/")
                 except Exception:
                     _rel_dir = os.path.dirname(_fp).replace("\\\\", "/")
-                _segs = [s.lower() for s in _rel_dir.split("/") if s and s != "."]
+                _segs = [_am_ud.normalize("NFC", s).lower() for s in _rel_dir.split("/") if s and s != "."]
                 if any(any(p in seg for p in _pats) for seg in _segs):
                     _skipped_imgs += 1
                     continue
@@ -691,8 +690,15 @@ if not os.path.isfile(script_path):
     raise FileNotFoundError(f"[Worker] Local AutoMetashape script not found: {{script_path}}")
 if source_dir not in sys.path:
     sys.path.insert(0, source_dir)
+_am_prev_excl = os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS")
 {exclude_setup_code}sys.argv = [script_path] + {arg_tokens}
-runpy.run_path(script_path, run_name="__main__")
+try:
+    runpy.run_path(script_path, run_name="__main__")
+finally:
+    if _am_prev_excl is None:
+        os.environ.pop("AUTOMETASHAPE_EXCLUDE_FOLDERS", None)
+    else:
+        os.environ["AUTOMETASHAPE_EXCLUDE_FOLDERS"] = _am_prev_excl
 """
 
     if Metashape is not None:

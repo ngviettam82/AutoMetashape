@@ -368,11 +368,6 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
     # 4. Auto-persist valid configuration to target config_path if missing/incomplete (respecting wizard decline)
     if host and root_path and should_auto_persist:
         target_cfg_paths = [config_path]
-        if not args.config:
-            doc_dir = os.path.join(os.path.expanduser("~"), "Documents", "AutoMetashape")
-            doc_cfg = os.path.join(doc_dir, cu.DEFAULT_WORKER_CONFIG_FILENAME)
-            if os.path.isdir(doc_dir) and doc_cfg not in target_cfg_paths:
-                target_cfg_paths.append(doc_cfg)
 
         for target_cfg in target_cfg_paths:
             existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
@@ -445,18 +440,15 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
             detected_label = f" ({len(detected_gpu_names)} discrete GPU(s) detected)" if detected_gpu_names else ""
             gpu_display_label = f"Auto (Metashape probe fallback){detected_label}"
 
-    print("=" * 72)
-    print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
-    print(f"  Cluster Server  : {host}:{port}")
-    print(f"  Result Storage  : {root_path}")
-    if source_root:
-        print(f"  Data Source SSD : {source_root}")
-    print(f"  Metashape Binary: {ms_exe}")
-    print(f"  GPU Device Mask : {gpu_display_label}")
-    print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
-    print("=" * 72)
+    # Prevent 0-compute zombie workers (gpu_mask == 0 AND cpu_enable == 0)
+    if active_gpu_mask == "0" and cpu_enable == 0:
+        print(
+            "[WARNING] GPU mask resolved to 0 (no discrete GPU) with --cpu-enable 0; forcing --cpu-enable 1 "
+            "so worker retains compute capability.",
+            file=sys.stderr,
+        )
+        cpu_enable = 1
 
-    # 6. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
     try:
         port_num = int(port)
         if not (1 <= port_num <= 65535):
@@ -466,11 +458,25 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
         port_num = 5840
         port = "5840"
 
-    print(f"\n[PRE-FLIGHT] Testing network connection to {host}:{port_num}...")
+    formatted_host_port = cu.format_host_port(host, port_num)
+
+    print("=" * 72)
+    print("  AutoMetashape Distributed Cluster - Worker Node Launcher")
+    print(f"  Cluster Server  : {formatted_host_port}")
+    print(f"  Result Storage  : {root_path}")
+    if source_root:
+        print(f"  Data Source SSD : {source_root}")
+    print(f"  Metashape Binary: {ms_exe}")
+    print(f"  GPU Device Mask : {gpu_display_label}")
+    print(f"  CPU Cores Active: {'Yes' if cpu_enable else 'No'}")
+    print("=" * 72)
+
+    # 6. Pre-Flight Diagnostic 2: TCP Socket Reachability Test
+    print(f"\n[PRE-FLIGHT] Testing network connection to {formatted_host_port}...")
     if cu.test_tcp_connection(host, port_num, timeout=3.0):
-        print(f"  [OK] Successfully connected to Cluster Server at {host}:{port_num}!")
+        print(f"  [OK] Successfully connected to Cluster Server at {formatted_host_port}!")
     else:
-        print(f"  [WARNING] Could not reach server at {host}:{port_num}.", file=sys.stderr)
+        print(f"  [WARNING] Could not reach server at {formatted_host_port}.", file=sys.stderr)
         print("  Check that metashape-server is running and TCP port 5840 is open in firewall.", file=sys.stderr)
 
     # 7. Pre-Flight Diagnostic 3: Shared Storage UNC Access Test
@@ -496,7 +502,7 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
         ms_exe,
         "--worker",
         "--host",
-        f"{host}:{port}",
+        formatted_host_port,
         "--root",
         root_path,
         "--cpu-enable",

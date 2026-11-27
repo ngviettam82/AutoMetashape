@@ -34,11 +34,26 @@ from autometashape.cluster.config import (
     load_cluster_config,
 )
 from autometashape.cluster.hardware import (
+    connect_network_client,
     find_metashape_path,
+    format_host_port,
     get_primary_lan_ip,
     is_healthy_online_worker,
+    normalize_rpc_list_response,
 )
 from autometashape.cluster.orchestrator import resolve_batch_canonical_path
+from autometashape.ipc.protocol import configure_utf8_stdio
+
+
+def _parse_gpu_mask(val: str) -> int:
+    """Parse decimal or hex GPU bitmask string (e.g. ``'3'``, ``'0x3'``) and reject negatives."""
+    try:
+        parsed = int(str(val).strip(), 0)
+    except (TypeError, ValueError) as exc:
+        raise argparse.ArgumentTypeError(f"invalid integer GPU mask: {val!r}") from exc
+    if parsed < 0:
+        raise argparse.ArgumentTypeError(f"GPU mask must be non-negative (got {parsed})")
+    return parsed
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
@@ -102,7 +117,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
     gpu_p.add_argument("--worker-id", type=int, default=None, help="Specific worker ID to update")
     gpu_p.add_argument("--hostname", type=str, default="", help="Update all healthy online workers matching hostname")
     gpu_p.add_argument(
-        "--gpu-mask", type=int, required=True, help="Integer GPU bitmask (e.g. 2 for GPU1, 3 for GPU0+1)"
+        "--gpu-mask",
+        type=_parse_gpu_mask,
+        required=True,
+        help="Integer GPU bitmask (decimal or hex, e.g. 2, 3, or 0x3)",
     )
     gpu_p.add_argument("--server", type=str, default="", help="Cluster server host")
 
@@ -114,16 +132,16 @@ def resolve_server_address(cli_server: str) -> str:
     """Dynamically determine server host and port without hardcoded IPs."""
     if cli_server and cli_server.strip():
         host, port = _split_host_port(cli_server.strip(), 5840)
-        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return format_host_port(host, port)
 
     cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
     if cfg.get("host") and cfg.get("host") != "0.0.0.0":
         host, port = _split_host_port(str(cfg["host"]), int(cfg.get("port", 5840) or 5840))
-        return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+        return format_host_port(host, port)
 
     lan_ip = get_primary_lan_ip()
     if lan_ip and lan_ip != "127.0.0.1":
-        return f"{lan_ip}:5840"
+        return format_host_port(lan_ip, 5840)
 
     return "127.0.0.1:5840"
 
@@ -133,14 +151,12 @@ def connect_client(server_str: str) -> Any:
     resolved = resolve_server_address(server_str)
     srv_ip, srv_port = _split_host_port(resolved, 5840)
     client = Metashape.NetworkClient()
-    client.connect(srv_ip, srv_port)
-    return client
+    return connect_network_client(client, srv_ip, srv_port)
 
 
 def cmd_list(client: Any, state_filter: str, shared_root: str = "") -> int:
     """List batches with status and details."""
-    b_resp = client.batchList() or {}
-    batches: List[Dict[str, Any]] = b_resp.get("batches", []) if isinstance(b_resp, dict) else []
+    batches: List[Dict[str, Any]] = normalize_rpc_list_response(client.batchList(), "batches")
 
     eff_root = shared_root.strip()
     if not eff_root:
@@ -215,26 +231,44 @@ def cmd_abort(client: Any, batch_id: int, demote_priority: int) -> int:
     return 0
 
 
+def _match_workers(
+    workers: List[Dict[str, Any]],
+    worker_id: int | None = None,
+    hostname: str = "",
+) -> List[tuple[Any, str]]:
+    """Match online workers by ID and/or hostname with short-hostname fallback."""
+    target_host = hostname.strip().lower()
+    target_short = target_host.split(".", 1)[0] if target_host else ""
+    exact_matches: List[tuple[Any, str]] = []
+    short_matches: List[tuple[Any, str]] = []
+    for w in workers:
+        wid = w.get("worker_id")
+        whost_raw = str(w.get("hostname", "") or "")
+        whost = whost_raw.strip().lower()
+        whost_short = whost.split(".", 1)[0] if whost else ""
+        if worker_id is not None and target_host:
+            if wid == worker_id and whost == target_host:
+                exact_matches.append((wid, whost_raw))
+            elif wid == worker_id and target_short and whost_short == target_short:
+                short_matches.append((wid, whost_raw))
+        elif worker_id is not None:
+            if wid == worker_id:
+                exact_matches.append((wid, whost_raw))
+        elif target_host and is_healthy_online_worker(w):
+            if whost == target_host:
+                exact_matches.append((wid, whost_raw))
+            elif target_short and whost_short == target_short:
+                short_matches.append((wid, whost_raw))
+    return exact_matches or short_matches
+
+
 def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = None, hostname: str = "") -> int:
     """Pause or unpause cluster workers matching worker_id and/or hostname."""
     if worker_id is None and not hostname.strip():
         print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
         return 1
-    w_resp = client.workerList() or {}
-    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
-    target_host = hostname.strip().lower()
-    matched = []
-    for w in workers:
-        wid = w.get("worker_id")
-        whost = str(w.get("hostname", "")).strip().lower()
-        if worker_id is not None and target_host:
-            if wid == worker_id and whost == target_host:
-                matched.append((wid, w.get("hostname", "")))
-        elif worker_id is not None:
-            if wid == worker_id:
-                matched.append((wid, w.get("hostname", "")))
-        elif target_host and whost == target_host and is_healthy_online_worker(w):
-            matched.append((wid, w.get("hostname", "")))
+    workers = normalize_rpc_list_response(client.workerList(), "workers")
+    matched = _match_workers(workers, worker_id=worker_id, hostname=hostname)
     if not matched:
         print(f"[WARNING] No online worker matched worker_id={worker_id} hostname='{hostname}'.")
         return 1
@@ -248,8 +282,7 @@ def cmd_set_worker_paused(client: Any, paused: bool, worker_id: int | None = Non
 
 def cmd_clear_worker(client: Any, worker_id: int, only_aborted: bool = False) -> int:
     """Disconnect a stale or aborted worker record on the server."""
-    w_resp = client.workerList() or {}
-    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
+    workers = normalize_rpc_list_response(client.workerList(), "workers")
     target = next((w for w in workers if w.get("worker_id") == worker_id), None)
     if target is None:
         print(f"[INFO] Worker #{worker_id} is not in server workerList.")
@@ -283,21 +316,8 @@ def cmd_set_worker_gpu_mask(
     if worker_id is None and not hostname.strip():
         print("[ERROR] Provide either --worker-id or --hostname.", file=sys.stderr)
         return 1
-    w_resp = client.workerList() or {}
-    workers: List[Dict[str, Any]] = w_resp.get("workers", []) if isinstance(w_resp, dict) else []
-    target_host = hostname.strip().lower()
-    matched = []
-    for w in workers:
-        wid = w.get("worker_id")
-        whost = str(w.get("hostname", "")).strip().lower()
-        if worker_id is not None and target_host:
-            if wid == worker_id and whost == target_host:
-                matched.append((wid, w.get("hostname", "")))
-        elif worker_id is not None:
-            if wid == worker_id:
-                matched.append((wid, w.get("hostname", "")))
-        elif target_host and whost == target_host and is_healthy_online_worker(w):
-            matched.append((wid, w.get("hostname", "")))
+    workers = normalize_rpc_list_response(client.workerList(), "workers")
+    matched = _match_workers(workers, worker_id=worker_id, hostname=hostname)
     if not matched:
         print(f"[WARNING] No online worker matched worker_id={worker_id} hostname='{hostname}'.")
         return 1
@@ -310,14 +330,7 @@ def cmd_set_worker_gpu_mask(
 
 def main() -> int:
     """CLI entry point for queue management."""
-    if sys.platform == "win32":
-        for _stream_name in ("stdout", "stderr"):
-            _stream = getattr(sys, _stream_name, None)
-            if _stream and hasattr(_stream, "reconfigure"):
-                try:
-                    _stream.reconfigure(encoding="utf-8", errors="replace")
-                except Exception:
-                    pass
+    configure_utf8_stdio()
 
     parser = build_arg_parser()
     args = parser.parse_args()
@@ -331,7 +344,7 @@ def main() -> int:
         ms_exe = find_metashape_path()
         if ms_exe and os.path.isfile(ms_exe):
             cmd = [ms_exe]
-            if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+            if sys.platform.startswith("linux"):
                 cmd.extend(["-platform", "offscreen"])
             cmd.extend(["-r", os.path.abspath(__file__), "--no-reexec"] + sys.argv[1:])
             res = subprocess.run(cmd)

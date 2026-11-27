@@ -12,6 +12,8 @@ set "ABORT_PY=%SCRIPT_DIR%scripts\cluster_abort.py"
 :: 1. Locate Metashape binary (embedded Metashape Python module) or standalone Python
 set "METASHAPE_EXE="
 
+if not defined METASHAPE_EXE if defined AUTOMETASHAPE_METASHAPE_PATH if exist "%AUTOMETASHAPE_METASHAPE_PATH%" set "METASHAPE_EXE=%AUTOMETASHAPE_METASHAPE_PATH%"
+if not defined METASHAPE_EXE if defined METASHAPE_EXE if exist "%METASHAPE_EXE%" set "METASHAPE_EXE=%METASHAPE_EXE%"
 if not defined METASHAPE_EXE if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
 if not defined METASHAPE_EXE if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
 if not defined METASHAPE_EXE if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\metashape.exe"
@@ -37,6 +39,8 @@ if defined METASHAPE_EXE (
 :: 2. Fallback to bundled Python or system Python if metashape.exe is not found
 set "PYTHON_EXE="
 set "PYTHON_ARGS="
+
+if not defined PYTHON_EXE if defined AUTOMETASHAPE_PYTHON_EXE if exist "%AUTOMETASHAPE_PYTHON_EXE%" set "PYTHON_EXE=%AUTOMETASHAPE_PYTHON_EXE%"
 
 if not defined PYTHON_EXE if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_EXE=%ProgramFiles%\Agisoft\Metashape Pro\python\python.exe"
 if not defined PYTHON_EXE if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe" set "PYTHON_EXE=%ProgramW6432%\Agisoft\Metashape Pro\python\python.exe"

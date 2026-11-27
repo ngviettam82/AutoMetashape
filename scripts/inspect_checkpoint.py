@@ -77,7 +77,12 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
         try:
             doc.open(norm_path, read_only=True, ignore_lock=True)
         except TypeError:
-            doc.open(norm_path)
+            try:
+                doc.open(norm_path, read_only=True)
+            except TypeError as exc:
+                raise RuntimeError(
+                    "Metashape Document.open() does not support read_only=True; refusing unsafe read-write open."
+                ) from exc
 
         chunks_info: List[Dict[str, Any]] = []
         print("=" * 80)
@@ -90,6 +95,9 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
             cams = getattr(c, "cameras", None) or []
             total_cams = len(cams)
             aligned_cams = sum(1 for cam in cams if getattr(cam, "transform", None) and getattr(cam, "enabled", True))
+            aligned_disabled_cams = sum(
+                1 for cam in cams if getattr(cam, "transform", None) and not getattr(cam, "enabled", True)
+            )
 
             # Tie points (Metashape 2.x uses chunk.tie_points; 1.x used chunk.point_cloud)
             tie_points = 0
@@ -128,15 +136,33 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
                 if dpc is not None:
                     dense_points = int(getattr(dpc, "point_count", 0) or 0)
 
-            # Mesh Model
+            # Mesh Model (prefer statistics() to avoid loading gigabytes of mesh buffers into RAM)
             model_faces = 0
             model_vertices = 0
             model = getattr(c, "model", None)
             if model is not None:
-                faces = getattr(model, "faces", None)
-                verts = getattr(model, "vertices", None)
-                model_faces = len(faces) if faces is not None else 0
-                model_vertices = len(verts) if verts is not None else 0
+                stats_fn = getattr(model, "statistics", None)
+                stats_obj = stats_fn() if callable(stats_fn) else None
+                if stats_obj is not None:
+                    sf = getattr(stats_obj, "faces", None)
+                    sv = getattr(stats_obj, "vertices", None)
+                    if isinstance(sf, int) and not isinstance(sf, bool):
+                        model_faces = sf
+                    if isinstance(sv, int) and not isinstance(sv, bool):
+                        model_vertices = sv
+                if stats_obj is None or (model_faces == 0 and model_vertices == 0):
+                    faces = getattr(model, "faces", None)
+                    verts = getattr(model, "vertices", None)
+                    if not isinstance(faces, int) and faces is not None and model_faces == 0:
+                        try:
+                            model_faces = len(faces)
+                        except TypeError:
+                            pass
+                    if not isinstance(verts, int) and verts is not None and model_vertices == 0:
+                        try:
+                            model_vertices = len(verts)
+                        except TypeError:
+                            pass
 
             # Orthomosaic, Elevation, CRS, Sensors, Markers & Textures
             has_ortho = getattr(c, "orthomosaic", None) is not None
@@ -164,6 +190,7 @@ def inspect_project(psx_path: str) -> Dict[str, Any]:
                 "label": label,
                 "total_cameras": total_cams,
                 "aligned_cameras": aligned_cams,
+                "aligned_disabled_cameras": aligned_disabled_cams,
                 "tie_points": tie_points,
                 "depth_maps": depth_maps,
                 "dense_points": dense_points,
