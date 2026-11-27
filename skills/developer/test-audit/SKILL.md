@@ -1,6 +1,6 @@
 ---
 name: test-audit
-description: "Audits unit and integration test suites against 15 junk patterns, enforces mutation resistance, and guarantees authoring quality gates across pytest and CTest. Use when authoring, modifying, auditing, or refactoring unit and integration tests."
+description: "Audits unit and integration test suites against 15 junk patterns, enforces mutation resistance, and guarantees authoring quality gates across Python unittest suites. Use when authoring, modifying, auditing, or refactoring unit and integration tests."
 audience: developer
 status: stable
 owners:

@@ -1,6 +1,6 @@
 ---
 name: coding-style
-description: "Enforces repository coding conventions, SPDX license headers, line length limits, and import hygiene across Python, C++, CUDA, and Rust code. Use when writing, formatting, refactoring, or reviewing code across the codebase."
+description: "Enforces repository coding conventions, SPDX license headers, line length limits, and import hygiene across Python, Windows Batch, and shell scripts. Use when writing, formatting, refactoring, or reviewing code across the codebase."
 audience: developer
 status: stable
 owners:
@@ -16,7 +16,7 @@ This skill defines and enforces the authoritative coding standards, automated fo
 ## When To Use
 
 Use this skill when:
-- Authoring new source files in Python, C++, CUDA, or Rust.
+- Authoring new source files in Python, Windows Batch, or shell scripts.
 - Refactoring existing modules or reviewing pull requests for style conformance.
 - Ensuring every new or modified file contains valid SPDX license headers.
 - Running or configuring automated code formatters and linting gates.

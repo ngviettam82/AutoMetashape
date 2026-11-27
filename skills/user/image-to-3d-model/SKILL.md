@@ -157,23 +157,27 @@ As a Senior Certified Photogrammetrist & Geomatics Specialist, the agent follows
    - GeoTIFF Orthomosaic (`--ortho`, `--ortho-resolution 0.05`): Generated via `chunk.buildOrthomosaic()` at a standardized default of **5 cm/px (`0.05 m/px`)** (approx. 25x lighter than 1 cm/px) projected onto a metric CRS (UTM fallback for geographic chunks), and exported as GeoTIFF with BigTIFF LZW compression and ESRI world file (`orthomosaic.tif` + `orthomosaic.tfw`).
    - Executive PDF Quality & Calibration Report (`--export-report`): Generated via `chunk.exportReport()` documenting camera calibrations, tie-point statistics, reprojection error histograms, ground sampling distance (GSD), and survey overlap.
 
-### 3. Multi-Project Sequential Batch Processing Protocol
+### 3. Multi-Project Auto-Discovery & Sequential Batch Processing Protocol
 
-When a parent directory contains multiple independent survey projects (e.g. `Surveys/Project_A/`, `Surveys/Project_B/`):
+When a parent directory contains multiple independent survey projects (e.g. `Surveys/Project_A/`, `Surveys/Project_B/`), either invoke `scripts/cluster_supervisor.py` (which auto-discovers project subfolders, skips auxiliary folders like `model`, `output`, `result`, `temp`, `*.files` without skipping site names like `ModelHouse`, enforces the 50 GB headroom watchdog, and runs `scripts/verify_deliverables.py` between jobs) or run each project sequentially:
 
-1. **Inspection**: Enumerate all immediate subdirectories in the parent folder. Verify photo counts and telemetry profiles.
-2. **Sequential Execution**:
-   - Execute each project independently using the Pro Photogrammetry Engine:
-     ```powershell
-     & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset pro
-     ```
-   - Nested subfolders within a project (e.g. `Project_A/Flight_1`, `Project_A/Flight_2`) are solved in a single global bundle adjustment by default, ensuring zero chunk-merging false alignment.
-3. **Verification Gate**:
-   - Check `<project>/<project_name>/` contains deliverables (`<project_name>.obj`, `<project_name>.glb`, `<project_name>.psx`).
-   - Confirm camera alignment registration rate $\ge 90\%$.
-   - Confirm exit code 0 and zero unhandled exceptions.
-4. **Progressive Advancement**: Advance to Project $N+1$ only after Project $N$ passes verification.
-5. **Batch Summary**: Present a consolidated Markdown table reporting photo counts, aligned cameras, face counts, and deliverable paths.
+1. **Automated Multi-Project Local Sequential Discovery (Single-Folder or Dual-SSD)**:
+   ```powershell
+   # Single-folder local auto-discovery:
+   python scripts/cluster_supervisor.py --scan-dir "D:/Surveys/Batch_March" --output-root "D:/Deliverables/Batch_March" --preset pro --sequential
+
+   # Dual-SSD local sequential (read-only SSD #1 -> writable SSD #2):
+   python scripts/cluster_supervisor.py --source-share "\\HOST_PC\DataSSD\Batch_March" --result-share "\\HOST_PC\ResultSSD\Batch_March" --preset pro --ortho-resolution 0.05 --sequential
+   ```
+2. **Direct Single-Project Execution**:
+   ```powershell
+   & "C:/Program Files/Agisoft/Metashape Pro/metashape.exe" -r scripts/metashape_reconstruction.py --images "<parent>/<project>" --preset pro
+   ```
+   Nested subfolders within a project (e.g. `Project_A/Flight_1`, `Project_A/Flight_2`) are deduplicated for exact copies and solved in a single global bundle adjustment by default (`--multi-chunk disable`).
+3. **Verification Gate & Progressive Advancement**:
+   - Confirm `<project>/<project_name>/` passes `scripts/verify_deliverables.py --dir "<output>" --expect obj ortho` (plus `dem`, `point_cloud`, or `report` when opted in), registration $\ge 90\%$, exit code 0, and zero unhandled exceptions before advancing to Project $N+1$.
+   - For deep 3D geometric verification beyond file headers (double-shells, detached ICP fragments, mixed multi-site folders, coverage gaps), run [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md).
+4. **Batch Summary**: Present a consolidated Markdown table reporting photo counts, aligned cameras, face counts, orthomosaic GSD, and deliverable paths.
 
 ### 4. Pipelined Compute-Export Overlap Engine
 
@@ -195,158 +199,12 @@ GPU Cluster: [Reconstruct Project 1 (GPU)] ──> [Reconstruct Project 2 (GPU)]
 Host CPU:                                     [Export Project 1 (CPU)]      ──> [Export Project 2 (CPU)]
 ```
 
-### 5. Distributed LAN Cluster Processing Protocol
+### 5. Distributed LAN Cluster Processing
 
 > [!NOTE]
-> For dedicated cluster fleet management, unattended worker provisioning, canary updates, and local NVMe scratch operations, see the specialized skill: [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md).
+> All cluster server/worker provisioning (`launch_server.bat`, `launch_worker.bat`, `worker_config.json`), dynamic GPU bitmask probing, local NVMe scratch staging, portable offline `.cluster/bridge_runtime/` provisioning, canonical batch dispatch (`scripts/submit_cluster_batch.py`, `scripts/cluster_supervisor.py`), queue controls, Operator Authority Gate monitoring, signal-based worker aborts, and canary fleet updates are owned canonically by **[skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md)**.
 
-For multi-PC local area networks (LAN), Metashape Network Processing divides large computational stages (feature matching, depth maps, dense point clouds) into parallel subtasks across multiple worker machines.
-
-#### 5.1 Architecture & Network Prerequisites
-- **Coordinator / Server**: The Host PC runs the central server dispatching subtasks to available workers.
-- **Shared Network Storage**: All machines (Host PC and all worker PCs) must access survey photos and project files using an identical path. Use the native Windows UNC share: `\\HOST_PC\SharedMetashape`. Ensure Windows sharing permissions are granted (Read/Write to Everyone or Authenticated Users). Avoid local drive letters (e.g. `C:\...`) because worker PCs cannot resolve local paths on the host.
-- **Firewall Configuration**: Ensure TCP port 5840 is open for incoming connections on the Host PC:
-  ```powershell
-  New-NetFirewallRule -DisplayName "Metashape Server Port 5840" -Direction Inbound -LocalPort 5840 -Protocol TCP -Action Allow
-  ```
-
-#### 5.2 Zero-Dependency Automated Node Updater (`update.bat`)
-Updates any worker or coordinator node directly from GitHub `main` in-place with zero Git dependency, no nested directories, automatic worker termination to release file locks, and user config preservation:
-- **In-Place Update**:
-  ```powershell
-  .\update.bat
-  ```
-- **Update and Immediately Launch Worker Daemon**:
-  ```powershell
-  .\update.bat --worker
-  ```
-- **Update and Immediately Launch Cluster Server**:
-  ```powershell
-  .\update.bat --server
-  ```
-- **Remote Cluster Fleet Updating**:
-  To trigger an automated in-place update across connected remote worker nodes from the host coordinator without visiting each machine, use `update_fleet.bat`. See [`cluster-fleet-operations`](../cluster-fleet-operations/SKILL.md) for full remote fleet deployment details:
-  ```powershell
-  .\update_fleet.bat --host 127.0.0.1 --root "\\HOST_PC\SharedMetashape" --node canary
-  ```
-
-#### 5.3 Starting the Cluster Server Daemon (Coordinator Workstation)
-The server process coordinates task dispatching and job tracking across all participating cluster nodes:
-- **1-Click Windows Launcher**:
-  ```powershell
-  .\launch_server.bat
-  ```
-  *(Dynamically discovers Metashape Pro across all drives `C:`, `D:`, `E:`, `F:`, `G:`, detects host LAN IP even on airgapped networks, and displays worker connection instructions).*
-- **Custom Ports / CLI Override**:
-  ```powershell
-  .\launch_server.bat --port 5840 --dispatch-port 5841
-  ```
-
-#### 5.4 Starting Cluster Worker Nodes (All Participating Workstations)
-To harness GPUs and high-core CPUs across your local network:
-- **1-Click Windows Launcher**:
-  ```powershell
-  .\launch_worker.bat
-  ```
-  *On first run*: Interactively prompts for the Cluster Server IP and Shared UNC Storage root, then saves to `worker_config.json`.
-  *Subsequent runs*: Double-click `launch_worker.bat` to connect instantly with zero typing!
-- **Headless / Automation CLI**:
-  ```powershell
-  .\launch_worker.bat --host <SERVER_IP> --root "\\HOST_PC\SharedMetashape" --cpu 1
-  ```
-- **Pre-Flight Health Diagnostics Built-in**:
-  1. Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
-  2. Tests TCP port reachability to server host (flags firewall issues immediately).
-  3. Tests Shared UNC storage directory access and permissions.
-  4. **Native Multi-GPU Benchmark & Discovery**: When `--gpu-mask` is omitted (default), Metashape Pro's native C++ engine automatically discovers, benchmarks, and engages all high-performance discrete GPUs while bypassing integrated graphics (Intel UHD/HD, AMD APU). Explicit bitmasks (e.g. `--gpu-mask 0` for CPU-only) are supported as manual overrides.
-  5. **Auto-Reconnect**: Automatically reconnects every 10s if the server restarts or network fluctuates.
-
-#### 5.5 Worker Node Configuration (`worker_config.json`) & Unattended Provisioning
-When `launch_worker.bat` runs interactively, it automatically creates `worker_config.json`. For automated deployment or mass provisioning across multiple worker PCs without interactive prompts, place a `worker_config.json` file in the AutoMetashape root directory:
-
-```json
-{
-  "host": "10.2.8.43",
-  "port": "5840",
-  "root": "\\\\HOST_PC\\SharedMetashape",
-  "cpu_enable": 1
-}
-```
-
-- **Configuration Fields**:
-  - `host` *(string)*: Cluster Coordinator workstation LAN IP address or DNS hostname.
-  - `port` *(string)*: Cluster Server control port (default `"5840"`).
-  - `root` *(string)*: Universal Windows UNC network share path accessible identically across all nodes.
-  - `cpu_enable` *(int)*: Set to `1` to utilize CPU compute cores, or `0` for GPU-only execution.
-  - `gpu_mask` *(string, optional)*: Manual GPU device bitmask override (e.g. `"0"` for CPU-only, or an explicit device bitmask). When omitted or set to `"Auto"` (recommended default), Metashape Pro dynamically benchmarks and engages all available discrete GPUs natively.
-- **Interactive Reconfiguration**:
-  To update an existing node's configuration at any time, run:
-  ```powershell
-  .\launch_worker.bat --interactive
-  ```
-- **Custom Config File Override**:
-  ```powershell
-  .\launch_worker.bat --config "D:\configs\custom_worker.json"
-  ```
-
-#### 5.6 Checking Connectivity & Connected Worker Discovery
-Inspect connected cluster nodes via Python or CLI:
-```python
-import Metashape
-
-client = Metashape.NetworkClient()
-client.connect("<SERVER_IP>:5840")
-workers = client.workerList()
-active_workers = workers.get("workers", []) if isinstance(workers, dict) else workers
-print(f"Connected Workers ({len(active_workers)}):")
-for w in active_workers:
-    host = w.get("hostname", "Worker")
-    ram_gb = w.get("memory_size", 0) / (1024**3)
-    print(f"  • Host: {host} | State: {w.get('state')} | RAM: {ram_gb:.1f} GB")
-```
-
-#### 5.7 Autonomous 1-Hour Monitoring & Self-Healing Protocol
-For massive multi-flight photogrammetry reconstructions running on the cluster (4–12+ hours), the AI Agent executes an autonomous **1-Hour Monitoring & Self-Healing Cycle**:
-
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                    HOURLY AGENT AUDIT & HEALING CYCLE                       │
-├─────────────────────────────────────────────────────────────────────────────┤
-│ 1. Telemetry & Milestone Inspection:                                        │
-│    - Query Metashape.NetworkClient (serverInfo, batchList, workerList)      │
-│    - Read _autometashape_status.json sidecar from shared output folder      │
-│ 2. Formulate Structured Hourly Production Report:                           │
-│    - Active Batches: Current stage, subtask completion %, elapsed time, ETA│
-│    - Worker Health: Active/idle states, GPU utilization, memory usage       │
-│    - Disk Deliverables: Completed .obj, .glb, .tif orthomosaics             │
-│ 3. Read-Only Diagnostics (Operator Authority Gate):                         │
-│    - Dropped Worker Node? -> Ping host and alert operator                   │
-│    - Stalled Task (>45m 0% progress)? -> Report to operator for auth resume │
-│    - Storage Latency / Access Drops? -> Audit SMB UNC path connectivity     │
-└─────────────────────────────────────────────────────────────────────────────┘
-```
-
-> [!IMPORTANT]
-> **Strict Non-Destructive Code Governance Boundary**:
-> * **Permitted Self-Healing Actions**: Network reconnection, daemon restarts, batch retry via `--resume`, lockfile cleanup, and structured progress reporting.
-> * **STRICTLY PROHIBITED**: The agent must **NEVER** autonomously rewrite, mutate, refactor, or modify core reconstruction code, pipeline scripts, or algorithm presets during monitoring runs.
-> * **User Intent Invariant**: All code modifications and pipeline rewrites strictly require explicit user instructions and authorization.
-
-#### 5.8 Independent Project Mode & Local NVMe Scratch Staging (Default Mode)
-During large-scale reconstructions, Metashape Pro generates massive out-of-core scratch data (depth maps,
-point clouds, and octree meshing leaves reaching 75–150+ GB). To eliminate SMB network congestion and worker hopping:
-- **Independent Project Default (`--network-independent-workers`, `worker_limit=1`)**: Enabled by default across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py --network-enable` (opt out via `--no-network-independent-workers` for centralized stage-by-stage distribution). Each project runs atomically on 1 dedicated worker.
-- **Local NVMe Scratch Staging Default (`--stage-local` / `--local-scratch-staging`)**: Enabled by default so every worker processes locally on internal NVMe.
-- **Dynamic NVMe Discovery**: The worker daemon automatically discovers the fastest internal fixed non-system NVMe SSD with the
-  highest free capacity (e.g. `D:\AutoMetashape_Scratch`).
-- **Resilient Headroom Fallback**: If local SSD headroom is below the threshold (default 100 GB via
-  `--min-scratch-free-gb`), execution safely falls back to direct network storage output.
-- **Staged PSX Chunk-ID Reconciliation & Atomic Deliverable Sync**: Before replacing `.files/` on the Result Share, `reconcile_staged_psx_chunk_id()` aligns single ICP-merged chunk folders (e.g. `3/` → `0/`) with the shared `.psx` stub so Metashape Worker exits cleanly with zero post-sync `io-error` retries. Deliverables, models, textures, and project files then synchronize atomically to the Result Share, `_autometashape_status.json` records `status="completed"` (`progress=100.0`), and local scratch is cleanly purged.
-- **Dual Shared Folder (Multi-SSD) Topology**: Supports splitting read-only raw survey photos (`--source-share`, SSD #1) from writable `.psx` checkpoints and deliverables (`--result-share`, SSD #2 as Metashape `--root`) across both distributed cluster and local sequential supervisor runs.
-- **Opt-Out Override**: To bypass local staging on standalone host-local runs, pass `--no-stage-local` (or `--no-local-scratch-staging`).
-
-#### 5.9 Submitting Distributed Reconstructions & Pipelined Export Overlap
-Dispatch autonomous reconstruction to the active cluster:
+To submit a reconstruction directly to an active Metashape cluster from the reconstruction CLI (Independent Project Mode `worker_limit=1` and Local NVMe Scratch Staging `--stage-local` are enabled by default; opt out via `--no-network-independent-workers` or `--no-stage-local`):
 ```powershell
 & "C:\Program Files\Agisoft\Metashape Pro\metashape.exe" -r scripts/metashape_reconstruction.py `
     --images "\\SERVER\DataSSD\041126\0043" `
@@ -354,26 +212,7 @@ Dispatch autonomous reconstruction to the active cluster:
     --preset pro --ortho-resolution 0.05 `
     --network-enable --network-host <SERVER_IP> --network-port 5840 --network-path "\\SERVER\ResultSSD"
 ```
-
-#### 5.10 Host-Initiated Autonomous Worker Fleet Update Protocol
-When maintaining or upgrading remote cluster worker nodes from the Host/Coordinator workstation, strictly execute the **Autonomous Worker Fleet Update Protocol**:
-
-1. **Zero Fleet-Wide Blind Kills**:
-   - Never kill, trigger, or push fleet-wide updates across all remote cluster worker nodes simultaneously.
-   - Broad simultaneous kills sever the cluster compute fabric and risk collective fleet timeouts or network saturation.
-2. **Single Canary Node Verification Gate**:
-   - Updates must always be tested on exactly **ONE canary worker node** first (e.g. `tan` or `DESKTOP-RJUQ6L8`).
-   - Monitor the canary node's lifecycle state via `Metashape.NetworkClient().workerList()`:
-     $$\text{inprogress (dispatched probe)} \longrightarrow \text{offline (releasing file locks)} \longrightarrow \text{ready (online with fresh code)}$$
-   - Confirm the canary worker node completes self-update, auto-discovers GPUs, and re-registers cleanly as `ready` within **60–90 seconds**.
-   - Only after the canary node passes the verification gate may update batches proceed across remaining worker nodes in staggered waves.
-3. **Preserve Host / Coordinator Exemption**:
-   - The coordinator workstation (e.g. `SERVER` / `192.168.1.100`) hosts the cluster server process and must be **explicitly filtered out** from remote worker update batches.
-   - Remote worker update probes must only target designated remote worker hosts (`host != coordinator_host`).
-4. **Zero-Touch Headless Invariants**:
-   - Remote workers execute `launch_worker.bat --non-interactive` with automatic UNC storage path inference (e.g. `\\SERVER\SharedStorage` or configured cluster storage).
-   - Remote worker updates must never block on interactive console prompts (`input()`) or unmanaged binary fallbacks.
-   - Dynamic multi-GPU detection is preserved without injecting hardcoded `gpu_mask` values into `worker_config.json`.
+For production multi-project cluster batches, prefer canonical `scripts/submit_cluster_batch.py` or `scripts/cluster_supervisor.py` (see [cluster-fleet-operations](../cluster-fleet-operations/SKILL.md)).
 
 ### 6. Web Studio Dynamic Telemetry Dashboard
 
@@ -469,7 +308,9 @@ Reconstruction outputs must satisfy the following quality criteria:
 ## References
 
 - [evaluations.md](evaluations.md)
+- [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md)
 - [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md)
+- [skills/user/photogrammetry-export/SKILL.md](../photogrammetry-export/SKILL.md)
 - [scripts/metashape_reconstruction.py](../../../scripts/metashape_reconstruction.py)
 - [source/autometashape/core/alignment_hygiene.py](../../../source/autometashape/core/alignment_hygiene.py)
 - [source/autometashape/core/icp_bridge.py](../../../source/autometashape/core/icp_bridge.py)

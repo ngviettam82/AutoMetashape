@@ -23,8 +23,8 @@ Use this skill when:
 - Verifying lens-lock conformance (`k4 = b1 = b2 = 0`), single-block or cleanly bridged tie-graph topology, and spatial coverage completeness without opening GUI sessions or mutating archives.
 
 Do not use this skill when:
-- Launching new end-to-end reconstructions from raw photos (use `skills/user/autonomous-photogrammetry/` or `skills/user/image-to-3d-model/`).
-- Monitoring live cluster queue health, worker RAM/GPU telemetry, or storage headroom (use `skills/user/cluster-supervisor/`).
+- Launching new end-to-end reconstructions from raw photos (use `skills/user/image-to-3d-model/`).
+- Provisioning clusters, dispatching batches, or monitoring live cluster queue health, worker RAM/GPU telemetry, or storage headroom (use `skills/user/cluster-fleet-operations/`).
 - Exporting, re-baking textures, or converting asset formats from a verified `.psx` project (use `skills/user/photogrammetry-export/`).
 - Executing queue aborts, moving raw photo folders, or re-submitting batches without explicit real-time operator authorization (strictly prohibited by the Operator Authority Gate).
 
@@ -66,7 +66,7 @@ python scripts/inspect_checkpoint.py --project "\\HOST_PC\ResultSSD\<project>\<p
 ```
 
 > [!IMPORTANT]
-> A `PASS` result from `scripts/verify_deliverables.py` proves only that files exist with valid headers and linked textures. It does **not** guarantee single-surface 3D alignment or complete site coverage; always continue through Steps 3–6 when auditing geometric quality.
+> `scripts/verify_deliverables.py` verifies 5 structural file gates — OBJ (`>= 1 KB`, vertices/faces, linked `.mtl` and `map_Kd` textures), GLB (`b'glTF'`), GeoTIFF/BigTIFF headers, dense point cloud (`>= 50 KB` `LASF`/`ply`), and PDF report (`>= 15 KB` `%PDF`). A `PASS` result proves only file/header integrity; it does **not** guarantee single-surface 3D alignment or complete site coverage. Always continue through Steps 3–6 when auditing geometric quality.
 
 ### 3. Single-Pass Tie-Graph, Sub-Island & Lens-Lock Audit
 
@@ -170,6 +170,6 @@ python scripts/cluster_monitor.py --help
 - Deliverable verification engine: [source/autometashape/core/verification.py](../../../source/autometashape/core/verification.py)
 - Canonical checkpoint inspector: [scripts/inspect_checkpoint.py](../../../scripts/inspect_checkpoint.py)
 - Canonical deliverable verifier: [scripts/verify_deliverables.py](../../../scripts/verify_deliverables.py)
-- Cluster Supervisor skill: [skills/user/cluster-supervisor/SKILL.md](../cluster-supervisor/SKILL.md)
 - Image-to-3D Model skill: [skills/user/image-to-3d-model/SKILL.md](../image-to-3d-model/SKILL.md)
 - Cluster Fleet Operations skill: [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md)
+- Photogrammetry Export skill: [skills/user/photogrammetry-export/SKILL.md](../photogrammetry-export/SKILL.md)

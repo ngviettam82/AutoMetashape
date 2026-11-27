@@ -1,34 +1,32 @@
 ---
 name: cluster-fleet-operations
-description: "Orchestrates Agisoft Metashape Pro distributed processing clusters, worker node provisioning, dynamic multi-GPU discovery, local NVMe scratch staging, hourly health monitoring, canary fleet updates, and signal-based worker abort & self-healing restarts. Use when deploying, managing, updating, or troubleshooting distributed photogrammetry clusters and multi-worker fleets."
+description: "Orchestrates Agisoft Metashape Pro distributed processing clusters end-to-end: server/worker node provisioning, dynamic enumGPUDevices GPU bitmask discovery, local NVMe scratch staging, portable offline Open3D bridge provisioning, canonical multi-dataset batch dispatch, storage headroom watchdogs (Win32 Error 112 defense), read-only telemetry under the Operator Authority Gate, deliverable verification gates, queue/worker controls, signal-based worker aborts, and canary/selective remote fleet updates. Use when deploying, dispatching, monitoring, queuing, updating, or troubleshooting distributed photogrammetry clusters and multi-worker fleets."
 audience: user
 status: stable
 owners:
   - "@autometashape-maintainers"
 ---
 
-# Distributed Processing Cluster & Autonomous Fleet Operations
+# Distributed Processing Cluster, Fleet Operations & Supervision
 
-Comprehensive operational runbook and architectural standard for provisioning, orchestrating, monitoring, and updating Agisoft Metashape Professional distributed processing clusters. Covers cluster server daemons, worker node provisioning with pre-flight TCP/UNC diagnostics, dynamic native multi-GPU discovery, local NVMe scratch staging, continuous autonomous health audits, and zero-touch canary fleet update protocols.
+Canonical operational runbook for Agisoft Metashape Professional distributed processing clusters. Unifies server/worker provisioning, dynamic discrete GPU bitmask probing, local NVMe scratch staging, portable offline Open3D bridge provisioning, canonical batch dispatch (`submit_cluster_batch.py`, `cluster_supervisor.py`), storage headroom watchdogs (Win32 Error 112 defense), read-only telemetry under the Operator Authority Gate (`cluster_monitor.py`, `manage_queue.py`), deliverable integrity gates (`verify_deliverables.py`), signal-based worker aborts (`cluster_abort.py`), and canary/selective remote fleet updates (`update_fleet.py`).
 
 ---
 
 ## When To Use
 
 Use this skill when:
-- Deploying or starting the central Cluster Coordinator Server (`metashape-server.exe`) on a LAN host.
-- Provisioning or starting remote worker nodes (`launch_worker.bat`) across workstation fleets.
-- Configuring unattended worker provisioning via `worker_config.json` with zero-touch automation.
-- Diagnosing network reachability (TCP port 5840), shared UNC storage path access, or GPU device discovery.
-- Managing Local NVMe Scratch Staging (`--stage-local` / `--local-scratch-staging`) to eliminate SMB network congestion and Win32 Error 112 (`ERROR_DISK_FULL`).
-- Executing the Autonomous 1-Hour Health & Self-Healing Monitoring Cycle for multi-hour cluster reconstructions.
-- Performing rolling fleet updates (`update.bat`) across remote worker nodes using the Single Canary Node Verification Gate.
-- Troubleshooting worker state transitions (`inprogress -> offline -> ready`), stalled tasks, or network disconnects.
-- Forcibly aborting hung worker processes during monolithic tasks, purging scratch locks, and orchestrating self-healing worker reconnects without server scheduler deadlocks.
+- Deploying or starting the central Cluster Coordinator Server (`launch_server.bat`) or remote worker nodes (`launch_worker.bat`, `worker_config.json`) across single-share or Dual-SSD topologies.
+- Diagnosing TCP port 5840 reachability, UNC share permissions, dynamic GPU bitmask probing (`enumGPUDevices()`), local NVMe scratch staging, or offline `.cluster/bridge_runtime/` Open3D provisioning.
+- Submitting single or multi-dataset cluster batches (`scripts/submit_cluster_batch.py`, `scripts/cluster_supervisor.py`) with pre-flight `.psx` materialization, `--start-paused` staging, or hidden `.cluster/tickets/` failover.
+- Monitoring multi-hour cluster telemetry, storage headroom (`>= 50 GB`, Win32 Error 112 defense), passive `std::bad_alloc` / OOM audits, and deliverable integrity (`scripts/verify_deliverables.py`) in strict read-only reporting mode under the **Operator Authority Gate**.
+- Executing operator-authorized queue/worker controls (`scripts/manage_queue.py`), signal-based worker aborts (`scripts/cluster_abort.py`), targeted GUI `.files/lock` PID forensics, or canary/selective remote fleet updates (`scripts/update_fleet.py`).
 
 Do not use this skill when:
-- Performing single-node local photogrammetry reconstructions without network distribution (use `skills/user/image-to-3d-model/`).
-- Exporting, format converting, or baking deliverables from an existing project archive (use `skills/user/photogrammetry-export/`).
+- Executing standalone local photogrammetry physics/reconstruction without cluster orchestration (use `skills/user/image-to-3d-model/`).
+- Performing standalone format conversion or texture re-baking from an existing `.psx` (use `skills/user/photogrammetry-export/`).
+- Running deep read-only post-completion 3D geometric/alignment/coverage audits on finished `.psx` archives (use `skills/user/photogrammetry-forensic-audit/`).
+- Auto-aborting batches, modifying priorities, or altering cluster queues without explicit, real-time operator permission (strictly prohibited by the Operator Authority Gate).
 
 ---
 
@@ -36,251 +34,216 @@ Do not use this skill when:
 
 ```mermaid
 flowchart TD
-    subgraph Host_Coordinator["Cluster Coordinator Host (e.g. SERVER / 192.168.1.100)"]
-        ServerProc["metashape-server.exe\n(TCP 5840 Control Daemon)"]
-        SharedStorage["Shared UNC Root (\\\\HOST\\SharedMetashape)"]
-        StatusSidecar["_autometashape_status.json\n(Milestone IPC Telemetry)"]
+    subgraph Host_Coordinator["Cluster Coordinator Host (TCP 5840)"]
+        ServerProc["metashape-server.exe\n(launch_server.bat)"]
+        Shares["Single or Dual-SSD Shares\n(Read-Only DataSSD -> Writable ResultSSD)"]
+        Headroom["Headroom Watchdog (>= 50 GB)\n(Win32 Error 112 Defense)"]
     end
 
-    subgraph Remote_Worker_Fleet["Remote Worker Fleet (Nodes: tan, RJUQ6L8, etc.)"]
-        WorkerProc["Metashape Worker Daemon\n(launch_worker.bat)"]
-        LocalScratch["Local Fast Scratch NVMe\n(C:\\AutoMetashape_Scratch or D:\\)"]
-        DiscreteGPU["Discrete RTX GPUs\n(Native C++ Discovery)"]
+    subgraph Dispatch_Monitor["Canonical CLI & Operator Authority Gate"]
+        Submit["submit_cluster_batch.py / cluster_supervisor.py\n(Pre-flight doc.save + worker_limit=1 + --local-scratch-staging)"]
+        Monitor["cluster_monitor.py (Read-Only Telemetry)\n(Scaled CPU/RAM, OOM Audit, verify_deliverables.py)"]
+        Control["Operator-Approved Only:\nmanage_queue.py | cluster_abort.py | update_fleet.py"]
     end
 
-    ServerProc <-->|TCP 5840 Task Queue & Heartbeats| WorkerProc
-    SharedStorage -->|Read Photo Assets & Project Files| WorkerProc
-    WorkerProc <-->|High-Speed NVMe I/O (75+ GB Temp Leaves)| LocalScratch
-    WorkerProc <-->|CUDA Kernels| DiscreteGPU
-    WorkerProc -->|Atomic Write on Stage Completion| SharedStorage
-    WorkerProc -->|Push Real-Time Sidecar Events| StatusSidecar
+    subgraph Remote_Workers["Worker Fleet (launch_worker.bat)"]
+        WorkerProc["Metashape Worker + 1s Abort Watchdog\n(Dynamic enumGPUDevices() Bitmask)"]
+        LocalScratch["Local Fixed NVMe Scratch (>= 100 GB)\n+ Offline .cluster/bridge_runtime/"]
+    end
+
+    Headroom --> Submit
+    Submit --> ServerProc
+    ServerProc <-->|TCP 5840 Queue & Heartbeats| WorkerProc
+    Shares -->|Read Photos / Atomic Sync Deliverables| WorkerProc
+    WorkerProc <--> LocalScratch
+    ServerProc --> Monitor
+    Monitor -.->|Report Only -> Operator Decides| Control
+    Control --> ServerProc
 ```
 
-### 1. Cluster Coordinator Server Provisioning
-On the Coordinator workstation hosting the shared network storage:
-1. Verify network share accessibility via UNC format (`\\HOST_PC\SharedMetashape`).
-2. Launch the cluster coordinator server daemon:
+### 1. Cluster Server & Worker Node Provisioning
+
+1. **Coordinator Server**: Verify UNC share read/write access and TCP port 5840 firewall rule, then start the server:
    ```powershell
-   .\launch_server.bat --port 5840 --root "\\HOST_PC\SharedMetashape"
-   ```
-3. Confirm server listening state:
-   ```powershell
+   .\launch_server.bat --port 5840 --root "\\HOST_PC\ResultSSD"
    Test-NetConnection -ComputerName 127.0.0.1 -Port 5840
    ```
-
-### 2. Worker Node Provisioning & Pre-Flight Diagnostics
-On each remote worker node across the local network:
-1. Interactive Launch with Guided Wizard (stores `worker_config.json`):
-   ```powershell
-   .\launch_worker.bat
-   ```
-2. Unattended / Headless Deployment (Single-Share or Dual-SSD):
-   Place `worker_config.json` in the AutoMetashape root directory (optionally setting `source_root` for Dual Shared Folder SSD #1 read-only photo shares while `root` anchors Metashape `--root` to SSD #2 Result Share):
+2. **Unattended Worker Provisioning (`worker_config.json`)**: Supports single-share or Dual-SSD topologies (`source_root` = read-only SSD #1 raw photos; `root` = writable SSD #2 Result Share anchored as Metashape `--root`):
    ```json
    {
-     "host": "10.2.8.43",
+     "host": "10.5.10.202",
      "port": "5840",
      "root": "\\\\HOST_PC\\ResultSSD",
      "source_root": "\\\\HOST_PC\\DataSSD",
      "cpu_enable": 1
    }
    ```
-   Execute non-interactively (or override shares via `--result-share` and `--source-share`):
    ```powershell
    .\launch_worker.bat --non-interactive --result-share "\\HOST_PC\ResultSSD" --source-share "\\HOST_PC\DataSSD"
    ```
-3. Pre-Flight Diagnostics Built-in:
-   - Validates Metashape Pro executable across `%ProgramFiles%` and all drives `C:`, `D:`, `E:`, `F:`, `G:`.
-   - Tests TCP port reachability to server host.
-   - Tests Result Share (`--root`) and optional Data Source Share (`--source-root`) SMB/UNC accessibility.
-   - **Dynamic Metashape Discrete GPU Bitmask Probing**: When `--gpu-mask` is omitted or `"Auto"` (default), `launch_worker.py` probes `Metashape.app.enumGPUDevices()` directly via `probe_metashape_gpu_mask()` (`source/autometashape/cluster/hardware.py`) to compute the exact Metashape-indexed discrete GPU bitmask (excluding Intel UHD/HD/Iris/Core Ultra Arc iGPUs, AMD 610M–890M/Vega APUs, and software renderers) and passes `--gpu-mask <N>` explicitly. For example, on a workstation with `[0] Intel Graphics` and `[1] NVIDIA GeForce RTX`, the computed bitmask is dynamically `1 << 1 = 2` (`0b10` -> `GPU=2` in telemetry), whereas single-discrete-GPU hosts automatically compute `1` (`0b01`), dual-GPU hosts compute `3` (`0b11`) or `6` (`0b110`), and CPU-only hosts compute `0` — never hardcoded. This overrides poisoned `HKCU` Registry `gpu_mask=0` or mixed `4294967295` values cleanly. Explicit overrides (`--gpu-mask <N>`) persist `"gpu_mask_explicit": true` and set `AUTOMETASHAPE_EXPLICIT_GPU_MASK`.
-   - **Auto-Reconnect Daemon**: Automatically reconnects every 10s if the coordinator restarts or network fluctuates, re-probing GPU bitmask if an initial boot probe transiently failed.
+3. **Built-In Pre-Flight Diagnostics & Dynamic GPU Bitmask Probing**:
+   - Locates `metashape.exe` across `%ProgramFiles%` and drives `C:`–`G:`, verifies TCP 5840 and SMB shares, and auto-reconnects every 10 s on disconnect.
+   - **Dynamic Metashape Discrete GPU Bitmask (`probe_metashape_gpu_mask()`)**: When `--gpu-mask` is omitted or `"Auto"`, `scripts/launch_worker.py` queries `Metashape.app.enumGPUDevices()` (`source/autometashape/cluster/hardware.py`) to select discrete GPUs while excluding Intel UHD/HD/Iris/Core Ultra Arc iGPUs, AMD 610M–890M/Vega APUs, and software renderers. For example, `[0] Intel Graphics, [1] NVIDIA RTX` dynamically computes `1 << 1 = 2` (`0b10` -> `GPU=2` in telemetry), single-GPU hosts compute `1`, dual-GPU hosts compute `3` or `6`, and CPU-only hosts compute `0` — never hardcoded. Overrides poisoned `HKCU` Registry `gpu_mask=0` or mixed `4294967295`. Explicit overrides (`--gpu-mask <N>`) persist `"gpu_mask_explicit": true`.
 
-### 3. Local NVMe Scratch Staging & Independent Project Defaults
-During large-scale reconstructions (1,000+ to 10,000+ photos), intermediate scratch data (depth maps and octree meshing leaves) reaches 75–150+ GB.
-- **Canonical Cluster Defaults (Both Enabled by Default)**:
-  - **Independent Project Mode (`--network-independent-workers`, `worker_limit=1`)**: Enabled by default across `submit_cluster_batch.py`, `cluster_supervisor.py`, and `metashape_reconstruction.py --network-enable` (opt out via `--no-network-independent-workers`). Each project runs atomically on 1 dedicated worker with zero worker hopping.
-  - **Local NVMe Scratch Staging (`--local-scratch-staging` / `--stage-local`)**: Enabled by default so every worker computes locally on internal NVMe instead of saturating SMB shares (opt out via `--no-local-scratch-staging` only for standalone host-local runs).
-- **Dynamic Local NVMe Discovery**: The worker daemon automatically discovers the fastest internal fixed non-system NVMe/SATA drive with the highest free capacity (e.g., `D:\AutoMetashape_Scratch`), explicitly rejecting mapped SMB network drives (`DRIVE_REMOTE`), removable/optical media (`GetDriveTypeW`), and external USB/FireWire/SD/MMC SSD enclosures (`BusTypeUsb` via `IOCTL_STORAGE_QUERY_PROPERTY`).
-- **Headroom Fallback**: Requires $\ge 100\text{ GB}$ free space (configurable via `--min-scratch-free-gb`). Safely falls back to direct network storage if local space is insufficient.
-- **Staged PSX Chunk-ID Reconciliation & Atomic Deliverable Sync**: Before replacing `.files/` on the shared Result Share, `reconcile_staged_psx_chunk_id()` aligns single ICP-merged chunk folders (e.g. `3/` or `1/`) to the shared stub's chunk ID (`0/`) inside `project.zip/doc.xml` so Metashape Worker's post-`RunScript` commit never triggers `Can't open file: .../0/chunk.zip`. Deliverables and project files then sync atomically to the Result Share, `_autometashape_status.json` is finalized to `status="completed"` (`progress=100.0`), and local scratch is purged cleanly.
-- **Opt-Out**: Pass `--no-stage-local` / `--no-local-scratch-staging` to bypass local staging on standalone host-local jobs.
+### 2. Local NVMe Scratch Staging, Independent Mode & Offline Open3D Bridge Runtime
 
-### 3b. Portable Offline Open3D Bridge Runtime Provisioning (`.cluster/bridge_runtime/`)
-To support the Zero-Neural CPU Open3D Sim(3) ICP Bridge (`source/autometashape/core/icp_bridge.py` + `icp_worker.py`) on bare worker nodes that have **no system Python, no PyTorch, no CUDA toolkit, no admin rights, and no internet access**:
-- **Shared Bundle Hosting**: The shared cluster root hosts `<root>/.cluster/bridge_runtime/manifest.json` alongside the SHA-256-verified `bridge_runtime_win_amd64_v1.zip` (~107 MB portable CPython 3.11 + Open3D + NumPy + SciPy + MSVC runtime DLLs).
-- **Zero-Touch One-Time Auto-Provisioning**: On the first project requiring ICP bridging, `icp_bridge.py` verifies the bundle SHA-256 against `manifest.json` and extracts it atomically into `%LOCALAPPDATA%\AutoMetashape\bridge_runtime_v<version>` (~2.5 s via built-in `zipfile`). Single-block projects never invoke the bridge runtime (0 s overhead).
-- **DLL & Environment Isolation**: `_clean_bridge_env()` strips Metashape binary directories from `PATH` and clears `PYTHONHOME` / `PYTHONPATH` before spawning the worker subprocess so Metashape's bundled Qt/OpenMP/VC++ DLLs cannot conflict with Open3D.
-- **32 GB RAM Safety & Isolated Temp Lifecycle**: Stage-0 dense cloud generation enforces `uniform_sampling=True, points_spacing=0.04` (4 cm spacing) to cap memory footprint, writes temporary PLY point clouds strictly to `%TEMP%\autometashape_icp_*` (outside `local_staging_dir` so they are never synced to the Result Share), and automatically purges stale `autometashape_icp_*` directories older than 24 hours.
+1. **Canonical Cluster Defaults (Both Enabled by Default)**:
+   - **Independent Project Mode (`--network-independent-workers`, `worker_limit=1`)**: Each project runs atomically on 1 dedicated worker (zero worker hopping or SMB stage syncs; opt out via `--no-network-independent-workers --sequential` only for centralized stage-by-stage distribution on a single mega-survey).
+   - **Local NVMe Scratch Staging (`--local-scratch-staging` / `--stage-local`)**: Workers automatically select the fastest internal fixed non-system NVMe/SATA volume with `>= 100 GB` free (`--min-scratch-free-gb`), rejecting mapped network drives (`DRIVE_REMOTE`), removable media, and external USB/FireWire/SD/MMC enclosures (`BusTypeUsb`), and safely falling back to direct network output when local headroom is below threshold. Only pass `--no-local-scratch-staging` for standalone host-pinned runs.
+2. **Staged PSX Chunk-ID Reconciliation & Atomic Deliverable Sync**: Before replacing `.files/` on Result Share, `reconcile_staged_psx_chunk_id()` aligns single ICP-merged chunk directories (e.g. `3/` -> `0/`) with the shared `.psx` stub (`project.zip/doc.xml`) so post-`RunScript` commits never trigger `Can't open file: .../0/chunk.zip`. Deliverables sync atomically, `_autometashape_status.json` finalizes `status="completed"` (`progress=100.0`), and PID+hash-isolated local scratch is purged cleanly.
+3. **Portable Offline Open3D Bridge Runtime (`.cluster/bridge_runtime/`)**:
+   - Supports Stage-4 Zero-Neural CPU Open3D Sim(3) ICP (`source/autometashape/core/icp_bridge.py` + `icp_worker.py`) on bare workers with **no system Python, no PyTorch, no CUDA toolkit, no admin rights, and no internet**.
+   - `<root>/.cluster/bridge_runtime/manifest.json` + SHA-256-verified `bridge_runtime_win_amd64_v1.zip` (~107 MB) auto-provisions once into `%LOCALAPPDATA%\AutoMetashape\bridge_runtime_v<version>` on the first project needing ICP (0 s overhead for single-block projects).
+   - `_clean_bridge_env()` strips Metashape DLL paths from `PATH` and clears `PYTHONHOME`/`PYTHONPATH`; Stage-0 clouds enforce 4 cm uniform spacing (`points_spacing=0.04` for 32 GB RAM safety) written strictly to `%TEMP%\autometashape_icp_*` (outside `local_staging_dir`, auto-pruned after 24 h).
 
-### 4. Autonomous 1-Hour Monitoring & Self-Healing Protocol
-For multi-hour cluster runs, run the canonical read-only monitor CLI:
-```powershell
-python scripts/cluster_monitor.py --server 127.0.0.1:5840 --result-share "\\HOST_PC\ResultSSD" --source-share "\\HOST_PC\DataSSD"
-```
-1. **Telemetry & Resource Scaling**: Reports accurate CPU % and RAM GB from Metashape 2.x `workerList()` `0–100%` resource usage metrics (`(memory_usage / 100.0) * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM reporting.
-2. **Dual-Share Isolation & Maintenance Filtering**: Strictly isolates read-only `--source-share` from deliverable/sidecar lookups (inspecting deliverables only under `--result-share`) and ignores internal `.cluster/` maintenance batches during deliverable verification.
-3. **Sidecar Inspection**: Read `_autometashape_status.json` from the shared output directory on Result Share.
-3. **Structured Hourly Status Reporting**:
-   - Active Batches: Current stage, subtask completion %, elapsed time, ETA.
-   - Worker Health: Active/idle states, GPU utilization, CPU %, RAM GB.
-   - Storage Headroom & Deliverables: Free space across Result & Data Source SSD shares and verified files on disk (`.obj`, `.mtl`, textures, `*_orthomosaic.tif`, `.tfw`, `.prj`).
-4. **Self-Healing Diagnostics**:
-   - *Dropped Worker*: Ping host, alert user, or trigger daemon restart.
-   - *Stalled Task (>45m 0% progress)*: Report to operator for authorized checkpoint resume.
-   - *Storage Latency / Access Drops*: Audit SMB UNC path connectivity.
+### 3. Canonical Batch Submission, Multi-Dataset Chaining & Checkpoint Resolution
 
-> [!IMPORTANT]
-> **Strict Non-Destructive Code Governance Boundary**:
-> - Permitted: Network reconnection, daemon restarts, batch retry via `--resume`, lockfile cleanup, and structured progress reporting.
-> - Strictly Prohibited: Never autonomously rewrite, mutate, refactor, or modify core reconstruction code or pipeline scripts during monitoring runs without explicit user authorization.
+Never compose ad-hoc dispatch scripts in chat or scratch directories — strictly use canonical scripts under `scripts/`:
+
+1. **Single-Project Canonical Dispatch (`scripts/submit_cluster_batch.py`)**:
+   - **Pre-Flight Physical Materialization Invariant**: Validates images, saves `<project>.psx` on Result Share, verifies `os.path.isfile(psx_path)`, releases locks via `doc.clear()`, and dispatches through idempotent `safe_create_cluster_batch()`.
+   - Defaults to `pro` preset (`50K` keypoints, `40K` tiepoints, `2K/MPx`, `k4=b1=b2=0`, 16×8K textures, 5 cm/px ortho, dense point cloud opt-in), `worker_limit=1`, `local_scratch=True`, and all folders included (natively bridging `Manual/` via hygiene + Open3D ICP; optional `--exclude-folders` includes a legacy-worker shim).
+   - **Staged Pausing**: Pass `--start-paused` to hold newly queued batches behind a pending remote fleet update until all target workers reboot onto the new commit.
+   - **Hidden `.cluster/tickets/` Recovery**: Always submits the canonical `<project>.psx` (attaching safely unless `--force` is passed). If Metashape Server 2.2.2 retains an un-evictable hard-killed aborted batch key (`Duplicate batch`), `safe_create_cluster_batch()` automatically dispatches via `<root>/.cluster/tickets/<slug>_<ts>_<pid>.psx` + `.ticket.json` — keeping `Result/<project>/` spotless without `_dispatch_*.psx` stubs while `cluster_monitor.py` resolves the real deliverable folder.
+   ```powershell
+   python scripts/submit_cluster_batch.py `
+       --images "\\HOST_PC\DataSSD\Survey_0167" `
+       --output "\\HOST_PC\ResultSSD\Survey_0167" `
+       --root "\\HOST_PC\ResultSSD" `
+       --preset pro --ortho-resolution 0.05 --priority 50
+   ```
+2. **Multi-Dataset Auto-Discovery & Queue Chaining (`scripts/cluster_supervisor.py`)**:
+   - Auto-discovers projects from `--scan-dir`, Dual-SSD (`--source-share` + `--result-share`), or a JSON manifest (`--manifest queue.json`), automatically skipping auxiliary output folders (`model`, `output`, `result`, `temp`, `*.files`).
+   - Supports **Mode 2 (Independent Concurrent, default with `--network-enable`)** and **Mode 1 (Centralized / Local Sequential via `--sequential` / `--no-concurrent`)**.
+   - **Metashape 2.2.2 Infinite-Retry Defense**: Respects operator-paused workers passively, rejects zombie `error_count > 0` batches, and aborts errored tasks stuck in `state="inprogress"` with `error_count > 0`.
+   ```powershell
+   python scripts/cluster_supervisor.py `
+       --source-share "\\HOST_PC\DataSSD\Batch_A" `
+       --result-share "\\HOST_PC\ResultSSD\Batch_A" `
+       --preset pro --ortho-resolution 0.05 --min-headroom-gb 50.0 `
+       --network-enable --network-host 10.5.10.202
+   ```
+3. **Hardened Checkpoint Resolution (`resolve_checkpoint_chunk(doc)`)**: On `--resume`, selects `Production_Reconstruction` first, falls back to the chunk with the highest aligned enabled camera count (`>= 2` skips alignment; `< 2` starts fresh cleanly).
+
+### 4. Read-Only Telemetry, Headroom Watchdog & The Operator Authority Gate
+
+**Core Invariant**: Agents and supervisors operate strictly as **Read-Only Telemetry Reporters**. All queue alterations, aborts, priority shifts, worker pauses, and setting changes **lie exclusively with the human operator**.
+
+1. **Canonical Read-Only Cluster Monitor** *(use `--server`, not `--host`)*:
+   ```powershell
+   python scripts/cluster_monitor.py --server 10.5.10.202 --result-share "\\HOST_PC\ResultSSD" --source-share "\\HOST_PC\DataSSD"
+   ```
+   - Reports accurate scaled CPU % and RAM GB from Metashape 2.x `workerList()` (`(memory_usage / 100.0) * memory_size`), with **no artificial RAM warning guard** and passive post-mortem `std::bad_alloc` / OOM auditing.
+   - Strictly isolates read-only `--source-share` from deliverable/sidecar checks and skips internal `.cluster/` maintenance batches.
+2. **Storage Headroom Watchdog (Win32 Error 112 Defense)**:
+   - Minimum safe free space: **50.0 GB** on the writable Result Share (`check_storage_headroom(path, 50.0)`). Below 50 GB, `cluster_supervisor.py` holds new dispatches in `PAUSED_LOW_DISK` and alerts the operator immediately rather than risking `ERROR_DISK_FULL` corruption.
+3. **Deliverable Integrity & Checkpoint Gates**:
+   ```powershell
+   python scripts/verify_deliverables.py --dir "\\HOST_PC\ResultSSD\Survey_0167" --expect obj ortho
+   python scripts/inspect_checkpoint.py --project "\\HOST_PC\ResultSSD\Survey_0167\Survey_0167.psx"
+   ```
+   - `verify_deliverables.py` checks OBJ size/vertices/faces + MTL/`map_Kd` textures, GLB `b'glTF'`, GeoTIFF/BigTIFF headers, LAZ/LAS/PLY headers (`>= 50 KB`), and PDF `%PDF` (`>= 15 KB`).
+   - For deep **3D geometric quality audits** (double-shells, detached ICP fragments, mixed multi-site folders, coverage gaps), invoke [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md).
+4. **Operator Authority Gate & Canonical Queue Controls (`scripts/manage_queue.py`)**:
+   Observe & Report -> Propose Action -> Await Operator Decision -> Execute Canonical CLI:
+   ```powershell
+   python scripts/manage_queue.py list --server 10.5.10.202
+   python scripts/manage_queue.py pause --batch 12
+   python scripts/manage_queue.py unpause --batch 12
+   python scripts/manage_queue.py set-priority --batch 29 --priority 100
+   python scripts/manage_queue.py abort --batch 58 --demote-priority -100
+   python scripts/manage_queue.py pause-worker --hostname CTUAV
+   python scripts/manage_queue.py unpause-worker --hostname CTUAV
+   python scripts/manage_queue.py clear-worker --worker-id 14 --only-aborted
+   python scripts/manage_queue.py set-worker-gpu-mask --hostname CTUAV --gpu-mask 2
+   ```
+   - **Prohibitions**: Zero uncommanded aborts/mutations, zero silent quality degradation, zero script-side node affinity rejection (`if COMPUTERNAME != target: sys.exit(2)` causes priority thrashing), and zero ad-hoc queue mutation scripts.
 
 ### 5. Host-Initiated Autonomous Worker Fleet Update Protocol
-When maintaining or upgrading remote cluster worker nodes from the Coordinator host:
-1. **Zero Fleet-Wide Blind Kills**: Never kill or push updates across all nodes simultaneously.
-2. **Single Canary Node Verification Gate**:
-   - Dispatch update probe to exactly **ONE canary worker node** first (e.g. canary or `Admin-pc`).
-   - Monitor canary state transition:
-     $$\text{inprogress (probe)} \longrightarrow \text{offline (releasing locks)} \longrightarrow \text{ready (online with fresh code)}$$
-   - Confirm canary node completes self-update and re-registers as `ready` within **30–60 seconds**.
-   - Only proceed across remaining worker nodes in staggered waves after canary passes.
-3. **Preserve Host / Coordinator Exemption & Selective Remote-Only Rollouts**: Coordinator host must be explicitly excluded from worker update batches, and never run worker kill/update commands against the server daemon. When the coordinator node runs directly out of the local Git working tree (or holds a long-running mega-project), target remote workers individually via `--node <host>` rather than `--node all`, stage any new batches requiring the update with `scripts/submit_cluster_batch.py --start-paused`, verify every remote worker reconnects cleanly on the new commit, and then unpause queued batches via `scripts/manage_queue.py unpause --batch <id>`.
-4. **Zero-Touch Headless Invariants**: Worker nodes execute non-interactively with automatic UNC path inference and dynamic GPU discovery.
-5. **Canonical Local Directory Invariant**: `%USERPROFILE%\Documents\AutoMetashape` is the **only permissible hardcoded directory** across all worker nodes. All other paths (storage root, server IP, GPU devices, scratch folders) MUST be dynamically auto-detected or explicitly configured via CLI/environment variables.
 
-#### Automated Fleet Updater CLI & API
-The repository provides an end-to-end autonomous remote updater (`scripts/update_fleet.py` and `update_fleet.bat`):
+1. **Governance Rules**:
+   - **Zero Blind Fleet Kills**: Never push unverified updates across all nodes simultaneously. Validate **ONE canary worker** first (`inprogress -> offline -> ready` within 30–60 s) before staggered rollout.
+   - **Coordinator Exemption & Selective Remote-Only Rollouts**: Exclude the coordinator host from remote updates. When the coordinator runs directly from the local Git working tree or holds a multi-hour mega-project, update remote nodes individually (`--node <host>`) instead of `--node all`, stage new batches with `submit_cluster_batch.py --start-paused`, confirm all remote workers reboot on the new commit, and then unpause via `manage_queue.py unpause`.
+   - **Canonical Directory & Zero-OS-Python Invariants**: `%USERPROFILE%\Documents\AutoMetashape` is the only permissible fixed local path on workers; `launch_worker.bat` and `reexec_supervisor` run strictly on Metashape's bundled Python without requiring Git or system Python on remote workers.
+2. **Fleet Updater CLI (`scripts/update_fleet.py` / `update_fleet.bat`)**:
+   ```powershell
+   .\update_fleet.bat --list
+   .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node canary
+   .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node Admin-pc          # default --force
+   .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node Admin-pc --safe   # skip if busy
+   .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node all
+   .\update_fleet.bat --root "\\HOST_PC\ResultSSD" --node Admin-pc --no-restart
+   ```
+3. **Decoupled Handshake, Watchdog-First Force Abort & Stale-ID Recovery**:
+   - **Watchdog-First `--force` Abort**: Aborts only the target worker's active `batch_id` and dispatches `dispatch_abort_signal(node_name=..., shared_root=...)` **before** `quitWorker` so C++ `RunScript`-blocked workers cleanly reap while unrelated workers keep running.
+   - **Per-Worker Maintenance Isolation**: Uses distinct `.cluster/maintenance_<slug>.psx` archives (real ZIP `project.zip/doc.xml`, `doc.clear()`, `worker_limit=1`), pauses non-target workers during `<50 ms` `.update_pending` signal registration, and restores all workers in a guaranteed `finally` block.
+   - **ZIP-Parity Mirror & Clean Re-Exec**: On child exit, `launch_worker.py` pulls `.cluster/update_payload.zip` (verified via `testzip()`, falling back to GitHub `main.zip`), mirrors files while preserving `worker_config.json`, `server_config.json`, `.agents/`, logs, and signal files, then re-execs cleanly (`subprocess.run` + `sys.exit` on Windows; `os.execv` on POSIX) with fresh GPU probing.
+   - **Stale Worker-ID `.update_pending` Recovery**: If a worker double-restarts during abort and `update_fleet.py` reports a restart-confirmation timeout (`Can't quit worker` on stale ID), `.update_pending` remains staged on disk. Check the worker's fresh ID and active batch, then run operator-approved `scripts/cluster_abort.py --node <name> --batch <active_bid> --root <share>` so `launch_worker.py` recycles the worker and applies `.update_pending`.
 
-- **List Connected Fleet Workers**:
-  ```powershell
-  .\update_fleet.bat --list
-  ```
-- **Update Single Canary Node** (verifies self-healing before wider rollout):
-  ```powershell
-  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node canary
-  ```
-- **Update Specific Worker Node** (default `--force` aborts active process for immediate update):
-  ```powershell
-  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc
-  ```
-- **Update Specific Worker in Safe Mode** (skips worker if busy on active reconstruction):
-  ```powershell
-  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --safe
-  ```
-- **Update Entire Fleet in Parallel**:
-  ```powershell
-  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node all
-  ```
-- **Update Codebase Without Daemon Restart** (signal registration only):
-  ```powershell
-  .\update_fleet.bat --root "\\HOST_PC\SharedMetashape" --node Admin-pc --no-restart
-  ```
+### 6. Signal-Based Worker Abort, GUI Lock Forensics & Self-Healing Watchdog
 
-#### Underlying Decoupled Handshake & Process Re-execution Architecture
-1. **Target Worker State Gating & Watchdog-First Force Abort**: If the targeted worker is currently busy on an active job, `--force` (default) aborts only the target worker's active `batch_id` (plus any stale maintenance batch) and dispatches the watchdog abort signal (`dispatch_abort_signal(node_name=..., shared_root=...)`) **before** `quitWorker` so C++ `RunScript`-blocked workers cleanly reap and recycle while unrelated workers keep running. `--safe` cleanly skips busy workers to protect jobs.
-   - **Stale Worker-ID `.update_pending` Recovery**: If a worker double-restarts during abort and `update_fleet.py` reports a restart-confirmation timeout (server log shows `Can't quit worker` on the stale ID), `.update_pending` remains staged on the remote host's disk. Inspect the worker's fresh ID and active batch in server logs or `cluster_monitor.py`, then issue `scripts/cluster_abort.py --node <name> --batch <active_bid> --root <share>` (with operator approval) so `launch_worker.py` cleanly recycles the child process and applies `.update_pending` immediately.
-2. **Per-Worker Maintenance Project & Cluster Isolation Guard**: Both single-node (`update_remote_worker`) and parallel (`update_all_workers_parallel`) rollouts assign each target worker a distinct `.cluster/maintenance_<slug>.psx` archive (with a real ZIP `project.zip` containing `doc.xml` on fallback, releasing locks via `doc.clear()`) so updates never collide on `safe_create_cluster_batch()`. Coordinator pauses non-target workers during signal dispatch, locks `worker_limit=1`, aborts any batch reporting `error_count > 0` (preventing Metashape 2.2.2 infinite retries), and restores all workers in a guaranteed `finally` teardown.
-3. **In-Task Signal Handshake (Zero In-Process File Locks)**:
-   - The injected Python task runs in `<50ms` inside `metashape.exe`.
-   - Verifies target `COMPUTERNAME` and locates target installation directory via `AUTOMETASHAPE_DIR`.
-   - Drops `.update_pending` signal file containing repo URL and payload cache path.
-   - Writes registration notice to `.cluster/<node>_update_result.txt`.
-   - Task completes immediately with zero network heavy downloads inside Metashape.
-4. **Graceful Daemon Signal**: Coordinator verifies task completion and calls `client.quitWorker(wid)`. Child `metashape.exe` terminates cleanly with return code 0, releasing all binary file handles.
-5. **Supervisor Autonomous Mirror & ZIP-Parity Prune (Zero Git on Workers)**:
-   - The persistent `launch_worker.py` supervisor intercepts child exit and detects `.update_pending`.
-   - Pulls the freshly staged ZIP archive (preferring high-speed LAN `.cluster/update_payload.zip` verified via `testzip()`, falling back to GitHub `main.zip`, matching `update.bat` without requiring Git on workers).
-   - Extracts archive, verifies repository structure, and executes case-safe Git-parity mirroring with automatic pruning of obsolete repository files.
-   - Strictly preserves machine-local files (`worker_config.json`, `server_config.json`), `.agents/`, logs, signal files (`.update_pending`, `.abort_pending`), and `.cluster/`.
-   - Removes `.update_pending`.
-6. **Clean Process Re-Execution**:
-   - Supervisor clears its PID file and relaunches `launch_worker.py` cleanly from disk (`subprocess.run` + `sys.exit` on Windows to preserve parent `.bat`/Task Scheduler handles and backslash escaping; `os.execv` on POSIX).
-   - Dynamic Metashape GPU probing (`probe_metashape_gpu_mask()`), TCP/UNC checks, and updated CLI flags execute fresh without stale memory.
-7. **Zero OS-Python Invariant**:
-   - `launch_worker.bat` and `reexec_supervisor` prioritize Metashape Pro's bundled Python (`python\python.exe`) across all system drives. Worker nodes operate 100% headless without requiring system Python.
-8. **Server Re-Registration**: Fresh worker process connects on a new socket port and registers with the server in `State=ready`.
-
-
-### 6. Signal-Based Worker Abort & Self-Healing Watchdog Protocol
-When an Agisoft Metashape batch is paused or aborted on the coordinator while running a monolithic task (`metashape_reconstruction.py`), the worker hangs because native C++ operations (OpenCV, FLANN matching, MVS stereopsis, CUDA depth maps) block the internal network listener. Furthermore, pausing an in-progress batch on the server freezes the scheduler state machine, locking the worker.
-
-AutoMetashape implements an autonomous signal-based abort-and-restart mechanism:
+When a monolithic `RunScript` task hangs in native C++ CUDA/MVS code or a paused batch freezes Metashape Server's scheduler, execute operator-authorized signal-based abort:
 
 ```mermaid
 sequenceDiagram
-    participant Coord as Coordinator / cluster_abort
+    participant Coord as cluster_abort.py
     participant Svr as Metashape Server (:5840)
     participant Watch as launch_worker Watchdog
-    participant MS as metashape.exe (Child Process)
-    participant Share as Shared UNC Root (.cluster/aborts/)
+    participant MS as metashape.exe (Child)
+    participant Share as Shared UNC (.cluster/aborts/)
 
-    Coord->>Svr: 1. setBatchPaused(id, False) (Unfreeze Scheduler State Machine)
-    Coord->>Svr: 2. abortBatch(id) & setBatchPriority(-100)
-    Coord->>Share: 3. Atomic Write <node_name>.abort Signal
-    loop Every 1.0s Polling Loop
-        Watch->>Share: Check local .abort_pending & <node>.abort
-    end
-    Watch->>Watch: Abort Signal Detected!
-    Watch->>MS: 4. proc.terminate() + taskkill /F /T /PID (Reap Entire Process Tree)
-    Watch->>Share: 5. cleanup_scratch_locks() (Bounded to max_depth=3)
-    Watch->>Share: 6. Acknowledge: write <node>.abort_ack & delete .abort
-    Watch->>Watch: 7. Delay 1.0s
-    Watch->>MS: 8. Relaunch metashape.exe --worker
-    MS->>Svr: 9. Reconnect & Re-register in State=ready
-    Coord->>Share: Await <node>.abort_ack or Reconnect in workerList()
+    Coord->>Svr: 1. setBatchPaused(id, False) -> abortBatch(id) -> setBatchPriority(-100)
+    Coord->>Share: 2. Atomic Write <node>.abort Signal
+    Watch->>Share: 3. 1.0s Polling Loop Detects <node>.abort
+    Watch->>MS: 4. taskkill /F /T /PID + proc.terminate() (PID-Scoped Tree Reap)
+    Watch->>Share: 5. Scoped cleanup_scratch_locks() (max_depth=3) & Write <node>.abort_ack
+    Watch->>MS: 6. 1.0s Delay -> Relaunch metashape.exe --worker
+    MS->>Svr: 7. Reconnect in State=ready
 ```
 
-#### Protocol Details
-1. **Non-Blocking Supervisor Watchdog**:
-   `scripts/launch_worker.py` replaces blocking `wait()` with a 1.0s watchdog polling loop monitoring local `.abort_pending` and network `<root>/.cluster/aborts/<node_name>.abort`.
-2. **Defensive Process-Tree Termination & Dual-Role Safety**:
-   `kill_worker_process()` initiates graceful termination, then enforces `taskkill /F /T /PID {proc.pid}` on Windows to ensure both parent worker daemons and any child processes running native CUDA stereopsis or scripts are reaped without leaving orphaned locks.
-   - **Zero Host-Wide Taskkill & Targeted GUI Lock Forensics**: In environments where a machine hosts both coordinator services and a compute worker (or an interactive Metashape Pro GUI session holding `.files/lock`), never execute `taskkill /IM metashape.exe`. Inspect exact window titles first via `tasklist /V /FI "IMAGENAME eq metashape.exe" /FO LIST` to identify and isolate ONLY the specific GUI PID holding the locked project archive (all termination strictly scoped via `taskkill /F /T /PID <pid>`). Remote nodes are signaled exclusively via atomic UNC files without local process interference.
-3. **Scoped Scratch Lock Cleanup & Single-Kill Acknowledgment**:
-   `cleanup_scratch_locks()` removes stale `lock` files strictly inside AutoMetashape/Metashape project and scratch directories (never sweeping unrelated `%TEMP%` files), bounded to `max_depth = 3`. `acknowledge_abort_signal()` purges both `<node>.abort` and the matching `.cluster/abort_signals.json` entry so workers never double-kill on reconnect.
-4. **Self-Healing Relaunch**:
-   After clearing signals and locks, the supervisor re-executes `metashape.exe --worker` with a 1.0s delay, seamlessly reconnecting to the coordinator in `State=ready`.
-5. **Remote Abort CLI & Native Runner Delegation**:
-   - `cluster_abort.bat` and `scripts/cluster_abort.py` unpause the frozen batch, abort it, demote its priority to `-100`, dispatch `<node>.abort`, and await acknowledgment:
-     ```powershell
-     # Using the batch runner (automatically locates and launches via metashape.exe -r)
-     .\cluster_abort.bat --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
-
-     # Or using the Python CLI (auto-delegates through metashape.exe -r if run under plain Python)
-     python scripts/cluster_abort.py --node DESKTOP-IFA3707 --batch 3 --server 192.168.1.100:5840 --root "\\SERVER\SharedMetashape"
-     ```
-   - **Metashape Runner Delegation**: Because `Metashape.NetworkClient` is embedded in `metashape.exe` and not in plain Python, `cluster_abort.bat` and `cluster_abort.py` automatically route through `metashape.exe -r` so server unpausing, batch aborting, and priority demotion execute natively.
+1. **Zero Host-Wide Taskkill & Targeted GUI `.files/lock` Forensics**: Never execute `taskkill /IM metashape.exe` (it kills dual-role coordinator/worker processes). When an interactive Metashape GUI holds `.files/lock`, inspect exact window titles via `tasklist /V /FI "IMAGENAME eq metashape.exe" /FO LIST` and terminate ONLY the specific GUI PID (`taskkill /F /T /PID <pid>`). Remote nodes are signaled strictly via atomic UNC `.abort` files.
+2. **Scoped Lock Cleanup & Single-Kill Ack**: `cleanup_scratch_locks()` cleans locks strictly inside Metashape/AutoMetashape project and scratch directories (`max_depth=3`); `acknowledge_abort_signal()` removes both `<node>.abort` and the matching `.cluster/abort_signals.json` entry so workers never double-kill.
+3. **Operator-Authorized Abort CLI** *(auto-routes through `metashape.exe -r`)*:
+   ```powershell
+   .\cluster_abort.bat --node DESKTOP-IFA3707 --batch 3 --server 10.5.10.202:5840 --root "\\HOST_PC\ResultSSD"
+   ```
 
 ---
 
 ## Validation
 
-Verify that all procedures and skill contracts execute cleanly:
-
-```bash
-# Validate skill architecture and governance rules
+```powershell
+# 1. Validate skill architecture and governance rules
 python tools/skills/cli.py check
 
-# Audit license compliance
+# 2. Audit license compliance
 python tools/check_licenses.py
 
-# Execute test suite covering cluster utilities, dual-share topology, alignment hygiene, ICP bridge, and regression guards
-python -m unittest tests/test_cluster_utils.py tests/test_cli_args.py tests/test_fleet_updater.py tests/test_worker_abort.py tests/test_dual_share.py tests/test_audit_regressions.py tests/test_alignment_hygiene.py tests/test_icp_bridge.py tests/test_exclude_folders.py
+# 3. Execute full cluster, supervisor, verification, dual-share, and hygiene/ICP test suites
+python -m unittest tests/test_cluster_utils.py tests/test_cluster_dispatch.py tests/test_cli_args.py tests/test_fleet_updater.py tests/test_worker_abort.py tests/test_supervisor.py tests/test_verification.py tests/test_checkpoint_loader.py tests/test_dual_share.py tests/test_audit_regressions.py tests/test_alignment_hygiene.py tests/test_icp_bridge.py tests/test_exclude_folders.py
+
+# 4. Verify canonical CLI entry points
+python scripts/submit_cluster_batch.py --help
+python scripts/cluster_monitor.py --help
+python scripts/verify_deliverables.py --help
 ```
 
 ---
 
 ## Maintenance
 
-- Review and audit worker connectivity and protocol compatibility with each Agisoft Metashape Pro minor/major update.
-- Verify that `worker_config.json` schema remains backward-compatible across existing fleet deployments.
-- Periodically validate NVMe scratch purge logic to guarantee zero residual disk leak on remote worker workstations.
+- Audit Metashape `NetworkClient` compatibility, `workerList()` scaling, and `enumGPUDevices()` GPU probing on each Metashape Pro release.
+- Keep `worker_config.json` backward-compatible across deployed worker fleets and extend `verify_project_deliverables` in `source/autometashape/core/verification.py` when adding new export formats.
+- Tune `min_headroom_gb` (default `50.0 GB`) and `--min-scratch-free-gb` (default `100.0 GB`) as dataset sizes scale.
 
 ---
 
 ## References
 
-- Contributing guide: [CONTRIBUTING.md](../../../CONTRIBUTING.md)
-- Image to 3D model skill: [skills/user/image-to-3d-model/SKILL.md](../image-to-3d-model/SKILL.md)
+- Contributing guide & Operator Authority Gate: [CONTRIBUTING.md](../../../CONTRIBUTING.md)
+- Cluster supervisor & dispatch engine: [source/autometashape/cluster/supervisor.py](../../../source/autometashape/cluster/supervisor.py)
+- Deliverable verification engine: [source/autometashape/core/verification.py](../../../source/autometashape/core/verification.py)
+- Image-to-3D model skill: [skills/user/image-to-3d-model/SKILL.md](../image-to-3d-model/SKILL.md)
 - Photogrammetry forensic audit skill: [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md)
+- Asset export skill: [skills/user/photogrammetry-export/SKILL.md](../photogrammetry-export/SKILL.md)
 - Benchmark evaluation suite: [evaluations.md](evaluations.md)

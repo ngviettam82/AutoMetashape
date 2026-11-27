@@ -172,7 +172,7 @@ AutoMetashape runs as a lean, production-grade, headless engine orchestrated dir
   - Each project runs atomically on 1 dedicated worker using local NVMe scratch with zero worker hopping and zero inter-worker LAN traffic, reconciling staged PSX chunk IDs (`reconcile_staged_psx_chunk_id`) before syncing deliverables back to shared storage.
   - Intermediate checkpoints saved to `.files` for instant resumption (`--resume`).
 - **Autonomous AI Agent Skill Protocol**:
-  - Managed via [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md) for 1-hour automated progress audits and self-healing dropped network workers.
+  - Managed via [`skills/user/cluster-fleet-operations`](skills/user/cluster-fleet-operations/SKILL.md) for read-only cluster telemetry, storage headroom watchdogs, and operator-authorized recovery.
 
 ---
 
@@ -229,10 +229,8 @@ All outputs are automatically organized inside the dedicated `<images_dir>/model
 
 This repository adheres to the **NVIDIA Isaac Lab** multi-asset skill architecture and governance standards:
 
-- [`skills/user/autonomous-photogrammetry`](skills/user/autonomous-photogrammetry/SKILL.md): Master coordinator for end-to-end multi-dataset photogrammetry operations across single or dual-SSD shared folder topologies.
-- [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md): Autonomous end-to-end photogrammetry pipeline with survey telemetry profiling, 4-stage zero-neural alignment hygiene & Open3D ICP bridging, `k4=b1=b2=0` lens lock, target detection, GCP georeferencing, opt-in dense point clouds, 3D tiles, DEM, contours, texture delighting, and PDF reporting.
-- [`skills/user/cluster-fleet-operations`](skills/user/cluster-fleet-operations/SKILL.md): Distributed cluster provisioning, dynamic multi-GPU discovery, fixed-NVMe local scratch staging, portable offline `.cluster/bridge_runtime/` provisioning, canary fleet updates, and signal-based worker abort & self-healing restarts.
-- [`skills/user/cluster-supervisor`](skills/user/cluster-supervisor/SKILL.md): Strict read-only cluster supervision under the Operator Authority Gate, storage headroom watchdogs, canonical batch submission & queue/worker controls, and deterministic deliverable quality gates.
+- [`skills/user/image-to-3d-model`](skills/user/image-to-3d-model/SKILL.md): Autonomous end-to-end photogrammetry pipeline across single or multi-project directories with survey telemetry profiling, 4-stage folder-/time-agnostic zero-neural alignment hygiene & sub-island-isolated Open3D ICP bridging, `k4=b1=b2=0` lens lock, target detection, GCP georeferencing, opt-in dense point clouds, 3D tiles, DEM, contours, texture delighting, and PDF reporting.
+- [`skills/user/cluster-fleet-operations`](skills/user/cluster-fleet-operations/SKILL.md): Unified distributed cluster orchestration and supervision — single/dual-SSD provisioning, dynamic `enumGPUDevices()` GPU bitmask discovery, fixed-NVMe local scratch staging, portable offline `.cluster/bridge_runtime/` provisioning, canonical batch dispatch & queue/worker controls under the Operator Authority Gate, storage headroom watchdogs, deliverable integrity verification, signal-based worker aborts, and canary/selective remote fleet updates.
 - [`skills/user/photogrammetry-export`](skills/user/photogrammetry-export/SKILL.md): Production asset export, 3D tiles, contours, point clouds, DEM, FBX/PLY, and texture delighting from existing projects.
 - [`skills/user/photogrammetry-forensic-audit`](skills/user/photogrammetry-forensic-audit/SKILL.md): Deep read-only forensic quality and alignment auditing across completed `.psx` archives, raw multi-flight source folders, and 3D deliverables (double-shell voxel NN verification, detached ICP fragment audits, 64 KB XMP mixed-site separation, and coverage-loss forensics).
 - [`skills/developer/coding-style`](skills/developer/coding-style/SKILL.md): Repository coding conventions, SPDX license headers, line limits, and formatting hygiene.
