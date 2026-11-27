@@ -101,6 +101,40 @@ SUPPORTED_IMAGE_EXTS = (
     ".ara",
 )
 
+_RAW_IMAGE_EXTS = frozenset(
+    {
+        ".dng",
+        ".cr2",
+        ".cr3",
+        ".crw",
+        ".nef",
+        ".nrw",
+        ".arw",
+        ".srf",
+        ".sr2",
+        ".iiq",
+        ".cap",
+        ".3fr",
+        ".fff",
+        ".rw2",
+        ".orf",
+        ".raf",
+        ".raw",
+        ".rwl",
+        ".pef",
+        ".ptx",
+    }
+)
+_THERMAL_MULTISPECTRAL_EXTS = frozenset({".seq", ".ara"})
+_RASTER_IMAGE_EXTS = frozenset(
+    ext for ext in SUPPORTED_IMAGE_EXTS if ext not in _RAW_IMAGE_EXTS and ext not in _THERMAL_MULTISPECTRAL_EXTS
+)
+
+
+def _is_supported_image_file(filename: str) -> bool:
+    """Return True for non-hidden supported images (skips macOS AppleDouble '._*' dotfiles)."""
+    return bool(filename) and not filename.startswith(".") and filename.lower().endswith(SUPPORTED_IMAGE_EXTS)
+
 # Professional Camera Optics & Sensor Database for Aerial Photogrammetry Payloads
 CAMERA_HARDWARE_DB: dict[str, dict] = {
     # DJI Enterprise & High-End Payloads (Mechanical Leaf / Global Shutters)
@@ -386,6 +420,17 @@ def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: floa
     return r_earth * c
 
 
+def _extract_xmp_slice(buf: bytes) -> bytes:
+    """Extract the first ``<x:xmpmeta>...</x:xmpmeta>`` packet from ``buf``, or empty bytes."""
+    start = buf.find(b"<x:xmpmeta")
+    if start == -1:
+        return b""
+    end = buf.find(b"</x:xmpmeta>", start)
+    if end == -1:
+        return b""
+    return buf[start : end + 12]
+
+
 def parse_xmp_telemetry(img_path: str) -> dict:
     """Fast probe extracting DJI RelativeAltitude, ShutterType, and GimbalPitch from XMP packet."""
     res = {"relative_alt": None, "shutter_type": None, "gimbal_pitch": None}
@@ -393,29 +438,41 @@ def parse_xmp_telemetry(img_path: str) -> dict:
         with open(img_path, "rb") as f:
             head = f.read(262144)
             start = head.find(b"<x:xmpmeta")
+            xmp_bytes = b""
             if start != -1:
-                end = head.find(b"</x:xmpmeta>", start)
-                if end != -1:
-                    xmp_str = head[start : end + 12].decode("utf-8", errors="ignore")
-                    m = re.search(r'RelativeAltitude=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
-                    if not m:
-                        m = re.search(r"<[^>]*RelativeAltitude>([+-]?\d+(?:\.\d+)?)</[^>]*RelativeAltitude>", xmp_str)
-                    if m:
-                        res["relative_alt"] = float(m.group(1))
+                if head.find(b"</x:xmpmeta>", start) == -1:
+                    extra = f.read(65536)
+                    if extra:
+                        head = head + extra
+                xmp_bytes = _extract_xmp_slice(head)
+            else:
+                f.seek(0, os.SEEK_END)
+                file_size = f.tell()
+                if file_size > 262144:
+                    f.seek(max(0, file_size - 262144))
+                    xmp_bytes = _extract_xmp_slice(f.read(262144))
 
-                    m_sh = re.search(r'ShutterType=["\']([A-Za-z]+)["\']', xmp_str)
-                    if not m_sh:
-                        m_sh = re.search(r"<[^>]*ShutterType>([A-Za-z]+)</[^>]*ShutterType>", xmp_str)
-                    if m_sh:
-                        res["shutter_type"] = m_sh.group(1).strip().lower()
+            if xmp_bytes:
+                xmp_str = xmp_bytes.decode("utf-8", errors="ignore")
+                m = re.search(r'RelativeAltitude=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
+                if not m:
+                    m = re.search(r"<[^>]*RelativeAltitude>([+-]?\d+(?:\.\d+)?)</[^>]*RelativeAltitude>", xmp_str)
+                if m:
+                    res["relative_alt"] = float(m.group(1))
 
-                    m_pitch = re.search(r'GimbalPitchDegree=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
-                    if not m_pitch:
-                        m_pitch = re.search(
-                            r"<[^>]*GimbalPitchDegree>([+-]?\d+(?:\.\d+)?)</[^>]*GimbalPitchDegree>", xmp_str
-                        )
-                    if m_pitch:
-                        res["gimbal_pitch"] = float(m_pitch.group(1))
+                m_sh = re.search(r'ShutterType=["\']([A-Za-z]+)["\']', xmp_str)
+                if not m_sh:
+                    m_sh = re.search(r"<[^>]*ShutterType>([A-Za-z]+)</[^>]*ShutterType>", xmp_str)
+                if m_sh:
+                    res["shutter_type"] = m_sh.group(1).strip().lower()
+
+                m_pitch = re.search(r'GimbalPitchDegree=["\']([+-]?\d+(?:\.\d+)?)["\']', xmp_str)
+                if not m_pitch:
+                    m_pitch = re.search(
+                        r"<[^>]*GimbalPitchDegree>([+-]?\d+(?:\.\d+)?)</[^>]*GimbalPitchDegree>", xmp_str
+                    )
+                if m_pitch:
+                    res["gimbal_pitch"] = float(m_pitch.group(1))
     except Exception:
         pass
     return res
@@ -613,11 +670,40 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
         try:
             if has_pil:
                 with Image.open(p) as img:
-                    thumb = img.resize((256, 256)).convert("L")
-                    hist = thumb.histogram()
-                    total = 256 * 256
-                    shadow_counts.append(sum(hist[:20]) / total)
-                    highlight_counts.append(sum(hist[235:]) / total)
+                    thumb = img.resize((256, 256))
+                    mode = getattr(thumb, "mode", "")
+                    if isinstance(mode, str) and (mode.startswith("I") or mode == "F"):
+                        extrema = thumb.getextrema()
+                        lo = float(extrema[0]) if isinstance(extrema, (tuple, list)) else 0.0
+                        hi = float(extrema[1]) if isinstance(extrema, (tuple, list)) else 255.0
+                        if mode == "F":
+                            if 0.0 <= lo and hi <= 1.0:
+                                offset, denom = 0.0, 1.0
+                            else:
+                                offset, denom = lo, (hi - lo) if hi > lo else 1.0
+                        elif "16" in mode or hi > 255.0:
+                            offset, denom = 0.0, 65535.0 if hi <= 65535.0 else hi
+                        else:
+                            offset, denom = 0.0, 255.0
+                        pixels = list(thumb.getdata())
+                        total_px = len(pixels)
+                        if total_px > 0:
+                            sh_cnt = 0
+                            hi_cnt = 0
+                            for px in pixels:
+                                val = float(px[0] if isinstance(px, (tuple, list)) else px)
+                                luma = ((val - offset) / denom) * 255.0
+                                if luma < 20.0:
+                                    sh_cnt += 1
+                                elif luma > 235.0:
+                                    hi_cnt += 1
+                            shadow_counts.append(sh_cnt / total_px)
+                            highlight_counts.append(hi_cnt / total_px)
+                    else:
+                        hist = thumb.convert("L").histogram()
+                        total = 256 * 256
+                        shadow_counts.append(sum(hist[:20]) / total)
+                        highlight_counts.append(sum(hist[235:]) / total)
             elif has_meta:
                 try:
                     im = Metashape.Image.open(p, datatype="U8", channels="RGB")
@@ -692,26 +778,75 @@ def _is_ignored_survey_dir(dir_name: str) -> bool:
 
 
 def _file_edge_hash(path: str, chunk_bytes: int = 4096) -> str:
-    """Compute a fast SHA-256 fingerprint from the first and last 4 KB of an image file."""
+    """Compute a fast SHA-256 fingerprint from file size plus head, middle, and tail slices."""
     h = hashlib.sha256()
     size = os.path.getsize(path)
+    h.update(str(size).encode("ascii"))
     with open(path, "rb") as f:
         h.update(f.read(chunk_bytes))
+        if size > 2 * chunk_bytes:
+            f.seek((size - chunk_bytes) // 2)
+            h.update(f.read(chunk_bytes))
         if size > chunk_bytes:
             f.seek(max(0, size - chunk_bytes))
             h.update(f.read(chunk_bytes))
     return h.hexdigest()
 
 
+def _file_full_hash(path: str, buf_size: int = 65536) -> str:
+    """Compute exact full-file SHA-256 digest to confirm byte equality on duplicate candidates."""
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while True:
+            chunk = f.read(buf_size)
+            if not chunk:
+                break
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def deduplicate_raw_sidecar_pairs(groups: dict[str, list[str]]) -> tuple[dict[str, list[str]], int]:
+    """Skip co-located RAW sidecars when an identical-stem raster image exists in the same folder."""
+    filtered: dict[str, list[str]] = {}
+    removed_count = 0
+    for grp_name, paths in groups.items():
+        raster_stems: set[tuple[str, str]] = set()
+        for path in paths:
+            abs_dir = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+            stem, ext = os.path.splitext(os.path.basename(path))
+            if ext.lower() in _RASTER_IMAGE_EXTS:
+                raster_stems.add((abs_dir, stem.lower()))
+
+        kept: list[str] = []
+        for path in paths:
+            abs_dir = os.path.normcase(os.path.dirname(os.path.abspath(path)))
+            stem, ext = os.path.splitext(os.path.basename(path))
+            if ext.lower() in _RAW_IMAGE_EXTS and (abs_dir, stem.lower()) in raster_stems:
+                removed_count += 1
+                continue
+            kept.append(path)
+        if kept:
+            filtered[grp_name] = kept
+
+    if removed_count > 0:
+        print(
+            f"  [Ingest Hygiene] Skipped {removed_count:,} RAW sidecar(s) paired with same-stem raster images "
+            "(standalone RAW files preserved).",
+            flush=True,
+        )
+    return filtered, removed_count
+
+
 def deduplicate_photo_groups(groups: dict[str, list[str]]) -> tuple[dict[str, list[str]], int]:
     """Remove exact duplicate image copies across subfolders without modifying files on disk.
 
-    Detects copies sharing identical filename (case-insensitive), byte size, and edge content hash
-    (e.g. duplicate backup folders inside raw UAV project directories) while preserving distinct
-    captures that merely share a filename like ``DJI_0001.JPG``.
+    Detects copies sharing identical filename (case-insensitive), byte size, sampled slice
+    fingerprint, and verified full-file SHA-256 digest while preserving distinct captures that
+    merely share a filename like ``DJI_0001.JPG``.
     """
     seen_by_name_size: dict[tuple[str, int], list[str]] = {}
     edge_hashes: dict[str, str] = {}
+    full_hashes: dict[str, str] = {}
     deduped: dict[str, list[str]] = {}
     removed_count = 0
 
@@ -737,8 +872,13 @@ def deduplicate_photo_groups(groups: dict[str, list[str]]) -> tuple[dict[str, li
                     if prior not in edge_hashes:
                         edge_hashes[prior] = _file_edge_hash(prior)
                     if edge_hashes[prior] == cur_hash:
-                        is_dup = True
-                        break
+                        if prior not in full_hashes:
+                            full_hashes[prior] = _file_full_hash(prior)
+                        if path not in full_hashes:
+                            full_hashes[path] = _file_full_hash(path)
+                        if full_hashes[prior] == full_hashes[path]:
+                            is_dup = True
+                            break
                 if is_dup:
                     removed_count += 1
                     continue
@@ -764,18 +904,19 @@ def discover_image_subfolder_groups(
     output_dir: str = None,
     exclude_folders: str | list[str] | tuple[str, ...] | None = None,
     deduplicate: bool = True,
+    deduplicate_raw_pairs: bool = True,
 ) -> dict:
     """Discovers images grouped by immediate subfolders under images_dir.
 
     Excludes output directory, subfolders named 'model*', hidden directories, stray Metashape
-    ``*.files`` asset directories, and any subfolder matching ``exclude_folders`` (or
-    ``AUTOMETASHAPE_EXCLUDE_FOLDERS`` env var). Optionally deduplicates exact duplicate copies.
+    ``*.files`` asset directories, hidden/AppleDouble dotfiles, and any subfolder matching
+    ``exclude_folders`` (or ``AUTOMETASHAPE_EXCLUDE_FOLDERS`` env var). Optionally skips
+    RAW+raster sidecar duplicates and deduplicates exact duplicate copies.
     If multiple image-bearing subfolders are found (e.g. multi-drone or multi-flight captures),
     returns a dictionary mapping folder names to their list of image filepaths.
     If images only reside at the root level or in a single subfolder, returns a dictionary
     with a single entry.
     """
-    supported_exts = SUPPORTED_IMAGE_EXTS
     abs_images = os.path.abspath(images_dir)
     abs_output = os.path.abspath(output_dir) if output_dir else None
     # Only exclude output_dir when it is strictly a proper subdirectory inside images_dir
@@ -820,11 +961,11 @@ def discover_image_subfolder_groups(
                     kept_dirs.append(d)
                 dirs[:] = kept_dirs
                 for f in files:
-                    if f.lower().endswith(supported_exts):
+                    if _is_supported_image_file(f):
                         sub_imgs.append(os.path.join(r, f))
             if sub_imgs:
                 groups[entry] = sorted(sub_imgs)
-        elif os.path.isfile(full_path) and entry.lower().endswith(supported_exts):
+        elif os.path.isfile(full_path) and _is_supported_image_file(entry):
             root_images.append(full_path)
 
     if excluded_dirs:
@@ -852,15 +993,86 @@ def discover_image_subfolder_groups(
                 and not (exclude_output and _is_same_or_subpath(os.path.join(r, d), abs_output))
             ]
             for f in files:
-                if f.lower().endswith(supported_exts):
+                if _is_supported_image_file(f):
                     all_imgs.append(os.path.join(r, f))
         if all_imgs:
             groups["Main"] = sorted(all_imgs)
+
+    if deduplicate and deduplicate_raw_pairs and groups:
+        groups, _ = deduplicate_raw_sidecar_pairs(groups)
 
     if deduplicate and groups:
         groups, _ = deduplicate_photo_groups(groups)
 
     return groups
+
+
+def _match_camera_hardware(make: str = "", model: str = "", label: str = "") -> dict | None:
+    """Resolve sensor optical entry from ``CAMERA_HARDWARE_DB`` with specific-key precedence."""
+    make_s = make.strip() if isinstance(make, str) else ""
+    model_s = model.strip() if isinstance(model, str) else ""
+    label_s = label.strip() if isinstance(label, str) else ""
+    combined_name = f"{make_s} {model_s} {label_s}".strip().lower()
+    if not combined_name:
+        return None
+    compact_model = f"{model_s} {label_s}".lower().replace("-", "").replace(" ", "")
+    is_dji_drone = (
+        ("dji" in combined_name)
+        or bool(re.search(r"\bfc\d{3,4}", combined_name))
+        or ("l1d-20c" in combined_name)
+        or ("l2d-20c" in combined_name)
+    )
+    brand_only_keys = frozenset({"hasselblad", "phase one", "wingtra"})
+
+    for k, v in sorted(
+        CAMERA_HARDWARE_DB.items(),
+        key=lambda kv: (kv[0] not in brand_only_keys, len(kv[0])),
+        reverse=True,
+    ):
+        if k == "hasselblad" and is_dji_drone:
+            continue
+        if k in combined_name or (compact_model and k in compact_model):
+            return v
+    return None
+
+
+def classify_sensor_shutter(
+    make: str = "",
+    model: str = "",
+    xmp_shutter: str | None = None,
+    label: str = "",
+) -> str:
+    """Classify a sensor shutter as ``'mechanical'`` or ``'rolling'`` from EXIF/XMP/hardware DB."""
+    if isinstance(xmp_shutter, str) and xmp_shutter.strip():
+        xs = xmp_shutter.strip().lower()
+        if xs in ("electronic", "rolling"):
+            return "rolling"
+        if xs in ("mechanical", "global"):
+            return "mechanical"
+
+    matched_hardware = _match_camera_hardware(make=make, model=model, label=label)
+    if matched_hardware:
+        return str(matched_hardware.get("shutter", "mechanical"))
+
+    make_s = make.strip() if isinstance(make, str) else ""
+    model_s = model.strip() if isinstance(model, str) else ""
+    label_s = label.strip() if isinstance(label, str) else ""
+    combined_name = f"{make_s} {model_s} {label_s}".strip().lower()
+    is_dji_drone = (
+        ("dji" in combined_name)
+        or bool(re.search(r"\bfc\d{3,4}", combined_name))
+        or ("l1d-20c" in combined_name)
+        or ("l2d-20c" in combined_name)
+    )
+    if "l2d" in combined_name:
+        return "rolling"
+    if make_s.lower() == "dji" or is_dji_drone:
+        if any(k in combined_name for k in ["fc6310", "m3e", "m4e", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
+            return "mechanical"
+        return "rolling"
+    if any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone", "gopro"]):
+        return "rolling"
+    return "mechanical"
 
 
 def analyze_survey_physics(
@@ -892,6 +1104,7 @@ def analyze_survey_physics(
     makes = []
     models = []
     coords = []
+    sensor_meta_samples: dict[str, tuple[str, str, str | None, str | None]] = {}
 
     has_meta = False
     try:
@@ -911,11 +1124,16 @@ def analyze_survey_physics(
                 meta = c.photo.meta
                 make = meta["Exif/Make"] if "Exif/Make" in meta else ""
                 model = meta["Exif/Model"] if "Exif/Model" in meta else ""
+                xmp_shutter = meta["DJI/ShutterType"] if "DJI/ShutterType" in meta else None
+                cam_path = c.photo.path if getattr(c, "photo", None) else None
+                cam_label = f"{make} {model}".strip()
                 if model:
-                    cameras_detected.add(f"{make} {model}".strip())
+                    cameras_detected.add(cam_label)
                     models.append(model)
                 if make:
                     makes.append(make)
+                if cam_label and cam_label not in sensor_meta_samples:
+                    sensor_meta_samples[cam_label] = (make, model, xmp_shutter, cam_path)
                 w = c.sensor.width if c.sensor else 0
                 h = c.sensor.height if c.sensor else 0
                 if w > 0:
@@ -947,8 +1165,8 @@ def analyze_survey_physics(
                         rel_alt_val = float(meta["DJI/RelativeAltitude"])
                     except (ValueError, TypeError):
                         pass
-                if rel_alt_val is None and c.photo and c.photo.path:
-                    rel_alt_val = parse_xmp_relative_altitude(c.photo.path)
+                if rel_alt_val is None and cam_path:
+                    rel_alt_val = parse_xmp_relative_altitude(cam_path)
                 if rel_alt_val is not None:
                     rel_alts.append(rel_alt_val)
         except Exception:
@@ -965,6 +1183,7 @@ def analyze_survey_physics(
             makes.clear()
             models.clear()
             coords.clear()
+            sensor_meta_samples.clear()
         finally:
             if temp_doc is not None and hasattr(temp_doc, "clear"):
                 try:
@@ -983,11 +1202,16 @@ def analyze_survey_physics(
                     alts.append(t["alt"])
             if t.get("relative_alt") is not None:
                 rel_alts.append(t["relative_alt"])
-            if t["model"]:
-                cameras_detected.add(f"{t['make']} {t['model']}".strip())
-                models.append(t["model"])
-            if t["make"]:
-                makes.append(t["make"])
+            mk = t.get("make", "")
+            md = t.get("model", "")
+            cam_label = f"{mk} {md}".strip()
+            if md:
+                cameras_detected.add(cam_label)
+                models.append(md)
+            if mk:
+                makes.append(mk)
+            if cam_label and cam_label not in sensor_meta_samples:
+                sensor_meta_samples[cam_label] = (mk, md, t.get("xmp_shutter"), path)
             if t["width"] > 0:
                 widths.append(t["width"])
                 heights.append(t["height"])
@@ -1000,31 +1224,17 @@ def analyze_survey_physics(
     gps_ratio = gps_count / len(sampled) if sampled else 0.0
     has_gps = gps_ratio >= 0.70
 
+    sensor_shutters: dict[str, str] = {}
+    for cam_label, (mk, md, xs, cpath) in sensor_meta_samples.items():
+        if xs is None and cpath and _match_camera_hardware(make=mk, model=md) is None:
+            xs = parse_xmp_telemetry(cpath).get("shutter_type")
+        sensor_shutters[cam_label] = classify_sensor_shutter(make=mk, model=md, xmp_shutter=xs)
+
     # Sensor hardware resolution: specific model codes always beat generic brand fallbacks,
     # and longer keys beat shorter prefixes (so fc6310r beats fc6310, l2d-20c beats hasselblad).
     primary_model = max(set(models), key=models.count) if models else ""
     primary_make = max(set(makes), key=makes.count) if makes else ""
-    combined_name = f"{primary_make} {primary_model}".strip().lower()
-    compact_model = primary_model.lower().replace("-", "").replace(" ", "") if primary_model else ""
-    is_dji_drone = (
-        ("dji" in combined_name)
-        or bool(re.search(r"\bfc\d{3,4}", combined_name))
-        or ("l1d-20c" in combined_name)
-        or ("l2d-20c" in combined_name)
-    )
-    brand_only_keys = frozenset({"hasselblad", "phase one", "wingtra"})
-
-    matched_hardware = None
-    for k, v in sorted(
-        CAMERA_HARDWARE_DB.items(),
-        key=lambda kv: (kv[0] not in brand_only_keys, len(kv[0])),
-        reverse=True,
-    ):
-        if k == "hasselblad" and is_dji_drone:
-            continue
-        if k in combined_name or (compact_model and k in compact_model):
-            matched_hardware = v
-            break
+    matched_hardware = _match_camera_hardware(make=primary_make, model=primary_model)
 
     avg_w = sum(widths) / len(widths) if widths else 4000
     avg_h = sum(heights) / len(heights) if heights else 3000
@@ -1051,21 +1261,12 @@ def analyze_survey_physics(
         # Robust physical shutter determination (direct XMP read works without PIL):
         xmp_shutters = [parse_xmp_telemetry(p).get("shutter_type") for p in sampled[:10]]
         xmp_shutter_valid = [s for s in xmp_shutters if s]
-        if any(s == "electronic" for s in xmp_shutter_valid):
-            shutter = "rolling"
-        elif any(s == "mechanical" for s in xmp_shutter_valid):
-            shutter = "mechanical"
-        elif "l2d" in combined_name:
-            shutter = "rolling"
-        elif primary_make.lower() == "dji":
-            if any(k in combined_name for k in ["fc6310", "m3e", "m4e", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
-                shutter = "mechanical"
-            else:
-                shutter = "rolling"
-        elif any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone", "gopro"]):
-            shutter = "rolling"
-        else:
-            shutter = "mechanical"
+        primary_xmp = (
+            "electronic"
+            if any(s == "electronic" for s in xmp_shutter_valid)
+            else ("mechanical" if any(s == "mechanical" for s in xmp_shutter_valid) else None)
+        )
+        shutter = classify_sensor_shutter(make=primary_make, model=primary_model, xmp_shutter=primary_xmp)
         sensor_name = f"{primary_make} {primary_model}".strip() or "Standard Optical Sensor"
 
     # Flight altitude AGL
@@ -1190,6 +1391,8 @@ def analyze_survey_physics(
         "sensor_h_mm": sensor_h_mm,
         "pixel_pitch_um": pixel_pitch_um,
         "shutter": shutter,
+        "sensor_shutters": sensor_shutters,
+        "has_mixed_shutters": len(set(sensor_shutters.values())) > 1,
         "forward_overlap_pct": fwd_ov,
         "lateral_overlap_pct": lat_ov,
         "shadow_clip_ratio": rad["shadow_clip_ratio"],
@@ -1211,8 +1414,15 @@ def derive_pro_photogrammetry_plan(physics: dict) -> dict:
     crop_method = "gps-square" if has_gps else "structure"
     custom_faces = 2000000
     texture_pages = 16
-    build_orthomosaic = True
+    build_orthomosaic = bool(has_gps)
     ortho_resolution = 0.05  # 5 cm/px (~25x lighter storage than 1 cm/px native GSD)
+    if gsd_cm is not None:
+        try:
+            gsd_val = float(gsd_cm)
+            if math.isfinite(gsd_val) and gsd_val > 5.0:
+                ortho_resolution = round(gsd_val / 100.0, 3)
+        except (TypeError, ValueError):
+            pass
     build_dem = False
     build_point_cloud = False
     classify_ground = False

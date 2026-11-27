@@ -16,6 +16,12 @@ try:
 except ImportError:
     Metashape = None
 
+from autometashape.cluster.dual_share import extract_path_leaf_name
+from autometashape.core.crs_utils import (
+    crs_linear_unit_to_meters,
+    is_linear_crs,
+    is_local_or_engineering_crs,
+)
 from autometashape.core.telemetry import compute_utm_epsg, is_projected_crs
 from autometashape.ipc.protocol import (
     IPC_COMPLETE,
@@ -70,6 +76,53 @@ _EXPORT_SUBDIR_NAMES = frozenset(
 )
 
 
+def _extract_dir_project_candidate(dir_path: str, skip_names: frozenset[str] | tuple[str, ...]) -> str:
+    """Extract a non-generic project name from a local, drive, or UNC directory path."""
+    raw = str(dir_path or "").strip().rstrip("\\/")
+    if not raw or raw in (".", ".."):
+        if not raw:
+            return ""
+        raw = os.path.abspath(raw).rstrip("\\/")
+
+    def _is_bare_drive_or_root(p: str) -> bool:
+        s = p.strip().rstrip("\\/")
+        if not s or s == "/":
+            return True
+        return len(s) == 2 and s[0].isascii() and s[0].isalpha() and s[1] == ":"
+
+    if _is_bare_drive_or_root(raw):
+        return ""
+
+    leaf = extract_path_leaf_name(raw, fallback="")
+    if not leaf:
+        return ""
+    if leaf.lower() in skip_names:
+        parent = os.path.dirname(raw)
+        if _is_bare_drive_or_root(parent):
+            return ""
+        return extract_path_leaf_name(parent, fallback="")
+    return leaf
+
+
+_GENERIC_IMAGE_DIRS = frozenset(
+    {
+        "images",
+        "photos",
+        "raw",
+        "dji",
+        "survey",
+        "data",
+        "input",
+        "ảnh",
+        "anh",
+        "ảnh chụp",
+        "anh chup",
+        "dữ liệu",
+        "du lieu",
+    }
+)
+
+
 def infer_project_name(
     images_dir: str | None = None,
     output_dir: str | None = None,
@@ -80,53 +133,28 @@ def infer_project_name(
         base = os.path.splitext(os.path.basename(project_file))[0]
         if base and base.lower() != "building_reconstruction":
             return base
-        parent = os.path.basename(os.path.dirname(os.path.abspath(project_file)))
-        if parent.lower() in _EXPORT_SUBDIR_NAMES:
-            grandparent = os.path.basename(os.path.dirname(os.path.dirname(os.path.abspath(project_file))))
-            if grandparent:
-                return grandparent
-        if parent:
-            return parent
+        parent_dir = os.path.dirname(project_file)
+        if parent_dir:
+            cand = _extract_dir_project_candidate(parent_dir, _EXPORT_SUBDIR_NAMES)
+            if cand:
+                return cand
 
     if images_dir:
-        abs_img = os.path.abspath(images_dir)
-        base = os.path.basename(abs_img)
-        if base.lower() in (
-            "images",
-            "photos",
-            "raw",
-            "dji",
-            "survey",
-            "data",
-            "input",
-            "ảnh",
-            "anh",
-            "ảnh chụp",
-            "anh chup",
-            "dữ liệu",
-            "du lieu",
-        ) and os.path.dirname(abs_img):
-            base = os.path.basename(os.path.dirname(abs_img))
-        if base and base not in (".", "/", "\\"):
-            return base
+        cand = _extract_dir_project_candidate(images_dir, _GENERIC_IMAGE_DIRS)
+        if cand:
+            return cand
 
     if output_dir:
-        abs_out = os.path.abspath(output_dir)
-        base = os.path.basename(abs_out)
-        if base.lower() in _EXPORT_SUBDIR_NAMES and os.path.dirname(abs_out):
-            base = os.path.basename(os.path.dirname(abs_out))
-        if base and base not in (".", "/", "\\"):
-            return base
+        cand = _extract_dir_project_candidate(output_dir, _EXPORT_SUBDIR_NAMES)
+        if cand:
+            return cand
 
     return "project"
 
 
 def _is_local_or_unreferenced_crs(crs) -> bool:
-    """Return True when ``crs`` is None or a local/non-georeferenced coordinate system."""
-    if crs is None:
-        return True
-    wkt = str(getattr(crs, "wkt", "") or "").upper()
-    return "LOCAL_CS" in wkt
+    """Return True when ``crs`` is None or a local/engineering coordinate system."""
+    return is_local_or_engineering_crs(crs)
 
 
 def _infer_model_format_from_path(model_path: str):
@@ -213,6 +241,18 @@ def _build_metric_ortho_projection(chunk):
         except Exception:
             pass
     return proj
+
+
+def _select_point_cloud_export_crs(chunk):
+    """Select a projected metric CRS when exporting point clouds from a geographic CRS."""
+    cur_crs = getattr(chunk, "crs", None)
+    if cur_crs is None or is_projected_crs(cur_crs) or _is_local_or_unreferenced_crs(cur_crs):
+        return None
+    proj = _build_metric_ortho_projection(chunk)
+    target_crs = getattr(proj, "crs", None) if proj is not None else None
+    if target_crs is not None and target_crs is not cur_crs and is_projected_crs(target_crs):
+        return target_crs
+    return None
 
 
 def export_project_assets(
@@ -604,15 +644,19 @@ def _export_opened_document(
         )
         pc_out = os.path.join(output_dir, f"{project_name}_point_cloud{pc_ext}")
         print(f"\n[Point Cloud] Exporting Dense Point Cloud to: {pc_out}...", flush=True)
-        chunk.exportPointCloud(
-            path=pc_out,
-            format=pc_fmt,
-            source_data=Metashape.DataSource.PointCloudData,
-            save_point_color=True,
-            save_point_normal=True,
-            save_point_confidence=True,
-            save_point_classification=True,
-        )
+        pc_crs = _select_point_cloud_export_crs(chunk)
+        pc_kwargs = {
+            "path": pc_out,
+            "format": pc_fmt,
+            "source_data": Metashape.DataSource.PointCloudData,
+            "save_point_color": True,
+            "save_point_normal": True,
+            "save_point_confidence": True,
+            "save_point_classification": True,
+        }
+        if pc_crs is not None:
+            pc_kwargs["crs"] = pc_crs
+        chunk.exportPointCloud(**pc_kwargs)
         print(f"  Saved Point Cloud: {pc_out} ({os.path.getsize(pc_out) / (1024 * 1024):.2f} MB)", flush=True)
 
     # 4. Optional DEM Export
@@ -669,7 +713,7 @@ def _export_opened_document(
         eff_ortho_res = float(ortho_resolution) if ortho_resolution and ortho_resolution > 0 else 0.0
         proj_om = _build_metric_ortho_projection(chunk)
         proj_om_crs = getattr(proj_om, "crs", None) if proj_om is not None else getattr(chunk, "crs", None)
-        ortho_crs_is_metric = is_projected_crs(proj_om_crs) or _is_local_or_unreferenced_crs(proj_om_crs)
+        ortho_crs_is_metric = proj_om_crs is None or is_linear_crs(proj_om_crs)
         if not has_ortho:
             res_label = (
                 f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and ortho_crs_is_metric) else "native GSD"
@@ -687,7 +731,8 @@ def _export_opened_document(
                     surf_data = Metashape.DataSource.ElevationData
                 ortho_kwargs = {"surface_data": surf_data}
                 if eff_ortho_res > 0 and ortho_crs_is_metric:
-                    ortho_kwargs["resolution"] = eff_ortho_res
+                    unit_m = crs_linear_unit_to_meters(proj_om_crs)
+                    ortho_kwargs["resolution"] = eff_ortho_res / unit_m if unit_m > 0.0 else eff_ortho_res
                 if proj_om is not None:
                     ortho_kwargs["projection"] = proj_om
                 chunk.buildOrthomosaic(**ortho_kwargs)
@@ -709,7 +754,7 @@ def _export_opened_document(
                 or getattr(getattr(om_obj, "projection", None), "crs", None)
                 or getattr(chunk, "crs", None)
             )
-            om_is_metric = is_projected_crs(om_crs) or _is_local_or_unreferenced_crs(om_crs)
+            om_is_metric = om_crs is None or is_linear_crs(om_crs)
             res_label = f"{eff_ortho_res * 100:.1f} cm/px" if (eff_ortho_res > 0 and om_is_metric) else "native GSD"
             print(f"\n[Orthomosaic] Exporting GeoTIFF Orthomosaic ({res_label}) to: {ortho_out}...", flush=True)
             comp = Metashape.ImageCompression()
@@ -724,7 +769,8 @@ def _export_opened_document(
                 "save_alpha": True,
             }
             if eff_ortho_res > 0 and om_is_metric:
-                export_ortho_kwargs["resolution"] = eff_ortho_res
+                unit_m = crs_linear_unit_to_meters(om_crs)
+                export_ortho_kwargs["resolution"] = eff_ortho_res / unit_m if unit_m > 0.0 else eff_ortho_res
             chunk.exportRaster(**export_ortho_kwargs)
             print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)", flush=True)
         else:
@@ -771,11 +817,15 @@ def _export_opened_document(
         tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"\n[Tie Points] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
-            chunk.exportPointCloud(
-                path=tp_out,
-                format=Metashape.PointCloudFormat.PointCloudFormatPLY,
-                source_data=Metashape.DataSource.TiePointsData,
-            )
+            tp_crs = _select_point_cloud_export_crs(chunk)
+            tp_kwargs = {
+                "path": tp_out,
+                "format": Metashape.PointCloudFormat.PointCloudFormatPLY,
+                "source_data": Metashape.DataSource.TiePointsData,
+            }
+            if tp_crs is not None:
+                tp_kwargs["crs"] = tp_crs
+            chunk.exportPointCloud(**tp_kwargs)
             print(f"  Saved Tie Points: {tp_out} ({os.path.getsize(tp_out) / (1024 * 1024):.2f} MB)", flush=True)
         except Exception as e_tp:
             print(f"  [WARNING] Tie points export issue: {e_tp}", flush=True)
