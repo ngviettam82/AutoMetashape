@@ -10,10 +10,12 @@ from __future__ import annotations
 import ctypes
 import json
 import os
+import signal
 import string
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 from collections import deque
 from datetime import datetime, timezone
@@ -37,6 +39,62 @@ ABORT_SIGNALS_JSON = "abort_signals.json"
 
 _TH32CS_SNAPPROCESS = 0x00000002
 _MAX_PATH = 260
+_IGNORED_LOCK_SCAN_DIRS = frozenset({".git", ".venv", ".agents", "node_modules", "__pycache__", ".cluster"})
+
+
+class _PROCESSENTRY32W(ctypes.Structure):
+    _fields_ = [
+        ("dwSize", ctypes.c_uint32),
+        ("cntUsage", ctypes.c_uint32),
+        ("th32ProcessID", ctypes.c_uint32),
+        ("th32DefaultHeapID", ctypes.c_void_p),
+        ("th32ModuleID", ctypes.c_uint32),
+        ("cntThreads", ctypes.c_uint32),
+        ("th32ParentProcessID", ctypes.c_uint32),
+        ("pcPriClassBase", ctypes.c_long),
+        ("dwFlags", ctypes.c_uint32),
+        ("szExeFile", ctypes.c_wchar * _MAX_PATH),
+    ]
+
+
+def _split_host_port(server_host: str, default_port: int = 5840) -> tuple[str, int]:
+    """Parse ``host[:port]`` or ``[ipv6]:port`` cleanly without splitting IPv6 colons."""
+    raw = str(server_host or "127.0.0.1").strip()
+    if raw.startswith("[") and "]" in raw:
+        end = raw.index("]")
+        host = raw[1:end]
+        rest = raw[end + 1 :]
+        if rest.startswith(":") and rest[1:].isdigit():
+            return host, int(rest[1:])
+        return host, default_port
+    if raw.count(":") == 1:
+        h, p = raw.rsplit(":", 1)
+        if p.isdigit():
+            return h, int(p)
+    return raw, default_port
+
+
+def _atomic_write_json(target_path: str, payload: Any, retries: int = 3) -> None:
+    """Atomically write JSON with PID+TID temp path, SMB retry, and orphan cleanup."""
+    tmp_path = f"{target_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2)
+        for attempt in range(retries):
+            try:
+                os.replace(tmp_path, target_path)
+                return
+            except (PermissionError, OSError):
+                if attempt >= retries - 1:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
 
 
 def _collect_descendant_pids_from_edges(root_pid: int, parent_to_children: Dict[int, List[int]]) -> List[int]:
@@ -70,20 +128,6 @@ def _enumerate_windows_descendant_pids(root_pid: int) -> List[int]:
         kernel32 = getattr(windll, "kernel32", None)
         if kernel32 is None:
             return []
-
-        class _PROCESSENTRY32W(ctypes.Structure):
-            _fields_ = [
-                ("dwSize", ctypes.c_uint32),
-                ("cntUsage", ctypes.c_uint32),
-                ("th32ProcessID", ctypes.c_uint32),
-                ("th32DefaultHeapID", ctypes.c_void_p),
-                ("th32ModuleID", ctypes.c_uint32),
-                ("cntThreads", ctypes.c_uint32),
-                ("th32ParentProcessID", ctypes.c_uint32),
-                ("pcPriClassBase", ctypes.c_long),
-                ("dwFlags", ctypes.c_uint32),
-                ("szExeFile", ctypes.c_wchar * _MAX_PATH),
-            ]
 
         create_snap = kernel32.CreateToolhelp32Snapshot
         create_snap.restype = ctypes.c_void_p
@@ -185,10 +229,24 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
                     time.sleep(0.05)
             except Exception:
                 pass
+        wait_fn = getattr(proc, "wait", None)
+        if callable(wait_fn):
+            try:
+                wait_fn(timeout=1.0)
+            except Exception:
+                pass
         return True
 
-    # Non-Windows (or missing PID): graceful terminate followed by force kill
+    # Non-Windows (or missing PID): graceful terminate (and dedicated process group if isolated) followed by force kill
     exited_gracefully = False
+    if proc_pid and hasattr(os, "getpgid") and hasattr(os, "killpg"):
+        try:
+            pgid = os.getpgid(int(proc_pid))
+            if pgid == int(proc_pid) and pgid != os.getpgid(0):
+                os.killpg(pgid, signal.SIGTERM)
+        except Exception:
+            pass
+
     if callable(terminate_fn):
         try:
             terminate_fn()
@@ -202,12 +260,26 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             pass
 
     if not exited_gracefully and callable(poll_fn) and poll_fn() is None:
+        if proc_pid and hasattr(os, "getpgid") and hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
+            try:
+                pgid = os.getpgid(int(proc_pid))
+                if pgid == int(proc_pid) and pgid != os.getpgid(0):
+                    os.killpg(pgid, signal.SIGKILL)
+            except Exception:
+                pass
         kill_fn = getattr(proc, "kill", None)
         if callable(kill_fn):
             try:
                 kill_fn()
             except Exception:
                 pass
+
+    wait_fn = getattr(proc, "wait", None)
+    if callable(wait_fn):
+        try:
+            wait_fn(timeout=1.0)
+        except Exception:
+            pass
 
     return True
 
@@ -259,6 +331,7 @@ def cleanup_scratch_locks(target_dir: str = "", root_path: str = "", max_depth: 
         try:
             base_depth = d.rstrip(r"\/").count(os.sep)
             for root, dirs, files in os.walk(d):
+                dirs[:] = [sub for sub in dirs if sub.lower() not in _IGNORED_LOCK_SCAN_DIRS]
                 cur_depth = root.rstrip(r"\/").count(os.sep) - base_depth
                 if cur_depth >= max_depth:
                     dirs.clear()  # Prune deeper traversal to avoid massive I/O
@@ -316,6 +389,15 @@ def check_abort_signal(
     for flag_path in candidates:
         if not os.path.isfile(flag_path):
             continue
+        # For broadcast all.abort, skip if this node already wrote a newer per-node .abort_ack
+        if os.path.basename(flag_path).lower() == "all.abort" and resolved_node and resolved_node != "unknown":
+            node_ack = os.path.join(os.path.dirname(flag_path), f"{resolved_node}.abort_ack")
+            if os.path.isfile(node_ack):
+                try:
+                    if os.path.getmtime(node_ack) >= os.path.getmtime(flag_path):
+                        continue
+                except OSError:
+                    pass
         try:
             with open(flag_path, "r", encoding="utf-8") as f:
                 content = f.read().strip()
@@ -383,7 +465,6 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
     sig_path = abort_data.get("_signal_path")
     node_name = str(abort_data.get("node_name", get_local_hostname())).lower()
     batch_id = abort_data.get("batch_id", "unknown")
-    unique_tmp_suffix = f".tmp.{os.getpid()}.{node_name}"
 
     ack_written = False
     if sig_path and os.path.isfile(sig_path):
@@ -392,19 +473,28 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 with open(sig_path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 key = abort_data.get("_json_key") or node_name
-                if key in data:
-                    del data[key]
-                elif "signals" in data and key in data["signals"]:
-                    del data["signals"][key]
-                tmp_sig = f"{sig_path}{unique_tmp_suffix}"
-                with open(tmp_sig, "w", encoding="utf-8") as f:
-                    json.dump(data, f, indent=2)
-                os.replace(tmp_sig, sig_path)
+                if isinstance(data, dict):
+                    if key in data and key != "all":
+                        del data[key]
+                    elif (
+                        "signals" in data
+                        and isinstance(data["signals"], dict)
+                        and key in data["signals"]
+                        and key != "all"
+                    ):
+                        del data["signals"][key]
+                    _atomic_write_json(sig_path, data)
                 ack_written = True
             except Exception:
                 pass
         elif sig_path.endswith(".abort"):
-            ack_path = os.path.splitext(sig_path)[0] + ".abort_ack"
+            is_broadcast = os.path.basename(sig_path).lower() == "all.abort"
+            ack_base = (
+                os.path.join(os.path.dirname(sig_path), node_name)
+                if (is_broadcast and node_name and node_name != "unknown")
+                else os.path.splitext(sig_path)[0]
+            )
+            ack_path = ack_base + ".abort_ack"
             ack_payload = {
                 "action": "aborted",
                 "node_name": node_name,
@@ -412,17 +502,16 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 "ack_timestamp": datetime.now(timezone.utc).isoformat(),
             }
             try:
-                tmp_ack = f"{ack_path}{unique_tmp_suffix}"
-                with open(tmp_ack, "w", encoding="utf-8") as af:
-                    json.dump(ack_payload, af, indent=2)
-                os.replace(tmp_ack, ack_path)
+                _atomic_write_json(ack_path, ack_payload)
                 ack_written = True
             except Exception:
                 pass
-            try:
-                os.remove(sig_path)
-            except Exception:
-                pass
+            # Never delete broadcast all.abort so sibling workers also receive the broadcast
+            if not is_broadcast:
+                try:
+                    os.remove(sig_path)
+                except Exception:
+                    pass
             # Also purge matching node entry from sibling .cluster/abort_signals.json
             # to prevent the watchdog from firing a second kill on the next poll.
             parent_dir = os.path.dirname(sig_path)
@@ -430,25 +519,21 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 os.path.dirname(parent_dir) if os.path.basename(parent_dir).lower() == ABORT_DIR_NAME else parent_dir
             )
             agg_json = os.path.join(cluster_dir, ABORT_SIGNALS_JSON)
-            if os.path.isfile(agg_json):
+            if os.path.isfile(agg_json) and not is_broadcast:
                 try:
                     with open(agg_json, "r", encoding="utf-8") as rf:
                         agg_data = json.load(rf)
                     changed = False
                     if isinstance(agg_data, dict):
-                        for k in (node_name, "all"):
-                            if k in agg_data and (k == node_name or sig_path.lower().endswith("all.abort")):
-                                del agg_data[k]
-                                changed = True
+                        if node_name in agg_data:
+                            del agg_data[node_name]
+                            changed = True
                         if "signals" in agg_data and isinstance(agg_data["signals"], dict):
                             if node_name in agg_data["signals"]:
                                 del agg_data["signals"][node_name]
                                 changed = True
                     if changed:
-                        tmp_agg = f"{agg_json}{unique_tmp_suffix}"
-                        with open(tmp_agg, "w", encoding="utf-8") as wf:
-                            json.dump(agg_data, wf, indent=2)
-                        os.replace(tmp_agg, agg_json)
+                        _atomic_write_json(agg_json, agg_data)
                 except Exception:
                     pass
         else:
@@ -511,36 +596,30 @@ def dispatch_abort_signal(
                 os.remove(stale_ack)
             except OSError:
                 pass
-        sig_path = os.path.join(aborts_dir, f"{clean_node}.abort")
-        tmp_sig = f"{sig_path}.tmp.{os.getpid()}"
-        with open(tmp_sig, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
-        os.replace(tmp_sig, sig_path)
 
-        # Also update aggregate abort_signals.json atomically with a PID-unique temp file
+        # Write aggregate abort_signals.json FIRST so a worker acknowledging <node>.abort
+        # always sees and clears the aggregate entry cleanly instead of triggering a second kill.
         agg_path = os.path.join(shared_root, ".cluster", ABORT_SIGNALS_JSON)
         try:
             agg_data: Dict[str, Any] = {}
             if os.path.isfile(agg_path):
                 with open(agg_path, "r", encoding="utf-8") as rf:
-                    agg_data = json.load(rf)
+                    loaded = json.load(rf)
+                if isinstance(loaded, dict):
+                    agg_data = loaded
             agg_data[clean_node] = payload
-            tmp_agg = f"{agg_path}.tmp.{os.getpid()}"
-            with open(tmp_agg, "w", encoding="utf-8") as wf:
-                json.dump(agg_data, wf, indent=2)
-            os.replace(tmp_agg, agg_path)
+            _atomic_write_json(agg_path, agg_data)
         except Exception:
             pass
 
+        sig_path = os.path.join(aborts_dir, f"{clean_node}.abort")
+        _atomic_write_json(sig_path, payload)
         return sig_path
 
     out_dir = local_dir or tempfile.gettempdir()
     os.makedirs(out_dir, exist_ok=True)
     sig_path = os.path.join(out_dir, ABORT_SIGNAL_FILENAME)
-    tmp_local = f"{sig_path}.tmp.{os.getpid()}"
-    with open(tmp_local, "w", encoding="utf-8") as f:
-        json.dump(payload, f, indent=2)
-    os.replace(tmp_local, sig_path)
+    _atomic_write_json(sig_path, payload)
     return sig_path
 
 
@@ -577,169 +656,179 @@ def abort_remote_worker(
         "error": None,
     }
 
-    # Step 1: Connect to Metashape Server (direct or via metashape.exe -r runner)
-    if client is None and Metashape is not None:
-        try:
-            net_client = Metashape.NetworkClient()
-            host = server_host
-            port = 5840
-            if ":" in server_host:
-                parts = server_host.split(":", 1)
-                host = parts[0]
-                try:
-                    port = int(parts[1])
-                except ValueError:
-                    pass
-            net_client.connect(host, port)
-            client = net_client
-        except Exception as e:
-            # Server connection is desirable but optional for signal file dispatch
-            result["error"] = f"Warning: Could not connect to Metashape server ({e})"
-    elif client is None and Metashape is None and batch_id is not None:
-        # Fallback for plain Python: unpause & abort batch on server via metashape.exe -r helper
-        try:
-            from autometashape.cluster.hardware import find_metashape_path
-
-            ms_exe = find_metashape_path()
-            if ms_exe and os.path.isfile(ms_exe):
-                host_str = server_host.split(":")[0] if ":" in server_host else server_host
-                port_str = server_host.split(":")[1] if ":" in server_host else "5840"
-                helper_code = f"""import Metashape, sys
-try:
-    c = Metashape.NetworkClient()
-    c.connect("{host_str}", {port_str})
-    bl = c.batchList()
-    for b in (bl.get("batches", []) if isinstance(bl, dict) else []):
-        if b.get("batch_id") == {batch_id}:
-            if b.get("paused") or str(b.get("state", "")).lower() == "paused":
-                c.setBatchPaused({batch_id}, False)
-            break
-    c.abortBatch({batch_id})
+    owned_client = False
     try:
-        c.setBatchPriority({batch_id}, -100)
-    except Exception:
-        pass
-except Exception:
-    pass
-sys.exit(0)
-"""
-                tmp_helper = os.path.join(tempfile.gettempdir(), f"_ms_abort_{batch_id}.py")
-                with open(tmp_helper, "w", encoding="utf-8") as hf:
-                    hf.write(helper_code)
-                try:
-                    subprocess.run([ms_exe, "-r", tmp_helper], capture_output=True, timeout=10)
-                finally:
-                    if os.path.isfile(tmp_helper):
-                        try:
-                            os.remove(tmp_helper)
-                        except Exception:
-                            pass
-        except Exception as helper_err:
-            result["error"] = f"Warning during fallback server abort: {helper_err}"
+        # Step 1: Connect to Metashape Server (direct or via metashape.exe -r runner)
+        if client is None and Metashape is not None:
+            try:
+                net_client = Metashape.NetworkClient()
+                host, port = _split_host_port(server_host)
+                net_client.connect(host, port)
+                client = net_client
+                owned_client = True
+            except Exception as e:
+                # Server connection is desirable but optional for signal file dispatch
+                result["error"] = f"Warning: Could not connect to Metashape server ({e})"
+        elif client is None and Metashape is None and batch_id is not None:
+            # Fallback for plain Python: unpause & abort batch on server via metashape.exe -r helper
+            # Pass host, port, and batch_id strictly via sys.argv (zero code interpolation).
+            try:
+                from autometashape.cluster.hardware import find_metashape_path
 
-    # Step 2 & 3: Unpause batch if paused, abort batch, and demote priority
-    if client is not None and batch_id is not None:
-        try:
-            # Check if batch is paused
-            batch_list_fn = getattr(client, "batchList", None)
-            if callable(batch_list_fn):
-                bl = batch_list_fn()
-                if isinstance(bl, dict):
-                    for b in bl.get("batches", []):
-                        if b.get("batch_id") == batch_id:
-                            is_paused = bool(b.get("paused", False)) or str(b.get("state", "")).lower() == "paused"
-                            if is_paused and hasattr(client, "setBatchPaused"):
-                                client.setBatchPaused(batch_id, False)
-                            break
+                ms_exe = find_metashape_path()
+                if ms_exe and os.path.isfile(ms_exe):
+                    host_str, port_num = _split_host_port(server_host)
+                    helper_code = (
+                        "import Metashape, sys\n"
+                        "host = sys.argv[1]\n"
+                        "port = int(sys.argv[2])\n"
+                        "bid = int(sys.argv[3])\n"
+                        "c = Metashape.NetworkClient()\n"
+                        "try:\n"
+                        "    c.connect(host, port)\n"
+                        "    bl = c.batchList()\n"
+                        "    for b in (bl.get('batches', []) if isinstance(bl, dict) else []):\n"
+                        "        if b.get('batch_id') == bid:\n"
+                        "            if b.get('paused') or str(b.get('state', '')).lower() == 'paused':\n"
+                        "                c.setBatchPaused(bid, False)\n"
+                        "            break\n"
+                        "    c.abortBatch(bid)\n"
+                        "    try:\n"
+                        "        c.setBatchPriority(bid, -100)\n"
+                        "    except Exception:\n"
+                        "        pass\n"
+                        "finally:\n"
+                        "    try:\n"
+                        "        c.disconnect()\n"
+                        "    except Exception:\n"
+                        "        pass\n"
+                    )
+                    fd, tmp_helper = tempfile.mkstemp(prefix="_ms_abort_", suffix=".py")
+                    with os.fdopen(fd, "w", encoding="utf-8") as hf:
+                        hf.write(helper_code)
+                    try:
+                        cmd = [ms_exe]
+                        env = os.environ.copy()
+                        if sys.platform.startswith("linux") and not env.get("DISPLAY"):
+                            cmd.extend(["-platform", "offscreen"])
+                            env.setdefault("QT_QPA_PLATFORM", "offscreen")
+                        cmd.extend(["-r", tmp_helper, host_str, str(port_num), str(int(batch_id))])
+                        proc_res = subprocess.run(cmd, capture_output=True, text=True, env=env, timeout=15)
+                        if proc_res.returncode != 0:
+                            err_tail = (proc_res.stderr or proc_res.stdout or "").strip()
+                            result["error"] = f"Warning: fallback server abort exited {proc_res.returncode}: {err_tail}"
+                    finally:
+                        if os.path.isfile(tmp_helper):
+                            try:
+                                os.remove(tmp_helper)
+                            except Exception:
+                                pass
+            except Exception as helper_err:
+                result["error"] = f"Warning during fallback server abort: {helper_err}"
 
-            # Abort batch
-            if hasattr(client, "abortBatch"):
-                client.abortBatch(batch_id)
+        # Step 2 & 3: Unpause batch if paused, abort batch, and demote priority
+        if client is not None and batch_id is not None:
+            try:
+                batch_list_fn = getattr(client, "batchList", None)
+                if callable(batch_list_fn):
+                    bl = batch_list_fn()
+                    if isinstance(bl, dict):
+                        for b in bl.get("batches", []):
+                            if b.get("batch_id") == batch_id:
+                                is_paused = bool(b.get("paused", False)) or str(b.get("state", "")).lower() == "paused"
+                                if is_paused and hasattr(client, "setBatchPaused"):
+                                    client.setBatchPaused(batch_id, False)
+                                break
 
-            # Demote priority to prevent immediate re-dispatch
-            if hasattr(client, "setBatchPriority"):
-                try:
-                    client.setBatchPriority(batch_id, -100)
-                except Exception:
-                    pass
-        except Exception as batch_err:
-            if not result["error"]:
-                result["error"] = f"Warning during batch abort: {batch_err}"
+                if hasattr(client, "abortBatch"):
+                    client.abortBatch(batch_id)
 
-    # Record pre-abort worker IDs for target node so we only count a genuinely fresh reconnect
-    pre_abort_worker_ids: set[Any] = set()
-    if client is not None and hasattr(client, "workerList"):
-        try:
-            w_pre = client.workerList()
-            if isinstance(w_pre, dict):
-                for w in w_pre.get("workers", []):
-                    if not is_healthy_online_worker(w):
-                        continue
-                    if str(w.get("hostname", "")).strip().lower() == clean_node:
-                        wid = w.get("worker_id")
-                        if wid is not None:
-                            pre_abort_worker_ids.add(wid)
-        except Exception:
-            pass
+                if hasattr(client, "setBatchPriority"):
+                    try:
+                        client.setBatchPriority(batch_id, -100)
+                    except Exception:
+                        pass
+            except Exception as batch_err:
+                if not result["error"]:
+                    result["error"] = f"Warning during batch abort: {batch_err}"
 
-    # Step 4: Write abort signal file atomically
-    sig_path = ""
-    try:
-        sig_path = dispatch_abort_signal(
-            node_name=clean_node,
-            batch_id=batch_id,
-            shared_root=shared_root,
-        )
-    except Exception as sig_err:
-        result["error"] = f"Failed to write abort signal file: {sig_err}"
-        return result
-
-    # Step 5: Wait up to timeout for supervisor acknowledgment and reconnect
-    aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME) if shared_root else ""
-    ack_path = os.path.join(aborts_dir, f"{clean_node}.abort_ack") if aborts_dir else ""
-
-    start_t = time.time()
-    ack_seen = False
-    reconnected = False
-
-    while time.time() - start_t < timeout:
-        # Check acknowledgment: ack file created or signal file removed
-        if ack_path and os.path.isfile(ack_path):
-            ack_seen = True
-        elif sig_path and not os.path.isfile(sig_path):
-            ack_seen = True
-
-        # Check worker list for a genuinely fresh/healthy online reconnect
+        # Record pre-abort worker IDs for target node so we only count a genuinely fresh reconnect
+        pre_abort_worker_ids: set[Any] = set()
         if client is not None and hasattr(client, "workerList"):
             try:
-                w_info = client.workerList()
-                if isinstance(w_info, dict):
-                    for w in w_info.get("workers", []):
+                w_pre = client.workerList()
+                if isinstance(w_pre, dict):
+                    for w in w_pre.get("workers", []):
                         if not is_healthy_online_worker(w):
                             continue
-                        w_hname = str(w.get("hostname", "")).strip().lower()
-                        w_state = str(w.get("state", "")).strip().lower()
-                        w_id = w.get("worker_id")
-                        is_fresh_worker = (w_id is None) or (w_id not in pre_abort_worker_ids) or ack_seen
-                        if w_hname == clean_node and w_state == "ready" and is_fresh_worker:
-                            reconnected = True
-                            break
+                        if str(w.get("hostname", "")).strip().lower() == clean_node:
+                            wid = w.get("worker_id")
+                            if wid is not None:
+                                pre_abort_worker_ids.add(wid)
             except Exception:
                 pass
 
-        if ack_seen and (reconnected or client is None):
-            break
-
-        time.sleep(poll_interval)
-
-    # Clean up ack file if present to leave clean state
-    if ack_path and os.path.isfile(ack_path):
+        # Step 4: Write abort signal file atomically
+        sig_path = ""
         try:
-            os.remove(ack_path)
-        except Exception:
-            pass
+            sig_path = dispatch_abort_signal(
+                node_name=clean_node,
+                batch_id=batch_id,
+                shared_root=shared_root,
+            )
+        except Exception as sig_err:
+            result["error"] = f"Failed to write abort signal file: {sig_err}"
+            return result
 
-    result["acknowledged"] = ack_seen
-    result["reconnected"] = reconnected
-    result["success"] = ack_seen or reconnected
-    return result
+        # Step 5: Wait up to timeout for supervisor acknowledgment and reconnect
+        aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME) if shared_root else ""
+        ack_path = os.path.join(aborts_dir, f"{clean_node}.abort_ack") if aborts_dir else ""
+
+        start_t = time.time()
+        ack_seen = False
+        reconnected = False
+
+        while time.time() - start_t < timeout:
+            if ack_path and os.path.isfile(ack_path):
+                ack_seen = True
+            elif sig_path and not os.path.isfile(sig_path):
+                ack_seen = True
+
+            if client is not None and hasattr(client, "workerList"):
+                try:
+                    w_info = client.workerList()
+                    if isinstance(w_info, dict):
+                        for w in w_info.get("workers", []):
+                            if not is_healthy_online_worker(w):
+                                continue
+                            w_hname = str(w.get("hostname", "")).strip().lower()
+                            w_state = str(w.get("state", "")).strip().lower()
+                            w_id = w.get("worker_id")
+                            is_fresh_worker = (w_id is None) or (w_id not in pre_abort_worker_ids)
+                            if w_hname == clean_node and w_state == "ready" and is_fresh_worker:
+                                reconnected = True
+                                break
+                except Exception:
+                    pass
+
+            if ack_seen and (reconnected or client is None):
+                break
+
+            time.sleep(poll_interval)
+
+        if ack_path and os.path.isfile(ack_path):
+            try:
+                os.remove(ack_path)
+            except Exception:
+                pass
+
+        result["acknowledged"] = ack_seen
+        result["reconnected"] = reconnected
+        result["success"] = ack_seen or reconnected
+        return result
+    finally:
+        if owned_client and client is not None:
+            try:
+                client.disconnect()
+            except Exception:
+                pass

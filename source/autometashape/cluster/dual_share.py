@@ -28,9 +28,30 @@ from autometashape.cluster.hardware import extract_unc_root
 
 
 def _is_windows_drive_path(path: str) -> bool:
-    """Return True if ``path`` starts with a Windows drive designator (e.g. ``C:\\`` or ``D:/``)."""
+    """Return True if ``path`` starts with an ASCII Windows drive designator (e.g. ``C:\\`` or ``D:/``)."""
     cleaned = (path or "").strip()
-    return len(cleaned) >= 2 and cleaned[0].isalpha() and cleaned[1] == ":"
+    return len(cleaned) >= 2 and cleaned[0].isascii() and cleaned[0].isalpha() and cleaned[1] == ":"
+
+
+def _unc_escapes_share_root(raw_path: str) -> bool:
+    """Return True if a UNC path contains ``..`` segments attempting to escape above ``\\\\server\\share``."""
+    cleaned = (raw_path or "").strip()
+    if not is_unc_path(cleaned):
+        return False
+    parts = [p for p in cleaned.lstrip("\\/").replace("/", "\\").split("\\") if p]
+    if len(parts) < 2:
+        return True
+    depth = 0
+    for seg in parts[2:]:
+        if seg == ".":
+            continue
+        if seg == "..":
+            if depth == 0:
+                return True
+            depth -= 1
+        else:
+            depth += 1
+    return False
 
 
 def _split_drive_and_segments(path: str, win_style: bool) -> tuple[str, List[str]]:
@@ -50,9 +71,12 @@ def is_subpath(child: str, parent: str, case_insensitive: Optional[bool] = None)
 
     Compares normalized drive/UNC share roots and exact path segments with Windows/SMB
     case-folding, eliminating both prefix-collision bugs (``\\\\SRV\\Data2`` vs
-    ``\\\\SRV\\Data``) and cross-platform ``posixpath``/``ntpath`` discrepancies.
+    ``\\\\SRV\\Data``), UNC ``..`` traversal escapes, and cross-platform ``posixpath``/``ntpath``
+    discrepancies.
     """
     if not child or not parent:
+        return False
+    if _unc_escapes_share_root(child) or _unc_escapes_share_root(parent):
         return False
     try:
         abs_child = normalize_share_path(child)
@@ -96,6 +120,8 @@ def relpath_under(child: str, parent: str, case_insensitive: Optional[bool] = No
     _, orig_segs_c = _split_drive_and_segments(abs_child, win_style=win_style)
     _, orig_segs_p = _split_drive_and_segments(abs_parent, win_style=win_style)
     rel_segs = orig_segs_c[len(orig_segs_p) :]
+    if any(seg == ".." for seg in rel_segs):
+        return None
     return "/".join(rel_segs) if rel_segs else "."
 
 
@@ -111,8 +137,11 @@ def normalize_share_path(path: str) -> str:
     if not raw:
         return ""
     if is_unc_path(raw):
-        body = raw.lstrip("\\/").replace("/", "\\").rstrip("\\")
-        return f"\\\\{body}" if body else ""
+        body = raw.lstrip("\\/").replace("/", "\\")
+        if not body:
+            return ""
+        normed = ntpath.normpath(f"\\\\{body}")
+        return normed.rstrip("\\") if normed.count("\\") > 3 else normed.rstrip("\\")
     if _is_windows_drive_path(raw):
         return ntpath.normpath(raw.replace("/", "\\"))
     return os.path.normpath(os.path.abspath(raw))
@@ -314,7 +343,8 @@ def _dir_contains_images(directory: str) -> bool:
     from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS
 
     try:
-        for _root, _, files in os.walk(directory):
+        for _root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if not d.startswith((".", "$")) and not d.lower().endswith(".files")]
             for fname in files:
                 if fname.lower().endswith(SUPPORTED_IMAGE_EXTS):
                     return True
@@ -385,7 +415,11 @@ def discover_dual_share_projects(
         full_p = os.path.join(norm_source, entry)
         if os.path.isdir(full_p) and not entry.startswith((".", "$")):
             entry_l = entry.lower()
-            if entry_l not in excluded_names and not entry_l.startswith(excluded_prefixes):
+            if (
+                entry_l not in excluded_names
+                and not entry_l.startswith(excluded_prefixes)
+                and not entry_l.endswith(".files")
+            ):
                 subdirs.append((entry, full_p))
 
     for folder_name, folder_path in subdirs:
@@ -442,10 +476,12 @@ def run_dual_share_cluster_pipeline(
     ortho_resolution: float = 0.05,
     build_point_cloud: bool = False,
     build_dem: bool = False,
+    build_orthomosaic: Optional[bool] = None,
     export_obj: bool = True,
     export_ortho: bool = True,
     export_dem: bool = False,
     export_glb: bool = False,
+    export_point_cloud: bool = False,
     export_report: bool = False,
     resume: bool = True,
     local_scratch: bool = True,
@@ -478,14 +514,20 @@ def run_dual_share_cluster_pipeline(
     if not validation["valid"]:
         raise ValueError("Dual-share topology validation failed: " + "; ".join(validation["errors"]))
 
-    if ":" in str(server_host):
-        host_part, port_part = str(server_host).rsplit(":", 1)
-        server_host = host_part
-        try:
+    raw_host = str(server_host).strip()
+    if raw_host.startswith("[") and "]" in raw_host:
+        bracket_end = raw_host.index("]")
+        server_host = raw_host[1:bracket_end]
+        rest = raw_host[bracket_end + 1 :]
+        if rest.startswith(":") and rest[1:].isdigit():
+            server_port = int(rest[1:])
+    elif raw_host.count(":") == 1:
+        host_part, port_part = raw_host.rsplit(":", 1)
+        if port_part.isdigit():
+            server_host = host_part
             server_port = int(port_part)
-        except ValueError:
-            pass
 
+    eff_build_ortho = (True if export_ortho else False) if build_orthomosaic is None else bool(build_orthomosaic)
     merged_extra: Dict[str, Any] = {
         "network_enable": True,
         "network_host": server_host,
@@ -493,12 +535,14 @@ def run_dual_share_cluster_pipeline(
         "network_independent_workers": True,
         "network_path": validation["result_network_root"],
         "ortho_resolution": ortho_resolution,
-        "build_point_cloud": build_point_cloud,
-        "build_dem": build_dem,
+        "build_point_cloud": build_point_cloud or export_point_cloud,
+        "build_dem": build_dem or export_dem,
+        "build_orthomosaic": eff_build_ortho,
         "export_obj": export_obj,
         "export_ortho": export_ortho,
         "export_dem": export_dem,
         "export_glb": export_glb,
+        "export_point_cloud": export_point_cloud,
         "export_report": export_report,
         "resume": resume,
         "local_scratch": local_scratch,

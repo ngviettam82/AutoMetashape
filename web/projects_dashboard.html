@@ -1002,34 +1002,76 @@
       }
     }
 
+    function psQuote(val) {
+      return "'" + String(val || "").replace(/'/g, "''") + "'";
+    }
+
+    function safeStatusClass(status) {
+      const allowed = new Set(["completed", "processing", "ready", "queued", "unaligned"]);
+      const s = String(status || "unaligned").toLowerCase();
+      return allowed.has(s) ? s : "unaligned";
+    }
+
+    async function copyToClipboard(text, successMsg) {
+      try {
+        if (navigator.clipboard && typeof navigator.clipboard.writeText === "function") {
+          await navigator.clipboard.writeText(text);
+          alert(successMsg);
+          return;
+        }
+      } catch (err) {
+        console.warn("Clipboard API failed:", err);
+      }
+      window.prompt("Copy command below (Ctrl+C, Enter):", text);
+    }
+
+    function parseProjectsDataJs(text) {
+      const stripped = String(text || "").trim();
+      if (stripped.startsWith("[")) {
+        const parsed = JSON.parse(stripped);
+        return Array.isArray(parsed) ? parsed : [];
+      }
+      const marker = stripped.match(/window\.SURVEY_PROJECTS\s*=\s*/);
+      if (!marker || marker.index === undefined) {
+        throw new Error("Missing window.SURVEY_PROJECTS assignment in projects_data.js");
+      }
+      let jsonPart = stripped.slice(marker.index + marker[0].length).trim();
+      if (jsonPart.endsWith(";")) {
+        jsonPart = jsonPart.slice(0, -1).trim();
+      }
+      const parsed = JSON.parse(jsonPart);
+      return Array.isArray(parsed) ? parsed : [];
+    }
+
     function renderTable() {
       const tbody = document.getElementById("projects-table-body");
-      tbody.innerHTML = "";
+      tbody.replaceChildren();
 
       const query = (document.getElementById("search-input").value || "").toLowerCase();
       const filtered = projects.filter(p => {
         const matchesFilter = activeFilter === "all" || p.status === activeFilter;
         const matchesQuery = !query ||
-          (p.name && p.name.toLowerCase().includes(query)) ||
-          (p.sensor && p.sensor.toLowerCase().includes(query)) ||
-          (p.path && p.path.toLowerCase().includes(query));
+          (p.name && String(p.name).toLowerCase().includes(query)) ||
+          (p.sensor && String(p.sensor).toLowerCase().includes(query)) ||
+          (p.path && String(p.path).toLowerCase().includes(query));
         return matchesFilter && matchesQuery;
       });
 
       if (filtered.length === 0) {
         const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td colspan="8" style="text-align: center; padding: 48px 16px; color: var(--muted);">
-            <div style="font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px;">
-              ${projects.length === 0 ? "No Survey Projects Found" : "No Matching Projects"}
-            </div>
-            <div style="font-size: 13px;">
-              ${projects.length === 0
-                ? "Run scripts/cluster_supervisor.py or scripts/submit_cluster_batch.py to process datasets and populate projects_data.js telemetry."
-                : "No projects match the current filter or search criteria."}
-            </div>
-          </td>
-        `;
+        const td = document.createElement("td");
+        td.colSpan = 8;
+        td.style.cssText = "text-align: center; padding: 48px 16px; color: var(--muted);";
+        const titleDiv = document.createElement("div");
+        titleDiv.style.cssText = "font-size: 15px; font-weight: 600; color: var(--text); margin-bottom: 6px;";
+        titleDiv.textContent = projects.length === 0 ? "No Survey Projects Found" : "No Matching Projects";
+        const subDiv = document.createElement("div");
+        subDiv.style.cssText = "font-size: 13px;";
+        subDiv.textContent = projects.length === 0
+          ? "Run scripts/cluster_supervisor.py or scripts/submit_cluster_batch.py to process datasets and populate projects_data.js telemetry."
+          : "No projects match the current filter or search criteria.";
+        td.append(titleDiv, subDiv);
+        tr.appendChild(td);
         tbody.appendChild(tr);
         updateBatchBar();
         updateKpiStrip();
@@ -1042,36 +1084,57 @@
         if (p.id === activeProjectId) tr.style.backgroundColor = "var(--active)";
         tr.style.cursor = "pointer";
 
-        tr.innerHTML = `
-          <td class="col-check" onclick="event.stopPropagation()">
-            <input type="checkbox" class="checkbox row-check" data-id="${p.id}" ${p.selected ? "checked" : ""}>
-          </td>
-          <td>
-            <div class="project-name">${p.name || "Untitled Project"}</div>
-            <div class="project-path">${p.path || ""}</div>
-          </td>
-          <td>${p.sensor || "Unknown"}</td>
-          <td class="num">${(p.photos || 0).toLocaleString()}</td>
-          <td class="num">${p.gsd || "--"}</td>
-          <td class="num">${p.faces || "--"}</td>
-          <td>
-            <span class="pill pill-${p.status || 'unaligned'}">${p.statusLabel || p.status || 'Ready'}</span>
-          </td>
-          <td style="color: var(--muted); font-size: 13px;">${p.deliverables || "--"}</td>
-        `;
-
-        tr.addEventListener("click", () => selectProject(p.id));
-        tbody.appendChild(tr);
-      });
-
-      document.querySelectorAll(".row-check").forEach(cb => {
+        const tdCheck = document.createElement("td");
+        tdCheck.className = "col-check";
+        tdCheck.addEventListener("click", (e) => e.stopPropagation());
+        const cb = document.createElement("input");
+        cb.type = "checkbox";
+        cb.className = "checkbox row-check";
+        cb.checked = Boolean(p.selected);
         cb.addEventListener("change", (e) => {
-          const id = e.target.getAttribute("data-id");
-          const proj = projects.find(x => x.id === id);
-          if (proj) proj.selected = e.target.checked;
+          p.selected = e.target.checked;
           updateBatchBar();
           renderTable();
         });
+        tdCheck.appendChild(cb);
+
+        const tdName = document.createElement("td");
+        const nameDiv = document.createElement("div");
+        nameDiv.className = "project-name";
+        nameDiv.textContent = p.name || "Untitled Project";
+        const pathDiv = document.createElement("div");
+        pathDiv.className = "project-path";
+        pathDiv.textContent = p.path || "";
+        tdName.append(nameDiv, pathDiv);
+
+        const tdSensor = document.createElement("td");
+        tdSensor.textContent = p.sensor || "Unknown";
+
+        const tdPhotos = document.createElement("td");
+        tdPhotos.className = "num";
+        tdPhotos.textContent = (Number(p.photos) || 0).toLocaleString();
+
+        const tdGsd = document.createElement("td");
+        tdGsd.className = "num";
+        tdGsd.textContent = p.gsd != null && p.gsd !== "" ? String(p.gsd) : "--";
+
+        const tdFaces = document.createElement("td");
+        tdFaces.className = "num";
+        tdFaces.textContent = p.faces != null && p.faces !== "" ? String(p.faces) : "--";
+
+        const tdStatus = document.createElement("td");
+        const pill = document.createElement("span");
+        pill.className = `pill pill-${safeStatusClass(p.status)}`;
+        pill.textContent = p.statusLabel || p.status || "Ready";
+        tdStatus.appendChild(pill);
+
+        const tdDeliv = document.createElement("td");
+        tdDeliv.style.cssText = "color: var(--muted); font-size: 13px;";
+        tdDeliv.textContent = p.deliverables || "--";
+
+        tr.append(tdCheck, tdName, tdSensor, tdPhotos, tdGsd, tdFaces, tdStatus, tdDeliv);
+        tr.addEventListener("click", () => selectProject(p.id));
+        tbody.appendChild(tr);
       });
 
       updateBatchBar();
@@ -1156,15 +1219,17 @@
 
     document.getElementById("search-input").addEventListener("input", renderTable);
 
-    document.getElementById("btn-copy-cli").addEventListener("click", () => {
+    document.getElementById("btn-copy-cli").addEventListener("click", async () => {
       const selected = projects.filter(p => p.selected);
       if (selected.length === 0) {
         alert("No projects selected.");
         return;
       }
-      const cmds = selected.map(p => `python scripts\\metashape_reconstruction.py --images "${p.path}" --project-name "${(p.name || '').includes('/') ? p.name.split('/').pop().trim() : (p.name || 'Project')}" --preset pro`).join("\n");
-      navigator.clipboard.writeText(cmds);
-      alert(`Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
+      const cmds = selected.map(p => {
+        const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
+        return `python scripts\\metashape_reconstruction.py --images ${psQuote(p.path)} --project-name ${psQuote(projName)} --preset pro`;
+      }).join("\n");
+      await copyToClipboard(cmds, `Copied batch reconstruction commands for ${selected.length} projects to clipboard!`);
     });
 
     document.getElementById("btn-execute-batch").addEventListener("click", () => {
@@ -1179,14 +1244,13 @@
 
     const btnOpenMetashape = document.getElementById("btn-open-metashape");
     if (btnOpenMetashape) {
-      btnOpenMetashape.addEventListener("click", () => {
+      btnOpenMetashape.addEventListener("click", async () => {
         const p = projects.find(x => x.id === activeProjectId);
         if (p && p.path) {
-          navigator.clipboard.writeText(`& "metashape.exe" "${p.path}"`);
-          alert(`Project path copied to clipboard:
-${p.path}
-
-You can launch Metashape Pro with this project directly.`);
+          await copyToClipboard(
+            `& 'metashape.exe' ${psQuote(p.path)}`,
+            `Project path copied to clipboard:\n${p.path}\n\nYou can launch Metashape Pro with this project directly.`
+          );
         } else {
           alert("Please select a project first.");
         }
@@ -1195,11 +1259,10 @@ You can launch Metashape Pro with this project directly.`);
 
     const btnInspectFolder = document.getElementById("btn-inspect-folder");
     if (btnInspectFolder) {
-      btnInspectFolder.addEventListener("click", () => {
+      btnInspectFolder.addEventListener("click", async () => {
         const p = projects.find(x => x.id === activeProjectId);
         if (p && p.path) {
-          navigator.clipboard.writeText(p.path);
-          alert(`Copied path to clipboard:\n${p.path}`);
+          await copyToClipboard(p.path, `Copied path to clipboard:\n${p.path}`);
         } else {
           alert("Please select a project first.");
         }
@@ -1217,12 +1280,10 @@ You can launch Metashape Pro with this project directly.`);
         const resp = await fetch(`projects_data.js?t=${Date.now()}`);
         if (resp.ok) {
           const text = await resp.text();
-          const scriptFunc = new Function(text);
-          scriptFunc();
-          if (Array.isArray(window.SURVEY_PROJECTS)) {
-            projects.length = 0;
-            projects.push(...window.SURVEY_PROJECTS);
-          }
+          const parsed = parseProjectsDataJs(text);
+          window.SURVEY_PROJECTS = parsed;
+          projects.length = 0;
+          projects.push(...parsed);
           renderTable();
           if (projects.length > 0) {
             selectProject(projects[0].id);

@@ -6,6 +6,7 @@ FROM ubuntu:22.04
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
+    PYTHONPATH=/workspace/autometashape/source \
     LANG=C.UTF-8 \
     LC_ALL=C.UTF-8
 
@@ -18,16 +19,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     python3 \
     python3-pip \
     python3-setuptools \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd --system autometashape \
+    && useradd --system --gid autometashape --create-home autometashape
 
 # Set up workspace
 WORKDIR /workspace/autometashape
 
-# Copy project files
-COPY . /workspace/autometashape
+# Install pinned development & verification tools
+RUN pip3 install --no-cache-dir ruff==0.14.10
 
-# Install development & verification tools
-RUN pip3 install --no-cache-dir ruff pytest
+# Copy project files with non-root ownership
+COPY --chown=autometashape:autometashape . /workspace/autometashape
+
+USER autometashape
 
 # Default entrypoint
 CMD ["bash", "build.sh"]

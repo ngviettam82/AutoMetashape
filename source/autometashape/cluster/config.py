@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from typing import Any
 
 DEFAULT_WORKER_CONFIG_FILENAME = "worker_config.json"
@@ -35,7 +37,8 @@ def load_cluster_config(
     if os.path.isfile(path):
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return json.load(f)
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
         except Exception:
             return {}
     return {}
@@ -50,8 +53,23 @@ def save_cluster_config(
     if parent_dir and not os.path.exists(parent_dir):
         os.makedirs(parent_dir, exist_ok=True)
 
-    tmp_path = f"{path}.tmp"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
-    os.replace(tmp_path, path)
+    tmp_path = f"{path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=2, ensure_ascii=False)
+        for attempt in range(3):
+            try:
+                os.replace(tmp_path, path)
+                break
+            except PermissionError:
+                if attempt >= 2:
+                    raise
+                time.sleep(0.1 * (attempt + 1))
+    except Exception:
+        if os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except OSError:
+                pass
+        raise
     return path

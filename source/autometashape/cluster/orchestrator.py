@@ -11,6 +11,7 @@ import json
 import os
 import subprocess
 import time
+import uuid
 import zipfile
 
 try:
@@ -122,13 +123,14 @@ def _norm_cluster_path(p: str | None) -> str:
     """Normalize file path for case-insensitive cluster path matching."""
     if not p:
         return ""
-    return p.strip().replace("\\", "/").rstrip("/").lower()
+    return p.strip().replace("\\", "/").strip("/").lower()
 
 
 def _has_dense_points(chunk) -> bool:
     """Helper to safely check if chunk has dense points, resilient against Mock objects in unit tests."""
-    if chunk and chunk.point_cloud is not None:
-        cnt = getattr(chunk.point_cloud, "point_count", 0)
+    pc = getattr(chunk, "point_cloud", None) if chunk is not None else None
+    if pc is not None:
+        cnt = getattr(pc, "point_count", 0)
         if isinstance(cnt, (int, float)):
             return cnt > 0
     return False
@@ -199,11 +201,12 @@ def build_cluster_gradual_selection_tasks(
     return tasks
 
 
-def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.05):
+def build_cluster_crop_task(crop_method: str = "gps-square", padding: float | None = 0.05):
     """Builds a RunScript task that executes horizontal enclosing rectangle or structure crop on the worker."""
     if Metashape is None:
         return None
-    pad_str = f"{padding:.4f}"
+    eff_padding = 0.05 if padding is None else float(padding)
+    pad_str = f"{eff_padding:.4f}"
     if crop_method == "gps-square":
         code = (
             "import Metashape, math\n"
@@ -247,17 +250,21 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "    pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []\n"
             "    if pts:\n"
             "        coords = [Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, "
-            "p.coord.z / p.coord.w]) for p in pts]\n"
+            "p.coord.z / p.coord.w]) for p in pts if abs(p.coord.w) > 1e-12]\n"
             "        pt_zs = sorted([(rot_t * v).z for v in coords])\n"
-            "        med_pz = pt_zs[len(pt_zs) // 2]\n"
-            "        devs_pz = sorted([abs(z - med_pz) for z in pt_zs])\n"
-            "        mad_pz = devs_pz[len(devs_pz) // 2]\n"
-            "        sigma_pz = 1.4826 * mad_pz\n"
-            "        filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] "
+            "        if pt_zs:\n"
+            "            med_pz = pt_zs[len(pt_zs) // 2]\n"
+            "            devs_pz = sorted([abs(z - med_pz) for z in pt_zs])\n"
+            "            mad_pz = devs_pz[len(devs_pz) // 2]\n"
+            "            sigma_pz = 1.4826 * mad_pz\n"
+            "            filtered_pt_zs = [z for z in pt_zs if abs(z - med_pz) <= 4.0 * sigma_pz] "
             "if sigma_pz > 1e-3 else pt_zs\n"
-            "        all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)\n"
-            "        med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]\n"
-            "        flight_height = abs(med_cam_z - med_pz)\n"
+            "            all_zs = inlier_zs + (filtered_pt_zs if filtered_pt_zs else pt_zs)\n"
+            "            med_cam_z = sorted(inlier_zs)[len(inlier_zs) // 2]\n"
+            "            flight_height = abs(med_cam_z - med_pz)\n"
+            "        else:\n"
+            "            all_zs = list(inlier_zs)\n"
+            "            flight_height = 0.0\n"
             "        min_z, max_z = min(all_zs), max(all_zs)\n"
             "        span_z = max(chunk.region.size.z, (max_z - min_z) * (1.0 + 2.0 * padding))\n"
             "        mid_z = (min_z + max_z) * 0.5\n"
@@ -294,23 +301,24 @@ def build_cluster_crop_task(crop_method: str = "gps-square", padding: float = 0.
             "if len(pts) >= 10:\n"
             "    rot = chunk.region.rot\n"
             "    rot_t = rot.t()\n"
-            "    locs = [rot_t * Metashape.Vector([p.x/p.w, p.y/p.w, p.z/p.w]) for p in pts]\n"
-            "    xs = sorted([p.x for p in locs])\n"
-            "    ys = sorted([p.y for p in locs])\n"
-            "    zs = sorted([p.z for p in locs])\n"
-            "    n = len(locs)\n"
-            "    i0, i1 = int(n * 0.05), int(n * 0.95)\n"
-            "    min_x, max_x = xs[i0], xs[i1]\n"
-            "    min_y, max_y = ys[i0], ys[i1]\n"
-            "    min_z, max_z = zs[i0], zs[i1]\n"
-            f"    padding = {pad_str}\n"
-            "    dx = (max_x - min_x) * (1.0 + padding)\n"
-            "    dy = (max_y - min_y) * (1.0 + padding)\n"
-            "    dz = (max_z - min_z) * (1.0 + padding * 2.0)\n"
-            "    chunk.region.center = rot * Metashape.Vector([(min_x + max_x)/2.0, (min_y + max_y)/2.0, "
+            "    locs = [rot_t * Metashape.Vector([p.x/p.w, p.y/p.w, p.z/p.w]) for p in pts if abs(p.w) > 1e-12]\n"
+            "    if len(locs) >= 10:\n"
+            "        xs = sorted([p.x for p in locs])\n"
+            "        ys = sorted([p.y for p in locs])\n"
+            "        zs = sorted([p.z for p in locs])\n"
+            "        n = len(locs)\n"
+            "        i0, i1 = int(n * 0.05), int(n * 0.95)\n"
+            "        min_x, max_x = xs[i0], xs[i1]\n"
+            "        min_y, max_y = ys[i0], ys[i1]\n"
+            "        min_z, max_z = zs[i0], zs[i1]\n"
+            f"        padding = {pad_str}\n"
+            "        dx = (max_x - min_x) * (1.0 + padding)\n"
+            "        dy = (max_y - min_y) * (1.0 + padding)\n"
+            "        dz = (max_z - min_z) * (1.0 + padding * 2.0)\n"
+            "        chunk.region.center = rot * Metashape.Vector([(min_x + max_x)/2.0, (min_y + max_y)/2.0, "
             "(min_z + max_z)/2.0])\n"
-            "    chunk.region.size = Metashape.Vector([dx, dy, dz])\n"
-            "    print(f'  [Worker] Auto-Crop (Structure applied): Size=({dx:.1f}m, {dy:.1f}m, {dz:.1f}m)')\n"
+            "        chunk.region.size = Metashape.Vector([dx, dy, dz])\n"
+            "        print(f'  [Worker] Auto-Crop (Structure applied): Size=({dx:.1f}m, {dy:.1f}m, {dz:.1f}m)')\n"
         )
     else:
         return None
@@ -630,7 +638,7 @@ import autometashape.core.telemetry as _am_tel
 if "exclude_folders" not in _am_ins.signature(_am_tel.discover_image_subfolder_groups).parameters:
     _am_orig_disc = getattr(_am_tel, "_orig_discover_image_subfolder_groups", _am_tel.discover_image_subfolder_groups)
     _am_tel._orig_discover_image_subfolder_groups = _am_orig_disc
-    def _am_filtered_disc(images_dir, output_dir=None):
+    def _am_filtered_disc(images_dir, output_dir=None, **_extra):
         _res = _am_orig_disc(images_dir, output_dir=output_dir)
         _raw = os.environ.get("AUTOMETASHAPE_EXCLUDE_FOLDERS", "")
         _pats = tuple(p.strip().lower() for p in _raw.split(",") if p.strip())
@@ -820,7 +828,8 @@ def build_unified_cluster_pipeline_tasks(
 
     # 2. Multi-View Stereo Depth Maps
     if build_depth_maps:
-        depth_downscale = DEPTH_DOWNSCALE_MAP.get((depth_quality or "high").lower(), 2)
+        eff_depth_quality = depth_quality or "high"
+        depth_downscale = DEPTH_DOWNSCALE_MAP.get(eff_depth_quality.lower(), 2)
         filter_mode_arg = DEPTH_FILTER_MAP.get(
             (depth_filtering or "moderate").lower(), Metashape.FilterMode.ModerateFiltering
         )
@@ -829,7 +838,7 @@ def build_unified_cluster_pipeline_tasks(
         t_d.filter_mode = filter_mode_arg
         t_d.reuse_depth = False
         tasks.append(t_d)
-        stage_info.append(("BuildDepthMaps", "depth", f"GPU MVS Depth Maps ({depth_quality.capitalize()})"))
+        stage_info.append(("BuildDepthMaps", "depth", f"GPU MVS Depth Maps ({eff_depth_quality.capitalize()})"))
 
     # 3. Dense Point Cloud
     if build_point_cloud:
@@ -984,7 +993,12 @@ def build_unified_cluster_pipeline_tasks(
     else:
         tex_image_fmt = Metashape.ImageFormat.ImageFormatPNG
 
-    if export_obj and build_mesh:
+    has_model_asset = build_mesh or (chunk is not None and getattr(chunk, "model", None) is not None)
+    has_dem_asset = build_dem or (chunk is not None and getattr(chunk, "elevation", None) is not None)
+    has_ortho_asset = build_orthomosaic or (chunk is not None and getattr(chunk, "orthomosaic", None) is not None)
+    has_pc_asset = build_point_cloud or _has_dense_points(chunk)
+
+    if export_obj and has_model_asset:
         t_obj = Metashape.Tasks.ExportModel()
         t_obj.format = Metashape.ModelFormat.ModelFormatOBJ
         t_obj.texture_format = tex_image_fmt
@@ -995,9 +1009,10 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_obj)
         stage_info.append(("ExportModel", "export", f"Exporting Wavefront OBJ + {fmt_lower.upper()} Atlas"))
 
-    if export_glb and build_mesh:
+    if export_glb and has_model_asset:
         t_glb = Metashape.Tasks.ExportModel()
         t_glb.format = Metashape.ModelFormat.ModelFormatGLTF
+        t_glb.save_texture = True
         t_glb.embed_texture = True
         t_glb.save_normals = True
         t_glb.save_colors = True
@@ -1005,7 +1020,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_glb)
         stage_info.append(("ExportModel", "export", "Exporting Binary glTF (.glb)"))
 
-    if export_fbx and build_mesh:
+    if export_fbx and has_model_asset:
         t_fbx = Metashape.Tasks.ExportModel()
         t_fbx.format = Metashape.ModelFormat.ModelFormatFBX
         t_fbx.save_texture = True
@@ -1015,7 +1030,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_fbx)
         stage_info.append(("ExportModel", "export", "Exporting Autodesk FBX"))
 
-    if export_ply and build_mesh:
+    if export_ply and has_model_asset:
         t_ply = Metashape.Tasks.ExportModel()
         t_ply.format = Metashape.ModelFormat.ModelFormatPLY
         t_ply.save_normals = True
@@ -1024,7 +1039,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_ply)
         stage_info.append(("ExportModel", "export", "Exporting Stanford PLY Mesh"))
 
-    if export_dxf and build_mesh:
+    if export_dxf and has_model_asset:
         t_dxf = Metashape.Tasks.ExportModel()
         t_dxf.format = Metashape.ModelFormat.ModelFormatDXF
         t_dxf.save_normals = True
@@ -1041,7 +1056,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_tp)
         stage_info.append(("ExportPointCloud", "export", "Exporting Sparse Tie Points (PLY)"))
 
-    if export_dem and build_dem:
+    if export_dem and has_dem_asset:
         t_dem = Metashape.Tasks.ExportRaster()
         t_dem.source_data = Metashape.DataSource.ElevationData
         t_dem.image_format = Metashape.ImageFormat.ImageFormatTIFF
@@ -1056,7 +1071,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_dem)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Elevation Model (DEM)"))
 
-    if export_ortho and build_orthomosaic:
+    if export_ortho and has_ortho_asset:
         t_ortho = Metashape.Tasks.ExportRaster()
         t_ortho.source_data = Metashape.DataSource.OrthomosaicData
         t_ortho.image_format = Metashape.ImageFormat.ImageFormatTIFF
@@ -1074,7 +1089,7 @@ def build_unified_cluster_pipeline_tasks(
         tasks.append(t_ortho)
         stage_info.append(("ExportRaster", "export", "Exporting GeoTIFF Orthomosaic"))
 
-    if export_point_cloud and build_point_cloud:
+    if export_point_cloud and has_pc_asset:
         pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
         pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
             pc_format_ext,
@@ -1165,22 +1180,30 @@ def cleanup_stale_dispatch_tickets(
     try:
         import shutil
 
+        grouped: dict[str, list[str]] = {}
         for entry in os.listdir(tickets_dir):
-            full = os.path.join(tickets_dir, entry)
             stem = entry[:-12] if entry.lower().endswith(".ticket.json") else os.path.splitext(entry)[0]
             if stem.lower() in protected_stems:
                 continue
+            grouped.setdefault(stem.lower(), []).append(os.path.join(tickets_dir, entry))
+
+        for _stem_l, paths in grouped.items():
             try:
-                if os.path.getmtime(full) > cutoff:
-                    continue
-                if os.path.isdir(full):
-                    shutil.rmtree(full, ignore_errors=True)
-                else:
-                    os.remove(full)
-                if not os.path.exists(full):
-                    removed += 1
+                newest_mtime = max(os.path.getmtime(p) for p in paths)
             except OSError:
-                pass
+                continue
+            if newest_mtime > cutoff:
+                continue
+            for full in paths:
+                try:
+                    if os.path.isdir(full):
+                        shutil.rmtree(full, ignore_errors=True)
+                    else:
+                        os.remove(full)
+                    if not os.path.exists(full):
+                        removed += 1
+                except OSError:
+                    pass
     except OSError:
         pass
     return removed
@@ -1195,19 +1218,19 @@ def create_hidden_dispatch_ticket(
 ) -> str:
     """Materialize a minimal hidden scheduler ticket under ``.cluster/tickets/`` (never in ``Result/``).
 
-    Used ONLY when Metashape Network Server retains an un-evictable aborted batch key for the
-    canonical ``<project>.psx`` path. Keeps the user's deliverables directory spotless with a
-    single canonical ``<project>.psx`` while writing a tiny ``.ticket.json`` metadata sidecar so
+    Used ONLY when explicitly opted in via ``allow_hidden_ticket=True`` for ``RunScript``-only
+    batches. Keeps the user's deliverables directory spotless with a single canonical
+    ``<project>.psx`` while writing a tiny ``.ticket.json`` metadata sidecar so
     ``cluster_monitor.py`` still verifies the real Result directory accurately.
 
     Returns:
-        Cluster-relative POSIX path to the hidden ticket ``.psx`` (e.g. ``.cluster/tickets/<slug>_<ts>.psx``).
+        Cluster-relative POSIX path to the hidden ticket ``.psx`` (e.g. ``.cluster/tickets/<slug>_<ts>_<pid>_<rand>.psx``).
     """
     cleanup_stale_dispatch_tickets(shared_root, protected_paths=protected_paths)
     tickets_dir = os.path.join(shared_root, ".cluster", "tickets")
     os.makedirs(tickets_dir, exist_ok=True)
     slug = _slugify_ticket_name(project_name)
-    stem = f"{slug}_{int(time.time() * 1000)}_{os.getpid()}"
+    stem = f"{slug}_{int(time.time() * 1000)}_{os.getpid()}_{uuid.uuid4().hex[:6]}"
     psx_path = os.path.join(tickets_dir, f"{stem}.psx")
     files_dir = os.path.join(tickets_dir, f"{stem}.files")
     os.makedirs(files_dir, exist_ok=True)
@@ -1280,6 +1303,148 @@ def _safe_abort_batch(net_client, batch_id: int, is_paused: bool = False) -> Non
         pass
 
 
+def _extract_batch_state(obj) -> str:
+    raw = obj.get("state") if isinstance(obj, dict) else getattr(obj, "state", "")
+    return str(raw or "").strip().lower()
+
+
+def _extract_batch_paused(obj) -> bool:
+    return bool(isinstance(obj, dict) and obj.get("paused")) or _extract_batch_state(obj) == "paused"
+
+
+def _find_blocking_batch_id(net_client, rel_psx: str) -> int | None:
+    """Return active blocking int batch_id for ``rel_psx`` via ``findBatch``, or ``None`` if free."""
+    if not hasattr(net_client, "findBatch"):
+        return None
+    try:
+        fb_id = net_client.findBatch(rel_psx)
+        if isinstance(fb_id, int) and not isinstance(fb_id, bool) and fb_id > 0:
+            return fb_id
+    except Exception:
+        pass
+    return None
+
+
+def _reap_holding_workers(net_client, batch_ids: set[int], shared_root: str) -> list[str]:
+    """Dispatch watchdog abort signals to any online worker still executing a batch in ``batch_ids``."""
+    if not batch_ids or not shared_root or not os.path.isdir(shared_root):
+        return []
+    reaped_hosts: list[str] = []
+    try:
+        from autometashape.cluster.abort import dispatch_abort_signal
+        from autometashape.cluster.hardware import is_healthy_online_worker
+
+        holding_worker_ids: set[int] = set()
+        if hasattr(net_client, "batchInfo"):
+            for bid in batch_ids:
+                try:
+                    info = net_client.batchInfo(bid)
+                    if isinstance(info, dict):
+                        for t in info.get("tasks") or []:
+                            if isinstance(t, dict) and t.get("worker_id") is not None:
+                                holding_worker_ids.add(t["worker_id"])
+                except Exception:
+                    pass
+
+        raw_w = net_client.workerList() if hasattr(net_client, "workerList") else {}
+        workers = (
+            raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
+        )
+        seen_nodes: set[str] = set()
+        for w in workers:
+            if not is_healthy_online_worker(w):
+                continue
+            wid = w.get("worker_id")
+            w_bid = w.get("batch_id")
+            hname = str(w.get("hostname") or "").strip()
+            if not hname:
+                continue
+            if (w_bid in batch_ids) or (wid in holding_worker_ids):
+                key = hname.lower()
+                if key not in seen_nodes:
+                    seen_nodes.add(key)
+                    try:
+                        dispatch_abort_signal(
+                            node_name=hname, batch_id=w_bid or next(iter(batch_ids)), shared_root=shared_root
+                        )
+                        reaped_hosts.append(hname)
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+    return reaped_hosts
+
+
+def clear_stale_project_lock(shared_root: str, rel_psx: str) -> tuple[bool, str]:
+    """Safely remove a leftover ``<project>.files/lock`` ONLY after server batch lock is released.
+
+    Returns ``(cleared_or_absent, message)``. Raises ``RuntimeError`` on WinError 32 / PermissionError
+    when an active OS process still holds an open handle to the lock file.
+    """
+    if not shared_root or not rel_psx or not os.path.isdir(shared_root):
+        return True, ""
+    clean_rel = rel_psx.strip().replace("\\", "/").lstrip("/")
+    if not clean_rel or ".." in clean_rel.split("/"):
+        return True, ""
+    abs_psx = os.path.join(shared_root, *clean_rel.split("/"))
+    from autometashape.cluster.staging import get_psx_files_dir
+
+    lock_file = os.path.join(get_psx_files_dir(abs_psx), "lock")
+    if not os.path.isfile(lock_file):
+        return True, ""
+    try:
+        os.remove(lock_file)
+        print(f"  [Cluster] Cleared stale project lock after batch release: {lock_file}", flush=True)
+        return True, lock_file
+    except OSError as exc:
+        raise RuntimeError(
+            f"Project lock '{lock_file}' is still actively held by a running process ({exc}); "
+            "refusing to force-dispatch a duplicate batch on the same project."
+        ) from exc
+
+
+def _wait_for_batch_path_release(
+    net_client,
+    rel_psx: str,
+    blocking_ids: set[int],
+    timeout_s: float = 30.0,
+    shared_root: str = "",
+    allow_reap: bool = False,
+) -> int | None:
+    """Deterministically wait for Metashape Server to release ``rel_psx`` (``findBatch(rel_psx) is None``).
+
+    On Metashape Server 2.2.2, aborted RunScript batches stay keyed in RAM only until the worker's
+    TCP connection closes. When ``allow_reap=True`` and ``rel_psx`` remains held after 2s, dispatches
+    the watchdog abort signal to close the stuck worker's TCP socket cleanly (~2-4s).
+
+    Returns ``None`` once ``rel_psx`` is free, or the still-blocking ``batch_id`` if timeout expires.
+    """
+    blocker = _find_blocking_batch_id(net_client, rel_psx)
+    if blocker is None:
+        return None
+    deadline = time.time() + max(0.0, float(timeout_s))
+    reap_dispatched = False
+    reap_at = time.time() + 2.0
+    while True:
+        blocker = _find_blocking_batch_id(net_client, rel_psx)
+        if blocker is None:
+            return None
+        blocking_ids.add(blocker)
+        now = time.time()
+        if now >= deadline:
+            return blocker
+        if allow_reap and not reap_dispatched and now >= reap_at and shared_root:
+            reaped = _reap_holding_workers(net_client, blocking_ids, shared_root)
+            reap_dispatched = True
+            if reaped:
+                print(
+                    f"  [Cluster] Dispatched watchdog reap to worker(s) {', '.join(reaped)} "
+                    f"to release '{rel_psx}' (batch #{blocker})...",
+                    flush=True,
+                )
+        time.sleep(0.5)
+
+
 def safe_create_cluster_batch(
     net_client: Metashape.NetworkClient,
     rel_psx: str,
@@ -1291,42 +1456,50 @@ def safe_create_cluster_batch(
     shared_root: str = "",
     ticket_project_name: str = "",
     ticket_rel_output_dir: str = "",
+    allow_hidden_ticket: bool = False,
+    release_timeout: float = 30.0,
 ) -> tuple[int, bool]:
-    """Safely creates a cluster batch, resolving 'Duplicate batch' conflicts on the Network Server."""
+    """Safely creates a cluster batch on the exact canonical ``rel_psx`` path.
+
+    Preserves operator-paused batches when ``force_fresh=False``. On ``force_fresh=True`` or
+    stale/errored batch replacement, deterministically aborts, optionally reaps stuck workers
+    holding the TCP lock, polls ``findBatch(rel_psx) is None``, and clears any stale project
+    ``.files/lock`` before dispatching — preventing silent ``.cluster/tickets/`` name mismatches.
+    """
     if net_client is None:
         raise ValueError("NetworkClient is not connected or None")
 
     norm_target = _norm_cluster_path(rel_psx)
     done_states = ("completed", "finished")
     terminal_states = ("completed", "finished", "failed", "aborted", "cancelled")
+    aborted_ids: set[int] = set()
 
-    if hasattr(net_client, "findBatch"):
+    fb_id = _find_blocking_batch_id(net_client, rel_psx)
+    if fb_id is not None:
         try:
-            fb_id = net_client.findBatch(rel_psx)
-            if isinstance(fb_id, int) and not isinstance(fb_id, bool) and fb_id > 0:
-                fb_info = net_client.batchInfo(fb_id)
-                fb_state = (
-                    fb_info.get("state", "") if isinstance(fb_info, dict) else getattr(fb_info, "state", "")
-                ).lower()
-                fb_err_cnt = int((fb_info.get("error_count") if isinstance(fb_info, dict) else 0) or 0)
-                fb_aborted = bool(isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
-                fb_paused = bool(isinstance(fb_info, dict) and fb_info.get("paused"))
-                fb_healthy_active = (
-                    fb_state in ("inprogress", "running", "submitted", "pending", "queued")
-                    and not fb_aborted
-                    and fb_err_cnt == 0
+            fb_info = net_client.batchInfo(fb_id)
+            fb_state = _extract_batch_state(fb_info)
+            fb_err_cnt = int((fb_info.get("error_count") if isinstance(fb_info, dict) else 0) or 0)
+            fb_aborted = bool(isinstance(fb_info, dict) and (fb_info.get("failed") or fb_info.get("aborted")))
+            fb_paused = _extract_batch_paused(fb_info)
+            fb_healthy_active = (
+                fb_state in ("inprogress", "running", "submitted", "pending", "queued", "paused")
+                and not fb_aborted
+                and fb_err_cnt == 0
+            )
+            if not force_fresh and fb_healthy_active:
+                print(
+                    f"  [Cluster] Attaching to active batch #{fb_id} via findBatch for '{rel_psx}' ({fb_state}).",
+                    flush=True,
                 )
-                if not force_fresh and fb_healthy_active:
-                    print(
-                        f"  [Cluster] Attaching to active batch #{fb_id} via findBatch for '{rel_psx}' ({fb_state}).",
-                        flush=True,
-                    )
-                    return fb_id, True
-                elif fb_state not in done_states and (
-                    (force_fresh and fb_state != "aborted") or (fb_state not in terminal_states and not fb_aborted)
-                ):
-                    _safe_abort_batch(net_client, fb_id, is_paused=fb_paused)
-                    time.sleep(0.5)
+                return fb_id, True
+            elif fb_state not in done_states and (
+                (force_fresh and fb_state != "aborted") or (fb_state not in terminal_states and not fb_aborted)
+            ):
+                _safe_abort_batch(net_client, fb_id, is_paused=fb_paused)
+                aborted_ids.add(fb_id)
+            elif fb_state in ("aborted", "failed", "cancelled") or fb_aborted:
+                aborted_ids.add(fb_id)
         except Exception:
             pass
 
@@ -1343,12 +1516,12 @@ def safe_create_cluster_batch(
             canon_b_path = resolve_batch_canonical_path(b_path, shared_root)
             if _norm_cluster_path(b_path) == norm_target or _norm_cluster_path(canon_b_path) == norm_target:
                 b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", getattr(b, "batch_id", None))
-                b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
+                b_state = _extract_batch_state(b)
                 b_err_cnt = int((b.get("error_count") if isinstance(b, dict) else 0) or 0)
                 b_aborted = bool(isinstance(b, dict) and (b.get("failed") or b.get("aborted")))
-                b_paused = bool(isinstance(b, dict) and b.get("paused"))
+                b_paused = _extract_batch_paused(b)
                 b_healthy_active = (
-                    b_state in ("inprogress", "running", "submitted", "pending", "queued")
+                    b_state in ("inprogress", "running", "submitted", "pending", "queued", "paused")
                     and not b_aborted
                     and b_err_cnt == 0
                 )
@@ -1361,16 +1534,29 @@ def safe_create_cluster_batch(
                     and ((force_fresh and b_state != "aborted") or (b_state not in terminal_states and not b_aborted))
                 ):
                     _safe_abort_batch(net_client, b_id, is_paused=b_paused)
-                    time.sleep(0.5)
+                    aborted_ids.add(b_id)
+                elif b_id is not None and (b_state in ("aborted", "failed", "cancelled") or b_aborted):
+                    aborted_ids.add(b_id)
     except Exception as e_pre:
         print(f"  [Cluster] Note: Pre-dispatch batch check: {e_pre}", flush=True)
+
+    if aborted_ids:
+        blocker = _wait_for_batch_path_release(
+            net_client,
+            rel_psx,
+            aborted_ids,
+            timeout_s=release_timeout,
+            shared_root=shared_root,
+            allow_reap=force_fresh,
+        )
+        if blocker is None and shared_root:
+            clear_stale_project_lock(shared_root, rel_psx)
 
     try:
         batch_id = net_client.createBatch(rel_psx, net_tasks)
     except Exception as e_create:
         if "duplicate batch" in str(e_create).lower():
             try:
-                aborted_ids = set()
                 raw_b = net_client.batchList()
                 batches = (
                     raw_b.get("batches", [])
@@ -1384,31 +1570,42 @@ def safe_create_cluster_batch(
                     canon_b_path = resolve_batch_canonical_path(b_path, shared_root)
                     if _norm_cluster_path(b_path) == norm_target or _norm_cluster_path(canon_b_path) == norm_target:
                         b_id = b.get("batch_id") if isinstance(b, dict) else getattr(b, "id", None)
-                        b_state = (b.get("state") if isinstance(b, dict) else getattr(b, "state", "")).lower()
-                        b_paused = bool(isinstance(b, dict) and b.get("paused"))
+                        b_state = _extract_batch_state(b)
+                        b_paused = _extract_batch_paused(b)
                         if b_id is not None and b_state not in done_states:
                             _safe_abort_batch(net_client, b_id, is_paused=b_paused)
                             aborted_ids.add(b_id)
-                if not aborted_ids and hasattr(net_client, "findBatch"):
-                    try:
-                        fb_id = net_client.findBatch(rel_psx)
-                        if (
-                            isinstance(fb_id, int)
-                            and not isinstance(fb_id, bool)
-                            and fb_id > 0
-                            and fb_id not in aborted_ids
-                        ):
-                            _safe_abort_batch(net_client, fb_id, is_paused=True)
-                    except Exception:
-                        pass
-                time.sleep(1.0)
+                fb_retry = _find_blocking_batch_id(net_client, rel_psx)
+                if fb_retry is not None and fb_retry not in aborted_ids:
+                    _safe_abort_batch(net_client, fb_retry, is_paused=True)
+                    aborted_ids.add(fb_retry)
+
+                still_blocked = _wait_for_batch_path_release(
+                    net_client,
+                    rel_psx,
+                    aborted_ids,
+                    timeout_s=release_timeout,
+                    shared_root=shared_root,
+                    allow_reap=True,
+                )
+                if still_blocked is None and shared_root:
+                    clear_stale_project_lock(shared_root, rel_psx)
+                elif still_blocked is None and not hasattr(net_client, "findBatch"):
+                    time.sleep(0.5)
+
                 try:
                     batch_id = net_client.createBatch(rel_psx, net_tasks)
                 except Exception as e_retry_dup:
-                    if "duplicate batch" in str(e_retry_dup).lower() and shared_root and os.path.isdir(shared_root):
-                        # Metashape Server 2.2.2 locks hard-killed aborted RunScript batch keys in RAM until
-                        # server restart. Dispatch via a hidden .cluster/tickets/ stub so Result/<project>/
-                        # NEVER gets polluted with a second _dispatch_*.psx project file.
+                    all_runscript = bool(net_tasks) and all(
+                        str(getattr(t, "name", "") or "") == "RunScript" for t in net_tasks
+                    )
+                    if (
+                        "duplicate batch" in str(e_retry_dup).lower()
+                        and allow_hidden_ticket
+                        and all_runscript
+                        and shared_root
+                        and os.path.isdir(shared_root)
+                    ):
                         proj_label = ticket_project_name or os.path.splitext(os.path.basename(rel_psx))[0]
                         rel_out = ticket_rel_output_dir or os.path.dirname(rel_psx.replace("\\", "/"))
                         ticket_rel = create_hidden_dispatch_ticket(
@@ -1419,11 +1616,21 @@ def safe_create_cluster_batch(
                             protected_paths=known_batch_paths,
                         )
                         print(
-                            f"  [Cluster Recovery] Server holds stale aborted key for '{rel_psx}'; "
-                            f"dispatching via hidden ticket '{ticket_rel}' (Result folder stays clean).",
+                            f"  [Cluster Recovery] Server still holds '{rel_psx}'; "
+                            f"dispatching via opt-in hidden ticket '{ticket_rel}'.",
                             flush=True,
                         )
                         batch_id = net_client.createBatch(ticket_rel, net_tasks)
+                    elif "duplicate batch" in str(e_retry_dup).lower():
+                        blocker_id = _find_blocking_batch_id(net_client, rel_psx) or (
+                            max(aborted_ids) if aborted_ids else None
+                        )
+                        raise RuntimeError(
+                            f"Cannot create canonical batch for '{rel_psx}': Metashape Server still holds "
+                            f"batch #{blocker_id} after waiting {release_timeout:.0f}s. Refusing to rename to "
+                            ".cluster/tickets/. Reap the worker holding that batch (scripts/cluster_abort.py) "
+                            "and re-submit."
+                        ) from e_retry_dup
                     else:
                         raise e_retry_dup
             except Exception as e_retry:
@@ -1433,19 +1640,37 @@ def safe_create_cluster_batch(
 
     # Configure priority and worker limits BEFORE unpausing so idle workers never claim at wrong priority
     if priority is not None and hasattr(net_client, "setBatchPriority"):
-        try:
-            net_client.setBatchPriority(batch_id, priority)
-        except Exception:
-            pass
-    if worker_limit is not None and worker_limit > 0:
-        try:
-            net_client.setBatchWorkerLimit(batch_id, worker_limit)
-        except Exception:
-            pass
-    try:
-        net_client.setBatchPaused(batch_id, bool(start_paused))
-    except Exception:
-        pass
+        for attempt in range(3):
+            try:
+                net_client.setBatchPriority(batch_id, priority)
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.25)
+    if worker_limit is not None and worker_limit > 0 and hasattr(net_client, "setBatchWorkerLimit"):
+        for attempt in range(3):
+            try:
+                net_client.setBatchWorkerLimit(batch_id, worker_limit)
+                break
+            except Exception:
+                if attempt < 2:
+                    time.sleep(0.25)
+    if hasattr(net_client, "setBatchPaused"):
+        pause_err: Exception | None = None
+        for attempt in range(3):
+            try:
+                net_client.setBatchPaused(batch_id, bool(start_paused))
+                pause_err = None
+                break
+            except Exception as exc:
+                pause_err = exc
+                if attempt < 2:
+                    time.sleep(0.25)
+        if pause_err is not None:
+            _safe_abort_batch(net_client, batch_id, is_paused=True)
+            raise RuntimeError(
+                f"Created batch #{batch_id} for '{rel_psx}' but failed to set paused={bool(start_paused)}: {pause_err}"
+            ) from pause_err
 
     return batch_id, False
 
@@ -1474,12 +1699,14 @@ def evaluate_cluster_batch_info(b_info: dict) -> tuple[str, bool, str]:
     tasks_info = b_info.get("tasks") or []
 
     has_failed = bool(
-        state in ("failed", "aborted")
+        state in ("failed", "aborted", "cancelled")
         or b_info.get("failed")
         or b_info.get("aborted")
         or int(b_info.get("error_count") or 0) > 0
         or any(
-            str(t.get("state") or "").lower() in ("failed", "aborted") or t.get("failed") or t.get("aborted")
+            str(t.get("state") or "").lower() in ("failed", "aborted", "cancelled")
+            or t.get("failed")
+            or t.get("aborted")
             for t in tasks_info
             if isinstance(t, dict)
         )
@@ -1501,16 +1728,18 @@ def evaluate_cluster_batch_info(b_info: dict) -> tuple[str, bool, str]:
         elif isinstance(last_err, str) and last_err.strip():
             _add_msg(last_err)
         for t in tasks_info:
-            for err in t.get("errors", []):
+            if not isinstance(t, dict):
+                continue
+            for err in t.get("errors") or []:
                 if isinstance(err, dict):
                     _add_msg(str(err.get("message") or err.get("type") or err))
                 else:
                     _add_msg(str(err))
-        resolved_state = "aborted" if (state == "aborted" or b_info.get("aborted")) else "failed"
+        resolved_state = "aborted" if (state in ("aborted", "cancelled") or b_info.get("aborted")) else "failed"
         err_str = "; ".join(err_msgs) if err_msgs else f"Batch {resolved_state} on cluster node"
         return resolved_state, False, err_str
 
-    if state == "completed":
+    if state in ("completed", "finished"):
         return "completed", True, ""
 
     return state or "inprogress", False, ""

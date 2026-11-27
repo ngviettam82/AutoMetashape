@@ -54,7 +54,7 @@ def is_healthy_online_worker(worker: Any) -> bool:
     if not isinstance(worker, dict):
         return False
     state = str(worker.get("state", "")).strip().lower()
-    return state != "offline" and not bool(worker.get("aborted"))
+    return state not in ("offline", "aborted", "disconnected") and not bool(worker.get("aborted"))
 
 
 def find_metashape_path() -> str | None:
@@ -311,14 +311,28 @@ def get_primary_lan_ip() -> str:
     return "127.0.0.1"
 
 
+_TRADEMARK_RE = re.compile(r"(?:\(r\)|\(tm\)|[®™])", re.IGNORECASE)
 _AMD_IGPU_RE = re.compile(r"\b(?:610m|660m|680m|740m|760m|780m|820m|840m|860m|880m|890m)\b")
-_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc(?:\(tm\))?\s+(?:[ab]\d{3}m?|pro)\b")
-_INTEL_IGPU_RE = re.compile(r"\bintel(?:\(r\))?\s+(?:uhd|hd|iris)\b")
+_INTEL_DISCRETE_ARC_RE = re.compile(r"\barc\s+(?:[ab]\d{3}m?|pro)\b")
+_INTEL_IGPU_RE = re.compile(r"\bintel\s+(?:uhd|hd|iris)\b")
+
+
+def _normalize_gpu_name(name: str) -> str:
+    """Lowercase GPU name and strip ASCII/Unicode trademark markers ((R), (TM), ®, ™)."""
+    cleaned = _TRADEMARK_RE.sub("", str(name or ""))
+    return " ".join(cleaned.lower().split())
+
+
+def _safe_int(val: Any, default: int = 0) -> int:
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return default
 
 
 def is_integrated_gpu(name: str) -> bool:
     """Return True if GPU device name matches integrated graphics or software renderers."""
-    lower = (name or "").strip().lower()
+    lower = _normalize_gpu_name(name)
     if not lower:
         return False
     # Software / virtual renderers
@@ -341,9 +355,7 @@ def is_integrated_gpu(name: str) -> bool:
     return any(
         ig in lower
         for ig in (
-            "intel(r) graphics",
             "intel graphics",
-            "radeon(tm) graphics",
             "radeon graphics",
             "vega",
         )
@@ -372,10 +384,10 @@ def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dic
         if not isinstance(g, dict):
             continue
         raw_name = str(g.get("name", f"GPU {i}")).strip()
-        name_low = raw_name.lower()
-        vendor_low = str(g.get("vendor", "")).strip().lower()
-        mem_bytes = int(g.get("mem_size", 0) or 0)
-        mem_mb = mem_bytes // (1024 * 1024) if mem_bytes > 0 else int(g.get("mem_mb", 0) or 0)
+        name_low = _normalize_gpu_name(raw_name)
+        vendor_low = _normalize_gpu_name(str(g.get("vendor", "")))
+        mem_bytes = _safe_int(g.get("mem_size", 0), 0)
+        mem_mb = mem_bytes // (1024 * 1024) if mem_bytes > 0 else _safe_int(g.get("mem_mb", 0), 0)
 
         if is_integrated_gpu(raw_name):
             continue
@@ -383,7 +395,7 @@ def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dic
         entry = {"index": i, "name": raw_name, "mem_mb": mem_mb}
         non_igpu_fallback.append((i, entry))
 
-        is_discrete = any(
+        is_discrete = bool(_INTEL_DISCRETE_ARC_RE.search(name_low)) or any(
             k in vendor_low or k in name_low
             for k in (
                 "nvidia",
@@ -396,7 +408,6 @@ def compute_discrete_gpu_mask(gpus: list[dict[str, Any]]) -> tuple[int, list[dic
                 "firepro",
                 "instinct",
                 "intel arc",
-                "arc(tm)",
                 "apple",
             )
         )
@@ -513,14 +524,16 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
             if gpus:
                 devices = []
                 for i, g in enumerate(gpus):
-                    name = g.get("name", f"GPU {i}")
+                    if not isinstance(g, dict):
+                        continue
+                    name = str(g.get("name", f"GPU {i}")).strip()
                     if is_integrated_gpu(name):
                         continue
                     devices.append(
                         {
                             "index": i,
                             "name": name,
-                            "mem_mb": int(g.get("mem_size", 0) // (1024 * 1024)),
+                            "mem_mb": _safe_int(g.get("mem_size", 0), 0) // (1024 * 1024),
                         }
                     )
                 if devices:
@@ -575,15 +588,17 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
                 "-Command",
                 "Get-CimInstance Win32_VideoController | Select-Object -ExpandProperty Name",
             ]
-            res = subprocess.run(cmd, capture_output=True, text=True, timeout=3)
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
             if res.returncode == 0 and res.stdout.strip():
                 devices = []
                 for name in res.stdout.strip().splitlines():
                     clean_name = name.strip()
                     if not clean_name or is_integrated_gpu(clean_name):
                         continue
-                    lower = clean_name.lower()
-                    if any(k in lower for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc")):
+                    lower = _normalize_gpu_name(clean_name)
+                    if _INTEL_DISCRETE_ARC_RE.search(lower) or any(
+                        k in lower for k in ("nvidia", "geforce", "rtx", "quadro", "tesla", "radeon", "intel arc")
+                    ):
                         devices.append({"index": len(devices), "name": clean_name, "mem_mb": 0})
                 if devices:
                     return devices
@@ -591,6 +606,9 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
             pass
 
     return []
+
+
+_BATCH_UNSAFE_CHARS_RE = re.compile(r'[\r\n&|<>^"%`]')
 
 
 def generate_worker_bat_content(
@@ -602,9 +620,16 @@ def generate_worker_bat_content(
 ) -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
     target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
+    if _BATCH_UNSAFE_CHARS_RE.search(target_host):
+        raise ValueError(f"Unsafe characters in worker host: {target_host!r}")
     target_port = str(port).strip() if port is not None else "5840"
     target_port = target_port or "5840"
+    if not target_port.isdigit() or not (1 <= int(target_port) <= 65535):
+        raise ValueError(f"Invalid worker port: {target_port!r}")
+    cpu_flag_val = 1 if int(cpu_enable) else 0
     target_root = root_path.strip()
+    if _BATCH_UNSAFE_CHARS_RE.search(target_root):
+        raise ValueError(f"Unsafe characters in worker root_path: {target_root!r}")
 
     if target_root:
         root_init = f'set "TARGET_ROOT={target_root}"'
@@ -615,11 +640,13 @@ def generate_worker_bat_content(
     if gpu_mask is not None:
         mask_str = str(gpu_mask).strip()
         if mask_str and mask_str.lower() not in ("auto", "none", "default"):
+            if not re.fullmatch(r"(?:0x[0-9a-fA-F]+|\d+)", mask_str):
+                raise ValueError(f"Invalid gpu_mask value: {mask_str!r}")
             gpu_flag = f" --gpu-mask {mask_str}"
 
     return f"""@echo off
 chcp 65001 > nul
-setlocal enabledelayedexpansion
+setlocal
 title Metashape Distributed Cluster Worker Node
 
 echo =======================================================================
@@ -628,7 +655,7 @@ echo   Cluster Target Server : {target_host}:{target_port}
 echo =======================================================================
 echo.
 
-:: Configure and validate Shared Network Storage root path
+:: Configure and validate Shared Network Storage root path (before EnableDelayedExpansion so '!' is preserved)
 {root_init}
 if "%TARGET_ROOT%"=="" (
     echo [ERROR] Shared network root path cannot be empty.
@@ -638,6 +665,7 @@ if "%TARGET_ROOT%"=="" (
 
 echo [OK] Shared Network Root   : %TARGET_ROOT%
 
+setlocal enabledelayedexpansion
 :: Detect Metashape installation dynamically across environment paths and mounted drives
 set "METASHAPE_EXE="
 if exist "%ProgramFiles%\\Agisoft\\Metashape Pro\\metashape.exe" (
@@ -676,7 +704,7 @@ echo [READY] Worker is online and waiting for jobs from the server.
 echo Press Ctrl+C in this window at any time to disconnect this worker node.
 echo.
 
-"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_enable}{gpu_flag}
+"%METASHAPE_EXE%" --worker --host {target_host}:{target_port} --root "%TARGET_ROOT%" --cpu-enable {cpu_flag_val}{gpu_flag}
 
 if !errorlevel! neq 0 (
     echo.
@@ -707,16 +735,12 @@ def normalize_unicode_path(path: str) -> str:
 
 
 def test_tcp_connection(host: str, port: int, timeout: float = 3.0) -> bool:
-    """Test TCP socket reachability to target cluster host and port."""
-    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    s.settimeout(timeout)
+    """Test TCP socket reachability to target cluster host and port (IPv4/IPv6 safe)."""
     try:
-        s.connect((host, port))
-        return True
-    except (socket.timeout, OSError):
+        with socket.create_connection((host, int(port)), timeout=timeout):
+            return True
+    except (socket.timeout, OSError, ValueError):
         return False
-    finally:
-        s.close()
 
 
 def test_unc_path(root_path: str) -> tuple[bool, str]:
@@ -744,6 +768,9 @@ def test_unc_path(root_path: str) -> tuple[bool, str]:
 def extract_unc_root(path: str) -> str:
     """Extracts UNC share root (\\\\server\\share) if path is a UNC path.
 
+    Handles Win32 extended-length UNC prefixes (``\\\\?\\UNC\\server\\share\\...``)
+    while rejecting extended local drive paths (``\\\\?\\C:\\...``).
+
     Args:
         path: Path string to inspect.
 
@@ -753,6 +780,13 @@ def extract_unc_root(path: str) -> str:
     if not path or not isinstance(path, str):
         return ""
     norm = path.strip().replace("/", "\\")
+    if norm.lower().startswith("\\\\?\\unc\\"):
+        parts = [p for p in norm[8:].split("\\") if p]
+        if len(parts) >= 2:
+            return f"\\\\{parts[0]}\\{parts[1]}"
+        return ""
+    if norm.startswith("\\\\?\\") or norm.startswith("\\\\.\\"):
+        return ""
     if norm.startswith(r"\\"):
         parts = [p for p in norm[2:].split("\\") if p]
         if len(parts) >= 2:

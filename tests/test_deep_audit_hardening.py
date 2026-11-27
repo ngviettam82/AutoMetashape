@@ -344,12 +344,36 @@ class TestHiddenDispatchTicketsAndMonitor(unittest.TestCase):
             os.makedirs(res_dir, exist_ok=True)
             call_order: list[str] = []
 
+            runscript_task = MagicMock()
+            runscript_task.name = "RunScript"
+
+            # 1. Default (allow_hidden_ticket=False) refuses silent renaming to .cluster/tickets/
+            mock_net_default = MagicMock()
+            mock_net_default.findBatch.return_value = -1
+            mock_net_default.batchList.return_value = {
+                "batches": [{"batch_id": 9, "path": "Result/CATP_0209/CATP_0209.psx", "state": "inprogress"}]
+            }
+            mock_net_default.createBatch.side_effect = RuntimeError("Duplicate batch: Result/CATP_0209/CATP_0209.psx")
+            with patch("autometashape.cluster.orchestrator.time.sleep"):
+                with self.assertRaises(RuntimeError) as ctx:
+                    safe_create_cluster_batch(
+                        mock_net_default,
+                        "Result/CATP_0209/CATP_0209.psx",
+                        [runscript_task],
+                        worker_limit=1,
+                        force_fresh=True,
+                        shared_root=shared_root,
+                        ticket_project_name="CATP_0209",
+                        ticket_rel_output_dir="Result/CATP_0209",
+                    )
+            self.assertIn("Refusing to rename to .cluster/tickets/", str(ctx.exception))
+
+            # 2. Explicit opt-in (allow_hidden_ticket=True) uses hidden ticket for RunScript tasks
             mock_net = MagicMock()
             mock_net.findBatch.return_value = -1
             mock_net.batchList.return_value = {
                 "batches": [{"batch_id": 9, "path": "Result/CATP_0209/CATP_0209.psx", "state": "inprogress"}]
             }
-            # Persistent Duplicate batch on canonical path, succeeds on hidden ticket path
             mock_net.createBatch.side_effect = [
                 RuntimeError("Duplicate batch: Result/CATP_0209/CATP_0209.psx"),
                 RuntimeError("Duplicate batch: Result/CATP_0209/CATP_0209.psx"),
@@ -363,7 +387,7 @@ class TestHiddenDispatchTicketsAndMonitor(unittest.TestCase):
                 bid, attached = safe_create_cluster_batch(
                     mock_net,
                     "Result/CATP_0209/CATP_0209.psx",
-                    [MagicMock()],
+                    [runscript_task],
                     worker_limit=1,
                     force_fresh=True,
                     priority=100,
@@ -371,6 +395,7 @@ class TestHiddenDispatchTicketsAndMonitor(unittest.TestCase):
                     shared_root=shared_root,
                     ticket_project_name="CATP_0209",
                     ticket_rel_output_dir="Result/CATP_0209",
+                    allow_hidden_ticket=True,
                 )
 
             self.assertEqual(bid, 42)

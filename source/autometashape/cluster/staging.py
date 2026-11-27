@@ -11,6 +11,7 @@ import ctypes
 import os
 import re
 import shutil
+import socket
 import string
 import struct
 import sys
@@ -152,12 +153,13 @@ def _is_fixed_local_windows_drive(drive_root: str) -> bool:
             return False
 
         # External USB SSD/NVMe enclosures report DRIVE_FIXED (3) to GetDriveTypeW;
-        # inspect the physical storage bus type to exclude USB/1394/SD/MMC external disks.
-        bus_info = _query_windows_drive_bus_info(drive_root)
-        if bus_info is not None:
-            removable_media, bus_type = bus_info
-            if removable_media or bus_type in _EXTERNAL_STORAGE_BUS_TYPES:
-                return False
+        # only query the physical storage bus type on DRIVE_FIXED volumes.
+        if drive_type == _WIN32_DRIVE_FIXED:
+            bus_info = _query_windows_drive_bus_info(drive_root)
+            if bus_info is not None:
+                removable_media, bus_type = bus_info
+                if removable_media or bus_type in _EXTERNAL_STORAGE_BUS_TYPES:
+                    return False
         return True
     except Exception:
         return True
@@ -173,6 +175,8 @@ def check_scratch_disk_headroom(scratch_dir: str, min_free_gb: float = 100.0) ->
     Returns:
         Tuple of (has_headroom: bool, free_gb: float).
     """
+    if not scratch_dir or not str(scratch_dir).strip():
+        return (False, 0.0)
     probe_dir = scratch_dir if os.path.exists(scratch_dir) else os.path.dirname(os.path.abspath(scratch_dir))
     while probe_dir and not os.path.exists(probe_dir):
         parent = os.path.dirname(probe_dir)
@@ -180,8 +184,11 @@ def check_scratch_disk_headroom(scratch_dir: str, min_free_gb: float = 100.0) ->
             break
         probe_dir = parent
 
+    if not probe_dir or not os.path.exists(probe_dir):
+        return (False, 0.0)
+
     try:
-        usage = shutil.disk_usage(probe_dir if os.path.exists(probe_dir) else ".")
+        usage = shutil.disk_usage(probe_dir)
         free_gb = usage.free / (1024**3)
         return (free_gb >= min_free_gb, free_gb)
     except Exception:
@@ -294,6 +301,21 @@ def _read_primary_chunk_id(project_zip_path: str) -> str | None:
     except Exception:
         return None
 
+    try:
+        root_elem = ET.fromstring(xml_txt)
+        chunks_elem = root_elem.find("chunks")
+        if chunks_elem is not None:
+            chunk_ids = [
+                str(c.attrib.get("id", "")).strip()
+                for c in chunks_elem.findall("chunk")
+                if str(c.attrib.get("id", "")).strip().isdigit()
+            ]
+            if chunk_ids:
+                active_id = str(chunks_elem.attrib.get("active_id", "")).strip()
+                return active_id if active_id in chunk_ids else chunk_ids[0]
+    except Exception:
+        pass
+
     chunks = re.findall(r'<chunk\s+id="(\d+)"\s+path="([^"]+)"\s*/>', xml_txt)
     if not chunks:
         return None
@@ -376,7 +398,7 @@ def reconcile_staged_psx_chunk_id(
     old_id = str(target_node.attrib.get("id", ""))
     old_path = str(target_node.attrib.get("path", "")).replace("\\", "/")
     old_dir = old_path.split("/")[0] if "/" in old_path else ""
-    if old_path != f"{old_dir}/chunk.zip":
+    if not old_dir.isdigit() or old_path != f"{old_dir}/chunk.zip":
         return False, old_id, target_id
     if old_id == target_id and old_dir == target_id:
         return False, old_id, target_id
@@ -435,18 +457,25 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
     if not os.path.isdir(local_stage_dir):
         return False
 
+    if os.path.normcase(os.path.abspath(local_stage_dir)) == os.path.normcase(os.path.abspath(target_network_dir)):
+        return True
+
     os.makedirs(target_network_dir, exist_ok=True)
+    raw_host = (os.environ.get("COMPUTERNAME") or "").strip() or socket.gethostname() or "node"
+    host_tag = re.sub(r"[^0-9A-Za-z_-]", "_", raw_host)[:24] or "node"
+    uniq_tag = f"{host_tag}_{os.getpid()}"
 
     try:
         # Pre-clean any lingering local lock files before network transfer
         for root, _, files in os.walk(local_stage_dir):
-            if "lock" in files:
-                try:
-                    os.remove(os.path.join(root, "lock"))
-                except Exception:
-                    pass
+            for fname in files:
+                if fname.lower() == "lock":
+                    try:
+                        os.remove(os.path.join(root, fname))
+                    except Exception:
+                        pass
 
-        ignore_transient = shutil.ignore_patterns("lock", "model.tmp", "*.tmp")
+        ignore_transient = shutil.ignore_patterns("lock", "LOCK", "model.tmp", "*.tmp", "*.TMP")
         items = os.listdir(local_stage_dir)
         psx_items = [it for it in items if it.lower().endswith(".psx")]
         other_items = [it for it in items if it not in psx_items]
@@ -458,8 +487,8 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
 
             if os.path.isdir(s_path):
                 if item.lower().endswith(".files"):
-                    tmp_d = f"{d_path}.sync_new_{os.getpid()}"
-                    old_d = f"{d_path}.sync_old_{os.getpid()}"
+                    tmp_d = f"{d_path}.sync_new_{uniq_tag}"
+                    old_d = f"{d_path}.sync_old_{uniq_tag}"
                     if os.path.exists(tmp_d):
                         shutil.rmtree(tmp_d, ignore_errors=True)
                     try:
@@ -467,35 +496,64 @@ def sync_staged_project_to_network(local_stage_dir: str, target_network_dir: str
                     except Exception:
                         shutil.rmtree(tmp_d, ignore_errors=True)
                         raise
+                    moved_old = False
                     try:
                         if os.path.isdir(d_path):
                             if os.path.exists(old_d):
                                 shutil.rmtree(old_d, ignore_errors=True)
                             os.rename(d_path, old_d)
+                            moved_old = True
                         os.rename(tmp_d, d_path)
                         if os.path.isdir(old_d):
                             shutil.rmtree(old_d, ignore_errors=True)
                     except OSError:
                         # Fallback if Windows SMB lock prevents directory rename: copy directly from
-                        # local NVMe s_path (never SMB->SMB from tmp_d) and purge temp/old siblings.
+                        # local NVMe s_path (never SMB->SMB from tmp_d) and restore old_d on failure.
                         shutil.rmtree(tmp_d, ignore_errors=True)
-                        shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
+                        try:
+                            shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
+                        except Exception:
+                            if moved_old and os.path.isdir(old_d) and not os.path.exists(d_path):
+                                try:
+                                    os.rename(old_d, d_path)
+                                except OSError:
+                                    pass
+                            raise
                         if os.path.isdir(old_d):
                             shutil.rmtree(old_d, ignore_errors=True)
                 else:
                     shutil.copytree(s_path, d_path, dirs_exist_ok=True, ignore=ignore_transient)
             else:
-                if not item.endswith(".tmp") and item != "lock":
-                    shutil.copy2(s_path, d_path)
+                low_item = item.lower()
+                if not low_item.endswith(".tmp") and low_item != "lock":
+                    tmp_file = f"{d_path}.sync_tmp_{uniq_tag}"
+                    try:
+                        shutil.copy2(s_path, tmp_file)
+                        os.replace(tmp_file, d_path)
+                    except OSError:
+                        if os.path.isfile(tmp_file):
+                            try:
+                                os.remove(tmp_file)
+                            except OSError:
+                                pass
+                        shutil.copy2(s_path, d_path)
 
         # 2. Publish .psx manifest(s) LAST via atomic temp replace so .psx never points at partial .files
         for item in psx_items:
             s_path = os.path.join(local_stage_dir, item)
             d_path = os.path.join(target_network_dir, item)
             if os.path.isfile(s_path):
-                tmp_psx = f"{d_path}.sync_tmp_{os.getpid()}"
-                shutil.copy2(s_path, tmp_psx)
-                os.replace(tmp_psx, d_path)
+                tmp_psx = f"{d_path}.sync_tmp_{uniq_tag}"
+                try:
+                    shutil.copy2(s_path, tmp_psx)
+                    os.replace(tmp_psx, d_path)
+                except Exception:
+                    if os.path.isfile(tmp_psx):
+                        try:
+                            os.remove(tmp_psx)
+                        except OSError:
+                            pass
+                    raise
 
         # Cleanup local staging directory upon verified completion
         try:
