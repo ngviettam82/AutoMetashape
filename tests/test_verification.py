@@ -89,11 +89,14 @@ class TestDeliverableVerification(unittest.TestCase):
 
     def test_verify_glb_model(self) -> None:
         """Verify binary GLB container validation."""
+        import struct
+
         valid_glb = os.path.join(self.test_dir, "valid.glb")
         invalid_glb = os.path.join(self.test_dir, "invalid.glb")
 
+        payload = b"\x00" * 1200
         with open(valid_glb, "wb") as f:
-            f.write(b"glTF" + b"\x00" * 1200)
+            f.write(struct.pack("<4sII", b"glTF", 2, 12 + len(payload)) + payload)
 
         with open(invalid_glb, "wb") as f:
             f.write(b"CORR" + b"\x00" * 1200)
@@ -145,7 +148,7 @@ class TestDeliverableVerification(unittest.TestCase):
         invalid_pdf = os.path.join(self.test_dir, "bad.pdf")
 
         with open(valid_pdf, "wb") as f:
-            f.write(b"%PDF-1.4\n" + b"\x00" * 20000)
+            f.write(b"%PDF-1.4\n" + b"\x00" * 20000 + b"\n%%EOF\n")
         with open(invalid_pdf, "wb") as f:
             f.write(b"TEXT" + b"\x00" * 20000)
 
@@ -154,9 +157,12 @@ class TestDeliverableVerification(unittest.TestCase):
 
     def test_verify_project_deliverables_directory(self) -> None:
         """Verify end-to-end directory scanning and deliverable verification."""
+        import struct
+
         # Populate full valid deliverables package
+        glb_body = b"\x00" * 2000
         with open(os.path.join(self.test_dir, "Survey_0167.glb"), "wb") as f:
-            f.write(b"glTF" + b"\x00" * 2000)
+            f.write(struct.pack("<4sII", b"glTF", 2, 12 + len(glb_body)) + glb_body)
 
         with open(os.path.join(self.test_dir, "Survey_0167_dem.tif"), "wb") as f:
             f.write(b"II*\x00" + b"\x00" * 2000)
@@ -168,7 +174,7 @@ class TestDeliverableVerification(unittest.TestCase):
             f.write(b"LASF" + b"\x00" * 60000)
 
         with open(os.path.join(self.test_dir, "Survey_0167_report.pdf"), "wb") as f:
-            f.write(b"%PDF-1.4\n" + b"\x00" * 20000)
+            f.write(b"%PDF-1.4\n" + b"\x00" * 20000 + b"\n%%EOF\n")
 
         report = verify_project_deliverables(
             deliverables_dir=self.test_dir,

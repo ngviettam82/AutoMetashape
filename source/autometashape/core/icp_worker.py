@@ -16,8 +16,10 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
+import os
 import sys
 import time
 from typing import Any
@@ -27,12 +29,28 @@ import open3d as o3d
 from scipy.spatial import cKDTree
 
 
+def _resolve_o3d_readable_path(path: str) -> str:
+    """Convert non-ASCII Windows paths to 8.3 short paths so Open3D's ANSI C++ fopen succeeds."""
+    if sys.platform != "win32" or path.isascii():
+        return path
+    try:
+        buf = ctypes.create_unicode_buffer(4096)
+        n = ctypes.windll.kernel32.GetShortPathNameW(os.path.abspath(path), buf, 4096)
+        if 0 < n < 4096:
+            return buf.value
+    except Exception:
+        pass
+    return path
+
+
 def umeyama_sim3(
     src: np.ndarray,
     dst: np.ndarray,
     with_scale: bool = True,
 ) -> tuple[float, np.ndarray, np.ndarray]:
     """Compute exact least-squares Sim(3) transform ``dst ≈ scale * (R @ src) + t``."""
+    if len(src) < 3 or len(dst) != len(src):
+        raise ValueError(f"umeyama_sim3 requires >= 3 matching point pairs, got src={len(src)}, dst={len(dst)}")
     mu_s = src.mean(axis=0)
     mu_d = dst.mean(axis=0)
     xc = src - mu_s
@@ -45,7 +63,9 @@ def umeyama_sim3(
     rot = u_mat @ sign_mat @ vt_mat
     if with_scale:
         var_s = float(np.sum(xc * xc) / len(src))
-        scale = float(np.sum(singular_vals * np.diag(sign_mat)) / max(var_s, 1e-12))
+        if var_s <= 0.0:
+            raise ValueError("Degenerate zero-variance source point set in umeyama_sim3")
+        scale = float(np.sum(singular_vals * np.diag(sign_mat)) / var_s)
     else:
         scale = 1.0
     trans = mu_d - scale * (rot @ mu_s)
@@ -89,9 +109,9 @@ def run_icp(
     """Register ``source_ply`` onto ``target_ply`` via coarse search + multi-scale Tukey Sim(3) ICP."""
     t0 = time.time()
     print(f"[ICP] Loading Target cloud: {target_ply}", flush=True)
-    tgt_full = o3d.io.read_point_cloud(target_ply)
+    tgt_full = o3d.io.read_point_cloud(_resolve_o3d_readable_path(target_ply))
     print(f"[ICP] Loading Source cloud: {source_ply}", flush=True)
-    src_full = o3d.io.read_point_cloud(source_ply)
+    src_full = o3d.io.read_point_cloud(_resolve_o3d_readable_path(source_ply))
     print(
         f"[ICP] Loaded Target={len(tgt_full.points):,} pts, Source={len(src_full.points):,} pts",
         flush=True,
@@ -118,13 +138,12 @@ def run_icp(
         return 0
 
     src_pts = np.asarray(src_full.points)
-    s_min = src_pts.min(axis=0)
-    s_max = src_pts.max(axis=0)
-    s_ctr = 0.5 * (s_min + s_max)
+    # Use robust [1, 99] percentiles for initial ROI crop so stray Stage-0 outliers cannot distort crop/pivot
+    s_min_raw, s_max_raw = np.percentile(src_pts, [1.0, 99.0], axis=0)
     # Use a wide +/-45 m Z crop initially so non-DJI flights lacking RelativeAltitude XMP still overlap in ROI
     eff_z_margin = max(crop_z_margin, 45.0)
-    crop_min = np.array([s_min[0] - crop_xy_margin, s_min[1] - crop_xy_margin, s_min[2] - eff_z_margin])
-    crop_max = np.array([s_max[0] + crop_xy_margin, s_max[1] + crop_xy_margin, s_max[2] + eff_z_margin])
+    crop_min = np.array([s_min_raw[0] - crop_xy_margin, s_min_raw[1] - crop_xy_margin, s_min_raw[2] - eff_z_margin])
+    crop_max = np.array([s_max_raw[0] + crop_xy_margin, s_max_raw[1] + crop_xy_margin, s_max_raw[2] + eff_z_margin])
     bbox = o3d.geometry.AxisAlignedBoundingBox(crop_min, crop_max)
     tgt_crop = tgt_full.crop(bbox)
     print(f"[ICP] Cropped Target around ROI: {len(tgt_crop.points):,} pts", flush=True)
@@ -176,17 +195,24 @@ def run_icp(
         )
         return 0
 
+    # Compute yaw pivot and XY mask bounds strictly from outlier-cleaned cloud
+    src_clean_pts = np.asarray(src_clean.points)
+    s_min = src_clean_pts.min(axis=0)
+    s_max = src_clean_pts.max(axis=0)
+    s_ctr = 0.5 * (s_min + s_max)
+
     # Stage 1: Fast vectorized multi-start coarse search around normalized GPS prior
     src_c = np.asarray(src_clean.voxel_down_sample(0.35).points)
     tgt_c = np.asarray(tgt_clean.voxel_down_sample(0.25).points)
     if len(src_c) < 30 or len(tgt_c) < 30:
-        src_c = np.asarray(src_clean.points)
+        src_c = src_clean_pts
         tgt_c = np.asarray(tgt_clean.points)
 
     src_rel = src_c - s_ctr
     tree = cKDTree(tgt_c)
 
-    best_score = -1.0
+    # Initialize best_score=0.0 so zero-match grids preserve the (0,0,0,0) GPS prior instead of teleporting to a corner
+    best_score = 0.0
     best_params = (0.0, 0.0, 0.0, 0.0)
     print(
         f"[ICP] Stage 1: Coarse multi-start search ({len(src_c):,} vs {len(tgt_c):,} pts)...",
@@ -246,9 +272,9 @@ def run_icp(
                         best_params = (float(dx), float(dy), float(dz), float(dyaw))
 
     # Pass 1b: Refine around best coarse peak (0.5m XYZ, 1 deg yaw)
-    # CRITICAL: Reset best_score because tighter 0.35m kernel values are strictly <= 0.50m scores!
+    # CRITICAL: Reset best_score_1b=0.0 because tighter 0.35m kernel values are <= 0.50m scores, while zero-match preserves Pass 1a!
     bx, by, bz, byaw = best_params
-    best_score_1b = -1.0
+    best_score_1b = 0.0
     for dyaw in np.linspace(byaw - 3.0, byaw + 3.0, 7):
         rz_mat = _rot_z(float(dyaw))
         rot_pts = (src_q_rel @ rz_mat.T) + s_ctr
@@ -262,7 +288,7 @@ def run_icp(
                     if score > best_score_1b:
                         best_score_1b = score
                         best_params = (float(dx), float(dy), float(dz), float(dyaw))
-    if best_score_1b >= 0.0:
+    if best_score_1b > 0.0:
         best_score = best_score_1b
 
     bx, by, bz, byaw = best_params
@@ -272,7 +298,7 @@ def run_icp(
     t_curr[:3, 3] = s_ctr - (rz_mat @ s_ctr) + np.array([bx, by, bz], dtype=np.float64)
     print(
         f"[ICP] Stage 1 Coarse peak: dXY=({bx:+.2f}, {by:+.2f})m, dZ={bz:+.2f}m, "
-        f"dYaw={byaw:+.1f}deg (score={best_score:.1f}/{len(src_c)}, {time.time() - t0:.1f}s)",
+        f"dYaw={byaw:+.1f}deg (score={best_score:.1f}/{len(src_q_rel)}, {time.time() - t0:.1f}s)",
         flush=True,
     )
 
@@ -397,12 +423,14 @@ def run_icp(
                 rmse_cur = float(np.sqrt(np.mean(d_cur[v_cur] ** 2))) if np.any(v_cur) else 999.0
                 rmse_cnd = float(np.sqrt(np.mean(d_cnd[v_cnd] ** 2))) if np.any(v_cnd) else 999.0
                 fit_cur, fit_cnd = float(np.mean(v_cur)), float(np.mean(v_cnd))
+                r_cnd = t_cand[:3, :3] / scale_curr
+                tilt_cnd = float(np.degrees(np.arccos(np.clip(r_cnd[2, 2], -1.0, 1.0))))
                 print(
                     f"  [Colored ICP Check] P2L: fit={fit_cur * 100:.1f}% rmse={rmse_cur * 100:.2f}cm -> "
-                    f"Colored: fit={fit_cnd * 100:.1f}% rmse={rmse_cnd * 100:.2f}cm",
+                    f"Colored: fit={fit_cnd * 100:.1f}% rmse={rmse_cnd * 100:.2f}cm tilt={tilt_cnd:.2f}deg",
                     flush=True,
                 )
-                if fit_cnd >= fit_cur - 0.005 and rmse_cnd <= rmse_cur + 0.002:
+                if fit_cnd >= fit_cur - 0.005 and rmse_cnd <= rmse_cur + 0.002 and tilt_cnd <= 5.0:
                     t_curr = t_cand
                     colored_accepted = True
                     print("  [Colored ICP] ACCEPTED (geometric fit preserved + tangent color locked).", flush=True)

@@ -23,13 +23,19 @@ def is_projected_crs(crs: object) -> bool:
     """Return True if a Metashape CoordinateSystem is a projected metric CRS (e.g. UTM/VN-2000).
 
     Metashape 2.2+ CoordinateSystem objects do not expose a ``.projcs`` attribute;
-    projected systems are identified by a ``PROJCS[...]`` WKT header.
+    projected systems are identified by WKT1 ``PROJCS[...]``, WKT2 ``PROJCRS[...]``,
+    or compound vertical CRS headers (``COMPD_CS`` / ``COMPOUNDCRS``) wrapping a projected CRS.
     """
     if crs is None:
         return False
     wkt = getattr(crs, "wkt", None)
     if isinstance(wkt, str) and wkt.strip():
-        return wkt.lstrip().upper().startswith("PROJCS")
+        upper = wkt.lstrip().upper()
+        if upper.startswith(("PROJCS", "PROJCRS")):
+            return True
+        if upper.startswith(("COMPD_CS", "COMPOUNDCRS")):
+            return "PROJCS[" in upper or "PROJCRS[" in upper
+        return False
     # Fallback for mock objects in tests that define .projcs directly
     return bool(getattr(crs, "projcs", None))
 
@@ -121,8 +127,16 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "shutter": "mechanical",
         "focal_fixed": 8.8,
     },
-    "fc3411": {
-        "name": "DJI Mavic 3 Enterprise Wide (FC3411)",
+    "m3e": {
+        "name": "DJI Mavic 3 Enterprise Wide (M3E)",
+        "sensor_w_mm": 17.3,
+        "sensor_h_mm": 13.0,
+        "pixel_pitch_um": 3.28,
+        "shutter": "mechanical",
+        "focal_fixed": 12.29,
+    },
+    "m4e": {
+        "name": "DJI Matrice 4E Wide (M4E)",
         "sensor_w_mm": 17.3,
         "sensor_h_mm": 13.0,
         "pixel_pitch_um": 3.28,
@@ -184,10 +198,10 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "sensor_h_mm": 8.8,
         "pixel_pitch_um": 2.40,
         "shutter": "rolling",
-        "focal_fixed": 6.72,
+        "focal_fixed": 8.7,
     },
     "fc9589": {
-        "name": "DJI Mini 4 / Neo / Consumer Payload (FC9589)",
+        "name": "DJI Consumer Payload (FC9589)",
         "sensor_w_mm": 10.08,
         "sensor_h_mm": 7.56,
         "pixel_pitch_um": 2.50,
@@ -202,6 +216,22 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "shutter": "rolling",
         "focal_fixed": 3.05,
     },
+    "fc8282": {
+        "name": "DJI Air 3 Wide (FC8282)",
+        "sensor_w_mm": 9.6,
+        "sensor_h_mm": 7.2,
+        "pixel_pitch_um": 2.40,
+        "shutter": "rolling",
+        "focal_fixed": 6.72,
+    },
+    "fc8482": {
+        "name": "DJI Mini 4 Pro (FC8482)",
+        "sensor_w_mm": 9.6,
+        "sensor_h_mm": 7.2,
+        "pixel_pitch_um": 2.40,
+        "shutter": "rolling",
+        "focal_fixed": 6.72,
+    },
     "l2d-20c": {
         "name": "DJI Mavic 3 / Classic / Pro Hasselblad (L2D-20c)",
         "sensor_w_mm": 17.3,
@@ -211,12 +241,20 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "focal_fixed": 12.29,
     },
     "fc3582": {
-        "name": "DJI Mavic 3 / Cine / Classic Hasselblad",
-        "sensor_w_mm": 17.3,
-        "sensor_h_mm": 13.0,
-        "pixel_pitch_um": 3.28,
+        "name": "DJI Mini 3 Pro (FC3582)",
+        "sensor_w_mm": 9.6,
+        "sensor_h_mm": 7.2,
+        "pixel_pitch_um": 2.40,
         "shutter": "rolling",
-        "focal_fixed": 12.29,
+        "focal_fixed": 6.72,
+    },
+    "fc3411": {
+        "name": "DJI Air 2S (FC3411)",
+        "sensor_w_mm": 13.2,
+        "sensor_h_mm": 8.8,
+        "pixel_pitch_um": 2.41,
+        "shutter": "rolling",
+        "focal_fixed": 8.38,
     },
     "fc3170": {
         "name": "DJI Mavic Air 2",
@@ -227,10 +265,10 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
         "focal_fixed": 4.5,
     },
     "fc3011": {
-        "name": "DJI Air 2S",
+        "name": "DJI Air 2S (Legacy Alias)",
         "sensor_w_mm": 13.2,
         "sensor_h_mm": 8.8,
-        "pixel_pitch_um": 2.4,
+        "pixel_pitch_um": 2.41,
         "shutter": "rolling",
         "focal_fixed": 8.38,
     },
@@ -337,19 +375,25 @@ CAMERA_HARDWARE_DB: dict[str, dict] = {
 
 def compute_utm_epsg(lon: float, lat: float) -> int:
     """Calculates standard WGS 84 / UTM Zone EPSG code for longitude and latitude."""
-    zone = int((lon + 180.0) // 6.0) + 1
+    if not (math.isfinite(lon) and math.isfinite(lat)):
+        raise ValueError(f"Non-finite coordinates for UTM EPSG calculation: lon={lon!r}, lat={lat!r}")
+    clamped_lon = max(-180.0, min(180.0, float(lon)))
+    zone = 60 if clamped_lon >= 180.0 else int((clamped_lon + 180.0) // 6.0) + 1
     zone = max(1, min(zone, 60))
     return 32600 + zone if lat >= 0.0 else 32700 + zone
 
 
 def calculate_haversine_meters(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
     """Calculates orthodromic surface distance between two WGS84 GPS coordinates in meters."""
+    if not all(math.isfinite(v) for v in (lat1, lon1, lat2, lon2)):
+        return 0.0
     r_earth = 6371000.0
     phi1 = math.radians(lat1)
     phi2 = math.radians(lat2)
     delta_phi = math.radians(lat2 - lat1)
     delta_lambda = math.radians(lon2 - lon1)
     a = math.sin(delta_phi / 2.0) ** 2 + math.cos(phi1) * math.cos(phi2) * math.sin(delta_lambda / 2.0) ** 2
+    a = max(0.0, min(1.0, a))
     c = 2.0 * math.atan2(math.sqrt(a), math.sqrt(max(0.0, 1.0 - a)))
     return r_earth * c
 
@@ -445,17 +489,40 @@ def extract_image_telemetry(img_path: str) -> dict:
                         except (ValueError, TypeError):
                             pass
 
-                # Nested EXIF IFD inspection for focal length in 35mm
+                # Nested EXIF SubIFD inspection for focal lengths, ISO, and exposure time
                 if hasattr(ExifTags, "IFD") and hasattr(ExifTags.IFD, "Exif"):
                     try:
                         exif_ifd = exif_raw.get_ifd(ExifTags.IFD.Exif)
-                        if exif_ifd:
-                            if 41989 in exif_ifd and meta["focal_35mm"] is None:
-                                meta["focal_35mm"] = float(exif_ifd[41989])
-                            if 37386 in exif_ifd and meta["focal_length"] is None:
-                                meta["focal_length"] = float(exif_ifd[37386])
                     except Exception:
-                        pass
+                        exif_ifd = None
+                    if isinstance(exif_ifd, dict):
+                        if 41989 in exif_ifd and meta["focal_35mm"] is None:
+                            try:
+                                val = float(exif_ifd[41989])
+                                if math.isfinite(val) and val > 0.0:
+                                    meta["focal_35mm"] = val
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pass
+                        if 37386 in exif_ifd and meta["focal_length"] is None:
+                            try:
+                                val = float(exif_ifd[37386])
+                                if math.isfinite(val) and val > 0.0:
+                                    meta["focal_length"] = val
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pass
+                        if 34855 in exif_ifd and meta["iso"] is None:
+                            try:
+                                raw_iso = exif_ifd[34855]
+                                meta["iso"] = int(raw_iso[0] if isinstance(raw_iso, (list, tuple)) else raw_iso)
+                            except (ValueError, TypeError, IndexError):
+                                pass
+                        if 33434 in exif_ifd and meta["exposure_time"] is None:
+                            try:
+                                val = float(exif_ifd[33434])
+                                if math.isfinite(val) and val > 0.0:
+                                    meta["exposure_time"] = val
+                            except (ValueError, TypeError, ZeroDivisionError):
+                                pass
 
                 gps_ifd = None
                 if hasattr(ExifTags, "IFD") and hasattr(ExifTags.IFD, "GPSInfo"):
@@ -463,27 +530,40 @@ def extract_image_telemetry(img_path: str) -> dict:
                         gps_ifd = exif_raw.get_ifd(ExifTags.IFD.GPSInfo)
                     except Exception:
                         pass
-                if not gps_ifd and 34853 in exif_raw:
+                if not isinstance(gps_ifd, dict) and 34853 in exif_raw and isinstance(exif_raw[34853], dict):
                     gps_ifd = exif_raw[34853]
 
-                if gps_ifd:
+                if isinstance(gps_ifd, dict):
 
                     def _to_deg(val):
                         try:
-                            return float(val[0]) + float(val[1]) / 60.0 + float(val[2]) / 3600.0
+                            deg = float(val[0]) + float(val[1]) / 60.0 + float(val[2]) / 3600.0
+                            return deg if math.isfinite(deg) else None
                         except Exception:
                             return None
 
-                    lat_ref = gps_ifd.get(1, "N")
+                    def _norm_ref(ref_val, default_ch: str) -> str:
+                        if isinstance(ref_val, (bytes, bytearray)):
+                            ref_val = ref_val.decode("ascii", errors="ignore")
+                        cleaned = str(ref_val or default_ch).strip("\x00 ").upper()
+                        return cleaned[:1] if cleaned else default_ch
+
+                    lat_ref = _norm_ref(gps_ifd.get(1, "N"), "N")
                     lat_val = gps_ifd.get(2)
-                    lon_ref = gps_ifd.get(3, "E")
+                    lon_ref = _norm_ref(gps_ifd.get(3, "E"), "E")
                     lon_val = gps_ifd.get(4)
                     alt_val = gps_ifd.get(6)
 
                     if lat_val and lon_val:
                         lat = _to_deg(lat_val)
                         lon = _to_deg(lon_val)
-                        if lat is not None and lon is not None and (abs(lat) > 0.001 or abs(lon) > 0.001):
+                        if (
+                            lat is not None
+                            and lon is not None
+                            and abs(lat) <= 90.0
+                            and abs(lon) <= 180.0
+                            and (abs(lat) > 0.001 or abs(lon) > 0.001)
+                        ):
                             if lat_ref == "S":
                                 lat = -lat
                             if lon_ref == "W":
@@ -495,10 +575,11 @@ def extract_image_telemetry(img_path: str) -> dict:
                     if alt_val is not None:
                         try:
                             alt_f = float(alt_val)
-                            alt_ref = gps_ifd.get(5, 0)
-                            if alt_ref in (1, b"\x01"):
-                                alt_f = -abs(alt_f)
-                            meta["alt"] = alt_f
+                            if math.isfinite(alt_f):
+                                alt_ref = gps_ifd.get(5, 0)
+                                if alt_ref in (1, b"\x01"):
+                                    alt_f = -abs(alt_f)
+                                meta["alt"] = alt_f
                         except Exception:
                             pass
     except Exception:
@@ -519,8 +600,9 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
     """Evaluates optical dynamic range across sample images to detect shadow and highlight clipping."""
     if not image_paths:
         return {"shadow_clip_ratio": 0.0, "highlight_clip_ratio": 0.0, "delighting_recommended": False}
-    step = max(1, len(image_paths) // sample_count)
-    sampled = image_paths[::step][:sample_count]
+    eff_sample = max(1, int(sample_count))
+    step = max(1, len(image_paths) // eff_sample)
+    sampled = image_paths[::step][:eff_sample]
     shadow_counts = []
     highlight_counts = []
     has_pil = False
@@ -758,7 +840,8 @@ def discover_image_subfolder_groups(
 
     if root_images:
         if groups:
-            groups["Root_Photos"] = sorted(root_images)
+            existing_root = groups.get("Root_Photos", [])
+            groups["Root_Photos"] = sorted(set(existing_root) | set(root_images))
         else:
             groups["Main"] = sorted(root_images)
 
@@ -784,9 +867,14 @@ def discover_image_subfolder_groups(
     return groups
 
 
-def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: str = None) -> dict:
+def analyze_survey_physics(
+    images_dir: str,
+    sample_size: int = 50,
+    output_dir: str = None,
+    exclude_folders: str | list[str] | tuple[str, ...] | None = None,
+) -> dict:
     """Profiles survey physics: sensor optics, flying height, GSD, overlap, dynamic range, and relief ratio."""
-    groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir)
+    groups = discover_image_subfolder_groups(images_dir, output_dir=output_dir, exclude_folders=exclude_folders)
     all_imgs = []
     for imgs in groups.values():
         all_imgs.extend(imgs)
@@ -796,8 +884,9 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
     if total_photos == 0:
         return {"photo_count": 0, "error": "No images found"}
 
-    step = max(1, total_photos // sample_size)
-    sampled = [all_imgs[i] for i in range(0, total_photos, step)][:sample_size]
+    eff_sample = max(1, int(sample_size))
+    step = max(1, total_photos // eff_sample)
+    sampled = [all_imgs[i] for i in range(0, total_photos, step)][:eff_sample]
 
     lats, lons, alts, rel_alts = [], [], [], []
     cameras_detected = set()
@@ -868,6 +957,18 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
                     rel_alts.append(rel_alt_val)
         except Exception:
             has_meta = False
+            lats.clear()
+            lons.clear()
+            alts.clear()
+            rel_alts.clear()
+            cameras_detected.clear()
+            widths.clear()
+            heights.clear()
+            focal_lengths.clear()
+            focal_35mms.clear()
+            makes.clear()
+            models.clear()
+            coords.clear()
         finally:
             if temp_doc is not None and hasattr(temp_doc, "clear"):
                 try:
@@ -903,14 +1004,29 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
     gps_ratio = gps_count / len(sampled) if sampled else 0.0
     has_gps = gps_ratio >= 0.70
 
-    # Sensor hardware resolution
-    primary_model = models[0] if models else ""
-    primary_make = makes[0] if makes else ""
+    # Sensor hardware resolution: specific model codes always beat generic brand fallbacks,
+    # and longer keys beat shorter prefixes (so fc6310r beats fc6310, l2d-20c beats hasselblad).
+    primary_model = max(set(models), key=models.count) if models else ""
+    primary_make = max(set(makes), key=makes.count) if makes else ""
     combined_name = f"{primary_make} {primary_model}".strip().lower()
+    compact_model = primary_model.lower().replace("-", "").replace(" ", "") if primary_model else ""
+    is_dji_drone = (
+        ("dji" in combined_name)
+        or bool(re.search(r"\bfc\d{3,4}", combined_name))
+        or ("l1d-20c" in combined_name)
+        or ("l2d-20c" in combined_name)
+    )
+    brand_only_keys = frozenset({"hasselblad", "phase one", "wingtra"})
 
     matched_hardware = None
-    for k, v in CAMERA_HARDWARE_DB.items():
-        if k in combined_name or (primary_model and k in primary_model.lower().replace("-", "").replace(" ", "")):
+    for k, v in sorted(
+        CAMERA_HARDWARE_DB.items(),
+        key=lambda kv: (kv[0] not in brand_only_keys, len(kv[0])),
+        reverse=True,
+    ):
+        if k == "hasselblad" and is_dji_drone:
+            continue
+        if k in combined_name or (compact_model and k in compact_model):
             matched_hardware = v
             break
 
@@ -946,7 +1062,7 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
         elif "l2d" in combined_name:
             shutter = "rolling"
         elif primary_make.lower() == "dji":
-            if any(k in combined_name for k in ["fc6310", "fc3411", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
+            if any(k in combined_name for k in ["fc6310", "m3e", "m4e", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
                 shutter = "mechanical"
             else:
                 shutter = "rolling"
@@ -983,8 +1099,14 @@ def analyze_survey_physics(images_dir: str, sample_size: int = 50, output_dir: s
     alt_span_m = 0.0
     if has_gps and len(lats) >= 2:
         min_lat, max_lat = min(lats), max(lats)
-        min_lon, max_lon = min(lons), max(lons)
-        lat_dist = calculate_haversine_meters(min_lat, min_lon, max_lat, min_lon)
+        # Antimeridian-safe longitude span via circular mean reference
+        mean_lon = math.degrees(
+            math.atan2(sum(math.sin(math.radians(x)) for x in lons), sum(math.cos(math.radians(x)) for x in lons))
+        )
+        wrapped_dlons = [((x - mean_lon + 180.0) % 360.0) - 180.0 for x in lons]
+        min_lon = mean_lon + min(wrapped_dlons)
+        max_lon = mean_lon + max(wrapped_dlons)
+        lat_dist = calculate_haversine_meters(min_lat, mean_lon, max_lat, mean_lon)
         lon_dist = calculate_haversine_meters(min_lat, min_lon, min_lat, max_lon)
         span_m = math.sqrt(lat_dist * lat_dist + lon_dist * lon_dist)
         if len(alts) >= 2:

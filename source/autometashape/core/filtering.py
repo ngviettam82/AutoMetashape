@@ -23,15 +23,36 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
     chunk.analyzeImages()
 
     disabled_count = 0
+    scored_enabled = []
     for cam in chunk.cameras:
+        if not getattr(cam, "enabled", True):
+            continue
         if "Image/Quality" in cam.meta:
             try:
                 qual_val = float(cam.meta["Image/Quality"])
-                if qual_val < min_quality:
-                    cam.enabled = False
-                    disabled_count += 1
+                if math.isfinite(qual_val):
+                    scored_enabled.append((qual_val, cam))
             except (ValueError, TypeError):
                 pass
+
+    below = [(q, c) for q, c in scored_enabled if q < min_quality]
+    total_enabled_before = sum(1 for c in chunk.cameras if getattr(c, "enabled", True))
+    # Never disable cameras down to < 2 remaining (protects hazy/low-contrast scenes from total collapse)
+    max_disable = max(0, total_enabled_before - 2)
+    if len(below) > max_disable and total_enabled_before >= 2:
+        below.sort(key=lambda item: item[0])
+        to_disable = [c for _q, c in below[:max_disable]]
+        print(
+            f"  [Quality Filter] Guard: clamping disable count from {len(below)} to {len(to_disable)} "
+            f"to retain at least 2 sharpest cameras.",
+            flush=True,
+        )
+    else:
+        to_disable = [c for _q, c in below]
+
+    for cam in to_disable:
+        cam.enabled = False
+        disabled_count += 1
 
     active_count = sum(1 for c in chunk.cameras if c.enabled)
     t_elapsed = time.time() - t_qual
@@ -57,6 +78,10 @@ def robust_bounds(sorted_vals, k: float = 3.0) -> tuple:
     mad = devs[n // 2]
     sigma = 1.4826 * mad
     if sigma < 1e-4:
+        if n >= 20:
+            lo_idx = int(n * 0.05)
+            hi_idx = min(n - 1, max(lo_idx, int(n * 0.95)))
+            return sorted_vals[lo_idx], sorted_vals[hi_idx]
         return sorted_vals[0], sorted_vals[-1]
 
     inliers = [v for v in sorted_vals if abs(v - med) <= k * sigma]
@@ -65,8 +90,9 @@ def robust_bounds(sorted_vals, k: float = 3.0) -> tuple:
     return min(inliers), max(inliers)
 
 
-def solve_ray_convergence_irls(aligned_cams, iterations: int = 3) -> tuple:
+def solve_ray_convergence_irls(aligned_cams, iterations: int = 3, scale: float = 1.0) -> tuple:
     """Solves 3D camera optical ray convergence using Iteratively Reweighted Least Squares (IRLS)."""
+    eff_scale = scale if (isinstance(scale, (int, float)) and scale > 0.0) else 1.0
     v_z = Metashape.Vector([0.0, 0.0, 1.0])
     cam_data = []
     for c in aligned_cams:
@@ -114,7 +140,7 @@ def solve_ray_convergence_irls(aligned_cams, iterations: int = 3) -> tuple:
 
         residuals.sort(key=lambda x: x[0])
         med_res = residuals[len(residuals) // 2][0]
-        thresh = max(2.5 * med_res, 1.5)
+        thresh = max(2.5 * med_res, 1.5 / eff_scale)
 
         active_cams = [item for res, item in residuals if res <= thresh]
         if len(active_cams) < 2:
@@ -130,11 +156,13 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
         print("  [Auto-Crop] Fewer than 2 aligned cameras; skipping bounding box crop.", flush=True)
         return False
 
+    raw_scale = getattr(getattr(chunk, "transform", None), "scale", None)
+    scale = float(raw_scale) if (isinstance(raw_scale, (int, float)) and raw_scale > 0.0) else 1.0
     print(
         f"\n[Auto-Crop] Calculating robust 3D camera optical ray convergence from {len(aligned_cams)} cameras...",
         flush=True,
     )
-    target_center, inlier_cams = solve_ray_convergence_irls(aligned_cams, iterations=3)
+    target_center, inlier_cams = solve_ray_convergence_irls(aligned_cams, iterations=3, scale=scale)
 
     if target_center is not None:
         inlier_count = len(inlier_cams)
@@ -162,12 +190,19 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
             flush=True,
         )
 
+    rot = chunk.region.rot
+    rot_t = rot.t()
+    target_local = rot_t * target_center
+
     inlier_centers = [c_pos for c_pos, _ in inlier_cams]
-    dists = [(c - target_center).norm() for c in inlier_centers]
-    dists.sort()
-    if dists:
-        idx_95 = min(int(len(dists) * 0.95), len(dists) - 1)
-        dist_95 = dists[idx_95]
+    dists_xy = []
+    for c_pos in inlier_centers:
+        cl = rot_t * c_pos
+        dists_xy.append(math.hypot(cl.x - target_local.x, cl.y - target_local.y))
+    dists_xy.sort()
+    if dists_xy:
+        idx_95 = min(int(len(dists_xy) * 0.95), len(dists_xy) - 1)
+        dist_95 = dists_xy[idx_95]
         max_radius = dist_95 * 1.25 if dist_95 > 0 else float("inf")
     else:
         max_radius = float("inf")
@@ -176,9 +211,6 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     if not pts:
         print("  [Auto-Crop] No tie points available; preserving default region.", flush=True)
         return False
-
-    rot = chunk.region.rot
-    rot_t = rot.t()
 
     orig_region = chunk.region
     orig_local_center = rot_t * orig_region.center
@@ -190,11 +222,14 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
     for pt in pts:
         if not pt.valid:
             continue
-        coord = pt.coord[:3]
-        if (coord - target_center).norm() > max_radius:
+        w = getattr(pt.coord, "w", 1.0)
+        if abs(w) <= 1e-12:
+            continue
+        coord = Metashape.Vector([pt.coord.x / w, pt.coord.y / w, pt.coord.z / w])
+        loc = rot_t * coord
+        if math.hypot(loc.x - target_local.x, loc.y - target_local.y) > max_radius:
             continue
 
-        loc = rot_t * coord
         local_x.append(loc.x)
         local_y.append(loc.y)
         valid_count += 1
@@ -231,8 +266,13 @@ def auto_crop_to_main_structure(chunk, padding: float = 0.15) -> bool:
 
     print("  [Auto-Crop] Successfully cropped horizontal region to main structure!", flush=True)
     print(f"  Center: ({new_center.x:.2f}, {new_center.y:.2f}, {new_center.z:.2f})", flush=True)
-    print(f"  Horizontal Size: ({span_x:.2f}m x {span_y:.2f}m) [Padding: {int(padding * 100)}%]", flush=True)
-    print(f"  Vertical Extent (Uncropped): {orig_span_z:.2f}m (Z Center: {orig_mid_z:.2f}m)", flush=True)
+    print(
+        f"  Horizontal Size: ({span_x * scale:.2f}m x {span_y * scale:.2f}m) [Padding: {int(padding * 100)}%]",
+        flush=True,
+    )
+    print(
+        f"  Vertical Extent (Uncropped): {orig_span_z * scale:.2f}m (Z Center: {orig_mid_z * scale:.2f}m)", flush=True
+    )
     print(f"  Isolated Main Structure Tie Points: {valid_count:,} points", flush=True)
     return True
 
@@ -249,9 +289,14 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
         flush=True,
     )
 
+    raw_scale = getattr(getattr(chunk, "transform", None), "scale", None)
+    scale = float(raw_scale) if (isinstance(raw_scale, (int, float)) and raw_scale > 0.0) else 1.0
+    crs_wkt = str(getattr(getattr(chunk, "crs", None), "wkt", "") or "").upper()
+    is_local_cs = "LOCAL_CS" in crs_wkt
+
     valid_cams = []
     for c in aligned_cams:
-        if c.reference and c.reference.location:
+        if not is_local_cs and c.reference and getattr(c.reference, "enabled", True) and c.reference.location:
             loc = c.reference.location
             if abs(loc.x) < 1e-4 and abs(loc.y) < 1e-4:
                 continue
@@ -279,9 +324,11 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     mad_d = devs_d[len(devs_d) // 2]
     sigma_d = 1.4826 * mad_d
 
+    outlier_floor_units = 1000.0 / scale
+    sigma_floor_units = 1e-3 / scale
     inlier_xs, inlier_ys, inlier_zs = [], [], []
     for x, y, z, d in zip(xs, ys, cam_zs, dists):
-        if sigma_d > 1e-3 and (d - med_d) > max(1000.0, 5.0 * sigma_d):
+        if sigma_d > sigma_floor_units and (d - med_d) > max(outlier_floor_units, 5.0 * sigma_d):
             continue
         inlier_xs.append(x)
         inlier_ys.append(y)
@@ -314,7 +361,11 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     span_x = max_rx - min_rx
     span_y = max_ry - min_ry
 
-    pts = [p for p in chunk.tie_points.points if p.valid] if chunk.tie_points else []
+    pts = (
+        [p for p in chunk.tie_points.points if p.valid and abs(getattr(p.coord, "w", 1.0)) > 1e-12]
+        if chunk.tie_points
+        else []
+    )
     if pts:
         coords = [Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w]) for p in pts]
         pt_zs = sorted([(rot_t * v).z for v in coords])
@@ -370,8 +421,9 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     fov_margin = flight_height * 0.35 if flight_height > 1e-3 else 0.0
     margin_x = max(span_x * padding, fov_margin)
     margin_y = max(span_y * padding, fov_margin)
-    side_x = span_x + 2.0 * margin_x
-    side_y = span_y + 2.0 * margin_y
+    min_side = 1.0 / scale
+    side_x = max(span_x + 2.0 * margin_x, min_side)
+    side_y = max(span_y + 2.0 * margin_y, min_side)
 
     mid_rx = (min_rx + max_rx) * 0.5
     mid_ry = (min_ry + max_ry) * 0.5
@@ -450,6 +502,22 @@ def execute_usgs_gradual_selection(
         f"\n[Tie-Point Refinement] Starting gentle gradual selection refinement across {initial_pts:,} tie points (Initial Reprojection RMS: {initial_rms:.3f} px, max prune ratio: {int(max_removal_ratio * 100)}%)...",
         flush=True,
     )
+
+    def _lock_unstable_lens_params() -> None:
+        for s in getattr(chunk, "sensors", None) or []:
+            if getattr(s, "fixed", False):
+                continue
+            cal = getattr(s, "calibration", None)
+            if cal is not None:
+                try:
+                    cal.k4 = 0.0
+                    cal.b1 = 0.0
+                    cal.b2 = 0.0
+                    s.calibration = cal
+                except Exception:
+                    pass
+
+    _lock_unstable_lens_params()
 
     # Pass 1: Reconstruction Uncertainty (RU <= 15.0)
     try:
@@ -560,37 +628,43 @@ def execute_usgs_gradual_selection(
 
     # Pass 4: Image Multiplicity (min_rays >= 2)
     try:
+        before_p4 = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True))
         f.init(chunk, criterion=Metashape.TiePoints.Filter.ImageCount)
+        removed_p4 = 0
         if min_rays > 1:
-            f.selectPoints(min_rays - 1)
-            chunk.tie_points.removeSelectedPoints()
-        for s in getattr(chunk, "sensors", None) or []:
-            cal = getattr(s, "calibration", None)
-            if cal is not None:
-                try:
-                    cal.k4 = 0.0
-                    cal.b1 = 0.0
-                    cal.b2 = 0.0
-                    s.calibration = cal
-                except Exception:
-                    pass
-        chunk.optimizeCameras(
-            fit_f=True,
-            fit_cx=True,
-            fit_cy=True,
-            fit_b1=False,
-            fit_b2=False,
-            fit_k1=True,
-            fit_k2=True,
-            fit_k3=True,
-            fit_k4=False,
-            fit_p1=True,
-            fit_p2=True,
-            adaptive_fitting=False,
-            tiepoint_covariance=True,
-        )
+            vals_p4 = list(getattr(f, "values", []) or [])
+            below_cnt = sum(1 for v in vals_p4 if v < min_rays)
+            if below_cnt > 0 and (not vals_p4 or (below_cnt / len(vals_p4)) <= max_removal_ratio):
+                f.selectPoints(min_rays - 1)
+                chunk.tie_points.removeSelectedPoints()
+                after_p4 = sum(1 for p in chunk.tie_points.points if getattr(p, "valid", True))
+                removed_p4 = max(0, before_p4 - after_p4)
+            elif below_cnt > 0:
+                print(
+                    f"  [Pass 4/4] Multiplicity removal ({below_cnt}/{len(vals_p4)}) exceeds "
+                    f"max_removal_ratio={max_removal_ratio:.2f}; preserving tie points.",
+                    flush=True,
+                )
+        _lock_unstable_lens_params()
+        if removed_p4 > 0:
+            chunk.optimizeCameras(
+                fit_f=True,
+                fit_cx=True,
+                fit_cy=True,
+                fit_b1=False,
+                fit_b2=False,
+                fit_k1=True,
+                fit_k2=True,
+                fit_k3=True,
+                fit_k4=False,
+                fit_p1=True,
+                fit_p2=True,
+                adaptive_fitting=False,
+                tiepoint_covariance=True,
+            )
         print(
-            f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Preserved structural multi-view rays; locked in stable bundle adjustment (k4/b1/b2 locked).",
+            f"  [Pass 4/4] Multi-ray Multiplicity (Rays >= {min_rays}): Preserved structural multi-view rays; "
+            f"removed {removed_p4:,} point(s) (k4/b1/b2 locked).",
             flush=True,
         )
     except Exception as e:

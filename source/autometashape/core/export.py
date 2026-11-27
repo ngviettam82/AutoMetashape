@@ -161,6 +161,8 @@ def _build_metric_ortho_projection(chunk):
                 pass
         return proj
     if target_crs and not is_projected_crs(target_crs):
+        import math
+
         lons: list[float] = []
         lats: list[float] = []
         for c in getattr(chunk, "cameras", None) or []:
@@ -177,10 +179,28 @@ def _build_metric_ortho_projection(chunk):
             if (abs(lon) > 1e-4 or abs(lat) > 1e-4) and abs(lon) <= 180.0 and abs(lat) <= 90.0:
                 lons.append(lon)
                 lats.append(lat)
+        if not lons:
+            # GCP-only georeferenced fallback: derive lon/lat from estimated camera centers
+            mat = getattr(getattr(chunk, "transform", None), "matrix", None)
+            if mat is not None:
+                try:
+                    wgs84 = Metashape.CoordinateSystem("EPSG::4326")
+                    for c in getattr(chunk, "cameras", None) or []:
+                        if getattr(c, "transform", None) and getattr(c, "enabled", True) and getattr(c, "center", None):
+                            pt = wgs84.project(mat.mulp(c.center))
+                            lon, lat = float(pt.x), float(pt.y)
+                            if math.isfinite(lon) and math.isfinite(lat) and abs(lon) <= 180.0 and abs(lat) <= 90.0:
+                                lons.append(lon)
+                                lats.append(lat)
+                except Exception:
+                    pass
         if lons:
-            lons.sort()
             lats.sort()
-            med_lon = lons[len(lons) // 2]
+            ref_lon = math.degrees(
+                math.atan2(sum(math.sin(math.radians(x)) for x in lons), sum(math.cos(math.radians(x)) for x in lons))
+            )
+            wrapped = sorted(((x - ref_lon + 180.0) % 360.0) - 180.0 for x in lons)
+            med_lon = ((ref_lon + wrapped[len(wrapped) // 2] + 180.0) % 360.0) - 180.0
             med_lat = lats[len(lats) // 2]
             utm_epsg = compute_utm_epsg(med_lon, med_lat)
             try:
@@ -248,26 +268,114 @@ def export_project_assets(
     print(f"  Destination: {output_dir}")
     print("=========================================================================", flush=True)
 
+    if import_model_path and not os.path.isfile(import_model_path):
+        raise FileNotFoundError(f"Requested import_model_path does not exist: {import_model_path}")
+
     emit_ipc_stage("project", f"Loading Metashape Project: {os.path.basename(project_path)}")
     doc = Metashape.Document()
-    files_dir = project_path[:-4] + ".files" if project_path.lower().endswith(".psx") else project_path + ".files"
-    lock_file = os.path.join(files_dir, "lock")
-    if os.path.isfile(lock_file):
+    try:
+        files_dir = project_path[:-4] + ".files" if project_path.lower().endswith(".psx") else project_path + ".files"
+        lock_file = os.path.join(files_dir, "lock")
+        if os.path.isfile(lock_file):
+            try:
+                os.remove(lock_file)
+            except Exception:
+                pass
         try:
-            os.remove(lock_file)
+            doc.open(project_path, read_only=False, ignore_lock=True)
+        except Exception:
+            try:
+                doc.open(project_path, ignore_lock=True)
+            except Exception:
+                doc.open(project_path)
+        try:
+            doc.read_only = False
         except Exception:
             pass
-    try:
-        doc.open(project_path, read_only=False, ignore_lock=True)
-    except Exception:
+
+        return _export_opened_document(
+            doc=doc,
+            project_path=project_path,
+            project_dir=project_dir,
+            output_dir=output_dir,
+            project_name=project_name,
+            texture_format=texture_format,
+            rebake_texture=rebake_texture,
+            texture_pages=texture_pages,
+            fill_holes=fill_holes,
+            ghosting_filter=ghosting_filter,
+            import_model_path=import_model_path,
+            export_point_cloud=export_point_cloud,
+            point_cloud_format=point_cloud_format,
+            export_dem=export_dem,
+            export_orthomosaic=export_orthomosaic,
+            ortho_resolution=ortho_resolution,
+            export_report=export_report,
+            report_title=report_title,
+            export_tiled_model=export_tiled_model,
+            tiled_model_format=tiled_model_format,
+            tile_size=tile_size,
+            export_contours=export_contours,
+            contour_interval=contour_interval,
+            contours_format=contours_format,
+            remove_lighting=remove_lighting,
+            delighting_color_mode=delighting_color_mode,
+            calibrate_colors=calibrate_colors,
+            smooth_mesh=smooth_mesh,
+            smooth_strength=smooth_strength,
+            decimate_mesh=decimate_mesh,
+            export_glb=export_glb,
+            export_obj=export_obj,
+            export_fbx=export_fbx,
+            export_ply=export_ply,
+            export_dxf=export_dxf,
+            export_tie_points=export_tie_points,
+        )
+    finally:
         try:
-            doc.open(project_path, ignore_lock=True)
+            doc.clear()
         except Exception:
-            doc.open(project_path)
-    try:
-        doc.read_only = False
-    except Exception:
-        pass
+            pass
+
+
+def _export_opened_document(
+    doc,
+    project_path: str,
+    project_dir: str,
+    output_dir: str,
+    project_name: str,
+    texture_format: str,
+    rebake_texture: bool,
+    texture_pages: int,
+    fill_holes: bool,
+    ghosting_filter: bool,
+    import_model_path: str | None,
+    export_point_cloud: bool,
+    point_cloud_format: str,
+    export_dem: bool,
+    export_orthomosaic: bool,
+    ortho_resolution: float,
+    export_report: bool,
+    report_title: str | None,
+    export_tiled_model: bool,
+    tiled_model_format: str,
+    tile_size: int,
+    export_contours: bool,
+    contour_interval: float,
+    contours_format: str,
+    remove_lighting: bool,
+    delighting_color_mode: bool,
+    calibrate_colors: bool,
+    smooth_mesh: bool,
+    smooth_strength: float,
+    decimate_mesh: int | None,
+    export_glb: bool,
+    export_obj: bool,
+    export_fbx: bool,
+    export_ply: bool,
+    export_dxf: bool,
+    export_tie_points: bool,
+):
 
     from autometashape.cluster.hardware import compute_discrete_gpu_mask
 
@@ -356,23 +464,37 @@ def export_project_assets(
 
         if smooth_mesh:
             print(f"[Mesh] Applying Laplacian smoothing (strength: {smooth_strength})...", flush=True)
-            chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
+            try:
+                chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True, replace_asset=True)
+            except TypeError:
+                chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
             doc.save()
             chunk = doc.chunk
 
         if decimate_mesh and decimate_mesh > 0:
             print(f"[Mesh] Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
-            chunk.decimateModel(face_count=decimate_mesh)
+            try:
+                chunk.decimateModel(face_count=decimate_mesh, replace_asset=True)
+            except TypeError:
+                chunk.decimateModel(face_count=decimate_mesh)
             doc.save()
             chunk = doc.chunk
 
         current_pages = 0
-        if hasattr(chunk.model, "textures") and chunk.model.textures:
-            current_pages = len(chunk.model.textures)
-        elif hasattr(chunk.model, "texture") and chunk.model.texture():
-            current_pages = 1
+        try:
+            from autometashape.core.pipeline import _get_model_texture_page_count
 
-        if calibrate_colors or rebake_texture or current_pages == 0 or remove_lighting:
+            current_pages = _get_model_texture_page_count(chunk.model)
+        except Exception:
+            if hasattr(chunk.model, "textures") and chunk.model.textures:
+                current_pages = len(chunk.model.textures)
+            elif hasattr(chunk.model, "texture") and chunk.model.texture():
+                current_pages = 1
+
+        needs_textured_mesh = any([export_glb, export_obj, export_fbx, remove_lighting])
+        will_bake_texture = rebake_texture or (current_pages == 0 and needs_textured_mesh)
+
+        if calibrate_colors or will_bake_texture or remove_lighting:
             emit_ipc_stage("texture", "Processing Texture Atlas & Delighting")
 
         if calibrate_colors:
@@ -384,7 +506,7 @@ def export_project_assets(
             except Exception as e_col:
                 print(f"  [WARNING] Color calibration issue: {e_col}. Continuing...", flush=True)
 
-        if rebake_texture or current_pages == 0:
+        if will_bake_texture:
             print(
                 f"\n[Texture] Baking {texture_pages}x 8192x8192 (8K) Texture Atlas (Mosaic Blending, Fill Holes: {fill_holes}, Ghosting Filter: {ghosting_filter})...",
                 flush=True,
@@ -427,6 +549,7 @@ def export_project_assets(
         chunk.exportModel(
             glb_out,
             format=Metashape.ModelFormat.ModelFormatGLTF,
+            save_texture=True,
             embed_texture=True,
             save_normals=True,
             save_colors=True,
@@ -652,14 +775,15 @@ def export_project_assets(
                 doc.save()
                 chunk = doc.chunk
 
+            tiled_fmt_key = (tiled_model_format or "cesium").lower()
             tiled_fmt_tuple = TILED_MODEL_FORMAT_MAP.get(
-                tiled_model_format.lower(),
+                tiled_fmt_key,
                 (Metashape.TiledModelFormat.TiledModelFormatCesium, "tileset.json")
                 if Metashape is not None
                 else (None, "tileset.json"),
             )
             tiled_fmt, tiled_ext = tiled_fmt_tuple
-            if tiled_model_format.lower() == "cesium":
+            if tiled_fmt_key == "cesium":
                 tiled_dir = os.path.join(output_dir, f"{project_name}_tiled_model")
                 os.makedirs(tiled_dir, exist_ok=True)
                 tiled_out = os.path.join(tiled_dir, "tileset.json")
@@ -705,8 +829,9 @@ def export_project_assets(
                     interval=contour_interval,
                     prevent_intersections=True,
                 )
+                cnt_fmt_key = (contours_format or "shp").lower()
                 sh_fmt, sh_ext = SHAPES_FORMAT_MAP.get(
-                    contours_format.lower(),
+                    cnt_fmt_key,
                     (Metashape.ShapesFormat.ShapesFormatSHP, ".shp") if Metashape is not None else (None, ".shp"),
                 )
                 cnt_out = os.path.join(output_dir, f"{project_name}_contours{sh_ext}")
@@ -734,8 +859,3 @@ def export_project_assets(
 
     print("\n[SUCCESS] Production assets exported successfully!", flush=True)
     emit_ipc_event(IPC_COMPLETE)
-
-    try:
-        doc.clear()
-    except Exception:
-        pass

@@ -15,9 +15,51 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import struct
 import sys
 from typing import Any, Dict, List, Optional, Tuple
+
+_MTL_MAP_OPT_ARITY = {
+    "-blendu": 1,
+    "-blendv": 1,
+    "-cc": 1,
+    "-clamp": 1,
+    "-mm": 2,
+    "-o": 3,
+    "-s": 3,
+    "-t": 3,
+    "-texres": 1,
+    "-bm": 1,
+    "-imfchan": 1,
+}
+
+
+def _extract_mtl_map_kd_filename(line: str) -> str:
+    """Parse texture filename from an MTL ``map_Kd`` directive, skipping optional flags."""
+    stripped = line.strip()
+    if not stripped.startswith("map_Kd"):
+        return ""
+    rest = stripped[6:]
+    if not rest or not rest[0].isspace():
+        return ""
+    tokens = rest.split()
+    i = 0
+    while i < len(tokens) and tokens[i].startswith("-"):
+        opt = tokens[i].lower()
+        arity = _MTL_MAP_OPT_ARITY.get(opt, 1)
+        i += 1
+        skipped = 0
+        while i < len(tokens) and skipped < arity and not tokens[i].startswith("-"):
+            # Stop early for 1-3 arg numeric options when encountering the texture filename
+            if opt in ("-o", "-s", "-t") and skipped >= 1:
+                try:
+                    float(tokens[i])
+                except ValueError:
+                    break
+            i += 1
+            skipped += 1
+    return " ".join(tokens[i:]).strip() if i < len(tokens) else ""
 
 
 def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, List[str]]:
@@ -60,11 +102,17 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
         window = 65536
         with open(obj_path, "rb") as bf:
             head_bytes = bf.read(window)
-            _scan_text_block(head_bytes.decode("utf-8", errors="ignore"))
+            head_text = head_bytes.decode("utf-8", errors="ignore")
+            if size > window and "\n" in head_text:
+                head_text = head_text.rsplit("\n", 1)[0]
+            _scan_text_block(head_text)
             if size > window and (not has_face or not has_vertex):
                 bf.seek(max(0, size - window))
                 tail_bytes = bf.read(window)
-                _scan_text_block(tail_bytes.decode("utf-8", errors="ignore"))
+                tail_text = tail_bytes.decode("utf-8", errors="ignore")
+                if "\n" in tail_text:
+                    tail_text = tail_text.split("\n", 1)[1]
+                _scan_text_block(tail_text)
 
         # Full fallback scan only if head+tail did not contain both vertex and face lines
         if not (has_vertex and has_face) and size > 2 * window:
@@ -101,16 +149,13 @@ def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
         try:
             with open(mtl_path, "r", encoding="utf-8", errors="ignore") as mf:
                 for mline in mf:
-                    mstripped = mline.strip()
-                    if mstripped.startswith("map_Kd "):
-                        tex_parts = mstripped.split(None, 1)
-                        if len(tex_parts) > 1:
-                            tex_file = tex_parts[1].strip()
-                            tex_path = os.path.join(base_dir, tex_file)
-                            if not os.path.isfile(tex_path):
-                                errors.append(f"MTL references missing texture atlas file: {tex_path}")
-                            elif os.path.getsize(tex_path) < 1000:
-                                errors.append(f"Referenced texture file is undersized/empty: {tex_path}")
+                    tex_file = _extract_mtl_map_kd_filename(mline)
+                    if tex_file:
+                        tex_path = os.path.join(base_dir, tex_file)
+                        if not os.path.isfile(tex_path):
+                            errors.append(f"MTL references missing texture atlas file: {tex_path}")
+                        elif os.path.getsize(tex_path) < 1000:
+                            errors.append(f"Referenced texture file is undersized/empty: {tex_path}")
         except Exception as m_exc:
             errors.append(f"Failed to parse linked MTL material file '{mtl_path}': {m_exc}")
 
@@ -131,8 +176,10 @@ def verify_glb_model(glb_path: str, min_size_bytes: int = 1000) -> Tuple[bool, L
             hdr = f.read(12)
             if len(hdr) < 12 or hdr[:4] != b"glTF":
                 return False, [f"Invalid GLB magic header: expected b'glTF', got {hdr[:4]!r}"]
-            declared_len = struct.unpack("<I", hdr[8:12])[0]
-            if declared_len > 0 and declared_len != size:
+            glb_version, declared_len = struct.unpack("<II", hdr[4:12])
+            if glb_version != 2:
+                return False, [f"Unsupported/invalid GLB version: expected 2, got {glb_version}"]
+            if declared_len != size:
                 return False, [
                     f"Truncated/corrupted GLB container: header declares {declared_len} bytes, file is {size} bytes"
                 ]
@@ -180,13 +227,16 @@ def verify_point_cloud(cloud_path: str, min_size_bytes: int = 50000) -> Tuple[bo
     ext = os.path.splitext(cloud_path)[1].lower()
     try:
         with open(cloud_path, "rb") as f:
-            header = f.read(4)
+            header = f.read(8)
             if ext in (".las", ".laz"):
-                if header != b"LASF":
-                    return False, [f"Invalid LAS/LAZ magic header: expected b'LASF', got {header!r}"]
+                if header[:4] != b"LASF":
+                    return False, [f"Invalid LAS/LAZ magic header: expected b'LASF', got {header[:4]!r}"]
             elif ext == ".ply":
                 if not header.startswith(b"ply"):
-                    return False, [f"Invalid PLY magic header: expected b'ply', got {header!r}"]
+                    return False, [f"Invalid PLY magic header: expected b'ply', got {header[:4]!r}"]
+            elif ext == ".e57":
+                if header != b"ASTM-E57":
+                    return False, [f"Invalid E57 magic header: expected b'ASTM-E57', got {header!r}"]
     except Exception as exc:
         return False, [f"Failed to read point cloud header: {exc}"]
 
@@ -207,6 +257,10 @@ def verify_pdf_report(pdf_path: str, min_size_bytes: int = 15000) -> Tuple[bool,
             magic = f.read(4)
             if magic != b"%PDF":
                 return False, [f"Invalid PDF header: expected b'%PDF', got {magic!r}"]
+            f.seek(max(0, size - 2048))
+            tail = f.read(2048)
+            if b"%%EOF" not in tail:
+                return False, ["Truncated/corrupted PDF report: missing '%%EOF' trailer marker."]
     except Exception as exc:
         return False, [f"Failed to read PDF report header: {exc}"]
 
@@ -242,15 +296,19 @@ def verify_project_deliverables(
     warnings: List[str] = []
     assets_checked: Dict[str, Any] = {}
 
-    # Gather sorted files in deliverables directory for deterministic verification
-    all_files = sorted(os.listdir(deliverables_dir))
+    # Gather sorted regular files in deliverables directory (skip subdirs & broken symlinks)
+    all_files = sorted(f for f in os.listdir(deliverables_dir) if os.path.isfile(os.path.join(deliverables_dir, f)))
 
     def _prefer_project_match(candidates: List[str]) -> str:
         if project_name and candidates:
             pref = project_name.lower()
-            named = [f for f in candidates if f.lower().startswith(pref)]
-            if named:
-                return named[0]
+            exact_or_delim = [
+                f
+                for f in candidates
+                if os.path.splitext(f)[0].lower() == pref or f.lower().startswith((pref + ".", pref + "_", pref + "-"))
+            ]
+            if exact_or_delim:
+                return exact_or_delim[0]
         return candidates[0]
 
     # Collect texture filenames referenced by MTL libraries so TIFF textures are never misclassified as DEM/Ortho
@@ -259,11 +317,9 @@ def verify_project_deliverables(
         try:
             with open(os.path.join(deliverables_dir, mf_name), "r", encoding="utf-8", errors="ignore") as mf:
                 for mline in mf:
-                    ms = mline.strip()
-                    if ms.startswith("map_Kd "):
-                        parts = ms.split(None, 1)
-                        if len(parts) > 1:
-                            mtl_referenced_tifs.add(os.path.basename(parts[1].strip()).lower())
+                    tex_file = _extract_mtl_map_kd_filename(mline)
+                    if tex_file:
+                        mtl_referenced_tifs.add(os.path.basename(tex_file).lower())
         except Exception:
             pass
 
@@ -305,20 +361,22 @@ def verify_project_deliverables(
 
     # 3. Elevation & Orthomosaic (GeoTIFF — exclude MTL textures and prefer canonical _dem/_orthomosaic suffixes)
     tif_files = [f for f in all_files if f.lower().endswith((".tif", ".tiff")) and f.lower() not in mtl_referenced_tifs]
-    dem_files = [f for f in tif_files if f.lower().endswith(("_dem.tif", "_dem.tiff", "_dsm.tif", "_dsm.tiff"))]
-    if not dem_files:
-        dem_files = [
-            f
-            for f in tif_files
-            if ("_dem" in f.lower() or "_dsm" in f.lower() or "elevation" in f.lower() or f.lower().startswith("dem"))
-        ]
     ortho_files = [
         f
         for f in tif_files
         if f.lower().endswith(("_orthomosaic.tif", "_orthomosaic.tiff", "_ortho.tif", "_ortho.tiff"))
     ]
     if not ortho_files:
-        ortho_files = [f for f in tif_files if "_ortho" in f.lower() or f.lower().startswith("ortho")]
+        ortho_files = [
+            f for f in tif_files if re.search(r"(?:^|[_-])(?:orthomosaic|ortho)(?:[_.-]|$)", f.lower()) is not None
+        ]
+    ortho_set = {f.lower() for f in ortho_files}
+    dem_candidates = [f for f in tif_files if f.lower() not in ortho_set]
+    dem_files = [f for f in dem_candidates if f.lower().endswith(("_dem.tif", "_dem.tiff", "_dsm.tif", "_dsm.tiff"))]
+    if not dem_files:
+        dem_files = [
+            f for f in dem_candidates if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", f.lower()) is not None
+        ]
 
     if dem_files:
         target_dem = _prefer_project_match(dem_files)

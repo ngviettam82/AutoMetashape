@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import unittest
@@ -110,7 +111,7 @@ class TestClusterSupervisor(unittest.TestCase):
             # Create output folder and dummy valid GLB
             os.makedirs(j.output_dir, exist_ok=True)
             with open(os.path.join(j.output_dir, f"{j.project_name}.glb"), "wb") as f:
-                f.write(b"glTF" + b"\x00" * 2000)
+                f.write(struct.pack("<4sII", b"glTF", 2, 2012) + b"\x00" * 2000)
 
             # Create dummy scratch staging folder
             staged_folder = os.path.join(scratch_dir, f"{j.project_name}_local_stage")
@@ -255,7 +256,7 @@ class TestClusterSupervisor(unittest.TestCase):
         def mock_execute(j: QueueJob):
             os.makedirs(j.output_dir, exist_ok=True)
             with open(os.path.join(j.output_dir, f"{j.project_name}.glb"), "wb") as f:
-                f.write(b"glTF" + b"\x00" * 2000)
+                f.write(struct.pack("<4sII", b"glTF", 2, 2012) + b"\x00" * 2000)
 
             staged_folder = os.path.join(scratch_dir, f"{j.project_name}_local_stage")
             os.makedirs(staged_folder, exist_ok=True)
@@ -314,7 +315,7 @@ class TestClusterSupervisor(unittest.TestCase):
         def mock_execute(j: QueueJob):
             os.makedirs(j.output_dir, exist_ok=True)
             with open(os.path.join(j.output_dir, f"{j.project_name}.glb"), "wb") as f:
-                f.write(b"glTF" + b"\x00" * 2000)
+                f.write(struct.pack("<4sII", b"glTF", 2, 2012) + b"\x00" * 2000)
 
         with patch("shutil.disk_usage", side_effect=mock_disk_usage):
             summary = supervisor.run_queue(execute_fn=mock_execute)

@@ -84,7 +84,8 @@ def _jacobi_eig_sym3(sym: list[list[float]], max_iter: int = 50) -> tuple[list[f
             if abs(a[i][j]) > max_off:
                 max_off = abs(a[i][j])
                 p, q = i, j
-        if max_off < 1e-15:
+        max_diag = max(abs(a[0][0]), abs(a[1][1]), abs(a[2][2]), 1e-300)
+        if max_off <= max_diag * 1e-15:
             break
 
         diff = a[q][q] - a[p][p]
@@ -131,11 +132,12 @@ def _svd3(mat: list[list[float]]) -> tuple[list[list[float]], list[float], list[
     evals, v_mat = _jacobi_eig_sym3(ata)
     s_vals = [math.sqrt(max(ev, 0.0)) for ev in evals]
 
+    s_eps = max(s_vals[0] * 1e-12, 1e-300)
     u_cols: list[list[float]] = []
     for k in range(3):
         v_col = [v_mat[r][k] for r in range(3)]
         mv = _mat3_vec(mat, v_col)
-        if s_vals[k] > 1e-12:
+        if s_vals[k] > s_eps:
             u_cols.append([x / s_vals[k] for x in mv])
         else:
             u_cols.append([0.0, 0.0, 0.0])
@@ -177,7 +179,7 @@ def _svd3(mat: list[list[float]]) -> tuple[list[list[float]], list[float], list[
             if n_k > 1e-12:
                 u_cols[k] = [x / n_k for x in u_cols[k]]
 
-    if s_vals[2] <= 1e-12:
+    if s_vals[2] <= s_eps:
         c2 = _cross(u_cols[0], u_cols[1])
         nc2 = _norm(c2)
         if nc2 > 1e-12:
@@ -228,7 +230,9 @@ def fit_sim3_umeyama_3d(
     rot = _mat3_mul(_mat3_mul(u_mat, sign_mat), vt_mat)
 
     if with_scale:
-        scale = sum(s_vals[i] * sign[i] for i in range(3)) / max(var_s, 1e-12)
+        if var_s <= 0.0:
+            raise ValueError("Degenerate zero-variance source point set in fit_sim3_umeyama_3d")
+        scale = sum(s_vals[i] * sign[i] for i in range(3)) / var_s
     else:
         scale = 1.0
 
@@ -304,25 +308,63 @@ def evaluate_icp_quality_gate(
 ) -> tuple[bool, list[str]]:
     """Evaluate strict Pre-MVS acceptance thresholds for a registered secondary island."""
     reasons: list[str] = []
-    if not metrics.get("ok", False):
-        reasons.append(f"worker_failed:{metrics.get('reason', 'unknown')}")
+    if not isinstance(metrics, dict) or not metrics.get("ok", False):
+        reason = metrics.get("reason", "unknown") if isinstance(metrics, dict) else "invalid_payload"
+        reasons.append(f"worker_failed:{reason}")
         return False, reasons
 
-    fitness = float(metrics.get("fitness_15cm", 0.0))
-    med_err = float(metrics.get("median_15cm_m", 999.0))
-    scale = float(metrics.get("scale", 0.0))
-    tilt_deg = float(metrics.get("tilt_deg", metrics.get("rotation_deg", 999.0)))
+    def _safe_finite(val: Any) -> float | None:
+        if val is None or isinstance(val, bool):
+            return None
+        try:
+            f = float(val)
+            return f if math.isfinite(f) else None
+        except (ValueError, TypeError):
+            return None
 
-    if fitness < min_fitness_15cm:
+    fitness = _safe_finite(metrics.get("fitness_15cm"))
+    med_err = _safe_finite(metrics.get("median_15cm_m"))
+    scale = _safe_finite(metrics.get("scale"))
+    tilt_deg = _safe_finite(metrics.get("tilt_deg", metrics.get("rotation_deg")))
+    k4_val = _safe_finite(max_abs_k4)
+
+    if fitness is None:
+        reasons.append("fitness_15cm=non_finite")
+    elif fitness < min_fitness_15cm:
         reasons.append(f"fitness_15cm={fitness * 100:.1f}% < {min_fitness_15cm * 100:.0f}%")
-    if med_err > max_median_15cm_m:
+
+    if med_err is None:
+        reasons.append("median_15cm=non_finite")
+    elif med_err > max_median_15cm_m:
         reasons.append(f"median_15cm={med_err * 100:.2f}cm > {max_median_15cm_m * 100:.0f}cm")
-    if not (min_scale <= scale <= max_scale):
+
+    if scale is None:
+        reasons.append("scale=non_finite")
+    elif not (min_scale <= scale <= max_scale):
         reasons.append(f"scale={scale:.4f} outside [{min_scale:.2f}, {max_scale:.2f}]")
-    if tilt_deg > max_tilt_deg:
+
+    if tilt_deg is None:
+        reasons.append("tilt=non_finite")
+    elif tilt_deg > max_tilt_deg:
         reasons.append(f"tilt={tilt_deg:.2f}deg > {max_tilt_deg:.1f}deg")
-    if abs(max_abs_k4) >= max_allowed_k4:
-        reasons.append(f"|k4|={abs(max_abs_k4):.4f} >= {max_allowed_k4:.2f}")
+
+    if k4_val is None:
+        reasons.append("|k4|=non_finite")
+    elif abs(k4_val) >= max_allowed_k4:
+        reasons.append(f"|k4|={abs(k4_val):.4f} >= {max_allowed_k4:.2f}")
+
+    t_enu = metrics.get("T_enu")
+    if t_enu is not None:
+        t_valid = (
+            isinstance(t_enu, (list, tuple))
+            and len(t_enu) == 4
+            and all(
+                isinstance(row, (list, tuple)) and len(row) == 4 and all(_safe_finite(x) is not None for x in row)
+                for row in t_enu
+            )
+        )
+        if not t_valid:
+            reasons.append("T_enu=non_finite_or_malformed")
 
     return len(reasons) == 0, reasons
 
@@ -460,6 +502,59 @@ def _sha256_file(path: str) -> str:
     return h.hexdigest()
 
 
+def _resolve_contained_relpath(base_dir: str, rel_path: str) -> str | None:
+    """Resolve ``rel_path`` strictly beneath ``base_dir`` without allowing path traversal."""
+    if not rel_path or not isinstance(rel_path, str):
+        return None
+    clean_rel = rel_path.strip().replace("\\", "/")
+    if not clean_rel or clean_rel.startswith("/") or os.path.isabs(clean_rel):
+        return None
+    drive, _ = os.path.splitdrive(clean_rel)
+    if drive:
+        return None
+    parts = [p for p in clean_rel.split("/") if p]
+    if not parts or any(p == ".." for p in parts):
+        return None
+    real_base = os.path.realpath(base_dir)
+    real_target = os.path.realpath(os.path.join(real_base, *parts))
+    try:
+        if os.path.commonpath([real_base, real_target]) != real_base:
+            return None
+    except ValueError:
+        return None
+    return real_target
+
+
+def _safe_extract_zip(
+    zip_path: str,
+    stage_dir: str,
+    max_files: int = 100000,
+    max_bytes: int = 8 * 1024 * 1024 * 1024,
+) -> None:
+    """Extract a ZIP archive into ``stage_dir`` rejecting Zip Slip, symlinks, and zip bombs."""
+    real_stage = os.path.realpath(stage_dir)
+    total_files = 0
+    total_bytes = 0
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        for info in zf.infolist():
+            mode = (info.external_attr >> 16) & 0o170000
+            if mode == 0o120000:
+                raise ValueError(f"Refusing to extract symlink member from archive: {info.filename}")
+            member_path = _resolve_contained_relpath(real_stage, info.filename)
+            if member_path is None:
+                raise ValueError(f"Refusing to extract unsafe archive member path: {info.filename}")
+            if info.is_dir():
+                os.makedirs(member_path, exist_ok=True)
+                continue
+            total_files += 1
+            total_bytes += max(0, int(info.file_size))
+            if total_files > max_files or total_bytes > max_bytes:
+                raise ValueError(f"Archive exceeds extraction safety limit ({total_files} files, {total_bytes} bytes)")
+            os.makedirs(os.path.dirname(member_path), exist_ok=True)
+            with zf.open(info, "r") as src, open(member_path, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+
+
 def ensure_bridge_runtime(
     network_path: str = "",
     images_dir: str = "",
@@ -468,8 +563,8 @@ def ensure_bridge_runtime(
     """Locate or auto-provision the isolated portable Python 3.11 + Open3D executable.
 
     Provisioning unpacks ``<share>\\.cluster\\bridge_runtime\\bridge_runtime_win_amd64_v1.zip``
-    once into ``%LOCALAPPDATA%\\AutoMetashape\\bridge_runtime_v<version>`` (outside repo and
-    outside local NVMe scratch staging). Requires zero system Python, zero admin rights, and
+    once into ``%LOCALAPPDATA%\\AutoMetashape\\bridge_runtime_v<version>_<sha8>`` (outside repo
+    and outside local NVMe scratch staging). Requires zero system Python, zero admin rights, and
     zero internet access on worker nodes.
     """
     # 1. Explicit environment override
@@ -478,6 +573,11 @@ def ensure_bridge_runtime(
         return env_py
 
     cache_base = _local_runtime_base_dir()
+    allow_unverified = os.environ.get("AUTOMETASHAPE_ALLOW_UNVERIFIED_BRIDGE", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
     # 2. Check shared NAS bundle manifest and auto-provision into local cache if needed
     for bundle_dir in _candidate_bundle_dirs(network_path, images_dir, output_dir):
@@ -487,35 +587,56 @@ def ensure_bridge_runtime(
         try:
             with open(manifest_path, "r", encoding="utf-8") as f:
                 manifest = json.load(f)
+            if not isinstance(manifest, dict):
+                raise ValueError("manifest root must be a JSON object")
             version = str(manifest.get("version", "1.0.0")).strip()
             filename = str(manifest.get("filename", "")).strip()
             py_rel = str(manifest.get("python_relpath", "python.exe")).strip()
             expected_sha = str(manifest.get("sha256", "")).strip().lower()
-            zip_path = os.path.join(bundle_dir, filename)
         except Exception as exc:
             print(f"  [ICP Runtime] Warning: unreadable manifest at {manifest_path}: {exc}", flush=True)
             continue
 
+        if expected_sha and not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            print(f"  [ICP Runtime] [WARNING] Invalid sha256 format in {manifest_path}; skipping.", flush=True)
+            continue
+        if not expected_sha and not allow_unverified:
+            print(
+                f"  [ICP Runtime] [WARNING] Refusing unverified runtime manifest without sha256 at {manifest_path} "
+                "(set AUTOMETASHAPE_ALLOW_UNVERIFIED_BRIDGE=1 to override).",
+                flush=True,
+            )
+            continue
+
+        zip_path = _resolve_contained_relpath(bundle_dir, filename)
+        if zip_path is None:
+            print(f"  [ICP Runtime] [WARNING] Unsafe archive filename in {manifest_path}: {filename!r}", flush=True)
+            continue
+
         safe_ver = re.sub(r"[^0-9A-Za-z._-]", "_", version)
-        target_dir = os.path.join(cache_base, f"{_DEFAULT_RUNTIME_DIRNAME}_v{safe_ver}")
-        target_py = os.path.join(target_dir, py_rel)
-        marker_file = os.path.join(target_dir, ".provisioned_sha256")
+        sha_suffix = f"_{expected_sha[:8]}" if expected_sha else ""
+        target_dir = os.path.join(cache_base, f"{_DEFAULT_RUNTIME_DIRNAME}_v{safe_ver}{sha_suffix}")
+        target_py = _resolve_contained_relpath(target_dir, py_rel)
+        if target_py is None:
+            print(f"  [ICP Runtime] [WARNING] Unsafe python_relpath in {manifest_path}: {py_rel!r}", flush=True)
+            continue
 
-        if os.path.isfile(target_py):
-            if expected_sha:
-                marker_ok = False
-                if os.path.isfile(marker_file):
-                    try:
-                        with open(marker_file, "r", encoding="utf-8") as mf:
-                            marker_ok = mf.read().strip().lower() == expected_sha
-                    except OSError:
-                        marker_ok = False
-            else:
-                marker_ok = True
-            if marker_ok and _verify_bridge_python(target_py):
-                return target_py
+        def _marker_matches(runtime_dir: str, exp_sha: str = expected_sha) -> bool:
+            if not exp_sha:
+                return allow_unverified
+            m_file = os.path.join(runtime_dir, ".provisioned_sha256")
+            if not os.path.isfile(m_file):
+                return False
+            try:
+                with open(m_file, "r", encoding="utf-8") as mf:
+                    return mf.read().strip().lower() == exp_sha
+            except OSError:
+                return False
 
-        if not filename or not os.path.isfile(zip_path):
+        if os.path.isfile(target_py) and _marker_matches(target_dir) and _verify_bridge_python(target_py):
+            return target_py
+
+        if not os.path.isfile(zip_path):
             continue
 
         print(
@@ -538,11 +659,10 @@ def ensure_bridge_runtime(
                     continue
 
             os.makedirs(stage_dir, exist_ok=True)
-            with zipfile.ZipFile(zip_path, "r") as zf:
-                zf.extractall(stage_dir)
+            _safe_extract_zip(zip_path, stage_dir)
 
-            staged_py = os.path.join(stage_dir, py_rel)
-            if not _verify_bridge_python(staged_py):
+            staged_py = _resolve_contained_relpath(stage_dir, py_rel)
+            if staged_py is None or not _verify_bridge_python(staged_py):
                 print("  [ICP Runtime] [WARNING] Extracted runtime failed Open3D smoke check.", flush=True)
                 shutil.rmtree(stage_dir, ignore_errors=True)
                 continue
@@ -552,8 +672,8 @@ def ensure_bridge_runtime(
                     mf.write(expected_sha)
 
             if os.path.isdir(target_dir):
-                # Another concurrent worker may have finished installing the exact same version
-                if _verify_bridge_python(target_py):
+                # Another concurrent worker may have finished installing the exact same verified version
+                if _marker_matches(target_dir) and _verify_bridge_python(target_py):
                     shutil.rmtree(stage_dir, ignore_errors=True)
                     return target_py
                 shutil.rmtree(target_dir, ignore_errors=True)
@@ -561,7 +681,7 @@ def ensure_bridge_runtime(
             try:
                 os.replace(stage_dir, target_dir)
             except OSError:
-                if _verify_bridge_python(target_py):
+                if _marker_matches(target_dir) and _verify_bridge_python(target_py):
                     shutil.rmtree(stage_dir, ignore_errors=True)
                     return target_py
                 raise
@@ -924,6 +1044,19 @@ def bridge_disconnected_islands(
 
     orig_chunk = getattr(doc, "chunk", None) or (doc.chunks[0] if getattr(doc, "chunks", None) else chunk)
 
+    # Pre-check georeferenced CRS before building expensive Stage-0 MVS clouds (unreferenced / LOCAL_CS
+    # chunks cannot construct a UTM frame and would otherwise waste Stage-0 compute).
+    orig_crs = getattr(orig_chunk, "crs", None)
+    orig_wkt = str(getattr(orig_crs, "wkt", "") or "").upper()
+    orig_crs_name = str(getattr(orig_crs, "name", "") or "").upper()
+    is_explicit_local = orig_crs is not None and ("LOCAL_CS" in orig_wkt or "LOCAL COORDINATES" in orig_crs_name)
+    if is_explicit_local or (orig_crs is None and _compute_island_utm_frame(orig_chunk, orig_chunk) is None):
+        print(
+            "  [ICP Bridge] Chunk has no georeferenced CRS (LOCAL_CS/unreferenced); skipping Stage-4 ICP bridge.",
+            flush=True,
+        )
+        return orig_chunk, {"triggered": False, "accepted": 0, "rejected": total_candidates, "reason": "no_georef_crs"}
+
     temp_chunks: list[Any] = []
     accepted_chunks: list[Any] = []
     bridged_cam_paths: set[str] = set()
@@ -1023,13 +1156,13 @@ def bridge_disconnected_islands(
         for idx, paths in enumerate(rescue_photo_groups, 1):
             ch_res = doc.addChunk()
             ch_res.label = f"_ICP_Rescue_{idx}"
+            temp_chunks.append(ch_res)
+            ch_res.addPhotos(paths)
             if getattr(orig_chunk, "crs", None) is not None:
                 try:
                     ch_res.crs = orig_chunk.crs
                 except Exception:
                     pass
-            temp_chunks.append(ch_res)
-            ch_res.addPhotos(paths)
             # Keep rolling shutter disabled on close-range rescue orbits to prevent scale collapse
             if Metashape is not None and hasattr(Metashape, "Shutter"):
                 for sensor in getattr(ch_res, "sensors", None) or []:
@@ -1172,6 +1305,15 @@ def bridge_disconnected_islands(
                 continue
 
             t_ecef_list, fit_mm = convert_utm_transform_to_ecef(metrics["T_enu"], utm_crs, shift_xyz)
+            if not math.isfinite(fit_mm) or fit_mm > 50.0:
+                print(
+                    f"  [ICP Quality Gate] REJECTED {isl_id}: UTM->ECEF fit error {fit_mm:.2f}mm > 50.0mm.",
+                    flush=True,
+                )
+                island_reports.append(
+                    {"id": isl_id, "passed": False, "reasons": [f"utm_to_ecef_fit_mm={fit_mm:.2f}"], "metrics": metrics}
+                )
+                continue
             print(
                 f"  [ICP Quality Gate] PASSED {isl_id} (EPSG::{epsg}, UTM->ECEF={fit_mm:.3f}mm): "
                 f"fit(<15cm)={metrics['fitness_15cm'] * 100:.1f}%, "
@@ -1188,6 +1330,11 @@ def bridge_disconnected_islands(
 
         # 4. Merge accepted islands with ch_main (or keep clean ch_main alone) and clean up temp chunks
         if accepted_chunks:
+            # Clear temporary Stage-0 dense clouds & depth maps BEFORE mergeChunks so they are never copied/merged
+            _clear_stage0_dense_assets(ch_main)
+            for _ac in accepted_chunks:
+                _clear_stage0_dense_assets(_ac)
+
             # Capture main block's ground-to-sky region AND transform before mergeChunks(merge_tiepoints=False)
             saved_main_region = None
             saved_main_matrix = None
@@ -1281,5 +1428,15 @@ def bridge_disconnected_islands(
             "rejected": len(island_reports) - len(accepted_chunks),
             "islands": island_reports,
         }
+    except Exception:
+        if temp_chunks:
+            try:
+                existing_keys = {c.key for c in (getattr(doc, "chunks", None) or [])}
+                orphans = [c for c in temp_chunks if getattr(c, "key", None) in existing_keys]
+                if orphans:
+                    doc.remove(orphans)
+            except Exception:
+                pass
+        raise
     finally:
         shutil.rmtree(tmp_icp_dir, ignore_errors=True)

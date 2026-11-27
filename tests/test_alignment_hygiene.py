@@ -292,7 +292,10 @@ class TestAlignmentHygiene(unittest.TestCase):
                 self.values = [0.2, 0.3, 0.4]
 
             def init(self, _chunk, criterion=None) -> None:
-                self.values = [0.2, 0.3, 0.4]
+                if criterion == self.ImageCount:
+                    self.values = [1.0] + [3.0] * 19
+                else:
+                    self.values = [0.2, 0.3, 0.4]
 
             def removePoints(self, _thresh) -> None:
                 pass
@@ -300,12 +303,20 @@ class TestAlignmentHygiene(unittest.TestCase):
             def selectPoints(self, _thresh) -> None:
                 pass
 
+        fake_pts = [SimpleNamespace(valid=True) for _ in range(10)]
+
+        def _remove_selected() -> None:
+            for pt in fake_pts:
+                if pt.valid:
+                    pt.valid = False
+                    break
+
         fake_ms = SimpleNamespace(TiePoints=SimpleNamespace(Filter=_FakeFilter))
         fake_chunk = SimpleNamespace(
             sensors=[sensor],
             tie_points=SimpleNamespace(
-                points=[SimpleNamespace(valid=True) for _ in range(10)],
-                removeSelectedPoints=lambda: None,
+                points=fake_pts,
+                removeSelectedPoints=_remove_selected,
             ),
             optimizeCameras=lambda **kw: opt_calls.append(kw),
         )

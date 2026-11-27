@@ -65,6 +65,8 @@ def _parse_float(value: Any) -> float | None:
 
 
 def _median(values: list[float]) -> float:
+    if not values:
+        return 0.0
     s = sorted(values)
     n = len(s)
     mid = n // 2
@@ -90,6 +92,8 @@ def zero_unstable_lens_params(chunk: Any) -> int:
     sensors = getattr(chunk, "sensors", None) or []
     reset_count = 0
     for sensor in sensors:
+        if getattr(sensor, "fixed", False):
+            continue
         cal = getattr(sensor, "calibration", None)
         if cal is None:
             continue
@@ -165,7 +169,17 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
             valid_cams.append((cam, x_val, y_val))
 
     if len(valid_cams) >= 3 and max_jump_m > 0.0:
-        med_x = _median([x[1] for x in valid_cams])
+        if metric_crs:
+            med_x = _median([x[1] for x in valid_cams])
+        else:
+            # Antimeridian-safe circular mean reference + median wrapped offset
+            ref_lon_rad = math.atan2(
+                sum(math.sin(math.radians(x[1])) for x in valid_cams),
+                sum(math.cos(math.radians(x[1])) for x in valid_cams),
+            )
+            ref_lon_deg = math.degrees(ref_lon_rad)
+            wrapped_offsets = [((x[1] - ref_lon_deg + 180.0) % 360.0) - 180.0 for x in valid_cams]
+            med_x = ((ref_lon_deg + _median(wrapped_offsets) + 180.0) % 360.0) - 180.0
         med_y = _median([x[2] for x in valid_cams])
         kept: list[tuple[Any, float, float]] = []
         for cam, xv, yv in valid_cams:
@@ -217,8 +231,8 @@ def _is_rtk_fixed_survey(cameras: list[Any]) -> bool:
                 acc_checked += 1
                 if ax <= 0.5 and az <= 1.0:
                     high_prec_acc += 1
-    if rtk_tagged >= 5 and (rtk_fixed / rtk_tagged) >= 0.5:
-        return True
+    if rtk_tagged >= 5:
+        return (rtk_fixed / rtk_tagged) >= 0.5
     if acc_checked >= 5 and (high_prec_acc / acc_checked) >= 0.5:
         return True
     return False
@@ -344,11 +358,12 @@ def normalize_flight_takeoff_z0(
             )
 
         if ref_z0 is None:
-            # Pure physics anchor selection: highest aerial RelativeAltitude band (>=25m preferred),
-            # breaking ties within 5m altitude bands by largest camera count (never reads folder names).
+            # Pure physics anchor selection: prefer aerial flights (RA >= 25m), ranking largest camera
+            # count first (with altitude as tie-breaker) so a few high-altitude transit shots never
+            # hijack the vertical datum of a large main survey mission.
             high_alt = [cs for cs in cluster_stats if cs["med_ra"] >= 25.0]
             pool = high_alt if high_alt else cluster_stats
-            anchor_cs = max(pool, key=lambda cs: (round(cs["med_ra"] / 5.0), cs["count"]))
+            anchor_cs = max(pool, key=lambda cs: (cs["count"], round(cs["med_ra"] / 5.0)))
             ref_z0 = anchor_cs["med_z0"]
             anchor_label = anchor_cs["label"]
         else:
@@ -423,7 +438,10 @@ def _compute_camera_gps_residual_vec(chunk: Any, camera: Any) -> tuple[float, fl
             dy = float(est.y - ref_loc.y)
         else:
             dy = float(est.y - ref_loc.y) * 111320.0
-            dx = float(est.x - ref_loc.x) * 111320.0 * math.cos(math.radians(float(ref_loc.y)))
+            dlon = ((float(est.x) - float(ref_loc.x) + 180.0) % 360.0) - 180.0
+            dx = dlon * 111320.0 * math.cos(math.radians(float(ref_loc.y)))
+        if not (math.isfinite(dx) and math.isfinite(dy) and math.isfinite(dz)):
+            return None
         return dx, dy, dz, math.hypot(dx, dy)
     except Exception:
         return None
@@ -450,17 +468,26 @@ def _camera_altitude_m(cam: Any) -> float | None:
 
 
 def _camera_focal_px(cam: Any) -> float | None:
-    """Return calibrated focal length in pixels for zoom-ratio comparison, if available."""
+    """Return unit-consistent normalized focal length (``f / sensor_width``) for zoom-ratio comparison.
+
+    Normalizing by image width prevents false zoom-discontinuity cuts between different-resolution
+    sensors sharing the same FOV and prevents mixing pixels (``cal.f``) with millimeters
+    (``sensor.focal_length``).
+    """
     sensor = getattr(cam, "sensor", None)
     if sensor is None:
         return None
+    sw = _parse_float(getattr(sensor, "width", None))
     cal = getattr(sensor, "calibration", None)
     f_val = _parse_float(getattr(cal, "f", None)) if cal is not None else None
     if f_val is not None and f_val > 1.0:
+        if sw is not None and sw > 0.0:
+            return f_val / sw
         return f_val
     fl_mm = _parse_float(getattr(sensor, "focal_length", None))
-    if fl_mm is not None and fl_mm > 0.1:
-        return fl_mm
+    pw_mm = _parse_float(getattr(sensor, "pixel_width", None))
+    if fl_mm is not None and fl_mm > 0.1 and sw is not None and sw > 0.0 and pw_mm is not None and pw_mm > 0.0:
+        return fl_mm / (sw * pw_mm)
     return None
 
 
@@ -764,7 +791,8 @@ def _cam_xy_meters(cam: Any, ref_x: float, ref_y: float, metric_crs: bool = Fals
     if abs(xv) < 1e-4 and abs(yv) < 1e-4:
         return None
     cos_lat = math.cos(math.radians(ref_y))
-    return ((xv - ref_x) * 111320.0 * cos_lat, (yv - ref_y) * 111320.0)
+    dlon = ((xv - ref_x + 180.0) % 360.0) - 180.0
+    return (dlon * 111320.0 * cos_lat, (yv - ref_y) * 111320.0)
 
 
 def _compute_main_xy_bounds(
@@ -783,14 +811,22 @@ def _compute_main_xy_bounds(
             coords.append((xv, yv))
     if len(coords) < 2:
         return None
-    ref_x = _median([c[0] for c in coords])
     ref_y = _median([c[1] for c in coords])
     if metric_crs:
+        ref_x = _median([c[0] for c in coords])
         xs = [x - ref_x for x, _ in coords]
         ys = [y - ref_y for _, y in coords]
     else:
+        ref_lon_deg = math.degrees(
+            math.atan2(
+                sum(math.sin(math.radians(c[0])) for c in coords),
+                sum(math.cos(math.radians(c[0])) for c in coords),
+            )
+        )
+        wrapped = [((c[0] - ref_lon_deg + 180.0) % 360.0) - 180.0 for c in coords]
+        ref_x = ((ref_lon_deg + _median(wrapped) + 180.0) % 360.0) - 180.0
         cos_lat = math.cos(math.radians(ref_y))
-        xs = [(lon - ref_x) * 111320.0 * cos_lat for lon, _ in coords]
+        xs = [(((lon - ref_x + 180.0) % 360.0) - 180.0) * 111320.0 * cos_lat for lon, _ in coords]
         ys = [(lat - ref_y) * 111320.0 for _, lat in coords]
     return (ref_x, ref_y, min(xs), max(xs), min(ys), max(ys))
 
@@ -925,31 +961,30 @@ def classify_and_quarantine_islands(
     # Require either a catastrophic teleport (>25m Z / >30m XY) OR an abrupt jump relative to strongly
     # connected visual neighbors so smooth multi-battery barometer/GPS drift (e.g. 7-11m across a 600m site)
     # never causes false quarantines on well-aligned flight lines.
-    main_res: dict[int, tuple[float, float]] = {}
+    main_res: dict[int, tuple[float, float, float, float]] = {}
     for k in main_keys:
-        res = compute_camera_gps_residual(chunk, by_key[k])
-        if res is not None:
-            main_res[k] = res
+        vec = _compute_camera_gps_residual_vec(chunk, by_key[k])
+        if vec is not None:
+            main_res[k] = vec
 
     spike_keys: list[int] = []
     if len(main_res) >= 5:
-        main_med_dz = _median([v[0] for v in main_res.values()])
-        main_med_dxy = _median([v[1] for v in main_res.values()])
+        main_med_dz = _median([v[2] for v in main_res.values()])
+        main_med_dxy = _median([v[3] for v in main_res.values()])
         if abs(main_med_dz) <= 3.5 and main_med_dxy <= 5.0:
-            for k, (dz, dxy) in main_res.items():
+            for k, (dx, dy, dz, dxy) in main_res.items():
                 exceeds_global = abs(dz - main_med_dz) > max_spike_dz_m or dxy > max_spike_dxy_m
                 if not exceeds_global:
                     continue
                 is_catastrophic = abs(dz - main_med_dz) > max_catastrophic_dz_m or dxy > max_catastrophic_dxy_m
                 if not is_catastrophic:
-                    nbr_res = [main_res[nb] for nb in strong_adj.get(k, ()) if nb in main_res]
-                    if nbr_res:
-                        nbr_med_dz = _median([v[0] for v in nbr_res])
-                        nbr_med_dxy = _median([v[1] for v in nbr_res])
-                        if (
-                            abs(dz - nbr_med_dz) <= max_neighbor_dz_jump_m
-                            and abs(dxy - nbr_med_dxy) <= max_neighbor_dxy_jump_m
-                        ):
+                    nbr_vecs = [main_res[nb] for nb in strong_adj.get(k, ()) if nb in main_res]
+                    if nbr_vecs:
+                        nbr_med_dx = _median([v[0] for v in nbr_vecs])
+                        nbr_med_dy = _median([v[1] for v in nbr_vecs])
+                        nbr_med_dz = _median([v[2] for v in nbr_vecs])
+                        nbr_xy_jump = math.hypot(dx - nbr_med_dx, dy - nbr_med_dy)
+                        if abs(dz - nbr_med_dz) <= max_neighbor_dz_jump_m and nbr_xy_jump <= max_neighbor_dxy_jump_m:
                             continue
                 quarantined.add(k)
                 spike_keys.append(k)
@@ -1056,12 +1091,12 @@ def find_unaligned_overlapping_groups(
             continue
         if not getattr(cam, "enabled", True) or getattr(cam, "transform", None) is not None:
             continue
-        # Skip ground-idle / landing-pad frames (DJI RelativeAltitude <= 0.5m) before clustering
-        # so stationary takeoff/landing shots can never contaminate nearby close-range flights.
+        # Skip ground-idle / landing-pad frames near exact takeoff level (|DJI/RelativeAltitude| <= 0.5m)
+        # while preserving negative-altitude flights taken off from rooftops/hilltops.
         photo = getattr(cam, "photo", None)
         meta = getattr(photo, "meta", None) if photo else None
         ra_val = _parse_float(get_camera_meta(meta, "DJI/RelativeAltitude"))
-        if ra_val is not None and ra_val <= 0.5:
+        if ra_val is not None and abs(ra_val) <= 0.5:
             continue
         band = _camera_physical_band(cam)
         b_tot = band_total.get(band, 0)

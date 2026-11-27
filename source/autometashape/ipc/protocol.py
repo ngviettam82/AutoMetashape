@@ -12,6 +12,7 @@ import os
 import re
 import socket
 import sys
+import threading
 import time
 
 # ---------------------------------------------------------------------------
@@ -80,6 +81,32 @@ def set_active_status_file(path: str | None) -> None:
     _ACTIVE_STATUS_FILE = path
 
 
+def _write_status_sidecar_atomic(status_path: str, data: dict) -> None:
+    """Write status sidecar JSON atomically with Windows/SMB retry and orphan-temp cleanup."""
+    parent = os.path.dirname(os.path.abspath(status_path))
+    if parent and not os.path.exists(parent):
+        os.makedirs(parent, exist_ok=True)
+    tmp_path = f"{status_path}.tmp.{os.getpid()}.{threading.get_ident()}"
+    try:
+        with open(tmp_path, "w", encoding="utf-8") as sf:
+            json.dump(data, sf, indent=2)
+        for attempt in range(3):
+            try:
+                os.replace(tmp_path, status_path)
+                return
+            except PermissionError:
+                if attempt < 2:
+                    time.sleep(0.05 * (attempt + 1))
+                else:
+                    raise
+    except Exception:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
+
+
 def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> None:
     """Emits an explicit machine-readable IPC milestone sentinel to stdout and atomic status sidecar.
 
@@ -88,27 +115,21 @@ def emit_ipc_stage(stage_key: str, description: str, progress: float = 0.0) -> N
         description: Human-readable description of current task activity.
         progress: Stage progress percentage between 0.0 and 100.0.
     """
-    print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{description}{IPC_SENTINEL_SUFFIX}", flush=True)
+    safe_desc = re.sub(r"[\r\n]+", " ", str(description)).strip()
+    print(f"{IPC_SENTINEL_PREFIX}{stage_key}:{safe_desc}{IPC_SENTINEL_SUFFIX}", flush=True)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE:
-        try:
-            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-            data = {
+        _write_status_sidecar_atomic(
+            _ACTIVE_STATUS_FILE,
+            {
                 "stage_key": stage_key,
-                "stage_desc": description,
+                "stage_desc": safe_desc,
                 "progress": float(progress),
                 "worker_node": socket.gethostname(),
                 "status": "running",
                 "timestamp": time.time(),
-            }
-            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as sf:
-                json.dump(data, sf, indent=2)
-            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
-        except Exception:
-            pass
+            },
+        )
 
 
 def emit_ipc_event(sentinel: str) -> None:
@@ -120,24 +141,29 @@ def emit_ipc_event(sentinel: str) -> None:
     print(sentinel, flush=True)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE and "COMPLETE" in sentinel:
-        try:
-            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-            data = {
+        _write_status_sidecar_atomic(
+            _ACTIVE_STATUS_FILE,
+            {
                 "stage_key": "complete",
                 "stage_desc": "Pipeline Complete",
                 "progress": 100.0,
                 "worker_node": socket.gethostname(),
                 "status": "completed",
                 "timestamp": time.time(),
-            }
-            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as sf:
-                json.dump(data, sf, indent=2)
-            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
-        except Exception:
-            pass
+            },
+        )
+    elif _ACTIVE_STATUS_FILE and "PAUSE" in sentinel:
+        _write_status_sidecar_atomic(
+            _ACTIVE_STATUS_FILE,
+            {
+                "stage_key": "paused",
+                "stage_desc": "Paused awaiting operator manual crop confirmation",
+                "progress": 0.0,
+                "worker_node": socket.gethostname(),
+                "status": "paused",
+                "timestamp": time.time(),
+            },
+        )
 
 
 def emit_ipc_error(stage_key: str, error_message: str) -> None:
@@ -147,29 +173,23 @@ def emit_ipc_error(stage_key: str, error_message: str) -> None:
         stage_key: Active stage during which the error occurred.
         error_message: Formatted error explanation string.
     """
-    err_line = f"[ERROR] Pipeline error in stage '{stage_key}': {error_message}"
+    safe_err = re.sub(r"[\r\n]+", " ", str(error_message)).strip()
+    err_line = f"[ERROR] Pipeline error in stage '{stage_key}': {safe_err}"
     print(err_line, file=sys.stderr, flush=True)
     global _ACTIVE_STATUS_FILE
     if _ACTIVE_STATUS_FILE:
-        try:
-            parent = os.path.dirname(os.path.abspath(_ACTIVE_STATUS_FILE))
-            if parent and not os.path.exists(parent):
-                os.makedirs(parent, exist_ok=True)
-            data = {
+        _write_status_sidecar_atomic(
+            _ACTIVE_STATUS_FILE,
+            {
                 "stage_key": stage_key,
-                "stage_desc": f"Error: {error_message}",
+                "stage_desc": f"Error: {safe_err}",
                 "progress": 0.0,
                 "worker_node": socket.gethostname(),
                 "status": "error",
-                "error": error_message,
+                "error": safe_err,
                 "timestamp": time.time(),
-            }
-            tmp_path = f"{_ACTIVE_STATUS_FILE}.tmp"
-            with open(tmp_path, "w", encoding="utf-8") as sf:
-                json.dump(data, sf, indent=2)
-            os.replace(tmp_path, _ACTIVE_STATUS_FILE)
-        except Exception:
-            pass
+            },
+        )
 
 
 def parse_ipc_line(line: str, mode: str = "recon") -> tuple[str, str] | None:
