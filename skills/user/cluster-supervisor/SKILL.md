@@ -94,6 +94,9 @@ Never mark a reconstruction finished simply because `metashape.exe` exited code 
 python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\Survey_0167" --expect obj ortho
 ```
 
+> [!NOTE]
+> `verify_deliverables.py` verifies **file, header, and texture-link integrity** (`OBJ + MTL + Ortho PASS`). To audit **3D geometric fidelity** (double-shell/ghost-roof detection, tie-graph sub-island splits, mixed multi-site photo folders, or coverage-loss over-pruning inside completed `.psx` archives), invoke [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md).
+
 The verification gate executes 5 structural integrity checks:
 1. **Wavefront OBJ**:
    - File size $\ge 1,000$ bytes.
@@ -240,6 +243,7 @@ When submitting a standalone or queued batch to the cluster, agents and operator
    - Pass `--source-share` (SSD #1, raw photos) and `--result-share` (SSD #2, writable `.psx` + deliverables) to utilize two separate SSD shares without mixing I/O.
    - Only pass `--no-local-scratch-staging` for standalone/host-pinned runs where remote workers will never claim the batch.
    - Optional `--exclude-folders "pat1,pat2"` filters named subfolders out of ingestion (with automatic legacy worker shim in `build_monolithic_runscript_task` so older workers ignore unknown flags safely). Note that close-range `Manual` orbits are natively bridged by default via Zero-Neural Alignment Hygiene & Open3D ICP and do not need exclusion unless explicitly requested by the operator.
+   - Pass `--start-paused` when staging new batches that must wait behind a pending remote fleet update (then release via `scripts/manage_queue.py unpause --batch <id>` once all target workers confirm reboot).
    - **Hidden `.cluster/tickets/` Recovery (Zero `_dispatch_*.psx` Pollution in `Result/`)**: `submit_cluster_batch.py` always submits the canonical single `<project>.psx` project file (attaching safely if an active healthy batch already exists unless `--force` is passed). If Metashape Network Server 2.2.2 retains an un-evictable hard-killed aborted batch key in RAM (`Duplicate batch`), `safe_create_cluster_batch()` automatically dispatches via a hidden scheduler ticket under `<root>/.cluster/tickets/<slug>_<ts>_<pid>.psx` + `.ticket.json` metadata sidecar — keeping `Result/<project>/` spotless with a single `<project>.psx` while `cluster_monitor.py` seamlessly resolves the real `Result/<project>/` directory for deliverable verification.
 3. **Execution**:
    ```powershell
@@ -258,8 +262,9 @@ When submitting a standalone or queued batch to the cluster, agents and operator
 1. **Strict Read-Only Telemetry Standard**:
    Execute non-intrusive fleet audits inspecting worker health (scaled CPU % and RAM GB, with **no artificial 55 GB RAM guard**), batch stage progress, passive post-mortem memory allocation faults (`std::bad_alloc` / OOM), and storage headroom ($\ge 50\text{ GB}$ across Result & Data Source SSD shares). `cluster_monitor.py` strictly isolates read-only `--source-share` from deliverable/sidecar lookups and skips internal `.cluster/` maintenance batches:
    ```powershell
-   python scripts/cluster_monitor.py --result-share "\\CLUSTER_SHARE\ResultSSD" --source-share "\\CLUSTER_SHARE\DataSSD"
+   python scripts/cluster_monitor.py --server 10.5.10.202 --result-share "\\CLUSTER_SHARE\ResultSSD" --source-share "\\CLUSTER_SHARE\DataSSD"
    ```
+   *(Use `--server`, not `--host`.)*
    - All observations, memory faults, and progress metrics are reported to the human operator in chat.
    - The supervisor does NOT auto-degrade settings, auto-retry, or auto-cancel failed tasks.
 
@@ -308,6 +313,7 @@ To inspect an existing `.psx` archive non-destructively without risking accident
 ```powershell
 python scripts/inspect_checkpoint.py --project "\\CLUSTER_SHARE\storage\Survey_0167\Result\Survey_0167.psx"
 ```
+For deep read-only post-completion geometric auditing (tie-graph fragmentation, 3D tie-point voxel misalignment, XMP multi-site separation, and coverage-loss forensics), see [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md).
 
 ---
 
@@ -344,4 +350,5 @@ python scripts/submit_cluster_batch.py --help
 - Deliverable Verification Engine: [source/autometashape/core/verification.py](../../../source/autometashape/core/verification.py)
 - Cluster Supervisor Engine: [source/autometashape/cluster/supervisor.py](../../../source/autometashape/cluster/supervisor.py)
 - Distributed Cluster Fleet Operations: [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md)
+- Photogrammetry Forensic Audit: [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md)
 - Supervisor Evaluation Suite: [evaluations.md](evaluations.md)

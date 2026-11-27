@@ -118,7 +118,7 @@ Before dispatching each dataset, the coordinator executes the storage watchdog:
 ### Phase 3: Autonomous Photogrammetry Reconstruction
 Each project executes using the standardized **Production Geomatics (`pro`)** preset:
 - High-accuracy camera alignment (`keypoint_limit=50,000`, `tiepoint_limit=40,000`, `keypoint_limit_per_mpx=2,000`) with guided matching, sensor-aware shutter physics (including DJI Air 3S `FC9113`), and **`k4 = b1 = b2 = 0` / `adaptive_fitting = False` hard-locked** across all passes.
-- **4-Stage Zero-Neural Alignment Hygiene & Open3D ICP Bridge** (`--alignment-hygiene`, `--icp-bridge`, enabled by default): neutralizes Null-Island/`> 5 km` GPS outliers, normalizes per-flight `TakeoffZ0` barometer datum drift (preserving RTK Fixed flights), audits the shared-track tie graph (`edge >= 15`) to quarantine rogue strips/spikes, and fuses disconnected overlapping orbits via portable offline CPU Open3D Sim(3) Point-to-Plane + gated Colored ICP under a strict Pre-MVS Quality Gate (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`).
+- **4-Stage Zero-Neural Alignment Hygiene & Open3D ICP Bridge** (`--alignment-hygiene`, `--icp-bridge`, enabled by default): neutralizes Null-Island/`> 5 km` GPS outliers, applies folder- and time-agnostic `TakeoffZ0` barometer datum normalization (1D gap clustering + idempotent `Z = ref_z0 + RelativeAltitude`, preserving RTK Fixed flights), audits the `pt.valid`-filtered tie graph (`edge >= 15`) with Tarjan 1-edge weak-hinge cutting and neighbor-continuity GPS-spike protection, isolates coherent sub-islands inside every aligned candidate and `_ICP_Rescue` chunk (`_isolate_coherent_sub_islands()`), and fuses disconnected overlapping orbits via portable offline CPU Open3D Sim(3) Point-to-Plane + gated Colored ICP under a strict Pre-MVS Quality Gate (`fitness_15cm >= 35%`, `MedErr <= 10 cm`, `0.90 <= scale <= 1.10`, `tilt <= 5°`, `|k4| < 0.05`).
 - USGS 4-Pass gradual selection tie-point filtering (`RU <= 15.0`, `PA <= 3.0`, `RE <= 0.50`, `Rays >= 2`, `<= 10%/pass`) and camera parameter re-optimization with `k4=b1=b2=0` locked.
 - GPU MVS dense depth map stereopsis with moderate outlier filtering (dense point cloud disabled by default in `pro`; opt-in via `--build-point-cloud`).
 - 2,000,000 polygon arbitrary 3D surface mesh.
@@ -134,6 +134,7 @@ python scripts/verify_deliverables.py --dir "\\CLUSTER_SHARE\ResultSSD\CATP_0167
 - **GeoTIFF**: Valid TIFF/BigTIFF headers and CRS spatial tags (5 cm/px default metric orthomosaic).
 - **Point Cloud (Opt-In)**: LAZ/LAS/PLY size matches expected point density when `--build-point-cloud --export-point-cloud` is enabled.
 - **PDF Report (Opt-In)**: Calibration report exists and exceeds $15\text{ KB}$ when `--export-report` is enabled.
+- **Post-Completion 3D Geometric Audit (Recommended for Production Batches)**: Because file-level deliverable verification (`PASS`) can still mask subtle geometric defects (double-shell ghost roofs, detached ICP rescue fragments, mixed multi-site folders, or over-pruned coverage gaps), run the read-only forensic audit protocol in [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md) across finished `.psx` projects before final sign-off.
 
 ### Phase 5: Scratch Purge & Executive Geomatics Summary
 - Upon successful verification, the PID+hash-isolated local NVMe staging folder `{project}_{hash}_{pid}_local_stage` is synced atomically (`.files` sibling swap, `.psx` published last) and purged cleanly.
@@ -188,5 +189,6 @@ python scripts/cluster_supervisor.py --help
 - Cluster Fleet Operations Skill: [skills/user/cluster-fleet-operations/SKILL.md](../cluster-fleet-operations/SKILL.md)
 - Cluster Supervisor Skill: [skills/user/cluster-supervisor/SKILL.md](../cluster-supervisor/SKILL.md)
 - Asset Export Skill: [skills/user/photogrammetry-export/SKILL.md](../photogrammetry-export/SKILL.md)
+- Photogrammetry Forensic Audit Skill: [skills/user/photogrammetry-forensic-audit/SKILL.md](../photogrammetry-forensic-audit/SKILL.md)
 - Master Supervisor Engine: [source/autometashape/cluster/supervisor.py](../../../source/autometashape/cluster/supervisor.py)
 - Evaluation Scenarios: [evaluations.md](evaluations.md)

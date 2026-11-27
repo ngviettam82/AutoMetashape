@@ -80,3 +80,23 @@ This evaluation suite defines benchmark scenarios to verify that autonomous agen
   - Attempting `pip install` or requiring system Python/CUDA/PyTorch on the worker.
   - Loading Metashape's conflicting DLLs from `PATH` inside the Open3D worker subprocess.
   - Syncing temporary Stage-0 PLY clouds back to the NAS Result Share.
+
+---
+
+### Scenario 5: Targeted Remote-Only Force Update with Watchdog Abort, Stale-ID Recovery & Staged Batch Pausing
+
+- **User Query**: *"Push the latest alignment fix to all remote workers (`Admin-pc`, `tan`, `Sanh`) without interrupting the coordinator's active 9,000-photo mega-job, recover any worker whose restart confirmation times out on a stale ID, and only unpause newly queued batches once every remote worker is confirmed running the new commit."*
+- **Expected Agent Action**:
+  1. Stage new batches requiring the new commit with `scripts/submit_cluster_batch.py --start-paused` so outdated remote workers cannot claim them prematurely.
+  2. Target remote workers individually (`--node Admin-pc`, `--node tan`, `--node Sanh`) rather than `--node all`, leaving the coordinator worker and server completely untouched.
+  3. Confirm single-node `--force` dispatches `dispatch_abort_signal(node_name=..., shared_root=...)` before `quitWorker` so C++ `RunScript`-blocked workers cleanly recycle.
+  4. If a remote worker double-restarts and `update_fleet.py` reports a restart-confirmation timeout (`Can't quit worker` on stale ID), verify the fresh worker ID and active batch, and execute `scripts/cluster_abort.py --node <name> --batch <active_bid> --root <share>` so `launch_worker.py` applies the staged `.update_pending` payload.
+  5. Confirm every targeted remote worker re-registers in `State=ready` with a fresh worker ID and dynamic discrete GPU bitmask (e.g., `GPU=2` on mixed iGPU+RTX nodes), then unpause staged batches via `scripts/manage_queue.py unpause --batch <id>`.
+- **Pass Criteria**:
+  - Coordinator worker's long-running mega-project remains completely uninterrupted.
+  - Every remote worker applies `.update_pending` and reconnects in `State=ready` before paused batches are released.
+  - Dynamic GPU bitmask (`enumGPUDevices()`) is preserved cleanly across every reboot.
+- **Fail Criteria**:
+  - Running `--node all` or `taskkill /IM metashape.exe` and killing the coordinator's active mega-project.
+  - Unpausing queued batches while any remote worker is still executing stale code.
+  - Leaving a stale-ID timed-out worker stuck with an unapplied `.update_pending` signal.
