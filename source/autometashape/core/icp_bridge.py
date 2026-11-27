@@ -29,7 +29,12 @@ import zipfile
 from typing import Any
 
 from autometashape.core.alignment_hygiene import (
+    _camera_altitude_m,
+    _evaluate_island_rigidity,
+    _is_metric_crs,
+    _median,
     build_tie_point_islands,
+    compute_block_backbone_score,
     normalize_flight_takeoff_z0,
     optimize_cameras_no_k4,
     sanitize_camera_gps,
@@ -331,7 +336,20 @@ def evaluate_icp_quality_gate(
     if fitness is None:
         reasons.append("fitness_15cm=non_finite")
     elif fitness < min_fitness_15cm:
-        reasons.append(f"fitness_15cm={fitness * 100:.1f}% < {min_fitness_15cm * 100:.0f}%")
+        has_partial_fields = all(
+            k in metrics for k in ("overlap_fitness_15cm", "overlap_fraction", "inlier_count_15cm")
+        )
+        partial_ok = False
+        if has_partial_fields:
+            ov_fit = _safe_finite(metrics.get("overlap_fitness_15cm"))
+            ov_frac = _safe_finite(metrics.get("overlap_fraction"))
+            inl_cnt = _safe_finite(metrics.get("inlier_count_15cm"))
+            if ov_fit is None or ov_frac is None or inl_cnt is None:
+                reasons.append("overlap_metrics=non_finite")
+            elif ov_fit >= max(0.45, min_fitness_15cm) and ov_frac >= 0.15 and inl_cnt >= 1000.0:
+                partial_ok = True
+        if not partial_ok:
+            reasons.append(f"fitness_15cm={fitness * 100:.1f}% < {min_fitness_15cm * 100:.0f}%")
 
     if med_err is None:
         reasons.append("median_15cm=non_finite")
@@ -945,6 +963,31 @@ def _isolate_coherent_sub_islands(
     return [(primary_label, chunk)] + isolated
 
 
+def _should_disable_island_rolling_shutter(chunk_obj: Any, global_rolling_shutter: bool) -> bool:
+    """Return True for close-range orbits (<25m AGL) where RS collapses scale; False for high-altitude surveys."""
+    if not global_rolling_shutter:
+        return True
+    ras = [v for c in (getattr(chunk_obj, "cameras", None) or []) if (v := _camera_altitude_m(c)) is not None]
+    if not ras:
+        return True
+    return _median(ras) < 25.0
+
+
+def _apply_island_rolling_shutter_policy(chunk_obj: Any, global_rolling_shutter: bool) -> None:
+    if Metashape is None or not hasattr(Metashape, "Shutter"):
+        return
+    mode = (
+        Metashape.Shutter.Model.Disabled
+        if _should_disable_island_rolling_shutter(chunk_obj, global_rolling_shutter)
+        else Metashape.Shutter.Model.Regularized
+    )
+    for sensor in getattr(chunk_obj, "sensors", None) or []:
+        try:
+            sensor.rolling_shutter = mode
+        except Exception:
+            pass
+
+
 def bridge_disconnected_islands(
     doc: Any,
     chunk: Any,
@@ -1069,7 +1112,8 @@ def bridge_disconnected_islands(
     _cleanup_stale_icp_temp_dirs(max_age_hours=24.0, temp_root=icp_temp_base)
     tmp_icp_dir = tempfile.mkdtemp(prefix="autometashape_icp_", dir=icp_temp_base)
     try:
-        # 1. Build clean isolated main Mission chunk (only main_island + kept_distant)
+        # 1. Build clean isolated initial main chunk (without building Stage-0 MVS yet in case a wider
+        # rescued/secondary block should become the primary target backbone!)
         ch_main = orig_chunk.copy()
         ch_main.label = "_ICP_Main_Block"
         temp_chunks.append(ch_main)
@@ -1089,23 +1133,7 @@ def bridge_disconnected_islands(
             except Exception:
                 pass
 
-        print(
-            f"  [ICP Bridge] Building Stage-0 Medium (downscale=4) target cloud on main block "
-            f"({len(ch_main.cameras)} cameras)...",
-            flush=True,
-        )
-        if not _build_stage0_cloud(ch_main):
-            print(
-                "  [ICP Bridge] [WARNING] Main block Stage-0 dense cloud failed; quarantining secondary islands.",
-                flush=True,
-            )
-            _clear_stage0_dense_assets(ch_main)
-            ch_main.label = "Production_Reconstruction"
-            doc.remove([orig_chunk])
-            doc.chunk = ch_main
-            return ch_main, {"triggered": True, "accepted": 0, "rejected": total_candidates}
-
-        # 2. Prepare all candidate island chunks
+        # 2. Prepare all candidate island & rescue chunks BEFORE choosing Stage-0 target backbone
         candidate_chunks: list[tuple[str, Any]] = []
 
         for idx, comp_ids in enumerate(bridge_candidate_ids, 1):
@@ -1117,14 +1145,9 @@ def bridge_disconnected_islands(
             to_remove = [c for c in ch_isl.cameras if _cam_identity(c) not in comp_ids]
             if to_remove:
                 ch_isl.remove(to_remove)
-            # Disable rolling shutter on isolated close-range/secondary orbits: Regularized RS
-            # causes 30-45% bundle-adjustment scale collapse on slow/hovering Manual orbits.
-            if Metashape is not None and hasattr(Metashape, "Shutter"):
-                for sensor in getattr(ch_isl, "sensors", None) or []:
-                    try:
-                        sensor.rolling_shutter = Metashape.Shutter.Model.Disabled
-                    except Exception:
-                        pass
+            # Physics-aware RS policy: disable on close-range orbits (<25m) to avoid scale collapse,
+            # preserve Regularized on high-altitude aerial survey blocks.
+            _apply_island_rolling_shutter_policy(ch_isl, bool(rolling_shutter))
             if hasattr(ch_isl, "updateTransform"):
                 try:
                     ch_isl.updateTransform()
@@ -1164,13 +1187,7 @@ def bridge_disconnected_islands(
                     ch_res.crs = orig_chunk.crs
                 except Exception:
                     pass
-            # Keep rolling shutter disabled on close-range rescue orbits to prevent scale collapse
-            if Metashape is not None and hasattr(Metashape, "Shutter"):
-                for sensor in getattr(ch_res, "sensors", None) or []:
-                    try:
-                        sensor.rolling_shutter = Metashape.Shutter.Model.Disabled
-                    except Exception:
-                        pass
+            _apply_island_rolling_shutter_policy(ch_res, bool(rolling_shutter))
             sanitize_camera_gps(ch_res)
             normalize_flight_takeoff_z0(ch_res, anchor_z0_override=anchor_z0)
             try:
@@ -1211,6 +1228,65 @@ def bridge_disconnected_islands(
             except Exception as exc:
                 print(f"  [ICP Bridge] Rescue group #{idx} alignment failed ({exc}) — skipping.", flush=True)
                 island_reports.append({"id": f"rescue_{idx}", "passed": False, "reasons": [str(exc)]})
+
+        # 2.5 Dynamic Backbone Promotion: if a rigid rescued/secondary chunk covers substantially wider
+        # spatial footprint than initial ch_main (e.g., Pass 1 aligned only compact Manual while Rescue
+        # recovered the full aerial site), promote it to ch_main BEFORE building Stage-0 target cloud!
+        if candidate_chunks:
+            metric_crs = _is_metric_crs(getattr(ch_main, "crs", None))
+            main_al = [c for c in ch_main.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)]
+            main_score, main_cells, main_n, main_has_sp = compute_block_backbone_score(main_al, metric_crs=metric_crs)
+            if main_has_sp:
+                best_promo: tuple[int, str, Any, float, int, int] | None = None
+                for c_idx, (c_id, ch_cand) in enumerate(candidate_chunks):
+                    cand_al = [
+                        c for c in ch_cand.cameras if getattr(c, "transform", None) and getattr(c, "enabled", True)
+                    ]
+                    if len(cand_al) < 12:
+                        continue
+                    c_score, c_cells, c_n, c_has_sp = compute_block_backbone_score(cand_al, metric_crs=metric_crs)
+                    if not c_has_sp:
+                        continue
+                    rig = _evaluate_island_rigidity(ch_cand, [c.key for c in cand_al], {c.key: c for c in cand_al})
+                    if not rig["is_rigid"]:
+                        continue
+                    if c_cells >= max(2 * main_cells, main_cells + 3) and c_score > 1.25 * main_score:
+                        if best_promo is None or (c_score, c_n) > (best_promo[3], best_promo[5]):
+                            best_promo = (c_idx, c_id, ch_cand, c_score, c_cells, c_n)
+
+                if best_promo is not None:
+                    b_idx, b_id, ch_best, b_score, b_cells, b_n = best_promo
+                    print(
+                        f"  [ICP Bridge] Promoting wider-coverage block '{b_id}' "
+                        f"({b_n} cams, {b_cells} cells, score={b_score:.1f}) as primary target backbone; "
+                        f"demoting compact block ({main_n} cams, {main_cells} cells, score={main_score:.1f}) "
+                        "to secondary candidate.",
+                        flush=True,
+                    )
+                    old_main = ch_main
+                    ch_main = ch_best
+                    if len(main_al) >= 12:
+                        candidate_chunks[b_idx] = ("demoted_initial_main", old_main)
+                    else:
+                        candidate_chunks.pop(b_idx)
+
+        # 2.6 Build Stage-0 Medium dense cloud on the selected primary target backbone
+        print(
+            f"  [ICP Bridge] Building Stage-0 Medium (downscale=4) target cloud on main block "
+            f"({len(ch_main.cameras)} cameras)...",
+            flush=True,
+        )
+        if not _build_stage0_cloud(ch_main):
+            print(
+                "  [ICP Bridge] [WARNING] Main block Stage-0 dense cloud failed; proceeding cleanly with main block only.",
+                flush=True,
+            )
+            _clear_stage0_dense_assets(ch_main)
+            ch_main.label = "Production_Reconstruction"
+            to_drop_fail = [orig_chunk] + [c for c in temp_chunks if c is not ch_main]
+            doc.remove(to_drop_fail)
+            doc.chunk = ch_main
+            return ch_main, {"triggered": True, "accepted": 0, "rejected": len(candidate_chunks)}
 
         # 3. Register each candidate independently via CPU Open3D Sim(3) ICP + Quality Gate
         for isl_id, ch_isl in candidate_chunks:
@@ -1377,6 +1453,35 @@ def bridge_disconnected_islands(
                     reg.center = new_center
                     reg.size = new_size
                     reg.rot = new_rot
+                    # Union-expand horizontally/vertically if accepted partial-overlap chunks extend beyond main box
+                    try:
+                        rot_t = new_rot.t()
+                        loc_c = rot_t * new_center
+                        l_min = [loc_c.x - 0.5 * new_size.x, loc_c.y - 0.5 * new_size.y, loc_c.z - 0.5 * new_size.z]
+                        l_max = [loc_c.x + 0.5 * new_size.x, loc_c.y + 0.5 * new_size.y, loc_c.z + 0.5 * new_size.z]
+                        expanded = False
+                        for cam in merged.cameras:
+                            if not getattr(cam, "transform", None) or not getattr(cam, "enabled", True):
+                                continue
+                            c_pos = getattr(cam, "center", None)
+                            if c_pos is None:
+                                continue
+                            lc = rot_t * c_pos
+                            pad_xy = 0.05 * max(new_size.x, new_size.y)
+                            for axis, pad in ((0, pad_xy), (1, pad_xy), (2, 0.0)):
+                                val = lc[axis]
+                                if val - pad < l_min[axis]:
+                                    l_min[axis] = val - pad
+                                    expanded = True
+                                if val + pad > l_max[axis]:
+                                    l_max[axis] = val + pad
+                                    expanded = True
+                        if expanded:
+                            mid_exp = Metashape.Vector([(l_min[i] + l_max[i]) * 0.5 for i in range(3)])
+                            reg.center = new_rot * mid_exp
+                            reg.size = Metashape.Vector([l_max[i] - l_min[i] for i in range(3)])
+                    except Exception:
+                        pass
                     merged.region = reg
                 except Exception:
                     pass

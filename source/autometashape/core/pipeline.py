@@ -54,7 +54,9 @@ from autometashape.cluster.staging import (
     sync_staged_project_to_network,
 )
 from autometashape.core.alignment_hygiene import (
+    _is_metric_crs,
     classify_and_quarantine_islands,
+    compute_block_backbone_score,
     find_unaligned_overlapping_groups,
     normalize_flight_takeoff_z0,
     optimize_cameras_no_k4,
@@ -1794,7 +1796,14 @@ def run_reconstruction(
                 )
 
             anchor_chunk = max(
-                aligned_chunks, key=lambda c: sum(1 for cam in c.cameras if cam.transform and cam.enabled)
+                aligned_chunks,
+                key=lambda c: (
+                    compute_block_backbone_score(
+                        [cam for cam in c.cameras if cam.transform and cam.enabled],
+                        metric_crs=_is_metric_crs(getattr(c, "crs", None)),
+                    )[0],
+                    sum(1 for cam in c.cameras if cam.transform and cam.enabled),
+                ),
             )
             ref_key = anchor_chunk.key
             merge_chunk_keys = [c.key for c in created_chunks]

@@ -443,9 +443,23 @@ def run_icp(
     sp_tr = (sp_f @ t_curr[:3, :3].T) + t_curr[:3, 3]
     dd, _ = tt_f.query(sp_tr, distance_upper_bound=0.15, workers=-1)
     valid = dd < 0.15
+    inlier_count_15cm = int(np.sum(valid))
     fitness = float(np.mean(valid))
     rmse_15 = float(np.sqrt(np.mean(dd[valid] ** 2))) if np.any(valid) else 999.0
     med_15 = float(np.median(dd[valid])) if np.any(valid) else 999.0
+
+    # Symmetric overlap-zone fitness: handles legitimate partial-overlap wings (adjacent blocks/facades)
+    tgt_xy_min = tp_f[:, :2].min(axis=0)
+    tgt_xy_max = tp_f[:, :2].max(axis=0)
+    in_tgt_xy = (
+        (sp_tr[:, 0] >= tgt_xy_min[0] - 1.0)
+        & (sp_tr[:, 0] <= tgt_xy_max[0] + 1.0)
+        & (sp_tr[:, 1] >= tgt_xy_min[1] - 1.0)
+        & (sp_tr[:, 1] <= tgt_xy_max[1] + 1.0)
+    )
+    overlap_count = int(np.sum(in_tgt_xy))
+    overlap_fraction = float(overlap_count) / max(1, len(sp_tr))
+    overlap_fitness_15cm = float(np.mean(valid[in_tgt_xy])) if overlap_count >= 100 else 0.0
 
     r_fin = t_curr[:3, :3] / scale_curr
     rot_deg = float(np.degrees(np.arccos(np.clip((np.trace(r_fin) - 1.0) * 0.5, -1.0, 1.0))))
@@ -454,7 +468,8 @@ def run_icp(
     elapsed_s = time.time() - t0
 
     print(
-        f"[ICP COMPLETE] fitness(<15cm)={fitness * 100:.1f}% | RMSE={rmse_15 * 100:.2f} cm | "
+        f"[ICP COMPLETE] fitness(<15cm)={fitness * 100:.1f}% (overlap={overlap_fitness_15cm * 100:.1f}% @ "
+        f"{overlap_fraction * 100:.0f}% ROI, inliers={inlier_count_15cm:,}) | RMSE={rmse_15 * 100:.2f} cm | "
         f"MedErr={med_15 * 100:.2f} cm | scale={scale_curr:.5f} | tilt={tilt_deg:.2f} deg "
         f"(yaw={yaw_deg:+.2f} deg) in {elapsed_s:.1f}s",
         flush=True,
@@ -471,6 +486,9 @@ def run_icp(
             "tilt_deg": tilt_deg,
             "translation_m": t_curr[:3, 3].tolist(),
             "fitness_15cm": fitness,
+            "overlap_fitness_15cm": overlap_fitness_15cm,
+            "overlap_fraction": overlap_fraction,
+            "inlier_count_15cm": inlier_count_15cm,
             "rmse_15cm_m": rmse_15,
             "median_15cm_m": med_15,
             "colored_accepted": colored_accepted,

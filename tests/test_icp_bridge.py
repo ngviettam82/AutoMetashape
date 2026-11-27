@@ -525,6 +525,252 @@ class TestIcpBridge(unittest.TestCase):
                 self.assertFalse(os.path.normcase(os.path.abspath(ep)).startswith(abs_stage))
                 self.assertFalse(os.path.exists(os.path.dirname(ep)))
 
+    def test_bridge_promotes_wider_rescued_backbone_over_compact_initial_main(self) -> None:
+        """Verify Stage-4 promotes wider rigid rescue backbone over compact Pass-1 main and keeps RS Regularized."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cos_lat = math.cos(math.radians(base_lat))
+
+        class _Mat:
+            def __init__(self, rows) -> None:
+                self.rows = rows
+
+            def __mul__(self, other):
+                return _Mat(self.rows)
+
+        class _Cam:
+            def __init__(self, key: int, label: str, path: str, lon: float, lat: float, ra: float, aligned: bool):
+                self.key = key
+                self.label = label
+                self.enabled = True
+                self.transform = object() if aligned else None
+                self.photo = SimpleNamespace(
+                    path=path,
+                    meta={"DJI/AbsoluteAltitude": str(25.0 + ra), "DJI/RelativeAltitude": str(ra)},
+                )
+                self.reference = SimpleNamespace(
+                    enabled=True,
+                    location=SimpleNamespace(x=lon, y=lat, z=25.0 + ra),
+                )
+                self.center = SimpleNamespace(x=lon, y=lat, z=25.0 + ra)
+                self.sensor = None
+
+        man_cams = []
+        for i in range(20):
+            dx = -15.0 + (i % 5) * 7.5
+            dy = -15.0 + (i // 5) * 10.0
+            man_cams.append(
+                _Cam(
+                    i + 1,
+                    f"man_{i:02d}.jpg",
+                    os.path.abspath(f"/proj/Manual/man_{i:02d}.jpg"),
+                    base_lon + dx * deg_m / cos_lat,
+                    base_lat + dy * deg_m,
+                    10.0,
+                    True,
+                )
+            )
+        aer_cams = []
+        for i in range(30):
+            dx = -100.0 + (i % 6) * 40.0
+            dy = -100.0 + (i // 6) * 50.0
+            aer_cams.append(
+                _Cam(
+                    100 + i,
+                    f"aer_{i:02d}.jpg",
+                    os.path.abspath(f"/proj/Aerial/aer_{i:02d}.jpg"),
+                    base_lon + dx * deg_m / cos_lat,
+                    base_lat + dy * deg_m,
+                    105.0,
+                    False,
+                )
+            )
+        by_path = {c.photo.path: c for c in man_cams + aer_cams}
+        stage0_built: list[str] = []
+
+        class _PromoChunk:
+            def __init__(
+                self, key: int, label: str, cameras: list[Any] | None = None, sensors: list[Any] | None = None
+            ):
+                self.key = key
+                self.label = label
+                self.cameras = list(cameras or [])
+                self.sensors = list(
+                    sensors
+                    or [
+                        SimpleNamespace(
+                            rolling_shutter=None,
+                            calibration=SimpleNamespace(k4=0.0, b1=0.0, b2=0.0),
+                        )
+                    ]
+                )
+                self.crs = SimpleNamespace(
+                    wkt='GEOGCS["WGS 84",DATUM["WGS_1984"]]',
+                    project=lambda v: v,
+                )
+                self.transform = SimpleNamespace(matrix=_Mat([[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]))
+                self.tie_points = None
+                self.depth_maps = None
+                self.point_cloud = None
+
+            def addPhotos(self, paths: list[str]) -> None:
+                for p in paths:
+                    src = by_path[os.path.abspath(p)]
+                    cloned = _Cam(
+                        src.key,
+                        src.label,
+                        src.photo.path,
+                        src.reference.location.x,
+                        src.reference.location.y,
+                        float(src.photo.meta["DJI/RelativeAltitude"]),
+                        False,
+                    )
+                    cloned.sensor = self.sensors[0]
+                    self.cameras.append(cloned)
+
+            def matchPhotos(self, **_kw) -> None:
+                pass
+
+            def alignCameras(self, **_kw) -> None:
+                for c in self.cameras:
+                    c.transform = object()
+
+            def copy(self):
+                copied = _PromoChunk(
+                    doc._next_key(),
+                    self.label + "_copy",
+                    [
+                        _Cam(
+                            c.key,
+                            c.label,
+                            c.photo.path,
+                            c.reference.location.x,
+                            c.reference.location.y,
+                            float(c.photo.meta["DJI/RelativeAltitude"]),
+                            c.transform is not None,
+                        )
+                        for c in self.cameras
+                    ],
+                )
+                doc.chunks.append(copied)
+                return copied
+
+            def remove(self, rm_cams) -> None:
+                rm_keys = {c.key for c in rm_cams}
+                self.cameras = [c for c in self.cameras if c.key not in rm_keys]
+
+            def optimizeCameras(self, **_kw) -> None:
+                pass
+
+            def exportPointCloud(self, path: str, **_kw) -> None:
+                with open(path, "w", encoding="utf-8") as f:
+                    f.write("ply\n")
+
+        class _PromoDoc:
+            def __init__(self) -> None:
+                self._k = 10
+                self.chunks: list[_PromoChunk] = []
+                self.chunk: _PromoChunk | None = None
+                self.path = ""
+
+            def _next_key(self) -> int:
+                self._k += 1
+                return self._k
+
+            def addChunk(self) -> _PromoChunk:
+                c = _PromoChunk(self._next_key(), "Chunk")
+                self.chunks.append(c)
+                return c
+
+            def remove(self, to_rm) -> None:
+                rm_set = set(to_rm)
+                self.chunks = [c for c in self.chunks if c not in rm_set]
+
+        doc = _PromoDoc()
+        orig = _PromoChunk(1, "Production_Reconstruction", man_cams + aer_cams)
+        doc.chunks.append(orig)
+        doc.chunk = orig
+
+        def _fake_stage0(ch_obj: _PromoChunk) -> bool:
+            stage0_built.append(ch_obj.label)
+            return True
+
+        def _fail_icp(cmd, **_kw):
+            out_path = cmd[cmd.index("--output") + 1]
+            with open(out_path, "w", encoding="utf-8") as f:
+                json.dump(
+                    {
+                        "ok": True,
+                        "T_enu": [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]],
+                        "scale": 1.0,
+                        "tilt_deg": 0.1,
+                        "fitness_15cm": 0.10,
+                        "median_15cm_m": 0.04,
+                    },
+                    f,
+                )
+            return SimpleNamespace(returncode=0)
+
+        fake_ms = SimpleNamespace(
+            Vector=lambda v: SimpleNamespace(x=v[0], y=v[1], z=v[2]),
+            Matrix=_Mat,
+            DataSource=SimpleNamespace(PointCloudData=1),
+            PointCloudFormat=SimpleNamespace(PointCloudFormatPLY=1),
+            ReferencePreselectionMode=SimpleNamespace(ReferencePreselectionSource=1),
+            Shutter=SimpleNamespace(Model=SimpleNamespace(Disabled="Disabled", Regularized="Regularized")),
+        )
+        with (
+            patch.object(ib, "Metashape", fake_ms),
+            patch.object(ib, "ensure_bridge_runtime", return_value="/fake/python.exe"),
+            patch.object(ib, "_build_stage0_cloud", side_effect=_fake_stage0),
+            patch.object(ib, "_compute_island_utm_frame", return_value=(object(), (0.0, 0.0, 0.0), 32648)),
+            patch.object(ib.subprocess, "run", side_effect=_fail_icp),
+        ):
+            final_chunk, stats = ib.bridge_disconnected_islands(
+                doc=doc,
+                chunk=orig,
+                audit_result={"main_island": [c.key for c in man_cams], "bridge_candidates": [], "kept_distant": []},
+                unaligned_groups=[[c.key for c in aer_cams]],
+                rolling_shutter=True,
+            )
+
+        # Wide aerial rescue chunk was promoted BEFORE building Stage-0 target cloud, kept Regularized RS,
+        # and survived even after compact Manual failed ICP Quality Gate!
+        self.assertEqual(stage0_built[0], "_ICP_Rescue_1")
+        self.assertEqual(final_chunk.sensors[0].rolling_shutter, "Regularized")
+        self.assertTrue(stats["triggered"])
+        self.assertEqual(stats["accepted"], 0)
+        self.assertEqual(stats["rejected"], 1)
+        self.assertEqual(len(doc.chunks), 1)
+        self.assertEqual(len(final_chunk.cameras), 30)
+        self.assertTrue(all(c.label.startswith("aer_") for c in final_chunk.cameras))
+
+    def test_evaluate_icp_quality_gate_partial_overlap_and_guards(self) -> None:
+        """Verify partial-overlap ICP acceptance and strict minimum inlier/overlap guards."""
+        partial_good = {
+            "ok": True,
+            "fitness_15cm": 0.22,
+            "overlap_fitness_15cm": 0.68,
+            "overlap_fraction": 0.25,
+            "inlier_count_15cm": 2500,
+            "median_15cm_m": 0.04,
+            "scale": 1.002,
+            "tilt_deg": 0.6,
+        }
+        self.assertEqual(ib.evaluate_icp_quality_gate(partial_good), (True, []))
+
+        # Reject tiny corner graze (inliers < 1000)
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "inlier_count_15cm": 200})[0])
+        # Reject insufficient ROI fraction (< 0.15)
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "overlap_fraction": 0.05})[0])
+        # Reject poor alignment inside ROI (< 0.45)
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "overlap_fitness_15cm": 0.35})[0])
+        # Reject NaN overlap metrics
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "overlap_fitness_15cm": float("nan")})[0])
+        # Still enforce median/scale/tilt even when partial overlap metrics look good
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "median_15cm_m": 0.14})[0])
+        self.assertFalse(ib.evaluate_icp_quality_gate({**partial_good, "tilt_deg": 6.5})[0])
+
     def test_isolate_coherent_sub_islands_prunes_rogue_fragments(self) -> None:
         """Verify rescue chunk splitting into [19, 8, 5] + 3 unaligned keeps ONLY the 19 coherent cams."""
 
@@ -856,6 +1102,9 @@ class TestIcpBridge(unittest.TestCase):
             passed, reasons = ib.evaluate_icp_quality_gate(metrics)
             self.assertTrue(passed, f"Expected pass, got reasons={reasons}, metrics={metrics}")
             self.assertGreater(metrics["fitness_15cm"], 0.90)
+            self.assertGreater(metrics["overlap_fitness_15cm"], 0.90)
+            self.assertGreater(metrics["overlap_fraction"], 0.90)
+            self.assertGreaterEqual(metrics["inlier_count_15cm"], 1000)
             self.assertLess(metrics["median_15cm_m"], 0.03)
             self.assertAlmostEqual(metrics["scale"], 0.99, delta=0.015)
             self.assertLess(metrics["tilt_deg"], 1.0)

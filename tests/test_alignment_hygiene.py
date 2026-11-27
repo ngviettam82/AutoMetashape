@@ -682,6 +682,233 @@ class TestAlignmentHygiene(unittest.TestCase):
             self.assertTrue(c.enabled)
             self.assertIsNotNone(c.transform)
 
+    def test_catp0046_compact_manual_more_photos_does_not_hijack_wide_aerial_backbone(self) -> None:
+        """Verify wider rigid aerial island (45 cams, 200x200m) beats denser compact manual island (60 cams, 38x38m)."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cos_lat = math.cos(math.radians(base_lat))
+        cams: list[_FakeCamera] = []
+        projs: dict[_FakeCamera, list[SimpleNamespace]] = {}
+
+        def _add(key: int, label: str, dx_m: float, dy_m: float, z: float, ra: float) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / cos_lat
+            lat = base_lat + dy_m * deg_m
+            c = _FakeCamera(
+                key,
+                label,
+                f"/p/{label}.jpg",
+                lon,
+                lat,
+                z,
+                meta={"DJI/AbsoluteAltitude": str(z), "DJI/RelativeAltitude": str(ra)},
+            )
+            cams.append(c)
+            projs[c] = []
+            return c
+
+        def _chain(group: list[_FakeCamera], start_tid: int) -> int:
+            tid = start_tid
+            for i in range(len(group) - 1):
+                for _ in range(20):
+                    projs[group[i]].append(SimpleNamespace(track_id=tid))
+                    projs[group[i + 1]].append(SimpleNamespace(track_id=tid))
+                    tid += 1
+            return tid
+
+        # 60 compact Manual cameras in [-19..+19] x [-19..+19] (38x38m < 40m cliff test, 4x 25m cells)
+        man_grp = [_add(i, f"man_{i}", -19.0 + (i % 6) * 7.6, -19.0 + (i // 6) * 4.2, 33.0, 4.0) for i in range(60)]
+        # 45 wide Aerial cameras across [-100..+100] x [-100..+100] (25-36x 25m cells, ~1.25 cams/cell)
+        aer_grp = [
+            _add(100 + i, f"aer_{i}", -100.0 + (i % 9) * 25.0, -100.0 + (i // 9) * 50.0, 130.0, 105.0)
+            for i in range(45)
+        ]
+
+        tid = _chain(man_grp, 1)
+        tid = _chain(aer_grp, tid)
+        pts = [SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)]
+        chunk = SimpleNamespace(
+            cameras=cams,
+            sensors=[],
+            crs=_IdentityCrs(),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(projections=projs, points=pts),
+            optimizeCameras=lambda **_kw: None,
+        )
+        res = ah.classify_and_quarantine_islands(chunk, edge_min=15, reoptimize=False)
+
+        self.assertEqual(sorted(res["main_island"]), sorted(c.key for c in aer_grp))
+        self.assertEqual(len(res["bridge_candidates"]), 1)
+        self.assertEqual(sorted(res["bridge_candidates"][0]), sorted(c.key for c in man_grp))
+        self.assertEqual(res["quarantined_keys"], [])
+
+    def test_compact_building_beats_sparse_transit_strip_and_rejects_non_rigid_backbone(self) -> None:
+        """Verify rigid 2D building (40 cams) beats 1D diagonal transit strip (14 cams) & exploded 200m rogue (50 cams)."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cos_lat = math.cos(math.radians(base_lat))
+        cams: list[_FakeCamera] = []
+        projs: dict[_FakeCamera, list[SimpleNamespace]] = {}
+
+        def _add(key: int, label: str, dx_m: float, dy_m: float, dz_err: float = 0.0) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / cos_lat
+            lat = base_lat + dy_m * deg_m
+            c = _FakeCamera(key, label, f"/p/{label}.jpg", lon, lat, 80.0, lon, lat, 80.0 + dz_err)
+            cams.append(c)
+            projs[c] = []
+            return c
+
+        def _chain(group: list[_FakeCamera], start_tid: int) -> int:
+            tid = start_tid
+            for i in range(len(group) - 1):
+                for _ in range(20):
+                    projs[group[i]].append(SimpleNamespace(track_id=tid))
+                    projs[group[i + 1]].append(SimpleNamespace(track_id=tid))
+                    tid += 1
+            return tid
+
+        # 1. Exploded/non-rigid 50-cam island across 200x200m (wider & more cams, but spread_dZ=20m -> MUST NOT be backbone)
+        rogue_grp = [
+            _add(i, f"rogue_{i}", -100.0 + (i % 10) * 22.0, -100.0 + (i // 10) * 50.0, 20.0 if i % 2 == 0 else -20.0)
+            for i in range(50)
+        ]
+        # 2. Rigid 2D compact building (40 cams in [-20..+20] x [-20..+20], minor_std >= 6m, 4 cells)
+        bldg_grp = [_add(100 + i, f"bldg_{i}", -20.0 + (i % 5) * 10.0, -20.0 + (i // 5) * 5.7, 0.2) for i in range(40)]
+        # 3. Sparse 1D diagonal transit strip (14 cams over 260m, minor_std=0 < 6.0 -> collapses to 1 multi-cam cell)
+        transit_grp = [_add(200 + i, f"trans_{i}", -130.0 + i * 20.0, -130.0 + i * 20.0, 0.1) for i in range(14)]
+
+        tid = _chain(rogue_grp, 1)
+        tid = _chain(bldg_grp, tid)
+        tid = _chain(transit_grp, tid)
+        pts = [SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)]
+        chunk = SimpleNamespace(
+            cameras=cams,
+            sensors=[],
+            crs=_IdentityCrs(),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(projections=projs, points=pts),
+            optimizeCameras=lambda **_kw: None,
+        )
+        res = ah.classify_and_quarantine_islands(chunk, edge_min=15, reoptimize=False)
+
+        self.assertEqual(sorted(res["main_island"]), sorted(c.key for c in bldg_grp))
+        self.assertEqual(sorted(res["bridge_candidates"][0]), sorted(c.key for c in transit_grp))
+        self.assertEqual(sorted(res["quarantined_keys"]), sorted(c.key for c in rogue_grp))
+
+    def test_symmetric_overlap_and_unclipped_wide_unaligned_rescue(self) -> None:
+        """Verify wide unaligned flight (70m+110m enclosing main) is returned 100% intact without clipping."""
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cos_lat = math.cos(math.radians(base_lat))
+        s_man = SimpleNamespace(key=0, calibration=SimpleNamespace(f=2970.0), focal_length=6.72)
+        s_aer = SimpleNamespace(key=1, calibration=SimpleNamespace(f=5910.0), focal_length=6.72)
+
+        def _cam(key: int, dx_m: float, dy_m: float, ra: float, aligned: bool, sensor: object) -> _FakeCamera:
+            lon = base_lon + dx_m * deg_m / cos_lat
+            lat = base_lat + dy_m * deg_m
+            return _FakeCamera(
+                key,
+                f"c_{key}",
+                f"/p/grp/c_{key}.jpg",
+                lon,
+                lat,
+                25.0 + ra,
+                aligned=aligned,
+                meta={"DJI/AbsoluteAltitude": str(25.0 + ra), "DJI/RelativeAltitude": str(ra)},
+                sensor=sensor,
+            )
+
+        # Pass-1 aligned compact main (20 cams in 40x40m)
+        man_main = [_cam(i, -20.0 + (i % 5) * 10.0, -20.0 + (i // 5) * 13.0, 10.0, True, s_man) for i in range(20)]
+        # Unaligned wide aerial survey: 60 cams across 200x200m (>70% outside main_bounds+35m, RA=70m & 110m)
+        aer_wide = [
+            _cam(
+                100 + i,
+                -100.0 + (i % 6) * 40.0,
+                -100.0 + (i // 6) * 22.0,
+                70.0 if i < 30 else 110.0,
+                False,
+                s_aer,
+            )
+            for i in range(60)
+        ]
+
+        chunk = SimpleNamespace(cameras=man_main + aer_wide)
+        groups = ah.find_unaligned_overlapping_groups(chunk, main_keys={c.key for c in man_main}, min_cams=12)
+        self.assertEqual(len(groups), 1)
+        self.assertEqual(sorted(groups[0]), sorted(c.key for c in aer_wide))
+
+    def test_single_manual_or_local_cs_project_still_selects_cleanly(self) -> None:
+        """Verify LOCAL_CS/no-GPS single island stays main and wide facade beats dense doorway burst."""
+
+        class _LocalCam:
+            def __init__(self, idx: int) -> None:
+                self.key = idx + 1
+                self.label = f"loc_{idx}"
+                self.enabled = True
+                self.transform = object()
+                self.center = _Vec((idx % 5) * 4.5, (idx // 5) * 4.5, 5.0)
+                self.reference = SimpleNamespace(enabled=False, location=None)
+                self.photo = SimpleNamespace(path=f"/local/loc_{idx}.jpg", meta=_MetaNoGet({}))
+                self.sensor = None
+
+        # 1. LOCAL_CS unreferenced chunk (location=None, distinct cam.center positions)
+        cams_local = []
+        projs_local = {}
+        for i in range(20):
+            c = _LocalCam(i)
+            cams_local.append(c)
+            projs_local[c] = []
+        tid = 1
+        for i in range(len(cams_local) - 1):
+            for _ in range(18):
+                projs_local[cams_local[i]].append(SimpleNamespace(track_id=tid))
+                projs_local[cams_local[i + 1]].append(SimpleNamespace(track_id=tid))
+                tid += 1
+        local_chunk = SimpleNamespace(
+            cameras=cams_local,
+            sensors=[],
+            crs=SimpleNamespace(wkt='LOCAL_CS["Local"]'),
+            transform=SimpleNamespace(matrix=_IdentityMatrix()),
+            tie_points=SimpleNamespace(
+                projections=projs_local,
+                points=[SimpleNamespace(track_id=t, valid=True) for t in range(1, tid)],
+            ),
+            optimizeCameras=lambda **_kw: None,
+        )
+        res_local = ah.classify_and_quarantine_islands(local_chunk, edge_min=15, reoptimize=False)
+        self.assertEqual(len(res_local["main_island"]), 20)
+        self.assertEqual(res_local["quarantined_keys"], [])
+
+        # 2. Wide 24m facade (100 cams) vs 4m doorway burst (120 cams) inside same 25m cell -> facade wins!
+        base_lon, base_lat = 106.6000, 10.7700
+        deg_m = 1.0 / 111320.0
+        cos_lat = math.cos(math.radians(base_lat))
+        facade = [
+            _FakeCamera(
+                i,
+                f"f_{i}",
+                f"/f/f_{i}.jpg",
+                base_lon + (1.0 + (i % 10) * 2.5) * deg_m / cos_lat,
+                base_lat + (1.0 + (i // 10) * 1.5) * deg_m,
+                20.0,
+            )
+            for i in range(100)
+        ]
+        doorway = [
+            _FakeCamera(
+                200 + i,
+                f"d_{i}",
+                f"/d/d_{i}.jpg",
+                base_lon + (10.5 + (i % 12) * 0.3) * deg_m / cos_lat,
+                base_lat + (10.5 + (i // 12) * 0.2) * deg_m,
+                20.0,
+            )
+            for i in range(120)
+        ]
+        s_fac = ah.compute_block_backbone_score(facade)[0]
+        s_door = ah.compute_block_backbone_score(doorway)[0]
+        self.assertGreater(s_fac, s_door)
+
 
 if __name__ == "__main__":
     unittest.main()

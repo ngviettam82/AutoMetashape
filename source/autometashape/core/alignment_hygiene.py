@@ -285,6 +285,172 @@ def _cluster_z0_entries(
     return clusters
 
 
+def _project_cams_xy_meters(
+    cams: list[Any],
+    metric_crs: bool = False,
+) -> tuple[float, float, list[tuple[Any, float, float]]] | None:
+    """Compute block median reference ``(ref_x, ref_y)`` and local East/North meters for valid GPS cameras."""
+    coords: list[tuple[Any, float, float]] = []
+    for cam in cams:
+        ref = getattr(cam, "reference", None)
+        if ref is None or not getattr(ref, "enabled", True) or getattr(ref, "location", None) is None:
+            continue
+        xv = _parse_float(getattr(ref.location, "x", None))
+        yv = _parse_float(getattr(ref.location, "y", None))
+        if xv is not None and yv is not None and (metric_crs or not (abs(xv) < 1e-4 and abs(yv) < 1e-4)):
+            coords.append((cam, xv, yv))
+    if len(coords) < 2:
+        return None
+    ref_y = _median([c[2] for c in coords])
+    if metric_crs:
+        ref_x = _median([c[1] for c in coords])
+        projected = [(cam, xv - ref_x, yv - ref_y) for cam, xv, yv in coords]
+    else:
+        ref_lon_deg = math.degrees(
+            math.atan2(
+                sum(math.sin(math.radians(c[1])) for c in coords),
+                sum(math.cos(math.radians(c[1])) for c in coords),
+            )
+        )
+        wrapped = [((c[1] - ref_lon_deg + 180.0) % 360.0) - 180.0 for c in coords]
+        ref_x = ((ref_lon_deg + _median(wrapped) + 180.0) % 360.0) - 180.0
+        cos_lat = math.cos(math.radians(ref_y))
+        projected = [
+            (cam, (((xv - ref_x + 180.0) % 360.0) - 180.0) * 111320.0 * cos_lat, (yv - ref_y) * 111320.0)
+            for cam, xv, yv in coords
+        ]
+    return ref_x, ref_y, projected
+
+
+def compute_block_backbone_score(
+    cameras: list[Any],
+    metric_crs: bool = False,
+    cell_m: float = 25.0,
+) -> tuple[float, int, int, bool]:
+    """Score a camera block by spatial coverage × sqrt(camera_count) using pure 2D geometry.
+
+    Args:
+        cameras: Cameras belonging to the block/island/chunk.
+        metric_crs: True if chunk CRS uses linear meter coordinates.
+        cell_m: Primary grid cell resolution in meters for sites spanning >= 40 m.
+
+    Returns:
+        ``(score, eff_cells, n_cams, has_spatial_footprint)``.
+    """
+    n_cams = len(cameras)
+    if n_cams == 0:
+        return (0.0, 0, 0, False)
+
+    def _effective_cell_count(points_xy: list[tuple[float, float]], step_m: float, total_pts: int) -> int:
+        cell_counts: dict[tuple[int, int], int] = defaultdict(int)
+        for px, py in points_xy:
+            cell_counts[(int(math.floor(px / step_m)), int(math.floor(py / step_m)))] += 1
+        if total_pts >= 24:
+            multi_cells = sum(1 for cnt in cell_counts.values() if cnt >= 2)
+            return multi_cells if multi_cells >= 2 else len(cell_counts)
+        return len(cell_counts)
+
+    proj = _project_cams_xy_meters(cameras, metric_crs=metric_crs)
+    if proj is not None:
+        _rx, _ry, pts_full = proj
+        inliers = [(mx, my) for _cam, mx, my in pts_full if math.hypot(mx, my) <= 5000.0]
+        n_in = len(inliers)
+        if n_in >= 2:
+            sub_cell_m = max(cell_m / 5.0, 1.0)
+            grid_25: dict[tuple[int, int], int] = defaultdict(int)
+            grid_5: set[tuple[int, int]] = set()
+            for mx, my in inliers:
+                grid_25[(int(math.floor(mx / cell_m)), int(math.floor(my / cell_m)))] += 1
+                grid_5.add((int(math.floor(mx / sub_cell_m)), int(math.floor(my / sub_cell_m))))
+
+            mean_x = sum(p[0] for p in inliers) / n_in
+            mean_y = sum(p[1] for p in inliers) / n_in
+            vxx = sum((p[0] - mean_x) ** 2 for p in inliers) / n_in
+            vyy = sum((p[1] - mean_y) ** 2 for p in inliers) / n_in
+            vxy = sum((p[0] - mean_x) * (p[1] - mean_y) for p in inliers) / n_in
+            disc = math.sqrt(max(0.0, (vxx - vyy) ** 2 + 4.0 * vxy * vxy))
+            minor_std = math.sqrt(max(0.0, 0.5 * ((vxx + vyy) - disc)))
+
+            if minor_std < 6.0:
+                multi_cells = sum(1 for cnt in grid_25.values() if cnt >= 2)
+                eff_cells = max(1, multi_cells)
+            else:
+                eff_cells = max(1, len(grid_25))
+
+            sub_weight = (sub_cell_m / cell_m) ** 2
+            eff_cov = float(eff_cells) + sub_weight * float(len(grid_5))
+            return (eff_cov * math.sqrt(float(n_cams)), eff_cells, n_cams, True)
+
+    # Unreferenced / LOCAL_CS fallback using aligned camera centers
+    centers: list[tuple[float, float]] = []
+    for cam in cameras:
+        if getattr(cam, "transform", None) is None:
+            continue
+        ctr = getattr(cam, "center", None)
+        if ctr is None:
+            continue
+        cx = _parse_float(getattr(ctr, "x", None))
+        cy = _parse_float(getattr(ctr, "y", None))
+        if cx is not None and cy is not None:
+            centers.append((cx, cy))
+    if len(centers) >= 2:
+        cxs = [p[0] for p in centers]
+        cys = [p[1] for p in centers]
+        s_max = max(
+            _percentile(cxs, 0.95) - _percentile(cxs, 0.05),
+            _percentile(cys, 0.95) - _percentile(cys, 0.05),
+        )
+        if s_max > 1e-3:
+            grid_step = max(s_max / 10.0, 1e-3)
+            eff_cells = _effective_cell_count(centers, grid_step, n_cams)
+            return (float(max(1, eff_cells)) * math.sqrt(float(n_cams)), eff_cells, n_cams, False)
+
+    return (math.sqrt(float(n_cams)), 1, n_cams, False)
+
+
+def _evaluate_island_rigidity(
+    chunk: Any,
+    comp_keys: list[int],
+    by_key: dict[int, Any],
+    max_internal_dz_spread_m: float = 6.0,
+    max_internal_dxy_spread_m: float = 8.0,
+) -> dict[str, Any]:
+    """Evaluate internal GPS residual consistency and rigidity for a connected camera block."""
+    dzs: list[float] = []
+    dxys: list[float] = []
+    for k in comp_keys:
+        cam = by_key.get(k)
+        if cam is None:
+            continue
+        res = compute_camera_gps_residual(chunk, cam)
+        if res is not None:
+            dzs.append(res[0])
+            dxys.append(res[1])
+
+    if dzs:
+        med_dz = _median(dzs)
+        med_dxy = _median(dxys)
+        int_dz_spread = _percentile([abs(v - med_dz) for v in dzs], 0.90)
+        int_dxy_spread = _percentile([abs(v - med_dxy) for v in dxys], 0.90)
+        max_dz = max(abs(v) for v in dzs)
+        max_xy = max(dxys)
+    else:
+        int_dz_spread = 0.0
+        int_dxy_spread = 0.0
+        max_dz = 0.0
+        max_xy = 0.0
+
+    is_rigid = int_dz_spread <= max_internal_dz_spread_m and int_dxy_spread <= max_internal_dxy_spread_m
+    return {
+        "gps_count": len(dzs),
+        "int_dz_spread": int_dz_spread,
+        "int_dxy_spread": int_dxy_spread,
+        "max_dz": max_dz,
+        "max_xy": max_xy,
+        "is_rigid": is_rigid,
+    }
+
+
 def _dominant_display_label(cams: list[Any]) -> str:
     """Return a concise human-readable label for logging only (never used for grouping/anchoring)."""
     counts: dict[str, int] = defaultdict(int)
@@ -358,12 +524,19 @@ def normalize_flight_takeoff_z0(
             )
 
         if ref_z0 is None:
-            # Pure physics anchor selection: prefer aerial flights (RA >= 25m), ranking largest camera
-            # count first (with altitude as tie-breaker) so a few high-altitude transit shots never
-            # hijack the vertical datum of a large main survey mission.
+            # Pure geometry/physics anchor selection: prefer aerial flights (RA >= 25m), ranking by
+            # spatial backbone score (coverage × sqrt(count)) with altitude as tie-breaker so neither
+            # dense stationary bursts nor tiny transit strips hijack the vertical datum.
+            metric_crs = _is_metric_crs(getattr(chunk, "crs", None))
             high_alt = [cs for cs in cluster_stats if cs["med_ra"] >= 25.0]
             pool = high_alt if high_alt else cluster_stats
-            anchor_cs = max(pool, key=lambda cs: (cs["count"], round(cs["med_ra"] / 5.0)))
+            anchor_cs = max(
+                pool,
+                key=lambda cs: (
+                    compute_block_backbone_score(cs["cams"], metric_crs=metric_crs)[0],
+                    round(cs["med_ra"] / 5.0),
+                ),
+            )
             ref_z0 = anchor_cs["med_z0"]
             anchor_label = anchor_cs["label"]
         else:
@@ -800,35 +973,49 @@ def _compute_main_xy_bounds(
     metric_crs: bool = False,
 ) -> tuple[float, float, float, float, float, float] | None:
     """Return ``(ref_x, ref_y, min_x, max_x, min_y, max_y)`` for valid referenced cameras."""
-    coords: list[tuple[float, float]] = []
-    for cam in cams:
-        ref = getattr(cam, "reference", None)
-        if ref is None or not getattr(ref, "enabled", True) or getattr(ref, "location", None) is None:
-            continue
-        xv = _parse_float(getattr(ref.location, "x", None))
-        yv = _parse_float(getattr(ref.location, "y", None))
-        if xv is not None and yv is not None and (metric_crs or not (abs(xv) < 1e-4 and abs(yv) < 1e-4)):
-            coords.append((xv, yv))
-    if len(coords) < 2:
+    proj = _project_cams_xy_meters(cams, metric_crs=metric_crs)
+    if proj is None:
         return None
-    ref_y = _median([c[1] for c in coords])
-    if metric_crs:
-        ref_x = _median([c[0] for c in coords])
-        xs = [x - ref_x for x, _ in coords]
-        ys = [y - ref_y for _, y in coords]
-    else:
-        ref_lon_deg = math.degrees(
-            math.atan2(
-                sum(math.sin(math.radians(c[0])) for c in coords),
-                sum(math.cos(math.radians(c[0])) for c in coords),
-            )
-        )
-        wrapped = [((c[0] - ref_lon_deg + 180.0) % 360.0) - 180.0 for c in coords]
-        ref_x = ((ref_lon_deg + _median(wrapped) + 180.0) % 360.0) - 180.0
-        cos_lat = math.cos(math.radians(ref_y))
-        xs = [(((lon - ref_x + 180.0) % 360.0) - 180.0) * 111320.0 * cos_lat for lon, _ in coords]
-        ys = [(lat - ref_y) * 111320.0 for _, lat in coords]
+    ref_x, ref_y, pts = proj
+    xs = [mx for _cam, mx, _my in pts]
+    ys = [my for _cam, _mx, my in pts]
     return (ref_x, ref_y, min(xs), max(xs), min(ys), max(ys))
+
+
+def _symmetric_bounds_overlap_ratio(
+    cams_a: list[Any],
+    bounds_a: tuple[float, float, float, float, float, float] | None,
+    cams_b: list[Any],
+    bounds_b: tuple[float, float, float, float, float, float] | None,
+    metric_crs: bool,
+    overlap_margin_m: float,
+) -> float:
+    """Compute bidirectional spatial overlap ratio ``max(frac(B in A), frac(A in B))``."""
+
+    def _frac_inside(
+        cams: list[Any],
+        bounds: tuple[float, float, float, float, float, float] | None,
+        fallback: float,
+    ) -> float:
+        if bounds is None:
+            return fallback
+        ref_x, ref_y, min_x, max_x, min_y, max_y = bounds
+        checked = 0
+        inside = 0
+        for cam in cams:
+            xy = _cam_xy_meters(cam, ref_x, ref_y, metric_crs=metric_crs)
+            if xy is None:
+                continue
+            checked += 1
+            if (min_x - overlap_margin_m) <= xy[0] <= (max_x + overlap_margin_m) and (min_y - overlap_margin_m) <= xy[
+                1
+            ] <= (max_y + overlap_margin_m):
+                inside += 1
+        return (inside / checked) if checked > 0 else fallback
+
+    frac_b_in_a = _frac_inside(cams_b, bounds_a, 1.0)
+    frac_a_in_b = _frac_inside(cams_a, bounds_b, 0.0)
+    return max(frac_b_in_a, frac_a_in_b)
 
 
 def classify_and_quarantine_islands(
@@ -847,12 +1034,13 @@ def classify_and_quarantine_islands(
     overlap_margin_m: float = 35.0,
     reoptimize: bool = True,
 ) -> dict[str, Any]:
-    """Partition tie-graph islands into main block, ICP bridge candidates, distant blocks, or rogue quarantine.
+    """Partition tie-graph islands into spatial backbone block, ICP bridge candidates, distant blocks, or quarantine.
 
-    Quarantines detached tiny/folded rogue islands and genuine isolated GPS-spike cameras inside the
-    main block (verified against visual tie-graph neighbors so smooth multi-battery consumer GPS or
-    barometer drift is never falsely quarantined), while preserving coherent overlapping secondary
-    islands for Stage-4 Zero-Neural Open3D ICP registration.
+    Selects the primary backbone block among sizable (``>= min_bridge_cams``), internally rigid
+    islands using spatial coverage × sqrt(camera_count) so compact close-range bursts can never
+    hijack wide-area scene backbones regardless of folder naming or photo counts, while using
+    symmetric overlap checks so compact secondary blocks overlapping wider blocks (and vice versa)
+    always enter Stage-4 Open3D ICP registration.
     """
     cameras = list(getattr(chunk, "cameras", None) or [])
     by_key = {c.key: c for c in cameras}
@@ -872,7 +1060,28 @@ def classify_and_quarantine_islands(
         }
 
     metric_crs = _is_metric_crs(getattr(chunk, "crs", None))
-    main_keys = list(islands[0])
+    rigidity = [
+        _evaluate_island_rigidity(
+            chunk,
+            comp,
+            by_key,
+            max_internal_dz_spread_m=max_internal_dz_spread_m,
+            max_internal_dxy_spread_m=max_internal_dxy_spread_m,
+        )
+        for comp in islands
+    ]
+    backbone_scores = [
+        compute_block_backbone_score([by_key[k] for k in comp if k in by_key], metric_crs=metric_crs)
+        for comp in islands
+    ]
+    eligible_backbone = [
+        i for i, comp in enumerate(islands) if len(comp) >= min_bridge_cams and rigidity[i]["is_rigid"]
+    ]
+    main_idx = (
+        max(eligible_backbone, key=lambda i: (backbone_scores[i][0], len(islands[i]))) if eligible_backbone else 0
+    )
+
+    main_keys = list(islands[main_idx])
     main_cams = [by_key[k] for k in main_keys if k in by_key]
     main_bounds = _compute_main_xy_bounds(main_cams, metric_crs=metric_crs)
 
@@ -881,53 +1090,40 @@ def classify_and_quarantine_islands(
         f"{[len(x) for x in islands]}",
         flush=True,
     )
+    if main_idx != 0:
+        m_score, m_cells, m_cams, _ = backbone_scores[main_idx]
+        c0_score, c0_cells, c0_cams, _ = backbone_scores[0]
+        print(
+            f"  [Tie-Graph Audit] Selected spatial backbone island #{main_idx + 1} "
+            f"({m_cams} cams, {m_cells} cells, score={m_score:.1f}) over compact higher-count island "
+            f"({c0_cams} cams, {c0_cells} cells, score={c0_score:.1f}).",
+            flush=True,
+        )
 
     bridge_candidates: list[list[int]] = []
     kept_distant: list[list[int]] = []
     quarantined: set[int] = set()
 
-    for idx, comp in enumerate(islands[1:], 2):
-        dzs: list[float] = []
-        dxys: list[float] = []
-        for k in comp:
-            res = compute_camera_gps_residual(chunk, by_key[k])
-            if res is not None:
-                dzs.append(res[0])
-                dxys.append(res[1])
+    for idx, comp in enumerate(islands, 1):
+        if idx - 1 == main_idx:
+            continue
+        rig = rigidity[idx - 1]
+        int_dz_spread = rig["int_dz_spread"]
+        int_dxy_spread = rig["int_dxy_spread"]
+        max_dz = rig["max_dz"]
+        max_xy = rig["max_xy"]
+        is_rigid = rig["is_rigid"]
 
-        if dzs:
-            med_dz = _median(dzs)
-            med_dxy = _median(dxys)
-            int_dz_spread = _percentile([abs(v - med_dz) for v in dzs], 0.90)
-            int_dxy_spread = _percentile([abs(v - med_dxy) for v in dxys], 0.90)
-            max_dz = max(abs(v) for v in dzs)
-            max_xy = max(dxys)
-        else:
-            int_dz_spread = 0.0
-            int_dxy_spread = 0.0
-            max_dz = 0.0
-            max_xy = 0.0
-
-        is_rigid = int_dz_spread <= max_internal_dz_spread_m and int_dxy_spread <= max_internal_dxy_spread_m
-
-        overlap_ratio = 0.0
-        if main_bounds is not None:
-            ref_lon, ref_lat, min_x, max_x, min_y, max_y = main_bounds
-            gps_checked = 0
-            gps_inside = 0
-            for k in comp:
-                xy = _cam_xy_meters(by_key[k], ref_lon, ref_lat, metric_crs=metric_crs)
-                if xy is None:
-                    continue
-                gps_checked += 1
-                if (min_x - overlap_margin_m) <= xy[0] <= (max_x + overlap_margin_m) and (
-                    min_y - overlap_margin_m
-                ) <= xy[1] <= (max_y + overlap_margin_m):
-                    gps_inside += 1
-            overlap_ratio = (gps_inside / gps_checked) if gps_checked > 0 else 1.0
-        else:
-            # No GPS available — assume potential overlap for sizable islands
-            overlap_ratio = 1.0
+        comp_cams = [by_key[k] for k in comp if k in by_key]
+        comp_bounds = _compute_main_xy_bounds(comp_cams, metric_crs=metric_crs)
+        overlap_ratio = _symmetric_bounds_overlap_ratio(
+            main_cams,
+            main_bounds,
+            comp_cams,
+            comp_bounds,
+            metric_crs=metric_crs,
+            overlap_margin_m=overlap_margin_m,
+        )
 
         if len(comp) >= min_bridge_cams and is_rigid and overlap_ratio >= 0.30:
             bridge_candidates.append(comp)
@@ -1103,17 +1299,29 @@ def find_unaligned_overlapping_groups(
         if b_tot > 0 and (band_in_main.get(band, 0) / b_tot) >= max_folder_aligned_ratio:
             continue
         xy = _cam_xy_meters(cam, ref_lon, ref_lat, metric_crs=metric_crs)
-        if xy is None:
+        if xy is None or math.hypot(xy[0], xy[1]) > 5000.0:
             continue
-        if (min_x - overlap_margin_m) <= xy[0] <= (max_x + overlap_margin_m) and (min_y - overlap_margin_m) <= xy[
-            1
-        ] <= (max_y + overlap_margin_m):
-            unaligned_xy.append((cam.key, xy[0], xy[1], _camera_altitude_m(cam)))
+        unaligned_xy.append((cam.key, xy[0], xy[1], _camera_altitude_m(cam)))
 
     if len(unaligned_xy) < min_cams:
         return []
 
-    # Connected-component spatial clustering within cluster_radius_m and 25m vertical continuity
+    main_pts_xy: list[tuple[float, float]] = []
+    for cam in main_cams:
+        xy_m = _cam_xy_meters(cam, ref_lon, ref_lat, metric_crs=metric_crs)
+        if xy_m is not None:
+            main_pts_xy.append(xy_m)
+
+    def _vertical_compatible(uz: float | None, vz: float | None) -> bool:
+        if uz is None or vz is None:
+            return True
+        if abs(uz - vz) <= 25.0:
+            return True
+        if uz >= 20.0 and vz >= 20.0:
+            return (max(uz, vz) / min(uz, vz)) <= 2.2
+        return False
+
+    # Cluster unaligned cameras BEFORE symmetric overlap gating so wider enclosing flights are never clipped
     visited: set[int] = set()
     groups: list[list[int]] = []
     r2 = cluster_radius_m * cluster_radius_m
@@ -1133,18 +1341,46 @@ def find_unaligned_overlapping_groups(
                 _vk, vx, vy, vz = unaligned_xy[v]
                 dx = ux - vx
                 dy = uy - vy
-                if (dx * dx + dy * dy) <= r2 and (uz is None or vz is None or abs(uz - vz) <= 25.0):
+                if (dx * dx + dy * dy) <= r2 and _vertical_compatible(uz, vz):
                     visited.add(v)
                     queue.append(v)
         if len(comp_indices) >= min_cams:
             xs = [unaligned_xy[i][1] for i in comp_indices]
             ys = [unaligned_xy[i][2] for i in comp_indices]
             zs = [unaligned_xy[i][3] for i in comp_indices if unaligned_xy[i][3] is not None]
-            xy_span = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+            c_min_x, c_max_x = min(xs), max(xs)
+            c_min_y, c_max_y = min(ys), max(ys)
+            xy_span = math.hypot(c_max_x - c_min_x, c_max_y - c_min_y)
             z_span = (max(zs) - min(zs)) if len(zs) >= 2 else 0.0
             if xy_span < min_motion_xy_m and z_span < min_motion_z_m:
                 continue
-            groups.append([unaligned_xy[i][0] for i in comp_indices])
 
-    groups.sort(key=len, reverse=True)
+            in_main = sum(
+                1
+                for i in comp_indices
+                if (min_x - overlap_margin_m) <= unaligned_xy[i][1] <= (max_x + overlap_margin_m)
+                and (min_y - overlap_margin_m) <= unaligned_xy[i][2] <= (max_y + overlap_margin_m)
+            )
+            frac_cluster_in_main = in_main / len(comp_indices)
+            main_in_cluster = (
+                sum(
+                    1
+                    for mx, my in main_pts_xy
+                    if (c_min_x - overlap_margin_m) <= mx <= (c_max_x + overlap_margin_m)
+                    and (c_min_y - overlap_margin_m) <= my <= (c_max_y + overlap_margin_m)
+                )
+                if main_pts_xy
+                else 0
+            )
+            frac_main_in_cluster = (main_in_cluster / len(main_pts_xy)) if main_pts_xy else 0.0
+            if in_main >= min_cams or frac_cluster_in_main >= 0.10 or frac_main_in_cluster >= 0.30:
+                groups.append([unaligned_xy[i][0] for i in comp_indices])
+
+    groups.sort(
+        key=lambda grp: (
+            compute_block_backbone_score([by_key[k] for k in grp if k in by_key], metric_crs=metric_crs)[0],
+            len(grp),
+        ),
+        reverse=True,
+    )
     return groups
