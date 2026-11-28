@@ -194,6 +194,7 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             mock_chunk.model.textures = [MagicMock()]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
+            mock_doc.addChunk.return_value = mock_chunk
             mock_meta.Document.return_value = mock_doc
 
             # 4. Mock Metashape Network Client on Server coordinator
@@ -327,6 +328,7 @@ class TestLocalScratchStagingSystem(unittest.TestCase):
             mock_doc = MagicMock()
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
+            mock_doc.addChunk.return_value = mock_chunk
             mock_meta.Document.return_value = mock_doc
 
             with patch.object(mr, "Metashape", mock_meta):

@@ -518,8 +518,8 @@ class TestIcpBridge(unittest.TestCase):
             self.assertFalse(by_k[10].reference.enabled)
             self.assertFalse(by_k[11].reference.enabled)
 
-            # Temp PLYs MUST live outside staging_out AND be completely cleaned up after return
-            self.assertEqual(len(exported_paths), 4)
+            # Temp PLYs MUST live outside staging_out AND be cleaned up after return (cached main target + 2 sources)
+            self.assertEqual(len(exported_paths), 3)
             abs_stage = os.path.normcase(os.path.abspath(staging_out))
             for ep in exported_paths:
                 self.assertFalse(os.path.normcase(os.path.abspath(ep)).startswith(abs_stage))

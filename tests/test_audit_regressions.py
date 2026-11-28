@@ -75,7 +75,7 @@ class TestAuditRegressions(unittest.TestCase):
         self.assertEqual(args.keypoint_limit, 50000)
         self.assertEqual(args.tiepoint_limit, 40000)
         self.assertEqual(args.keypoint_limit_per_mpx, 2000)
-        self.assertAlmostEqual(args.ortho_resolution, 0.05)
+        self.assertIsNone(args.ortho_resolution)
         self.assertIsNone(args.build_point_cloud)
 
     def test_is_projected_crs_uses_wkt_without_projcs_attribute(self) -> None:

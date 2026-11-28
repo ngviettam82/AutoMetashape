@@ -523,12 +523,74 @@ class TestWaveCPipelineHardening(unittest.TestCase):
             self.assertEqual(set(merged_keys), {small_key, back_key})
             self.assertNotIn(unaligned_key, merged_keys)
 
-        # Verify shared-station (method=2), shared-marker (method=1), and georeferenced detection helpers
+        # Verify shared-station (method=2 >=3 shared photo identities), shared-marker (method=1), and georef checks
         shared_cam_a = SimpleNamespace(
-            cameras=[SimpleNamespace(label="CAM_01", reference=None), SimpleNamespace(label="CAM_02", reference=None)]
+            cameras=[
+                SimpleNamespace(
+                    label=f"CAM_0{i}",
+                    photo=SimpleNamespace(path=f"/proj/Flight1/CAM_0{i}.JPG", meta={}),
+                    reference=None,
+                )
+                for i in (1, 2, 3)
+            ]
         )
-        shared_cam_b = SimpleNamespace(cameras=[SimpleNamespace(label="CAM_02", reference=None)])
+        shared_cam_b = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(
+                    label=f"CAM_0{i}",
+                    photo=SimpleNamespace(path=f"/proj/Flight1/CAM_0{i}.JPG", meta={}),
+                    reference=None,
+                )
+                for i in (1, 2, 3)
+            ]
+        )
         self.assertTrue(pipeline_mod._chunks_share_camera_labels([shared_cam_a, shared_cam_b]))
+
+        exif_a = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(
+                    label=f"DJI_000{i}",
+                    photo=SimpleNamespace(
+                        path=f"/nas_a/DJI_000{i}.JPG",
+                        meta={"Exif/DateTimeOriginal": f"2026:11:01 10:00:0{i}", "Exif/BodySerialNumber": "SN123"},
+                    ),
+                    reference=None,
+                )
+                for i in (1, 2, 3)
+            ]
+        )
+        exif_b = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(
+                    label=f"DJI_000{i}",
+                    photo=SimpleNamespace(
+                        path=f"/nas_b/DJI_000{i}.JPG",
+                        meta={"Exif/DateTimeOriginal": f"2026:11:01 10:00:0{i}", "Exif/BodySerialNumber": "SN123"},
+                    ),
+                    reference=None,
+                )
+                for i in (1, 2, 3)
+            ]
+        )
+        self.assertTrue(pipeline_mod._chunks_share_camera_labels([exif_a, exif_b]))
+
+        too_few_a = SimpleNamespace(cameras=shared_cam_a.cameras[:2])
+        too_few_b = SimpleNamespace(cameras=shared_cam_b.cameras[:2])
+        self.assertFalse(pipeline_mod._chunks_share_camera_labels([too_few_a, too_few_b]))
+
+        generic_a = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(label=f"DJI_000{i}", photo=SimpleNamespace(path=f"/f1/DJI_000{i}.JPG"), reference=None)
+                for i in (1, 2, 3, 4)
+            ]
+        )
+        generic_b = SimpleNamespace(
+            cameras=[
+                SimpleNamespace(label=f"DJI_000{i}", photo=SimpleNamespace(path=f"/f2/DJI_000{i}.JPG"), reference=None)
+                for i in (1, 2, 3, 4)
+            ]
+        )
+        self.assertFalse(pipeline_mod._chunks_share_camera_labels([generic_a, generic_b]))
 
         disjoint_a = SimpleNamespace(
             markers=[SimpleNamespace(label="GCP1"), SimpleNamespace(label="GCP2"), SimpleNamespace(label="GCP3")],
@@ -872,8 +934,8 @@ class TestWaveCPipelineHardening(unittest.TestCase):
                     ortho_resolution=0.05,
                 )
 
-            self.assertAlmostEqual(build_om_calls[0]["resolution"], expected_ft_res, places=6)
-            self.assertAlmostEqual(raster_calls[0]["resolution"], expected_ft_res, places=6)
+            self.assertAlmostEqual(build_om_calls[0]["resolution"], 0.05, places=6)
+            self.assertAlmostEqual(raster_calls[0]["resolution"], 0.05, places=6)
 
         # 3. pipeline.py also projects WGS84 clouds to UTM and scales feet ortho_resolution
         with tempfile.TemporaryDirectory() as tmpdir:

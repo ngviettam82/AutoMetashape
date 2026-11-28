@@ -373,7 +373,7 @@ class TestNetworkCluster(unittest.TestCase):
 
             mock_doc = MagicMock()
             mock_chunk = MagicMock()
-            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True) for _ in range(2)]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
             mock_meta.Document.return_value = mock_doc
@@ -811,7 +811,7 @@ class TestNetworkCluster(unittest.TestCase):
             mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
             mock_doc = MagicMock()
             mock_chunk = MagicMock()
-            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True) for _ in range(2)]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
             mock_meta.Document.return_value = mock_doc
@@ -889,7 +889,7 @@ class TestNetworkCluster(unittest.TestCase):
             mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
             mock_doc = MagicMock()
             mock_chunk = MagicMock()
-            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True) for _ in range(2)]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
             mock_meta.Document.return_value = mock_doc
@@ -945,7 +945,7 @@ class TestNetworkCluster(unittest.TestCase):
             mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
             mock_doc = MagicMock()
             mock_chunk = MagicMock()
-            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True) for _ in range(2)]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
             mock_meta.Document.return_value = mock_doc
@@ -1084,7 +1084,7 @@ class TestNetworkCluster(unittest.TestCase):
             mock_meta.app.enumGPUDevices.return_value = [{"name": "RTX 4090", "mem_size": 24 * (1024**3)}]
             mock_doc = MagicMock()
             mock_chunk = MagicMock()
-            mock_chunk.cameras = [MagicMock(transform=True, enabled=True)]
+            mock_chunk.cameras = [MagicMock(transform=True, enabled=True) for _ in range(2)]
             mock_doc.chunk = mock_chunk
             mock_doc.chunks = [mock_chunk]
             mock_meta.Document.return_value = mock_doc
