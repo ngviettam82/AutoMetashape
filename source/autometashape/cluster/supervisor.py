@@ -28,14 +28,23 @@ try:
 except ImportError:
     Metashape = None
 
-from autometashape.cluster.abort import _split_host_port
+from autometashape.cluster.abort import _is_pid_alive
 from autometashape.cluster.dual_share import (
     discover_dual_share_projects,
     extract_path_leaf_name,
     relpath_under,
     validate_dual_share_topology,
 )
-from autometashape.cluster.hardware import extract_unc_root, find_metashape_path
+from autometashape.cluster.hardware import (
+    connect_network_client,
+    extract_unc_root,
+    find_metashape_path,
+    format_host_port,
+    get_local_hostname,
+    is_healthy_online_worker,
+    normalize_rpc_list_response,
+    split_host_port,
+)
 from autometashape.cluster.orchestrator import (
     _safe_abort_batch,
     build_monolithic_runscript_task,
@@ -46,6 +55,31 @@ from autometashape.cluster.staging import get_optimal_local_scratch_dir
 from autometashape.core.telemetry import SUPPORTED_IMAGE_EXTS, _is_supported_image_file
 from autometashape.core.verification import verify_project_deliverables
 from autometashape.ipc.protocol import configure_utf8_stdio
+
+
+def _cleanup_completed_job_scratch(scratch_dir: str, project_name: str) -> None:
+    """Clean local staging dirs matching ``project_name`` while sparing any live PID's dir."""
+    if not scratch_dir or not os.path.isdir(scratch_dir) or not project_name:
+        return
+    import re as _re
+
+    pid_re = _re.compile(r"_(\d+)_local_stage$", _re.IGNORECASE)
+    prefix = f"{project_name}_"
+    try:
+        for entry in os.listdir(scratch_dir):
+            full_p = os.path.join(scratch_dir, entry)
+            if not os.path.isdir(full_p):
+                continue
+            if entry == f"{project_name}_local_stage":
+                shutil.rmtree(full_p, ignore_errors=True)
+                continue
+            if entry.startswith(prefix) and entry.lower().endswith("_local_stage"):
+                m = pid_re.search(entry)
+                if m and _is_pid_alive(int(m.group(1))):
+                    continue
+                shutil.rmtree(full_p, ignore_errors=True)
+    except Exception:
+        pass
 
 
 def check_storage_headroom(target_path: str, min_headroom_gb: float = 50.0) -> Tuple[bool, float]:
@@ -269,18 +303,20 @@ class ClusterSupervisor:
                     forward_kwargs = {
                         k: v for k, v in job.extra_args.items() if k in sig_params and k not in reserved_keys
                     }
+                    use_local_scratch = bool(
+                        job.extra_args.get(
+                            "local_scratch_staging",
+                            job.extra_args.get("local_scratch", True),
+                        )
+                    )
                     if not is_net:
                         # Local sequential execution does not use Metashape Network Processing;
                         # omitting network_path ensures pipeline.py runs local discrete GPU selection.
                         forward_kwargs.pop("network_path", None)
-                        use_local_scratch = bool(
-                            job.extra_args.get(
-                                "local_scratch_staging",
-                                job.extra_args.get("local_scratch", True),
-                            )
-                        )
+                        eff_scratch_dir = self.scratch_dir
                     else:
-                        use_local_scratch = False
+                        # Never inject the coordinator's local drive path into remote cluster worker tasks
+                        eff_scratch_dir = job.extra_args.get("scratch_dir")
 
                     run_reconstruction(
                         images_dir=job.images_dir,
@@ -288,7 +324,7 @@ class ClusterSupervisor:
                         project_name=job.project_name,
                         preset=job.preset,
                         local_scratch_staging=use_local_scratch,
-                        scratch_dir=self.scratch_dir,
+                        scratch_dir=eff_scratch_dir,
                         **forward_kwargs,
                     )
             except Exception as exc:
@@ -328,13 +364,7 @@ class ClusterSupervisor:
 
             # 4. Scratch Staging Cleanup between Queue Items
             if job.status == "COMPLETED" and self.scratch_dir and os.path.isdir(self.scratch_dir):
-                staged_sub = os.path.join(self.scratch_dir, f"{job.project_name}_local_stage")
-                if os.path.isdir(staged_sub):
-                    try:
-                        shutil.rmtree(staged_sub, ignore_errors=True)
-                        print(f"  [SUPERVISOR] Cleared local scratch staging: {staged_sub}", flush=True)
-                    except Exception:
-                        pass
+                _cleanup_completed_job_scratch(self.scratch_dir, job.project_name)
 
             if job.status != "COMPLETED" and self.stop_on_failure:
                 print("  [SUPERVISOR] Halting queue execution due to job failure.", flush=True)
@@ -428,20 +458,17 @@ class ClusterSupervisor:
                     )
 
                 if job.status == "COMPLETED" and self.scratch_dir and os.path.isdir(self.scratch_dir):
-                    staged_sub = os.path.join(self.scratch_dir, f"{job.project_name}_local_stage")
-                    if os.path.isdir(staged_sub):
-                        try:
-                            shutil.rmtree(staged_sub, ignore_errors=True)
-                        except Exception:
-                            pass
+                    _cleanup_completed_job_scratch(self.scratch_dir, job.project_name)
 
                 return job
 
             pool_size = max(1, min(len(eligible_jobs), max_workers))
+            completed_job_ids: set[int] = set()
             with concurrent.futures.ThreadPoolExecutor(max_workers=pool_size) as executor:
                 future_to_job = {executor.submit(_worker_wrapper, job): job for job in eligible_jobs}
                 for future in concurrent.futures.as_completed(future_to_job):
                     res_job = future.result()
+                    completed_job_ids.add(id(res_job))
                     results.append(res_job.to_dict())
                     if res_job.status != "COMPLETED" and self.stop_on_failure:
                         print(
@@ -451,10 +478,9 @@ class ClusterSupervisor:
                         executor.shutdown(wait=False, cancel_futures=True)
                         break
 
-        # Collect any unexecuted pending jobs
-        executed_job_names = {r["project_name"] for r in results}
+        # Collect any unexecuted pending jobs (by object identity so duplicate names aren't dropped)
         for job in self.queue:
-            if job.project_name not in executed_job_names:
+            if id(job) not in completed_job_ids:
                 results.append(job.to_dict())
 
         passed_count = sum(1 for r in results if r["status"] == "COMPLETED")
@@ -499,31 +525,23 @@ class ClusterSupervisor:
         first_job_extra = self.queue[0].extra_args if self.queue else {}
         raw_host = str(first_job_extra.get("network_host", "127.0.0.1"))
         default_port = int(first_job_extra.get("network_port", 5840))
-        net_host, net_port = _split_host_port(raw_host, default_port)
+        net_host, net_port = split_host_port(raw_host, default_port)
+        display_endpoint = format_host_port(net_host, net_port)
 
         try:
-            try:
-                net_client.connect(net_host, int(net_port))
-            except TypeError:
-                net_client.connect(f"{net_host}:{net_port}")
-            print(f"  [Cluster Supervisor] Connected to coordinator at {net_host}:{net_port}", flush=True)
+            connect_network_client(net_client, net_host, int(net_port))
+            print(f"  [Cluster Supervisor] Connected to coordinator at {display_endpoint}", flush=True)
         except Exception as exc:
-            raise RuntimeError(f"Failed to connect to cluster coordinator at {net_host}:{net_port}: {exc}") from exc
+            raise RuntimeError(f"Failed to connect to cluster coordinator at {display_endpoint}: {exc}") from exc
 
         try:
             # Respect Operator Authority Gate: never auto-unpause paused workers; report passively if paused
             try:
-                raw_w = net_client.workerList()
-                w_list = (
-                    raw_w.get("workers", [])
-                    if isinstance(raw_w, dict)
-                    else (raw_w if isinstance(raw_w, (list, tuple)) else [])
-                )
+                w_list = normalize_rpc_list_response(net_client.workerList(), "workers")
                 paused_names = [
-                    str(w.get("hostname", w.get("worker_id")) if isinstance(w, dict) else getattr(w, "id", "?"))
+                    str(w.get("hostname", w.get("worker_id")))
                     for w in w_list
-                    if (w.get("paused", False) if isinstance(w, dict) else getattr(w, "paused", False))
-                    and str(w.get("state", "") if isinstance(w, dict) else getattr(w, "state", "")).lower() != "offline"
+                    if w.get("paused", False) and str(w.get("state", "")).lower() != "offline"
                 ]
                 if paused_names:
                     print(
@@ -1087,6 +1105,13 @@ def main() -> int:
             return res.returncode
         print(
             "[ERROR] Agisoft Metashape Pro executable not found. Run via 'metashape.exe -r'.",
+            file=sys.stderr,
+        )
+        return 1
+
+    if Metashape is None:
+        print(
+            "[ERROR] Metashape Python module is unavailable. Run via 'metashape.exe -r'.",
             file=sys.stderr,
         )
         return 1

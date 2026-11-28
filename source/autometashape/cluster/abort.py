@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import json
 import os
 import re
@@ -30,8 +31,11 @@ except ImportError:
 
 from autometashape.cluster.hardware import (
     _is_fixed_local_drive_fast,
+    connect_network_client,
     get_local_hostname,
     is_healthy_online_worker,
+    normalize_rpc_list_response,
+    split_host_port,
 )
 
 ABORT_SIGNAL_FILENAME = ".abort_pending"
@@ -69,24 +73,51 @@ def _sanitize_node_filename(node_name: str) -> str:
     return cleaned or "unknown"
 
 
+def _is_ip_literal(value: str) -> bool:
+    """Return True if ``value`` is a valid IPv4 or IPv6 literal address."""
+    try:
+        ipaddress.ip_address(str(value or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def _short_hostname(value: str) -> str:
+    """Return short DNS label for ``value``, keeping IPv4/IPv6 literals intact."""
+    clean = str(value or "").strip().lower()
+    if not clean or _is_ip_literal(clean):
+        return clean
+    return clean.split(".", 1)[0]
+
+
 def _hostnames_match(a: str, b: str) -> bool:
-    """Match node hostnames across FQDN/short-name and localhost aliases."""
-    na = str(a or "").strip().lower()
-    nb = str(b or "").strip().lower()
+    """Match node hostnames across FQDN/short-name and localhost aliases (IPv4/IPv6 safe)."""
+    na = str(a or "").strip().lower().strip("[]")
+    nb = str(b or "").strip().lower().strip("[]")
     if not na or not nb:
         return False
     if na == nb:
         return True
-    sa = na.split(".", 1)[0]
-    sb = nb.split(".", 1)[0]
-    if sa and sa == sb:
-        return True
-    if na in ("localhost", "127.0.0.1") or nb in ("localhost", "127.0.0.1"):
+    na_is_ip = _is_ip_literal(na)
+    nb_is_ip = _is_ip_literal(nb)
+    if not na_is_ip and not nb_is_ip:
+        sa = na.split(".", 1)[0]
+        sb = nb.split(".", 1)[0]
+        if sa and sa == sb:
+            return True
+    loopback = ("localhost", "127.0.0.1", "::1")
+    if na in loopback or nb in loopback:
         local = str(get_local_hostname() or "").strip().lower()
-        local_short = local.split(".", 1)[0] if local else ""
-        other = nb if na in ("localhost", "127.0.0.1") else na
-        other_short = other.split(".", 1)[0]
-        return other in (local, local_short) or (bool(other_short) and other_short in (local, local_short))
+        local_is_ip = _is_ip_literal(local)
+        local_short = "" if (not local or local_is_ip) else local.split(".", 1)[0]
+        other = nb if na in loopback else na
+        other_is_ip = _is_ip_literal(other)
+        other_short = "" if (not other or other_is_ip) else other.split(".", 1)[0]
+        if other in loopback:
+            return True
+        return other in (local, local_short) or (
+            bool(other_short) and not other_is_ip and other_short in (local, local_short)
+        )
     return False
 
 
@@ -127,21 +158,24 @@ def _is_signal_expired(data: Dict[str, Any], ttl_s: float = DEFAULT_ABORT_SIGNAL
 
 
 def _node_ack_candidates(aborts_dir: str, resolved_node: str) -> List[str]:
-    """Return ordered unique per-node `.abort_ack` candidate paths for ``resolved_node``."""
-    safe_node = _sanitize_node_filename(resolved_node)
-    short_node = _sanitize_node_filename(str(resolved_node or "").strip().lower().split(".", 1)[0])
+    """Return ordered unique per-node ack candidate paths (``.broadcast_ack`` and ``.abort_ack``)."""
+    clean_node = str(resolved_node or "").strip().lower()
+    is_ip = _is_ip_literal(clean_node)
+    safe_node = _sanitize_node_filename(clean_node)
+    short_node = safe_node if is_ip else _sanitize_node_filename(clean_node.split(".", 1)[0])
     paths: List[str] = []
     for name in (safe_node, short_node):
         if name and name != "unknown":
-            cand = os.path.join(aborts_dir, f"{name}.abort_ack")
-            if cand not in paths:
-                paths.append(cand)
-    if short_node and short_node != "unknown" and os.path.isdir(aborts_dir):
+            for ext in (".broadcast_ack", ".abort_ack"):
+                cand = os.path.join(aborts_dir, f"{name}{ext}")
+                if cand not in paths:
+                    paths.append(cand)
+    if not is_ip and short_node and short_node != "unknown" and os.path.isdir(aborts_dir):
         prefix = f"{short_node}."
         try:
             for fname in sorted(os.listdir(aborts_dir)):
                 low = fname.lower()
-                if low.startswith(prefix) and low.endswith(".abort_ack"):
+                if low.startswith(prefix) and low.endswith((".broadcast_ack", ".abort_ack")):
                     cand = os.path.join(aborts_dir, fname)
                     if cand not in paths:
                         paths.append(cand)
@@ -420,12 +454,14 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
                 pass
         return True
 
-    # Non-Windows (or missing PID): graceful terminate (and dedicated process group if isolated) followed by force kill
+    # Non-Windows (or missing PID): graceful terminate followed by guaranteed process-group SIGKILL
     exited_gracefully = False
+    captured_pgid: Optional[int] = None
     if proc_pid and hasattr(os, "getpgid") and hasattr(os, "killpg"):
         try:
             pgid = os.getpgid(int(proc_pid))
             if pgid == int(proc_pid) and pgid != os.getpgid(0):
+                captured_pgid = pgid
                 os.killpg(pgid, signal.SIGTERM)
         except Exception:
             pass
@@ -443,19 +479,19 @@ def kill_worker_process(proc: Any, timeout: float = 2.0) -> bool:
             pass
 
     if not exited_gracefully and callable(poll_fn) and poll_fn() is None:
-        if proc_pid and hasattr(os, "getpgid") and hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
-            try:
-                pgid = os.getpgid(int(proc_pid))
-                if pgid == int(proc_pid) and pgid != os.getpgid(0):
-                    os.killpg(pgid, signal.SIGKILL)
-            except Exception:
-                pass
         kill_fn = getattr(proc, "kill", None)
         if callable(kill_fn):
             try:
                 kill_fn()
             except Exception:
                 pass
+
+    # Always sweep the isolated session process group with SIGKILL even if parent exited early
+    if captured_pgid is not None and hasattr(os, "killpg") and hasattr(signal, "SIGKILL"):
+        try:
+            os.killpg(captured_pgid, signal.SIGKILL)
+        except Exception:
+            pass
 
     wait_fn = getattr(proc, "wait", None)
     if callable(wait_fn):
@@ -472,6 +508,7 @@ def cleanup_scratch_locks(
     root_path: str = "",
     max_depth: int = 3,
     worker_pid: Optional[int] = None,
+    killed_pids: Optional[set[int]] = None,
 ) -> List[str]:
     """Remove stale Metashape lock files in scratch staging dirs or project ``.files`` dirs.
 
@@ -480,9 +517,16 @@ def cleanup_scratch_locks(
     """
     removed_locks: List[str] = []
     lock_dirs: List[str] = []
+    target_pids: set[int] = {int(p) for p in (killed_pids or ()) if p is not None and int(p) > 0}
+    if worker_pid is not None and int(worker_pid) > 0:
+        target_pids.add(int(worker_pid))
 
     if target_dir and os.path.isdir(target_dir):
         lock_dirs.append(target_dir)
+
+    env_scratch = os.environ.get("AUTOMETASHAPE_SCRATCH_DIR", "").strip()
+    if env_scratch and os.path.isdir(env_scratch) and env_scratch not in lock_dirs:
+        lock_dirs.append(env_scratch)
 
     # Local scratch directories across fixed local drives only (never touch mapped network shares or shared .cluster/)
     if sys.platform == "win32":
@@ -490,7 +534,7 @@ def cleanup_scratch_locks(
             if not _is_fixed_local_drive_fast(letter):
                 continue
             scratch_cand = rf"{letter}:\AutoMetashape_Scratch"
-            if os.path.isdir(scratch_cand):
+            if os.path.isdir(scratch_cand) and scratch_cand not in lock_dirs:
                 lock_dirs.append(scratch_cand)
     else:
         for cand in [
@@ -499,11 +543,11 @@ def cleanup_scratch_locks(
             "/tmp/AutoMetashape_Scratch",
             os.path.expanduser("~/AutoMetashape_Scratch"),
         ]:
-            if os.path.isdir(cand):
+            if os.path.isdir(cand) and cand not in lock_dirs:
                 lock_dirs.append(cand)
 
     temp_scratch = os.path.join(tempfile.gettempdir(), "AutoMetashape_Scratch")
-    if os.path.isdir(temp_scratch):
+    if os.path.isdir(temp_scratch) and temp_scratch not in lock_dirs:
         lock_dirs.append(temp_scratch)
 
     for d in lock_dirs:
@@ -525,7 +569,7 @@ def cleanup_scratch_locks(
                     m_stage = _STAGE_DIR_PID_RE.search(sub)
                     if m_stage:
                         stage_pid = int(m_stage.group(1))
-                        if (worker_pid is not None and stage_pid != worker_pid) or _is_pid_alive(stage_pid):
+                        if (target_pids and stage_pid not in target_pids) or _is_pid_alive(stage_pid):
                             continue
                     kept_dirs.append(sub)
                 dirs[:] = kept_dirs
@@ -572,8 +616,9 @@ def check_abort_signal(
     and stale signals older than their TTL are skipped cleanly.
     """
     resolved_node = (node_name or get_local_hostname()).strip().lower()
+    is_ip = _is_ip_literal(resolved_node)
     safe_node = _sanitize_node_filename(resolved_node)
-    short_node = _sanitize_node_filename(resolved_node.split(".", 1)[0]) if resolved_node else "unknown"
+    short_node = safe_node if is_ip else _sanitize_node_filename(resolved_node.split(".", 1)[0])
     node_aliases: List[str] = []
     for n in (resolved_node, safe_node, short_node):
         if n and n != "unknown" and n not in node_aliases:
@@ -594,10 +639,22 @@ def check_abort_signal(
     for alias in file_aliases:
         candidates.append(os.path.join(temp_dir, f"{ABORT_SIGNAL_FILENAME}_{alias}"))
 
-    # 2. UNC Direct per-node file checks (Atomic single stat, zero contention)
+    # 2. UNC Direct per-node file checks (exact aliases, then FQDN/short-name matches, then all.abort)
     if aborts_dir and os.path.isdir(aborts_dir):
         for alias in file_aliases:
             candidates.append(os.path.join(aborts_dir, f"{alias}.abort"))
+        try:
+            for fname in sorted(os.listdir(aborts_dir)):
+                low_f = fname.lower()
+                if not low_f.endswith(".abort") or low_f == "all.abort":
+                    continue
+                stem = low_f[:-6]
+                if resolved_node != "unknown" and _hostnames_match(stem, resolved_node):
+                    cand = os.path.join(aborts_dir, fname)
+                    if cand not in candidates:
+                        candidates.append(cand)
+        except OSError:
+            pass
         candidates.append(os.path.join(aborts_dir, "all.abort"))
 
     for flag_path in candidates:
@@ -672,6 +729,19 @@ def check_abort_signal(
                             entry = signals_sub[cand_key]
                             matched_key = cand_key
                             break
+                    if entry is None and resolved_node != "unknown":
+                        for k_scan, v_scan in data.items():
+                            is_host_entry = isinstance(v_scan, dict) and k_scan != "signals"
+                            if is_host_entry and _hostnames_match(k_scan, resolved_node):
+                                entry = v_scan
+                                matched_key = k_scan
+                                break
+                        if entry is None and signals_sub:
+                            for k_scan, v_scan in signals_sub.items():
+                                if isinstance(v_scan, dict) and _hostnames_match(k_scan, resolved_node):
+                                    entry = v_scan
+                                    matched_key = k_scan
+                                    break
                     if isinstance(entry, dict) and matched_key is not None:
                         if _is_signal_expired(entry):
                             return None
@@ -746,7 +816,7 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
         raw_node = str(get_local_hostname() or "unknown").strip().lower()
     node_name = raw_node
     safe_node = _sanitize_node_filename(node_name)
-    short_node = _sanitize_node_filename(node_name.split(".", 1)[0]) if node_name else "unknown"
+    short_node = safe_node if _is_ip_literal(node_name) else _sanitize_node_filename(node_name.split(".", 1)[0])
     batch_id = abort_data.get("batch_id", "unknown")
     sig_id = str(abort_data.get("signal_id") or "").strip() or None
 
@@ -758,6 +828,12 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
                 aborts_dir = os.path.join(os.path.dirname(sig_path), ABORT_DIR_NAME)
                 ack_written = _write_node_ack(
                     os.path.join(aborts_dir, f"{safe_node}.abort_ack"),
+                    node_name=node_name,
+                    batch_id=batch_id,
+                    signal_id=sig_id,
+                )
+                _write_node_ack(
+                    os.path.join(aborts_dir, f"{safe_node}.broadcast_ack"),
                     node_name=node_name,
                     batch_id=batch_id,
                     signal_id=sig_id,
@@ -789,6 +865,13 @@ def acknowledge_abort_signal(abort_data: Dict[str, Any]) -> bool:
             )
             ack_path = ack_base + ".abort_ack"
             ack_written = _write_node_ack(ack_path, node_name=node_name, batch_id=batch_id, signal_id=sig_id)
+            if is_broadcast and safe_node and safe_node != "unknown":
+                _write_node_ack(
+                    os.path.join(os.path.dirname(sig_path), f"{safe_node}.broadcast_ack"),
+                    node_name=node_name,
+                    batch_id=batch_id,
+                    signal_id=sig_id,
+                )
             # Never delete broadcast all.abort so sibling workers also receive the broadcast
             if not is_broadcast:
                 try:
@@ -965,8 +1048,8 @@ def abort_remote_worker(
         if client is None and Metashape is not None:
             try:
                 net_client = Metashape.NetworkClient()
-                host, port = _split_host_port(server_host)
-                net_client.connect(host, port)
+                host, port = split_host_port(server_host)
+                connect_network_client(net_client, host, port)
                 client = net_client
                 owned_client = True
             except Exception as e:
@@ -980,7 +1063,7 @@ def abort_remote_worker(
 
                 ms_exe = find_metashape_path()
                 if ms_exe and os.path.isfile(ms_exe):
-                    host_str, port_num = _split_host_port(server_host)
+                    host_str, port_num = split_host_port(server_host)
                     helper_code = (
                         "import Metashape, sys\n"
                         "host = sys.argv[1]\n"
@@ -988,10 +1071,16 @@ def abort_remote_worker(
                         "bid = int(sys.argv[3])\n"
                         "c = Metashape.NetworkClient()\n"
                         "try:\n"
-                        "    c.connect(host, port)\n"
+                        "    try:\n"
+                        "        c.connect(host, port)\n"
+                        "    except TypeError:\n"
+                        "        hp = f'[{host}]:{port}' if ':' in host else f'{host}:{port}'\n"
+                        "        c.connect(hp)\n"
                         "    bl = c.batchList()\n"
-                        "    for b in (bl.get('batches', []) if isinstance(bl, dict) else []):\n"
-                        "        if b.get('batch_id') == bid:\n"
+                        "    batches = (bl.get('batches', []) if isinstance(bl, dict) "
+                        "else (bl if isinstance(bl, (list, tuple)) else []))\n"
+                        "    for b in batches:\n"
+                        "        if isinstance(b, dict) and b.get('batch_id') == bid:\n"
                         "            if b.get('paused') or str(b.get('state', '')).lower() == 'paused':\n"
                         "                c.setBatchPaused(bid, False)\n"
                         "            break\n"
@@ -1034,14 +1123,12 @@ def abort_remote_worker(
             try:
                 batch_list_fn = getattr(client, "batchList", None)
                 if callable(batch_list_fn):
-                    bl = batch_list_fn()
-                    if isinstance(bl, dict):
-                        for b in bl.get("batches", []):
-                            if b.get("batch_id") == batch_id:
-                                is_paused = bool(b.get("paused", False)) or str(b.get("state", "")).lower() == "paused"
-                                if is_paused and hasattr(client, "setBatchPaused"):
-                                    client.setBatchPaused(batch_id, False)
-                                break
+                    for b in normalize_rpc_list_response(batch_list_fn(), "batches"):
+                        if b.get("batch_id") == batch_id:
+                            is_paused = bool(b.get("paused", False)) or str(b.get("state", "")).lower() == "paused"
+                            if is_paused and hasattr(client, "setBatchPaused"):
+                                client.setBatchPaused(batch_id, False)
+                            break
 
                 if hasattr(client, "abortBatch"):
                     client.abortBatch(batch_id)
@@ -1055,24 +1142,28 @@ def abort_remote_worker(
                 if not result["error"]:
                     result["error"] = f"Warning during batch abort: {batch_err}"
 
-        # Record pre-abort worker IDs for target node so we only count a genuinely fresh reconnect
+        # Record pre-abort worker IDs & hostnames for target node (supports both targeted and broadcast "all")
+        is_broadcast_abort = clean_node == "all"
         pre_abort_worker_ids: set[Any] = set()
+        pre_abort_hosts: set[str] = set()
         if client is not None and hasattr(client, "workerList"):
             try:
-                w_pre = client.workerList()
-                if isinstance(w_pre, dict):
-                    for w in w_pre.get("workers", []):
-                        if not is_healthy_online_worker(w):
-                            continue
-                        if _hostnames_match(str(w.get("hostname", "")), clean_node):
-                            wid = w.get("worker_id")
-                            if wid is not None:
-                                pre_abort_worker_ids.add(wid)
+                for w in normalize_rpc_list_response(client.workerList(), "workers"):
+                    if not is_healthy_online_worker(w):
+                        continue
+                    w_hname = str(w.get("hostname", "")).strip().lower()
+                    if is_broadcast_abort or _hostnames_match(w_hname, clean_node):
+                        if w_hname:
+                            pre_abort_hosts.add(w_hname)
+                        wid = w.get("worker_id")
+                        if wid is not None:
+                            pre_abort_worker_ids.add(wid)
             except Exception:
                 pass
 
         # Step 4: Write abort signal file atomically
         sig_path = ""
+        dispatched_signal_id = ""
         try:
             sig_path = dispatch_abort_signal(
                 node_name=clean_node,
@@ -1080,29 +1171,83 @@ def abort_remote_worker(
                 shared_root=shared_root,
             )
             result["signal_dispatched"] = True
+            if sig_path and os.path.isfile(sig_path):
+                try:
+                    with open(sig_path, "r", encoding="utf-8") as sf:
+                        dispatched_signal_id = str((json.load(sf) or {}).get("signal_id") or "").strip()
+                except Exception:
+                    dispatched_signal_id = ""
         except Exception as sig_err:
             result["error"] = f"Failed to write abort signal file: {sig_err}"
             return result
 
         # Step 5: Wait up to timeout for supervisor acknowledgment and reconnect
         aborts_dir = os.path.join(shared_root, ".cluster", ABORT_DIR_NAME) if shared_root else ""
-        ack_path = os.path.join(aborts_dir, f"{safe_node}.abort_ack") if aborts_dir else ""
+        ack_path = os.path.join(aborts_dir, f"{safe_node}.abort_ack") if (aborts_dir and not is_broadcast_abort) else ""
 
         start_t = time.time()
         ack_seen = False
         reconnected = False
 
         while time.time() - start_t < timeout:
-            if ack_path and os.path.isfile(ack_path):
-                ack_seen = True
-            elif sig_path and not os.path.isfile(sig_path):
-                ack_seen = True
+            if is_broadcast_abort:
+                if sig_path and not os.path.isfile(sig_path):
+                    ack_seen = True
+                elif aborts_dir and os.path.isdir(aborts_dir):
+                    if pre_abort_hosts:
+                        if all(
+                            _is_broadcast_already_acked(
+                                aborts_dir,
+                                h,
+                                {"signal_id": dispatched_signal_id} if dispatched_signal_id else {},
+                                sig_mtime=start_t - 0.1,
+                            )
+                            for h in pre_abort_hosts
+                        ):
+                            ack_seen = True
+                    else:
+                        try:
+                            for fname in os.listdir(aborts_dir):
+                                if not fname.lower().endswith((".broadcast_ack", ".abort_ack")):
+                                    continue
+                                fpath = os.path.join(aborts_dir, fname)
+                                with open(fpath, "r", encoding="utf-8") as af:
+                                    adata = json.load(af)
+                                if isinstance(adata, dict) and (
+                                    (dispatched_signal_id and str(adata.get("signal_id") or "") == dispatched_signal_id)
+                                    or dispatched_signal_id in (adata.get("acked_signal_ids") or [])
+                                ):
+                                    ack_seen = True
+                                    break
+                        except Exception:
+                            pass
+            else:
+                if ack_path and os.path.isfile(ack_path):
+                    ack_seen = True
+                elif sig_path and not os.path.isfile(sig_path):
+                    ack_seen = True
 
             if client is not None and hasattr(client, "workerList"):
                 try:
-                    w_info = client.workerList()
-                    if isinstance(w_info, dict):
-                        for w in w_info.get("workers", []):
+                    workers_now = normalize_rpc_list_response(client.workerList(), "workers")
+                    if is_broadcast_abort:
+                        ready_hosts: set[str] = set()
+                        for w in workers_now:
+                            if not is_healthy_online_worker(w):
+                                continue
+                            w_hname = str(w.get("hostname", "")).strip().lower()
+                            w_state = str(w.get("state", "")).strip().lower()
+                            w_id = w.get("worker_id")
+                            is_fresh_worker = (w_id is None) or (w_id not in pre_abort_worker_ids)
+                            if w_state == "ready" and is_fresh_worker:
+                                if w_hname:
+                                    ready_hosts.add(w_hname)
+                                elif not pre_abort_hosts:
+                                    reconnected = True
+                        if pre_abort_hosts and pre_abort_hosts.issubset(ready_hosts):
+                            reconnected = True
+                    else:
+                        for w in workers_now:
                             if not is_healthy_online_worker(w):
                                 continue
                             w_hname = str(w.get("hostname", "")).strip().lower()

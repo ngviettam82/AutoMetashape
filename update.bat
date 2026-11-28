@@ -237,40 +237,47 @@ echo   [SUCCESS] AutoMetashape codebase cleanly replaced and updated in-place!
 echo   Target: "%TARGET_DIR%"
 echo =========================================================================
 
-if /i "%ACTION_FLAG%"=="--worker" (
-    echo Launching cluster worker daemon...
-    cd /d "%TARGET_DIR%"
+if /i "%ACTION_FLAG%"=="--worker" goto :launch_worker
+if /i "%ACTION_FLAG%"=="--server" goto :launch_server
+echo Node files are ready in "%TARGET_DIR%".
+exit /b 0
 
-    :: Smart UNC Share Auto-Inference: only infer if worker_config.json is absent or override is set
-    set "ALLOW_UNC_INFER=0"
-    if not exist "%TARGET_DIR%\worker_config.json" set "ALLOW_UNC_INFER=1"
-    if defined AUTOMETASHAPE_INFER_HOST_FROM_UNC set "ALLOW_UNC_INFER=1"
-    if "%ALLOW_UNC_INFER%"=="1" if "%SCRIPT_DIR:~0,2%"=="\\" (
-        for /f "tokens=1,2 delims=\\" %%i in ("%SCRIPT_DIR:~2%") do (
-            if "%HAS_HOST%"=="0" (
-                set "INFERRED_HOST=%%i"
-                echo [AUTO-INFERRED] Inferred cluster server: %%i
-            )
-            if "%HAS_ROOT%"=="0" (
-                set "INFERRED_ROOT=\\%%i\%%j"
-                echo [AUTO-INFERRED] Inferred storage root: "\\%%i\%%j"
-            )
-        )
+:launch_worker
+echo Launching cluster worker daemon...
+cd /d "%TARGET_DIR%"
+
+:: Smart UNC Share Auto-Inference: only infer if worker_config.json is absent or override is set
+set "INFERRED_HOST="
+set "INFERRED_ROOT="
+set "ALLOW_UNC_INFER=0"
+if not exist "%TARGET_DIR%\worker_config.json" set "ALLOW_UNC_INFER=1"
+if defined AUTOMETASHAPE_INFER_HOST_FROM_UNC set "ALLOW_UNC_INFER=1"
+if not "%ALLOW_UNC_INFER%"=="1" goto :after_unc_infer
+if not "%SCRIPT_DIR:~0,2%"=="\\" goto :after_unc_infer
+for /f "tokens=1,2 delims=\" %%i in ("%SCRIPT_DIR:~2%") do (
+    if "%HAS_HOST%"=="0" if not "%%i"=="" (
+        set "INFERRED_HOST=%%i"
+        echo [AUTO-INFERRED] Inferred cluster server: %%i
     )
-    if defined INFERRED_HOST set "FORWARD_ARGS=--host %INFERRED_HOST% %FORWARD_ARGS%"
-    if defined INFERRED_ROOT set "FORWARD_ARGS=--root "%INFERRED_ROOT%" %FORWARD_ARGS%"
-
-    :: Ensure non-interactive execution for headless node updates
-    if "%HAS_NON_INT%"=="0" set "FORWARD_ARGS=--non-interactive %FORWARD_ARGS%"
-
-    start "AutoMetashape Cluster Worker Node" cmd.exe /c ""%TARGET_DIR%\launch_worker.bat" %FORWARD_ARGS%"
-) else if /i "%ACTION_FLAG%"=="--server" (
-    echo Launching cluster server daemon...
-    cd /d "%TARGET_DIR%"
-    start "AutoMetashape Cluster Server Daemon" cmd.exe /c ""%TARGET_DIR%\launch_server.bat" %FORWARD_ARGS%"
-) else (
-    echo Node files are ready in "%TARGET_DIR%".
+    if "%HAS_ROOT%"=="0" if not "%%j"=="" (
+        set "INFERRED_ROOT=\\%%i\%%j"
+        echo [AUTO-INFERRED] Inferred storage root: "\\%%i\%%j"
+    )
 )
+:after_unc_infer
+if defined INFERRED_HOST set FORWARD_ARGS=--host "%INFERRED_HOST%" %FORWARD_ARGS%
+if defined INFERRED_ROOT set FORWARD_ARGS=--root "%INFERRED_ROOT%" %FORWARD_ARGS%
+
+:: Ensure non-interactive execution for headless node updates
+if "%HAS_NON_INT%"=="0" set FORWARD_ARGS=--non-interactive %FORWARD_ARGS%
+
+start "AutoMetashape Cluster Worker Node" cmd.exe /c ""%TARGET_DIR%\launch_worker.bat" %FORWARD_ARGS%"
+exit /b 0
+
+:launch_server
+echo Launching cluster server daemon...
+cd /d "%TARGET_DIR%"
+start "AutoMetashape Cluster Server Daemon" cmd.exe /c ""%TARGET_DIR%\launch_server.bat" %FORWARD_ARGS%"
 exit /b 0
 
 :parse_args
@@ -278,15 +285,10 @@ set "_ARG_IDX=0"
 :parse_loop
 if [%1]==[] goto :eof
 set "_CUR=%~1"
-set "_CUR_RAW=%1"
-if /i "%_CUR%"=="--non-interactive" (
-    set "IS_HEADLESS=1"
-    set "HAS_NON_INT=1"
-)
-if /i "%_CUR%"=="--headless" (
-    set "IS_HEADLESS=1"
-    set "HAS_NON_INT=1"
-)
+if /i "%_CUR%"=="--non-interactive" set "IS_HEADLESS=1"
+if /i "%_CUR%"=="--non-interactive" set "HAS_NON_INT=1"
+if /i "%_CUR%"=="--headless" set "IS_HEADLESS=1"
+if /i "%_CUR%"=="--headless" set "HAS_NON_INT=1"
 if /i "%_CUR%"=="--host" set "HAS_HOST=1"
 if /i "%_CUR:~0,7%"=="--host=" set "HAS_HOST=1"
 if /i "%_CUR%"=="--root" set "HAS_ROOT=1"
@@ -295,15 +297,25 @@ if /i "%_CUR%"=="--result-root" set "HAS_ROOT=1"
 if /i "%_CUR:~0,14%"=="--result-root=" set "HAS_ROOT=1"
 if /i "%_CUR%"=="--result-share" set "HAS_ROOT=1"
 if /i "%_CUR:~0,15%"=="--result-share=" set "HAS_ROOT=1"
-if "%_ARG_IDX%"=="0" (
-    set "_ARG_IDX=1"
-) else (
-    if defined FORWARD_ARGS (
-        set "FORWARD_ARGS=%FORWARD_ARGS% %_CUR_RAW%"
-    ) else (
-        set "FORWARD_ARGS=%_CUR_RAW%"
-    )
-)
+if "%_ARG_IDX%"=="0" goto :parse_first_done
+:trim_slash_loop
+if not "%_CUR:~-1%"=="\" goto :slash_ok
+if "%_CUR%"=="\" goto :slash_ok
+if "%_CUR:~1,2%"==":\" if "%_CUR:~3%"=="" goto :double_drive_slash
+set "_CUR=%_CUR:~0,-1%"
+goto :trim_slash_loop
+:double_drive_slash
+set "_CUR=%_CUR%\"
+:slash_ok
+if defined FORWARD_ARGS goto :parse_append_fwd
+set FORWARD_ARGS="%_CUR%"
+goto :parse_next
+:parse_append_fwd
+set FORWARD_ARGS=%FORWARD_ARGS% "%_CUR%"
+goto :parse_next
+:parse_first_done
+set "_ARG_IDX=1"
+:parse_next
 shift
 goto :parse_loop
 

@@ -156,7 +156,9 @@ def main() -> int:
 
     client = Metashape.NetworkClient()
     try:
-        client.connect(srv_ip, srv_port)
+        from autometashape.cluster.hardware import connect_network_client
+
+        connect_network_client(client, srv_ip, srv_port)
     except Exception as e:
         print(f"[FATAL ERROR] Failed to connect to Metashape Server at {host}: {e}", file=sys.stderr)
         return 1
@@ -264,18 +266,40 @@ def main() -> int:
         fail_count = 0
         for node in targets:
             target_hostname = str(node.get("hostname") or "").strip()
-            target_name = target_hostname or str(node.get("worker_id"))
-            # Re-query current online workers: match by hostname so shifted/reassigned worker_ids
-            # never redirect updates onto a different physical machine.
+            target_wid = node.get("worker_id")
+            target_name = target_hostname or str(target_wid)
+            # Re-query current online workers: match exact worker_id + hostname first (safe for multi-worker hosts)
             fresh_workers = list_online_workers(client)
-            if target_hostname:
+            matched = None
+            if target_wid is not None:
                 matched = next(
-                    (fw for fw in fresh_workers if str(fw.get("hostname", "")).lower() == target_hostname.lower()),
+                    (
+                        fw
+                        for fw in fresh_workers
+                        if fw.get("worker_id") == target_wid
+                        and (
+                            not target_hostname
+                            or str(fw.get("hostname", "")).strip().lower() == target_hostname.lower()
+                        )
+                    ),
                     None,
                 )
-            else:
+            if matched is None and target_wid is None and target_hostname:
                 matched = next(
-                    (fw for fw in fresh_workers if str(fw.get("worker_id")) == str(node.get("worker_id"))),
+                    (
+                        fw
+                        for fw in fresh_workers
+                        if str(fw.get("hostname", "")).strip().lower() == target_hostname.lower()
+                    ),
+                    None,
+                )
+            if matched is None and target_hostname:
+                matched = next(
+                    (
+                        fw
+                        for fw in fresh_workers
+                        if str(fw.get("hostname", "")).strip().lower() == target_hostname.lower()
+                    ),
                     None,
                 )
 

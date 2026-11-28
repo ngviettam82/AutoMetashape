@@ -51,29 +51,33 @@ if not defined PYTHON_CMD (
 
 echo [BUILD] Auditing SPDX license compliance...
 "%PYTHON_CMD%" %PYTHON_ARGS% tools/check_licenses.py
-if errorlevel 1 (
-    set "BUILD_EXIT=%ERRORLEVEL%"
-    echo [ERROR] License compliance check failed.
-    goto :cleanup
-)
+set "BUILD_EXIT=%ERRORLEVEL%"
+if not "%BUILD_EXIT%"=="0" goto :license_fail
 
 echo [BUILD] Validating agent skills...
 "%PYTHON_CMD%" %PYTHON_ARGS% tools/skills/cli.py check
-if errorlevel 1 (
-    set "BUILD_EXIT=%ERRORLEVEL%"
-    echo [ERROR] Skill validation failed.
-    goto :cleanup
-)
+set "BUILD_EXIT=%ERRORLEVEL%"
+if not "%BUILD_EXIT%"=="0" goto :skill_fail
 
 echo [BUILD] Running unit test suite...
 "%PYTHON_CMD%" %PYTHON_ARGS% -m unittest discover -s tests
-if errorlevel 1 (
-    set "BUILD_EXIT=%ERRORLEVEL%"
-    echo [ERROR] Unit test suite failed.
-    goto :cleanup
-)
+set "BUILD_EXIT=%ERRORLEVEL%"
+if not "%BUILD_EXIT%"=="0" goto :test_fail
 
 echo [BUILD] AutoMetashape build completed successfully.
+goto :cleanup
+
+:license_fail
+echo [ERROR] License compliance check failed.
+goto :cleanup
+
+:skill_fail
+echo [ERROR] Skill validation failed.
+goto :cleanup
+
+:test_fail
+echo [ERROR] Unit test suite failed.
+goto :cleanup
 
 :cleanup
 popd

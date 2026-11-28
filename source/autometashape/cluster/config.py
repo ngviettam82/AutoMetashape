@@ -53,7 +53,7 @@ def get_default_config_path(
     env_dir = os.environ.get("AUTOMETASHAPE_CONFIG_DIR", "").strip()
     if env_dir:
         abs_env_dir = os.path.abspath(env_dir)
-        if for_write or not os.path.isdir(abs_env_dir):
+        if for_write:
             os.makedirs(abs_env_dir, exist_ok=True)
         return os.path.join(abs_env_dir, filename)
 
@@ -61,16 +61,35 @@ def get_default_config_path(
     is_repo_checkout = os.path.isfile(os.path.join(repo_root, "pyproject.toml")) and os.path.isdir(
         os.path.join(repo_root, "scripts")
     )
-    if is_repo_checkout:
-        local_conf = os.path.join(repo_root, filename)
-        if os.path.exists(local_conf) and (not for_write or _is_dir_writable(repo_root)):
+    user_dir = os.path.join(os.path.expanduser("~"), ".autometashape")
+    user_conf = os.path.join(user_dir, filename)
+    local_conf = os.path.join(repo_root, filename) if is_repo_checkout else ""
+
+    if not for_write:
+        if is_repo_checkout and local_conf:
+            has_user = os.path.isfile(user_conf)
+            has_local = os.path.isfile(local_conf)
+            if has_user and has_local:
+                try:
+                    # Prefer user override when repo checkout is read-only or user config is newer
+                    if not os.access(repo_root, os.W_OK) or os.path.getmtime(user_conf) > os.path.getmtime(local_conf):
+                        return user_conf
+                except OSError:
+                    return user_conf
+                return local_conf
+            if has_user:
+                return user_conf
+            if has_local:
+                return local_conf
             return local_conf
-        if not os.path.exists(local_conf) and _is_dir_writable(repo_root):
+        return user_conf
+
+    if is_repo_checkout and local_conf:
+        if _is_dir_writable(repo_root):
             return local_conf
 
-    user_dir = os.path.join(os.path.expanduser("~"), ".autometashape")
     os.makedirs(user_dir, exist_ok=True)
-    return os.path.join(user_dir, filename)
+    return user_conf
 
 
 def load_cluster_config(

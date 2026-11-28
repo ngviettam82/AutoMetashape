@@ -7,7 +7,9 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
+import ipaddress
 import json
 import os
 import shutil
@@ -24,8 +26,12 @@ except ImportError:
     Metashape = None
 
 
-from autometashape.cluster.abort import dispatch_abort_signal
-from autometashape.cluster.hardware import get_local_hostname, is_healthy_online_worker
+from autometashape.cluster.abort import _is_pid_alive, dispatch_abort_signal
+from autometashape.cluster.hardware import (
+    get_local_hostname,
+    is_healthy_online_worker,
+    normalize_rpc_list_response,
+)
 from autometashape.cluster.orchestrator import _safe_abort_batch
 
 DEFAULT_REPO_ARCHIVE_URL = "https://github.com/ngviettam82/AutoMetashape/archive/refs/heads/main.zip"
@@ -58,6 +64,65 @@ def _sha256_file(path: str) -> str:
         for chunk in iter(lambda: fh.read(1024 * 1024), b""):
             h.update(chunk)
     return h.hexdigest()
+
+
+def _is_ip_literal(value: str) -> bool:
+    """Return True if ``value`` is a valid IPv4 or IPv6 literal address."""
+    try:
+        ipaddress.ip_address(str(value or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
+def _short_hostname(name: str) -> str:
+    """Return DNS short hostname for FQDN, preserving IPv4/IPv6 literals intact."""
+    clean = str(name or "").strip().lower()
+    if not clean or _is_ip_literal(clean):
+        return clean
+    return clean.split(".", 1)[0]
+
+
+@contextlib.contextmanager
+def _mirror_target_lock(target_dir: str, timeout_s: float = 60.0):
+    """Cross-process exclusive lock serializing in-place updates on co-located multi-worker hosts."""
+    abs_dir = os.path.abspath(target_dir)
+    digest = hashlib.sha256(os.path.normcase(abs_dir).encode("utf-8", errors="ignore")).hexdigest()[:12]
+    lock_path = os.path.join(tempfile.gettempdir(), f".am_mirror_{digest}.lock")
+    deadline = time.time() + max(1.0, float(timeout_s))
+    acquired_fd: int | None = None
+    while time.time() < deadline:
+        try:
+            acquired_fd = os.open(lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+            try:
+                os.write(acquired_fd, str(os.getpid()).encode("ascii"))
+            finally:
+                os.close(acquired_fd)
+            break
+        except FileExistsError:
+            acquired_fd = None
+            try:
+                with open(lock_path, "r", encoding="ascii", errors="ignore") as lf:
+                    owner_str = lf.read().strip()
+                owner_pid = int(owner_str) if owner_str.isdigit() else 0
+                if owner_pid > 0 and owner_pid != os.getpid() and not _is_pid_alive(owner_pid):
+                    os.remove(lock_path)
+                    continue
+            except OSError:
+                pass
+            time.sleep(0.2)
+        except OSError:
+            acquired_fd = None
+            break
+    try:
+        yield
+    finally:
+        if acquired_fd is not None:
+            try:
+                if os.path.isfile(lock_path):
+                    os.remove(lock_path)
+            except OSError:
+                pass
 
 
 def _safe_extract_update_zip(
@@ -101,6 +166,18 @@ def _safe_extract_update_zip(
             os.makedirs(os.path.dirname(target_path), exist_ok=True)
             with zf.open(info, "r") as src, open(target_path, "wb") as dst:
                 shutil.copyfileobj(src, dst)
+            if sys.platform != "win32":
+                unix_mode = (info.external_attr >> 16) & 0o777
+                if unix_mode:
+                    try:
+                        os.chmod(target_path, unix_mode)
+                    except OSError:
+                        pass
+                elif target_path.lower().endswith(".sh"):
+                    try:
+                        os.chmod(target_path, 0o755)
+                    except OSError:
+                        pass
 
 
 def _copy2_with_retry(src_file: str, dst_file: str, retries: int = 3) -> None:
@@ -224,7 +301,12 @@ def check_update_pending(target_dir: str, node_name: str | None = None) -> dict 
     else:
         target_node = node_name.strip().lower()
     if target_node:
-        candidates.append(os.path.join(tempfile.gettempdir(), f"{UPDATE_SIGNAL_FILENAME}_{target_node}"))
+        short_node = _short_hostname(target_node)
+        for cand_node in (target_node, short_node):
+            if cand_node:
+                cand_p = os.path.join(tempfile.gettempdir(), f"{UPDATE_SIGNAL_FILENAME}_{cand_node}")
+                if cand_p not in candidates:
+                    candidates.append(cand_p)
 
     for flag_path in candidates:
         try:
@@ -317,8 +399,9 @@ def perform_worker_codebase_update(signal_data: dict, target_dir: str) -> bool:
         ):
             raise RuntimeError(f"Extracted update archive at '{src_dir}' does not resemble an AutoMetashape repository")
 
-        # 5. Mirror with prune
-        mirror_directory_with_prune(src_dir, target_dir)
+        # 5. Mirror with prune (serialized across co-located supervisors on shared host)
+        with _mirror_target_lock(target_dir):
+            mirror_directory_with_prune(src_dir, target_dir)
 
         # 6. Clean up flag
         if os.path.isfile(flag_path):
@@ -373,21 +456,33 @@ def generate_worker_updater_code(
     """
     clean_expected = expected_hostname.strip().lower()
     clean_sha = expected_sha256.strip().lower()
-    return f"""import json
+    return f"""import ipaddress
+import json
 import os
 import socket
 import sys
 import tempfile
 import time
 
+def _is_ip(v):
+    try:
+        ipaddress.ip_address((v or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+def _short_host(v):
+    c = (v or "").strip().lower()
+    return c if (not c or _is_ip(c)) else c.split(".", 1)[0]
+
 log = []
 node_name = (os.environ.get("COMPUTERNAME") or "").strip() or socket.gethostname() or "unknown"
 node_low = node_name.strip().lower()
-node_short = node_low.split(".", 1)[0]
+node_short = _short_host(node_low)
 expected_node = {clean_expected!r}
 if expected_node and expected_node != "unknown":
-    exp_short = expected_node.split(".", 1)[0]
-    if node_low != expected_node and node_short != exp_short:
+    exp_short = _short_host(expected_node)
+    if node_low != expected_node and (node_short != exp_short or _is_ip(node_low) or _is_ip(expected_node)):
         err_msg = f"Target node mismatch: task assigned to {{node_name}}, expected {{expected_node}}"
         log.append(f"FATAL: {{err_msg}}")
         raise RuntimeError(err_msg)
@@ -556,14 +651,12 @@ def _abort_stale_maintenance_batches(client, rel_project: str) -> None:
     norm_target = rel_project.replace("\\", "/").strip("/").lower()
     if hasattr(client, "batchList") and hasattr(client, "abortBatch"):
         try:
-            bl = client.batchList()
-            if isinstance(bl, dict):
-                for b in bl.get("batches", []):
-                    bpath = str(b.get("path") or "").replace("\\", "/").strip("/").lower()
-                    bid = b.get("batch_id")
-                    if bid is not None and bpath == norm_target:
-                        is_paused = bool(b.get("paused")) or str(b.get("state", "")).lower() == "paused"
-                        _safe_abort_batch(client, bid, is_paused=is_paused)
+            for b in normalize_rpc_list_response(client.batchList(), "batches"):
+                bpath = str(b.get("path") or "").replace("\\", "/").strip("/").lower()
+                bid = b.get("batch_id")
+                if bid is not None and bpath == norm_target:
+                    is_paused = bool(b.get("paused")) or str(b.get("state", "")).lower() == "paused"
+                    _safe_abort_batch(client, bid, is_paused=is_paused)
         except Exception:
             pass
 
@@ -623,10 +716,7 @@ def list_online_workers(client) -> list[dict]:
     """Retrieve list of currently connected, non-aborted workers from Metashape Server."""
     if not client:
         return []
-    info = client.workerList()
-    if isinstance(info, dict):
-        return [w for w in info.get("workers", []) if is_healthy_online_worker(w)]
-    return []
+    return [w for w in normalize_rpc_list_response(client.workerList(), "workers") if is_healthy_online_worker(w)]
 
 
 def _extract_host_ip(hostaddr: str) -> str:
@@ -710,72 +800,77 @@ def update_remote_worker(
 
     # Stage fresh update payload BEFORE pausing any batches or workers
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
-    stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url, force_refresh=True)
+    staged_zip = stage_cluster_update_payload(shared_root=shared_root, repo_url=repo_url, force_refresh=True)
+    if not staged_zip:
+        result["error"] = (
+            "Failed to stage fresh update payload from repository URL; "
+            "aborting update to avoid installing a stale archive."
+        )
+        return result
     payload_sha = _read_payload_meta_sha256(shared_root)
 
     try:
-        # Pre-flight Check: Is target worker currently busy?
+        batches_snapshot: list[dict] = []
+        if hasattr(client, "batchList"):
+            try:
+                batches_snapshot = normalize_rpc_list_response(client.batchList(), "batches")
+            except Exception:
+                batches_snapshot = []
+
         target_state = str(target.get("state", "")).lower()
-        if target_state not in ("ready", ""):
-            if not force:
-                result["error"] = (
-                    f"Target worker '{node_hname}' (ID={wid}) is currently {target_state}. "
-                    "Skipping update in safe mode (enable force to abort active processing)."
-                )
-                return result
+        target_bid = target.get("batch_id") if target_state not in ("ready", "") else None
 
-            # FORCE MODE: Abort active processing ONLY on target worker to allow immediate update
-            target_bid = target.get("batch_id")
-            batches_snapshot: list[dict] = []
-            if hasattr(client, "batchList"):
-                try:
-                    bl = client.batchList()
-                    if isinstance(bl, dict):
-                        batches_snapshot = list(bl.get("batches", []))
-                except Exception:
-                    batches_snapshot = []
+        # Pre-flight Check: Is target worker currently busy?
+        if target_state not in ("ready", "") and not force:
+            result["error"] = (
+                f"Target worker '{node_hname}' (ID={wid}) is currently {target_state}. "
+                "Skipping update in safe mode (enable force to abort active processing)."
+            )
+            return result
 
-            # If workerList() omitted batch_id, identify the specific active batch running on `wid`
-            if target_bid is None and batches_snapshot:
-                active_inprog = [
-                    b
-                    for b in batches_snapshot
-                    if str(b.get("state", "")).lower() in ("inprogress", "running", "active")
-                    and b.get("batch_id") is not None
-                ]
-                if hasattr(client, "batchInfo"):
-                    for b in active_inprog:
-                        bid = b.get("batch_id")
-                        try:
-                            binfo = client.batchInfo(bid)
-                            if isinstance(binfo, dict):
-                                if any(
-                                    isinstance(t, dict) and t.get("worker_id") == wid for t in binfo.get("tasks", [])
-                                ):
-                                    target_bid = bid
-                                    break
-                        except Exception:
-                            pass
-                if target_bid is None and len(active_inprog) == 1:
-                    target_bid = active_inprog[0].get("batch_id")
-
-            # 1. Temporarily pause unpaused queued/active batches (EXCEPT target_bid, never unpausing operator-paused work)
-            if batches_snapshot and hasattr(client, "setBatchPaused"):
-                try:
-                    for b in batches_snapshot:
-                        bid = b.get("batch_id")
-                        bstate = str(b.get("state", "")).lower()
-                        if (
-                            bid != target_bid
-                            and not b.get("paused")
-                            and bstate in ("queued", "inprogress", "running", "active", "submitted", "pending")
+        # Pause queued/pending/active batches EXCEPT target_bid BEFORE unpausing/isolating target worker
+        # (prevents an idle or operator-paused target worker from stealing a queued job on unpause)
+        if target_state not in ("ready", "") and target_bid is None and batches_snapshot:
+            active_inprog = [
+                b
+                for b in batches_snapshot
+                if str(b.get("state", "")).lower() in ("inprogress", "running", "active")
+                and b.get("batch_id") is not None
+            ]
+            if hasattr(client, "batchInfo"):
+                for b in active_inprog:
+                    bid = b.get("batch_id")
+                    try:
+                        binfo = client.batchInfo(bid)
+                        if isinstance(binfo, dict) and any(
+                            isinstance(t, dict) and t.get("worker_id") == wid for t in binfo.get("tasks", [])
                         ):
-                            client.setBatchPaused(bid, True)
-                            paused_existing_batches.append(bid)
-                except Exception:
-                    pass
+                            target_bid = bid
+                            break
+                    except Exception:
+                        pass
+            if target_bid is None and len(active_inprog) == 1:
+                target_bid = active_inprog[0].get("batch_id")
 
-            # 2. Unpause (if paused) and abort ONLY the active batch running on target worker
+        if batches_snapshot and hasattr(client, "setBatchPaused"):
+            try:
+                for b in batches_snapshot:
+                    bid = b.get("batch_id")
+                    bstate = str(b.get("state", "")).lower()
+                    if (
+                        bid is not None
+                        and bid != target_bid
+                        and not b.get("paused")
+                        and bstate in ("queued", "inprogress", "running", "active", "submitted", "pending")
+                    ):
+                        client.setBatchPaused(bid, True)
+                        paused_existing_batches.append(bid)
+            except Exception:
+                pass
+
+        if target_state not in ("ready", ""):
+            # FORCE MODE: Abort active processing ONLY on target worker to allow immediate update
+            # Unpause (if paused) and abort ONLY the active batch running on target worker
             if hasattr(client, "abortBatch") and target_bid is not None:
                 try:
                     if hasattr(client, "setBatchPaused"):
@@ -937,11 +1032,10 @@ def update_remote_worker(
                 time.sleep(poll_interval)
                 continue
             batch_entry = None
-            if isinstance(batches_info, dict):
-                for b in batches_info.get("batches", []):
-                    if b.get("batch_id") == batch_id:
-                        batch_entry = b
-                        break
+            for b in normalize_rpc_list_response(batches_info, "batches"):
+                if b.get("batch_id") == batch_id:
+                    batch_entry = b
+                    break
             if batch_entry:
                 state = str(batch_entry.get("state", "")).lower()
                 err_cnt = int(batch_entry.get("error_count", 0) or 0)
@@ -1073,33 +1167,53 @@ def update_all_workers_parallel(
         return []
 
     # 1. Stage fresh update payload once BEFORE pausing any batches or workers
-    stage_cluster_update_payload(shared_root, repo_url, force_refresh=True)
+    staged_zip = stage_cluster_update_payload(shared_root, repo_url, force_refresh=True)
+    if not staged_zip:
+        return [
+            {
+                "success": False,
+                "worker_id": w.get("worker_id"),
+                "hostname": w.get("hostname"),
+                "hostaddr": w.get("hostaddr"),
+                "batch_id": None,
+                "relaunched": False,
+                "new_worker_id": None,
+                "new_hostaddr": None,
+                "log": "",
+                "error": (
+                    "Failed to stage fresh update payload from repository URL; "
+                    "aborting update to avoid installing a stale archive."
+                ),
+            }
+            for w in workers
+        ]
     payload_sha = _read_payload_meta_sha256(shared_root)
     cluster_shared_dir = os.path.join(shared_root, ".cluster")
 
     paused_existing_batches: list[int] = []
     orig_worker_paused: dict[int | str, bool] = {}
+    orig_paused_by_wid: dict[Any, bool] = {
+        w.get("worker_id"): bool(w.get("paused", False)) for w in workers if w.get("worker_id") is not None
+    }
     orig_paused_by_host: dict[str, bool] = {
         str(w.get("hostname", "")).strip().lower(): bool(w.get("paused", False)) for w in workers if w.get("hostname")
     }
     worker_batches: list[dict] = []
 
     try:
-        # 2. If force mode, pause queued batches and abort active tasks on busy workers
+        # 2. Pause queued batches (if force or before dispatch) and abort active tasks on busy workers
         if force:
             if hasattr(client, "batchList"):
                 try:
-                    bl = client.batchList()
-                    if isinstance(bl, dict):
-                        for b in bl.get("batches", []):
-                            bid = b.get("batch_id")
-                            bstate = str(b.get("state", "")).lower()
-                            if bstate in ("queued", "pending", "submitted") and not b.get("paused"):
-                                if hasattr(client, "setBatchPaused"):
-                                    client.setBatchPaused(bid, True)
-                                    paused_existing_batches.append(bid)
-                            elif bstate in ("inprogress", "running", "active") and not b.get("aborted"):
-                                _safe_abort_batch(client, bid, is_paused=bool(b.get("paused")))
+                    for b in normalize_rpc_list_response(client.batchList(), "batches"):
+                        bid = b.get("batch_id")
+                        bstate = str(b.get("state", "")).lower()
+                        if bid is not None and bstate in ("queued", "pending", "submitted") and not b.get("paused"):
+                            if hasattr(client, "setBatchPaused"):
+                                client.setBatchPaused(bid, True)
+                                paused_existing_batches.append(bid)
+                        elif bid is not None and bstate in ("inprogress", "running", "active") and not b.get("aborted"):
+                            _safe_abort_batch(client, bid, is_paused=bool(b.get("paused")))
                 except Exception:
                     pass
 
@@ -1205,12 +1319,14 @@ def update_all_workers_parallel(
                             if refreshed:
                                 workers = refreshed
 
-        # 3. Record original pause state across refreshed fleet so we isolate each node cleanly during signal dispatch
+        # 3. Record original pause state per worker_id so co-located workers preserve independent pause flags
         for w in workers:
             w_id = w.get("worker_id")
             if w_id is not None:
                 hkey = str(w.get("hostname", "")).strip().lower()
-                orig_worker_paused[w_id] = orig_paused_by_host.get(hkey, bool(w.get("paused", False)))
+                orig_worker_paused[w_id] = orig_paused_by_wid.get(
+                    w_id, orig_paused_by_host.get(hkey, bool(w.get("paused", False)))
+                )
 
         for w in workers:
             wid = w.get("worker_id")
@@ -1219,6 +1335,7 @@ def update_all_workers_parallel(
             node_res = {
                 "success": False,
                 "worker_id": wid,
+                "orig_paused": orig_worker_paused.get(wid, bool(w.get("paused", False))),
                 "hostname": hname,
                 "hostaddr": w.get("hostaddr"),
                 "batch_id": None,
@@ -1275,11 +1392,10 @@ def update_all_workers_parallel(
                     time.sleep(poll_interval)
                     continue
                 batch_entry = None
-                if isinstance(bl, dict):
-                    for b in bl.get("batches", []):
-                        if b.get("batch_id") == batch_id:
-                            batch_entry = b
-                            break
+                for b in normalize_rpc_list_response(bl, "batches"):
+                    if b.get("batch_id") == batch_id:
+                        batch_entry = b
+                        break
                 if batch_entry:
                     state = str(batch_entry.get("state", "")).lower()
                     err_cnt = int(batch_entry.get("error_count", 0) or 0)
@@ -1382,8 +1498,7 @@ def update_all_workers_parallel(
                             nr["new_hostaddr"] = cw.get("hostaddr")
                             if cw_id is not None:
                                 claimed_new_ids.add(cw_id)
-                            if orig_paused_by_host.get(target_hname) and cw_id is not None:
-                                orig_worker_paused[cw_id] = True
+                                orig_worker_paused[cw_id] = bool(nr.get("orig_paused", False))
                             break
 
                 if all(nr.get("relaunched") for nr in relaunching_nodes):

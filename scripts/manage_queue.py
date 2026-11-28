@@ -231,25 +231,39 @@ def cmd_abort(client: Any, batch_id: int, demote_priority: int) -> int:
     return 0
 
 
+def _is_ip_literal(value: str) -> bool:
+    """Return True if ``value`` is a valid IPv4 or IPv6 literal address."""
+    import ipaddress
+
+    try:
+        ipaddress.ip_address(str(value or "").strip().strip("[]"))
+        return True
+    except ValueError:
+        return False
+
+
 def _match_workers(
     workers: List[Dict[str, Any]],
     worker_id: int | None = None,
     hostname: str = "",
 ) -> List[tuple[Any, str]]:
-    """Match online workers by ID and/or hostname with short-hostname fallback."""
+    """Match online workers by ID and/or hostname with short-hostname fallback (IP-safe)."""
     target_host = hostname.strip().lower()
-    target_short = target_host.split(".", 1)[0] if target_host else ""
+    target_is_ip = _is_ip_literal(target_host)
+    target_short = "" if (not target_host or target_is_ip) else target_host.split(".", 1)[0]
     exact_matches: List[tuple[Any, str]] = []
     short_matches: List[tuple[Any, str]] = []
     for w in workers:
         wid = w.get("worker_id")
         whost_raw = str(w.get("hostname", "") or "")
         whost = whost_raw.strip().lower()
-        whost_short = whost.split(".", 1)[0] if whost else ""
+        whost_is_ip = _is_ip_literal(whost)
+        whost_short = "" if (not whost or whost_is_ip) else whost.split(".", 1)[0]
+        can_short = bool(target_short and whost_short and not target_is_ip and not whost_is_ip)
         if worker_id is not None and target_host:
             if wid == worker_id and whost == target_host:
                 exact_matches.append((wid, whost_raw))
-            elif wid == worker_id and target_short and whost_short == target_short:
+            elif wid == worker_id and can_short and whost_short == target_short:
                 short_matches.append((wid, whost_raw))
         elif worker_id is not None:
             if wid == worker_id:
@@ -257,7 +271,7 @@ def _match_workers(
         elif target_host and is_healthy_online_worker(w):
             if whost == target_host:
                 exact_matches.append((wid, whost_raw))
-            elif target_short and whost_short == target_short:
+            elif can_short and whost_short == target_short:
                 short_matches.append((wid, whost_raw))
     return exact_matches or short_matches
 

@@ -10,10 +10,9 @@ set "SCRIPT_DIR=%~dp0"
 set "ABORT_PY=%SCRIPT_DIR%scripts\cluster_abort.py"
 
 :: 1. Locate Metashape binary (embedded Metashape Python module) or standalone Python
-set "METASHAPE_EXE="
+if defined METASHAPE_EXE if not exist "%METASHAPE_EXE%" set "METASHAPE_EXE="
 
 if not defined METASHAPE_EXE if defined AUTOMETASHAPE_METASHAPE_PATH if exist "%AUTOMETASHAPE_METASHAPE_PATH%" set "METASHAPE_EXE=%AUTOMETASHAPE_METASHAPE_PATH%"
-if not defined METASHAPE_EXE if defined METASHAPE_EXE if exist "%METASHAPE_EXE%" set "METASHAPE_EXE=%METASHAPE_EXE%"
 if not defined METASHAPE_EXE if defined ProgramFiles if exist "%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%ProgramFiles%\Agisoft\Metashape Pro\metashape.exe"
 if not defined METASHAPE_EXE if defined ProgramW6432 if exist "%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%ProgramW6432%\Agisoft\Metashape Pro\metashape.exe"
 if not defined METASHAPE_EXE if defined LOCALAPPDATA if exist "%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\metashape.exe" set "METASHAPE_EXE=%LOCALAPPDATA%\Programs\Agisoft\Metashape Pro\metashape.exe"
@@ -25,16 +24,7 @@ if not defined METASHAPE_EXE (
     )
 )
 
-if defined METASHAPE_EXE (
-    "%METASHAPE_EXE%" -r "%ABORT_PY%" %*
-    set "EXIT_CODE=%ERRORLEVEL%"
-    if not "%EXIT_CODE%"=="0" (
-        echo.
-        echo [EXIT] Cluster abort utility terminated with exit code %EXIT_CODE%.
-        exit /b %EXIT_CODE%
-    )
-    exit /b 0
-)
+if defined METASHAPE_EXE goto :run_metashape
 
 :: 2. Fallback to bundled Python or system Python if metashape.exe is not found
 set "PYTHON_EXE="
@@ -60,17 +50,23 @@ if not defined PYTHON_EXE (
     )
 )
 
-if defined PYTHON_EXE (
-    "%PYTHON_EXE%" %PYTHON_ARGS% "%ABORT_PY%" %*
-    set "EXIT_CODE=%ERRORLEVEL%"
-    if not "%EXIT_CODE%"=="0" (
-        echo.
-        echo [EXIT] Cluster abort utility terminated with exit code %EXIT_CODE%.
-        exit /b %EXIT_CODE%
-    )
-    exit /b 0
-) else (
-    echo [ERROR] Agisoft Metashape Pro or Python runtime was not found.
-    echo Please install Agisoft Metashape Pro or Python 3.9+ to run the cluster abort utility.
-    exit /b 1
-)
+if defined PYTHON_EXE goto :run_python
+echo [ERROR] Agisoft Metashape Pro or Python runtime was not found.
+echo Please install Agisoft Metashape Pro or Python 3.9+ to run the cluster abort utility.
+exit /b 1
+
+:run_metashape
+"%METASHAPE_EXE%" -r "%ABORT_PY%" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" exit /b 0
+echo.
+echo [EXIT] Cluster abort utility terminated with exit code %EXIT_CODE%.
+exit /b %EXIT_CODE%
+
+:run_python
+"%PYTHON_EXE%" %PYTHON_ARGS% "%ABORT_PY%" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" exit /b 0
+echo.
+echo [EXIT] Cluster abort utility terminated with exit code %EXIT_CODE%.
+exit /b %EXIT_CODE%

@@ -501,6 +501,8 @@ def discover_dual_share_projects(
         base_extra["network_path"] = resolved_net_root
     base_extra.setdefault("source_share", norm_source)
     base_extra.setdefault("result_share", norm_result)
+    if exclude_folders and not base_extra.get("exclude_folders"):
+        base_extra["exclude_folders"] = exclude_folders
 
     excl_patterns = tuple(_nfc(p) for p in parse_exclude_folder_patterns(exclude_folders))
 
@@ -710,6 +712,8 @@ def run_dual_share_cluster_pipeline(
         "local_scratch": local_scratch,
         "local_scratch_staging": local_scratch,
     }
+    if exclude_folders:
+        merged_extra["exclude_folders"] = exclude_folders
     if extra_args:
         merged_extra.update(extra_args)
 

@@ -122,10 +122,15 @@ def main() -> int:
     target_node = args.node.strip()
 
     # Safety guard: refuse to fall back to local %TEMP%\.abort_pending when targeting a remote node!
+    from autometashape.cluster.abort import _hostnames_match
     from autometashape.cluster.hardware import get_local_hostname
 
     local_host = get_local_hostname().strip().lower()
-    if not shared_root and target_node.lower() not in (local_host, "localhost", "127.0.0.1"):
+    target_low = target_node.strip().lower()
+    is_local_target = target_low in ("localhost", "127.0.0.1", "::1", "[::1]") or _hostnames_match(
+        target_low, local_host
+    )
+    if not shared_root and not is_local_target:
         print(
             f"[FATAL ERROR] Cannot dispatch remote abort to '{target_node}' without a shared storage root "
             "(--root, AUTOMETASHAPE_CLUSTER_ROOT, server_config.json, or worker_config.json). "

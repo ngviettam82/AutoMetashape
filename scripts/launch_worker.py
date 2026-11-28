@@ -42,28 +42,54 @@ if sys.platform == "win32":
                 pass
 
 PID_FILE_PATH = os.path.join(tempfile.gettempdir(), "autometashape_worker.pid")
+_OWN_PID_FILES: list[str] = []
 
 
 def record_worker_pid() -> None:
-    """Record current process ID to a well-known temp file for deterministic process management."""
+    """Record current process ID safely without clobbering another live co-located worker."""
+    my_pid = os.getpid()
+    per_pid_path = os.path.join(tempfile.gettempdir(), f"autometashape_worker_{my_pid}.pid")
+    write_primary = True
     try:
-        with open(PID_FILE_PATH, "w", encoding="utf-8") as f:
-            f.write(str(os.getpid()))
+        if os.path.isfile(PID_FILE_PATH):
+            with open(PID_FILE_PATH, "r", encoding="utf-8") as rf:
+                existing = rf.read().strip()
+            if existing.isdigit() and int(existing) != my_pid:
+                try:
+                    from autometashape.cluster.abort import _is_pid_alive
+
+                    if _is_pid_alive(int(existing)):
+                        write_primary = False
+                except Exception:
+                    pass
     except Exception:
         pass
+    targets = [per_pid_path]
+    if write_primary:
+        targets.insert(0, PID_FILE_PATH)
+    for dest in targets:
+        try:
+            with open(dest, "w", encoding="utf-8") as f:
+                f.write(str(my_pid))
+            if dest not in _OWN_PID_FILES:
+                _OWN_PID_FILES.append(dest)
+        except Exception:
+            pass
 
 
 def clear_worker_pid() -> None:
-    """Remove worker PID tracking file on clean exit if it belongs to this process."""
-    try:
-        if os.path.isfile(PID_FILE_PATH):
-            with open(PID_FILE_PATH, "r", encoding="utf-8") as f:
-                recorded = f.read().strip()
-            if recorded and recorded != str(os.getpid()):
-                return
-            os.remove(PID_FILE_PATH)
-    except Exception:
-        pass
+    """Remove worker PID tracking files on clean exit if they belong to this process."""
+    for cand in list(dict.fromkeys([PID_FILE_PATH] + _OWN_PID_FILES)):
+        try:
+            if os.path.isfile(cand):
+                with open(cand, "r", encoding="utf-8") as f:
+                    recorded = f.read().strip()
+                if recorded and recorded != str(os.getpid()):
+                    continue
+                os.remove(cand)
+        except Exception:
+            pass
+    _OWN_PID_FILES.clear()
 
 
 cleanup_stale_worker_processes = cu.cleanup_stale_worker_processes
@@ -265,8 +291,8 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
     is_headless = args.non_interactive or not is_tty
 
     # 2. Resolve configuration (CLI args -> Environment -> Config File -> Dynamic Discovery)
-    config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME)
-    saved_config = cu.load_cluster_config(config_path)
+    read_config_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME, for_write=False)
+    saved_config = cu.load_cluster_config(read_config_path)
 
     gpu_devices = cu.detect_gpu_devices()
     detected_gpu_names = []
@@ -274,8 +300,18 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
         mem_str = f" ({d['mem_mb'] / 1024:.1f} GB)" if d.get("mem_mb") else ""
         detected_gpu_names.append(f"{d['name']}{mem_str}")
 
-    host = args.host or os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip() or saved_config.get("host", "")
-    port = args.port or os.environ.get("AUTOMETASHAPE_CLUSTER_PORT", "").strip() or saved_config.get("port", "5840")
+    raw_host = args.host or os.environ.get("AUTOMETASHAPE_CLUSTER_HOST", "").strip() or saved_config.get("host", "")
+    raw_port = args.port or os.environ.get("AUTOMETASHAPE_CLUSTER_PORT", "").strip() or saved_config.get("port", "5840")
+    try:
+        fallback_port = int(raw_port)
+    except (ValueError, TypeError):
+        fallback_port = 5840
+    if str(raw_host or "").strip():
+        host, parsed_port = cu.split_host_port(str(raw_host).strip(), default_port=fallback_port)
+        port = args.port if args.port is not None else str(parsed_port)
+    else:
+        host = ""
+        port = str(raw_port or "5840")
     root_path = args.root or os.environ.get("AUTOMETASHAPE_CLUSTER_ROOT", "").strip() or saved_config.get("root", "")
     source_root = (
         args.source_root
@@ -362,55 +398,59 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
             if explicit_gpu_mask is not None:
                 conf_data["gpu_mask"] = explicit_gpu_mask
                 conf_data["gpu_mask_explicit"] = True
-            saved_file = cu.save_cluster_config(conf_data, config_path)
+            saved_file = cu.save_cluster_config(
+                conf_data, args.config or None, filename=cu.DEFAULT_WORKER_CONFIG_FILENAME
+            )
             print(f"[OK] Configuration saved to: {saved_file}\n")
 
     # 4. Auto-persist valid configuration to target config_path if missing/incomplete (respecting wizard decline)
     if host and root_path and should_auto_persist:
-        target_cfg_paths = [config_path]
-
-        for target_cfg in target_cfg_paths:
-            existing_cfg = cu.load_cluster_config(target_cfg) if os.path.isfile(target_cfg) else {}
-            # Purge legacy auto-written "gpu_mask": "1" (without gpu_mask_explicit), sentinel values,
-            # or an existing saved override when the operator explicitly passes --gpu-mask auto.
-            cli_requested_auto = args.gpu_mask is not None and str(args.gpu_mask).strip().lower() in (
-                "auto",
-                "none",
-                "default",
-                "",
-            )
-            if "gpu_mask" in existing_cfg and (args.gpu_mask is None or cli_requested_auto):
-                val = str(existing_cfg.get("gpu_mask", "")).strip().lower()
-                is_legacy_one = val == "1" and not bool(existing_cfg.get("gpu_mask_explicit"))
-                if cli_requested_auto or val in ("auto", "none", "default", "") or is_legacy_one:
-                    existing_cfg.pop("gpu_mask", None)
-                    existing_cfg.pop("gpu_mask_explicit", None)
-                    try:
-                        cu.save_cluster_config(existing_cfg, target_cfg)
-                    except Exception:
-                        pass
-
-            is_missing = not os.path.isfile(target_cfg)
-            is_incomplete = not existing_cfg.get("host") or not existing_cfg.get("root")
-
-            if is_missing or is_incomplete:
-                persist_data = {
-                    "host": host,
-                    "port": str(port),
-                    "root": root_path,
-                    "cpu_enable": int(cpu_enable),
-                }
-                if source_root:
-                    persist_data["source_root"] = source_root
-                # STRICT INVARIANT: Only persist gpu_mask if explicitly configured with a non-auto override
-                if explicit_gpu_mask is not None:
-                    persist_data["gpu_mask"] = explicit_gpu_mask
-                    persist_data["gpu_mask_explicit"] = True
+        write_cfg_path = args.config or cu.get_default_config_path(cu.DEFAULT_WORKER_CONFIG_FILENAME, for_write=True)
+        existing_cfg = cu.load_cluster_config(write_cfg_path) if os.path.isfile(write_cfg_path) else dict(saved_config)
+        # Purge legacy auto-written "gpu_mask": "1" (without gpu_mask_explicit), sentinel values,
+        # or an existing saved override when the operator explicitly passes --gpu-mask auto.
+        cli_requested_auto = args.gpu_mask is not None and str(args.gpu_mask).strip().lower() in (
+            "auto",
+            "none",
+            "default",
+            "",
+        )
+        if "gpu_mask" in existing_cfg and (args.gpu_mask is None or cli_requested_auto):
+            val = str(existing_cfg.get("gpu_mask", "")).strip().lower()
+            is_legacy_one = val == "1" and not bool(existing_cfg.get("gpu_mask_explicit"))
+            if cli_requested_auto or val in ("auto", "none", "default", "") or is_legacy_one:
+                existing_cfg.pop("gpu_mask", None)
+                existing_cfg.pop("gpu_mask_explicit", None)
                 try:
-                    saved_p = cu.save_cluster_config(persist_data, target_cfg)
-                    print(f"[OK] Auto-persisted worker configuration to: {saved_p}")
+                    cu.save_cluster_config(
+                        existing_cfg, args.config or None, filename=cu.DEFAULT_WORKER_CONFIG_FILENAME
+                    )
                 except Exception:
                     pass
+
+        is_missing = not os.path.isfile(read_config_path) and not os.path.isfile(write_cfg_path)
+        is_incomplete = not existing_cfg.get("host") or not existing_cfg.get("root")
+
+        if is_missing or is_incomplete:
+            persist_data = {
+                "host": host,
+                "port": str(port),
+                "root": root_path,
+                "cpu_enable": int(cpu_enable),
+            }
+            if source_root:
+                persist_data["source_root"] = source_root
+            # STRICT INVARIANT: Only persist gpu_mask if explicitly configured with a non-auto override
+            if explicit_gpu_mask is not None:
+                persist_data["gpu_mask"] = explicit_gpu_mask
+                persist_data["gpu_mask_explicit"] = True
+            try:
+                saved_p = cu.save_cluster_config(
+                    persist_data, args.config or None, filename=cu.DEFAULT_WORKER_CONFIG_FILENAME
+                )
+                print(f"[OK] Auto-persisted worker configuration to: {saved_p}")
+            except Exception:
+                pass
 
     # 5. Pre-Flight Diagnostic 1: Metashape Pro Binary Locator
     ms_exe = cu.find_metashape_path()
@@ -498,16 +538,22 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
             print("  Ensure worker node has read access to the Data Source SMB share.", file=sys.stderr)
 
     # 8. Build Worker Command
-    worker_cmd = [
-        ms_exe,
-        "--worker",
-        "--host",
-        formatted_host_port,
-        "--root",
-        root_path,
-        "--cpu-enable",
-        str(cpu_enable),
-    ]
+    worker_cmd = [ms_exe]
+    worker_env = os.environ.copy()
+    if sys.platform.startswith("linux") and not worker_env.get("DISPLAY"):
+        worker_cmd.extend(["-platform", "offscreen"])
+        worker_env.setdefault("QT_QPA_PLATFORM", "offscreen")
+    worker_cmd.extend(
+        [
+            "--worker",
+            "--host",
+            formatted_host_port,
+            "--root",
+            root_path,
+            "--cpu-enable",
+            str(cpu_enable),
+        ]
+    )
     # Pass explicit discrete GPU bitmask (computed dynamically via Metashape enumGPUDevices or manual override)
     if active_gpu_mask is not None:
         worker_cmd.extend(["--gpu-mask", active_gpu_mask])
@@ -526,7 +572,6 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
             user_profile = os.environ.get("USERPROFILE") or os.path.expanduser("~")
             target_dir = os.path.join(user_profile, "Documents", "AutoMetashape")
 
-    worker_env = os.environ.copy()
     worker_env["AUTOMETASHAPE_DIR"] = target_dir
     if is_manual_override and explicit_gpu_mask is not None:
         worker_env["AUTOMETASHAPE_EXPLICIT_GPU_MASK"] = explicit_gpu_mask
@@ -542,6 +587,12 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                     active_gpu_mask = str(retry_mask)
                     if "--gpu-mask" not in worker_cmd:
                         worker_cmd.extend(["--gpu-mask", active_gpu_mask])
+                    if active_gpu_mask == "0" and cpu_enable == 0:
+                        cpu_enable = 1
+                        if "--cpu-enable" in worker_cmd:
+                            ce_idx = worker_cmd.index("--cpu-enable")
+                            if ce_idx + 1 < len(worker_cmd):
+                                worker_cmd[ce_idx + 1] = "1"
                     print(f"[Hardware] Dynamic GPU probe recovered on reconnect: --gpu-mask {active_gpu_mask}")
             start_t = time.time()
             popen_kwargs: dict[str, object] = {"env": worker_env, "cwd": target_dir}
@@ -561,6 +612,15 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                         "Forcibly terminating stuck child process...",
                         flush=True,
                     )
+                    proc_pid = getattr(proc, "pid", None)
+                    killed_pids: set[int] = {int(proc_pid)} if proc_pid else set()
+                    try:
+                        from autometashape.cluster.abort import _enumerate_windows_descendant_pids
+
+                        if proc_pid:
+                            killed_pids.update(_enumerate_windows_descendant_pids(int(proc_pid)))
+                    except Exception:
+                        pass
                     # 1. Kill child metashape.exe process tree immediately and wait for handles to release
                     cu.kill_worker_process(proc)
                     try:
@@ -572,10 +632,18 @@ def _execute_worker_lifecycle(args: argparse.Namespace) -> int:
                     # 2. Clean up scratch locks: remove any stale lock files in target_dir or scratch dirs
                     try:
                         cu.cleanup_scratch_locks(
-                            target_dir=target_dir, root_path=root_path, worker_pid=getattr(proc, "pid", None)
+                            target_dir=target_dir,
+                            root_path=root_path,
+                            worker_pid=proc_pid,
+                            killed_pids=killed_pids,
                         )
                     except TypeError:
-                        cu.cleanup_scratch_locks(target_dir=target_dir, root_path=root_path)
+                        try:
+                            cu.cleanup_scratch_locks(
+                                target_dir=target_dir, root_path=root_path, worker_pid=proc_pid
+                            )
+                        except TypeError:
+                            cu.cleanup_scratch_locks(target_dir=target_dir, root_path=root_path)
 
                     # 3. Acknowledge and clear signal file
                     cu.acknowledge_abort_signal(abort_sig)

@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import time
+import unicodedata
 from typing import Any, Dict, List, Tuple
 
 try:
@@ -212,10 +213,10 @@ def resolve_storage_paths(
     paths: List[str] = []
     if cli_root.strip():
         paths.append(os.path.normpath(cli_root.strip()))
-
-    cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
-    if cfg.get("root") and os.path.normpath(cfg["root"]) not in paths:
-        paths.append(os.path.normpath(cfg["root"]))
+    else:
+        cfg = load_cluster_config(filename=DEFAULT_SERVER_CONFIG_FILENAME)
+        if cfg.get("root") and os.path.normpath(cfg["root"]) not in paths:
+            paths.append(os.path.normpath(cfg["root"]))
 
     # Inspect batch paths to extract network shares dynamically (supports both \\server\share and //server/share)
     for b in batches:
@@ -277,19 +278,13 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
         + glob.glob(os.path.join(escaped_dir, "*.jpg"))
         + glob.glob(os.path.join(escaped_dir, "*.jpeg"))
     )
-    proj_low = proj_name.lower()
-    tex_files = [
-        p
-        for p in img_candidates
-        if proj_low in os.path.basename(p).lower()
-        and "_orthomosaic" not in os.path.basename(p).lower()
-        and "_dem" not in os.path.basename(p).lower()
-    ]
-
+    proj_low = unicodedata.normalize("NFC", proj_name).lower()
     ortho_files = sorted(glob.glob(os.path.join(escaped_dir, "*_orthomosaic.tif")))
     if not ortho_files:
         ortho_files = sorted(
-            p for p in glob.glob(os.path.join(escaped_dir, "*.tif")) if "_orthomosaic" in os.path.basename(p).lower()
+            p
+            for p in (glob.glob(os.path.join(escaped_dir, "*.tif")) + glob.glob(os.path.join(escaped_dir, "*.tiff")))
+            if "_orthomosaic" in unicodedata.normalize("NFC", os.path.basename(p)).lower()
         )
     ortho_bytes = os.path.getsize(ortho_files[0]) if ortho_files else 0
     ortho_sz = ortho_bytes / (1024 * 1024)
@@ -297,8 +292,19 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
     dem_files = sorted(
         p
         for p in (glob.glob(os.path.join(escaped_dir, "*.tif")) + glob.glob(os.path.join(escaped_dir, "*.tiff")))
-        if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", os.path.basename(p).lower()) is not None
+        if re.search(
+            r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)",
+            unicodedata.normalize("NFC", os.path.basename(p)).lower(),
+        )
+        is not None
     )
+    non_tex_rasters = {os.path.normcase(os.path.abspath(p)) for p in (ortho_files + dem_files)}
+    tex_files = [
+        p
+        for p in img_candidates
+        if os.path.normcase(os.path.abspath(p)) not in non_tex_rasters
+        and proj_low in unicodedata.normalize("NFC", os.path.basename(p)).lower()
+    ]
     cloud_files = [
         p
         for ext in ("*.laz", "*.las", "*.ply", "*.e57", "*.xyz")
@@ -344,8 +350,12 @@ def verify_deliverables(result_dir: str, proj_name: str) -> Dict[str, Any]:
         "ortho_sz_mb": round(ortho_sz, 1),
         "spatial": bool(prj_files and tfw_files),
     }
-    if not intact and canonical.get("errors"):
-        result["reason"] = "; ".join(canonical["errors"])
+    if not intact:
+        reasons = list(canonical.get("errors") or [])
+        has_tex_err = any("texture" in r.lower() or "mtl" in r.lower() for r in reasons)
+        if present_expected and not mtl_tex_ok and not has_tex_err:
+            reasons.append("Missing OBJ texture atlas (.mtl or texture image files)")
+        result["reason"] = "; ".join(reasons) or "Deliverable integrity check failed"
     return result
 
 
@@ -592,6 +602,7 @@ def execute_audit(
         "completed_count": len(completed_batches),
         "errored_count": len(errored_batches),
         "running_batches": running_batches,
+        "result_storage_paths": result_storage_paths,
         "deliverables": deliverable_results,
         "allocation_faults": allocation_faults,
     }
@@ -740,41 +751,54 @@ def export_dashboard_telemetry(audit_data: Dict[str, Any], output_path: str) -> 
         psx_path = (
             os.path.join(ppath, f"{pname}.psx") if ppath and not ppath.lower().endswith(".psx") else ppath
         )
+        source_path = str(d.get("source_path") or "")
         entries.append(
             {
                 "id": uid,
                 "name": pname,
                 "path": ppath,
+                "outputDir": ppath,
+                "sourcePath": source_path,
                 "psxPath": psx_path,
                 "sensor": "Cluster Survey",
                 "photos": 0,
                 "aligned": 0,
                 "gsd": None,
                 "faces": None,
-                "status": "completed" if intact else "ready",
+                "status": "completed" if intact else "attention",
                 "statusLabel": "Verified" if intact else "Attention",
                 "deliverables": ", ".join(deliv_parts) or str(d.get("reason") or "--"),
                 "meshDefault": f"{d.get('obj_sz_mb', 0)} MB" if d.get("obj") else "--",
+                "texturesCount": int(d.get("textures_count") or 0),
                 "texMem": f"{d.get('textures_count', 0)} files" if d.get("textures_count") else "--",
                 "selected": False,
             }
         )
 
+    storage_roots = list(audit_data.get("result_storage_paths") or [])
     for b in audit_data.get("running_batches") or []:
-        if not isinstance(b, dict):
+        if not isinstance(b, dict) or b.get("aborted"):
             continue
         bid = b.get("batch_id")
         uid = f"batch-{bid}"
         if uid in seen_ids:
             continue
         bpath = str(b.get("path") or "")
-        pname = os.path.splitext(os.path.basename(bpath.replace("\\", "/")))[0] or f"Batch_{bid}"
+        if _is_maintenance_batch_path(bpath):
+            continue
+        pname, rdir = _resolve_batch_project_target(bpath, storage_roots)
+        if not pname:
+            pname = os.path.splitext(os.path.basename(bpath.replace("\\", "/")))[0] or f"Batch_{bid}"
+        proj_dir = rdir or (os.path.dirname(bpath) if bpath.lower().endswith(".psx") else bpath)
+        psx_resolved = os.path.join(proj_dir, f"{pname}.psx") if proj_dir else bpath
         entries.append(
             {
                 "id": uid,
                 "name": pname,
-                "path": os.path.dirname(bpath) if bpath.lower().endswith(".psx") else bpath,
-                "psxPath": bpath,
+                "path": proj_dir,
+                "outputDir": proj_dir,
+                "sourcePath": "",
+                "psxPath": psx_resolved,
                 "sensor": "Cluster Survey",
                 "photos": 0,
                 "aligned": 0,
@@ -784,6 +808,7 @@ def export_dashboard_telemetry(audit_data: Dict[str, Any], output_path: str) -> 
                 "statusLabel": str(b.get("state") or "Processing"),
                 "deliverables": "In progress",
                 "meshDefault": "--",
+                "texturesCount": 0,
                 "texMem": "--",
                 "selected": False,
             }

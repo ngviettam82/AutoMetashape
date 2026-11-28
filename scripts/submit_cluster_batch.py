@@ -358,15 +358,15 @@ def submit_batch(
     print(f"\n[CONNECT] Connecting to server at {resolved_server}...", flush=True)
     server_ip, server_port = _split_host_port(resolved_server, 5840)
 
+    from autometashape.cluster.hardware import connect_network_client, normalize_rpc_list_response
+
     net_client = Metashape.NetworkClient()
-    net_client.connect(server_ip, server_port)
+    connect_network_client(net_client, server_ip, server_port)
 
     try:
         norm_target = _norm_cluster_path(rel_psx)
         raw_b = net_client.batchList()
-        if raw_b is None:
-            raw_b = {}
-        existing_batches = raw_b.get("batches", []) if isinstance(raw_b, dict) else []
+        existing_batches = normalize_rpc_list_response(raw_b, "batches")
         aborted_ids: set[int] = set()
         for b in existing_batches:
             b_raw_path = b.get("path")
@@ -593,12 +593,17 @@ def main() -> int:
             disc_kwargs: dict[str, Any] = {"result_network_root": resolved_root}
             if args.discovery_depth != 1:
                 disc_kwargs["discovery_depth"] = args.discovery_depth
+            if args.exclude_folders:
+                disc_kwargs["exclude_folders"] = args.exclude_folders
             projects = discover_dual_share_projects(
                 args.source_share,
                 result_share,
                 **disc_kwargs,
             )
-            excl_pats = parse_exclude_folder_patterns(args.exclude_folders)
+            excl_pats = [
+                unicodedata.normalize("NFC", p).lower()
+                for p in parse_exclude_folder_patterns(args.exclude_folders)
+            ]
             if excl_pats and projects:
                 filtered_projects = []
                 for proj in projects:
@@ -608,7 +613,7 @@ def main() -> int:
                             rel_p = os.path.relpath(proj.images_dir, args.source_share).replace("\\", "/")
                         except ValueError:
                             rel_p = proj.images_dir.replace("\\", "/")
-                    rel_parts = rel_p.lower().split("/")
+                    rel_parts = unicodedata.normalize("NFC", rel_p).lower().split("/")
                     if any(any(pat in seg for pat in excl_pats) for seg in rel_parts):
                         continue
                     filtered_projects.append(proj)
@@ -675,6 +680,23 @@ def main() -> int:
             effective_output = os.path.join(os.path.normpath(args.result_share), single_proj_name)
         else:
             effective_output = ""
+
+        # Win32 Error 112 defense in single-project mode: verify headroom on result share / output volume
+        min_hr = float(getattr(args, "min_headroom", 0.0) or 0.0)
+        if min_hr > 0.0:
+            from autometashape.cluster.supervisor import check_storage_headroom
+
+            hr_target = effective_root.strip() or effective_output.strip() or args.images
+            if hr_target:
+                hr_ok, hr_free = check_storage_headroom(hr_target, min_headroom_gb=min_hr)
+                if not hr_ok:
+                    print(
+                        f"[FATAL ERROR] Insufficient storage headroom on '{hr_target}': "
+                        f"{hr_free:.1f} GB free < {min_hr:.1f} GB required.",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    return 1
 
         batch_id = submit_batch(
             images_dir=args.images,

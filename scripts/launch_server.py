@@ -138,11 +138,17 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
             print(f"[NOTICE] Ignoring unrecognized server arguments: {' '.join(cleaned)}")
 
     # 1. Resolve Configuration (explicit CLI --host overrides saved config, including 0.0.0.0)
-    config_path = args.config or cu.get_default_config_path(cu.DEFAULT_SERVER_CONFIG_FILENAME)
-    saved_config = cu.load_cluster_config(config_path)
+    read_cfg_path = args.config or cu.get_default_config_path(cu.DEFAULT_SERVER_CONFIG_FILENAME, for_write=False)
+    saved_config = cu.load_cluster_config(read_cfg_path)
 
-    host = args.host if args.host is not None else saved_config.get("host", "0.0.0.0")
-    port = args.port or saved_config.get("port", "5840")
+    raw_host = args.host if args.host is not None else saved_config.get("host", "0.0.0.0")
+    raw_port = args.port or saved_config.get("port", "5840")
+    try:
+        fallback_port = int(raw_port)
+    except (ValueError, TypeError):
+        fallback_port = 5840
+    host, parsed_port = cu.split_host_port(str(raw_host or "0.0.0.0"), default_port=fallback_port)
+    port = args.port if args.port is not None else str(parsed_port)
     shared_root = args.root.strip() or saved_config.get("root", "")
 
     if args.root.strip():
@@ -151,7 +157,7 @@ def _run_server_lifecycle(manage_pid: bool = False) -> int:
         updated_cfg.setdefault("port", str(port))
         updated_cfg["root"] = args.root.strip()
         try:
-            cu.save_cluster_config(updated_cfg, config_path)
+            cu.save_cluster_config(updated_cfg, args.config or None, filename=cu.DEFAULT_SERVER_CONFIG_FILENAME)
         except Exception:
             pass
 

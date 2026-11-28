@@ -71,7 +71,7 @@ def export_project_assets(*args, **kwargs):
             if hasattr(tmf, "TiledModelFormatSLPK"):
                 tiled_map["slpk"] = (tmf.TiledModelFormatSLPK, ".slpk")
             if hasattr(tmf, "TiledModelFormatOSGB"):
-                tiled_map["osgb"] = (tmf.TiledModelFormatOSGB, ".osgb")
+                tiled_map["osgb"] = (tmf.TiledModelFormatOSGB, ".zip")
             if tiled_map:
                 _export_mod.TILED_MODEL_FORMAT_MAP = tiled_map
         if getattr(Metashape, "ShapesFormat", None) is not None:

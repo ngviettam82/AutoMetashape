@@ -51,17 +51,14 @@ if not defined PYTHON_CMD (
 
 echo [FORMAT] Checking licenses and formatting source code...
 "%PYTHON_CMD%" %PYTHON_ARGS% tools/check_licenses.py
-if errorlevel 1 (
-    echo [FORMAT] Inserting missing license headers...
-    "%PYTHON_CMD%" %PYTHON_ARGS% tools/add_license_headers.py
-    "%PYTHON_CMD%" %PYTHON_ARGS% tools/check_licenses.py
-    if errorlevel 1 (
-        set "FMT_EXIT=%ERRORLEVEL%"
-        echo [ERROR] License header validation failed.
-        goto :cleanup
-    )
-)
+if not errorlevel 1 goto :after_licenses
+echo [FORMAT] Inserting missing license headers...
+"%PYTHON_CMD%" %PYTHON_ARGS% tools/add_license_headers.py
+"%PYTHON_CMD%" %PYTHON_ARGS% tools/check_licenses.py
+set "FMT_EXIT=%ERRORLEVEL%"
+if not "%FMT_EXIT%"=="0" goto :license_fail
 
+:after_licenses
 set "RUFF_EXE="
 set "RUFF_ARGS="
 where ruff >nul 2>nul
@@ -83,33 +80,43 @@ if not defined RUFF_EXE (
     )
 )
 
-if defined RUFF_EXE (
-    echo [FORMAT] Running ruff format...
-    "%RUFF_EXE%" %RUFF_ARGS% format .
-    if errorlevel 1 (
-        set "FMT_EXIT=%ERRORLEVEL%"
-        echo [ERROR] ruff format failed.
-        goto :cleanup
-    )
-    echo [FORMAT] Running ruff check...
-    "%RUFF_EXE%" %RUFF_ARGS% check .
-    if errorlevel 1 (
-        set "FMT_EXIT=%ERRORLEVEL%"
-        echo [ERROR] ruff check failed.
-        goto :cleanup
-    )
-) else (
-    echo [WARN] ruff not found in PATH or Python environment; skipping ruff format/check.
-    echo [WARN] Install ruff ^("pip install ruff"^) to mirror GitHub Actions Lint and Format checks locally.
-)
+if not defined RUFF_EXE goto :no_ruff
+echo [FORMAT] Running ruff format...
+"%RUFF_EXE%" %RUFF_ARGS% format .
+set "FMT_EXIT=%ERRORLEVEL%"
+if not "%FMT_EXIT%"=="0" goto :ruff_format_fail
+echo [FORMAT] Running ruff check...
+"%RUFF_EXE%" %RUFF_ARGS% check .
+set "FMT_EXIT=%ERRORLEVEL%"
+if not "%FMT_EXIT%"=="0" goto :ruff_check_fail
+goto :check_skills
 
+:no_ruff
+echo [WARN] ruff not found in PATH or Python environment; skipping ruff format/check.
+echo [WARN] Install ruff ^("pip install ruff"^) to mirror GitHub Actions Lint and Format checks locally.
+
+:check_skills
 echo [FORMAT] Validating agent skills...
 "%PYTHON_CMD%" %PYTHON_ARGS% tools/skills/cli.py check
-if errorlevel 1 (
-    set "FMT_EXIT=%ERRORLEVEL%"
-    echo [ERROR] Skill validation failed.
-    goto :cleanup
-)
+set "FMT_EXIT=%ERRORLEVEL%"
+if not "%FMT_EXIT%"=="0" goto :skill_fail
+goto :cleanup
+
+:license_fail
+echo [ERROR] License header validation failed.
+goto :cleanup
+
+:ruff_format_fail
+echo [ERROR] ruff format failed.
+goto :cleanup
+
+:ruff_check_fail
+echo [ERROR] ruff check failed.
+goto :cleanup
+
+:skill_fail
+echo [ERROR] Skill validation failed.
+goto :cleanup
 
 :cleanup
 popd

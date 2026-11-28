@@ -526,9 +526,13 @@ class TestFleetUpdater(unittest.TestCase):
         mock_metashape = MagicMock()
         mock_metashape.Tasks.RunScript.return_value = MagicMock()
         with tempfile.TemporaryDirectory() as tmp_dir:
+            staged_zip = os.path.join(tmp_dir, ".cluster", "update_payload.zip")
+            os.makedirs(os.path.dirname(staged_zip), exist_ok=True)
+            with open(staged_zip, "wb") as zf:
+                zf.write(b"PK\x05\x06" + b"\x00" * 18)
             with (
                 patch("autometashape.cluster.updater.Metashape", mock_metashape),
-                patch("autometashape.cluster.updater.stage_cluster_update_payload", return_value=""),
+                patch("autometashape.cluster.updater.stage_cluster_update_payload", return_value=staged_zip),
             ):
                 results = update_all_workers_parallel(
                     client=mock_client,
@@ -543,6 +547,36 @@ class TestFleetUpdater(unittest.TestCase):
         mock_client.setBatchPaused.assert_any_call(50, False)
         mock_client.setWorkerPaused.assert_any_call(1, False)
         mock_client.setWorkerPaused.assert_any_call(2, False)
+
+    def test_update_all_workers_parallel_aborts_early_when_staging_fails(self) -> None:
+        """Verify empty staged payload aborts P0-4 early without pausing batches/workers or creating batches."""
+        mock_client = MagicMock()
+        mock_client.workerList.return_value = {
+            "workers": [
+                {"worker_id": 1, "hostname": "Worker-A", "state": "ready", "paused": False},
+                {"worker_id": 2, "hostname": "Worker-B", "state": "ready", "paused": False},
+            ]
+        }
+        mock_client.batchList.return_value = {"batches": [{"batch_id": 50, "state": "pending", "paused": False}]}
+        mock_metashape = MagicMock()
+        mock_metashape.Tasks.RunScript.return_value = MagicMock()
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                patch("autometashape.cluster.updater.Metashape", mock_metashape),
+                patch("autometashape.cluster.updater.stage_cluster_update_payload", return_value=""),
+            ):
+                results = update_all_workers_parallel(
+                    client=mock_client,
+                    shared_root=tmp_dir,
+                    timeout=2.0,
+                    restart=False,
+                    poll_interval=0.01,
+                )
+        self.assertEqual(len(results), 2)
+        self.assertTrue(all(not r["success"] for r in results))
+        mock_client.setBatchPaused.assert_not_called()
+        mock_client.setWorkerPaused.assert_not_called()
+        mock_client.createBatch.assert_not_called()
 
 
 if __name__ == "__main__":

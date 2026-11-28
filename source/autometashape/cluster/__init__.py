@@ -54,6 +54,7 @@ from autometashape.cluster.hardware import (
     normalize_rpc_list_response,
     normalize_unicode_path,
     probe_metashape_gpu_mask,
+    split_host_port,
     test_tcp_connection,
     test_unc_path,
 )
@@ -174,6 +175,7 @@ __all__ = [
     "run_dual_share_cluster_pipeline",
     "safe_create_cluster_batch",
     "save_cluster_config",
+    "split_host_port",
     "sync_staged_project_to_network",
     "test_tcp_connection",
     "test_unc_path",

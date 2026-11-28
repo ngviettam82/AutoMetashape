@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import ctypes
+import ipaddress
 import json
 import os
 import re
@@ -374,7 +375,7 @@ def get_primary_lan_ip() -> str:
         finally:
             s.close()
 
-    # Airgapped / offline LAN fallback: inspect hostname IP resolution across all IPv4 addresses
+    # Airgapped / offline LAN fallback: inspect hostname IP resolution across IPv4 then IPv6 addresses
     try:
         host_name = socket.gethostname()
         ip = socket.gethostbyname(host_name)
@@ -384,6 +385,27 @@ def get_primary_lan_ip() -> str:
             cand = res[4][0]
             if cand and not cand.startswith(("127.", "169.254.")):
                 return cand
+    except Exception:
+        pass
+
+    # IPv6-only LAN fallback
+    try:
+        s6 = socket.socket(socket.AF_INET6, socket.SOCK_DGRAM)
+        try:
+            s6.connect(("2001:4860:4860::8888", 80))
+            ip6 = s6.getsockname()[0].split("%", 1)[0]
+            if ip6 and ip6 != "::1" and not ip6.lower().startswith("fe80:"):
+                return ip6
+        finally:
+            s6.close()
+    except Exception:
+        pass
+
+    try:
+        for res6 in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET6):
+            cand6 = str(res6[4][0]).split("%", 1)[0]
+            if cand6 and cand6 != "::1" and not cand6.lower().startswith("fe80:"):
+                return cand6
     except Exception:
         pass
 
@@ -704,13 +726,48 @@ def detect_gpu_devices() -> list[dict[str, Any]]:
     return []
 
 
+def split_host_port(server_host: str, default_port: int = 5840) -> tuple[str, int]:
+    """Parse ``host[:port]``, ``[ipv6]:port``, or bare ``ipv6`` without mangling IPv6 colons."""
+    raw = str(server_host or "").strip()
+    if not raw:
+        return "127.0.0.1", int(default_port)
+    if raw.startswith("[") and "]" in raw:
+        end = raw.index("]")
+        host = raw[1:end].strip() or "127.0.0.1"
+        rest = raw[end + 1 :].strip()
+        if rest.startswith(":") and rest[1:].isdigit():
+            pnum = int(rest[1:])
+            if 1 <= pnum <= 65535:
+                return host, pnum
+        return host, int(default_port)
+    # Only split host:port when not a bare IPv6 address
+    try:
+        ipaddress.ip_address(raw)
+        return raw, int(default_port)
+    except ValueError:
+        pass
+    if raw.count(":") == 1:
+        h, p = raw.rsplit(":", 1)
+        if h.strip() and p.strip().isdigit():
+            pnum = int(p.strip())
+            if 1 <= pnum <= 65535:
+                return h.strip(), pnum
+    return raw, int(default_port)
+
+
 def format_host_port(host: str, port: int | str = 5840) -> str:
     """Format host and port with bracketed IPv6 support (e.g. ``[::1]:5840``)."""
-    clean = str(host or "").strip()
-    if clean.startswith("[") and clean.endswith("]"):
-        clean = clean[1:-1].strip()
-    port_str = str(port).strip() if port is not None else "5840"
-    port_str = port_str or "5840"
+    clean_raw = str(host or "").strip()
+    try:
+        def_p = int(str(port).strip()) if port is not None and str(port).strip() else 5840
+    except (ValueError, TypeError):
+        def_p = 5840
+    clean, parsed_p = split_host_port(clean_raw, default_port=def_p) if clean_raw else ("", def_p)
+    has_port = clean_raw and (
+        (":" in clean_raw and not clean_raw.startswith("[") and clean_raw.count(":") == 1) or "]:" in clean_raw
+    )
+    port_num = parsed_p if has_port else def_p
+    port_str = str(port_num or 5840)
     return f"[{clean}]:{port_str}" if ":" in clean else f"{clean}:{port_str}"
 
 
@@ -739,10 +796,8 @@ def normalize_rpc_list_response(resp: Any, key: str) -> list[dict[str, Any]]:
 
 def connect_network_client(client: Any, host: str, port: int | str = 5840) -> Any:
     """Connect a Metashape NetworkClient cleanly, with 1-arg string fallback."""
-    clean_host = str(host or "").strip()
-    if clean_host.startswith("[") and clean_host.endswith("]"):
-        clean_host = clean_host[1:-1].strip()
     port_num = int(port) if port is not None and str(port).strip() else 5840
+    clean_host, port_num = split_host_port(str(host or "").strip(), default_port=port_num)
     try:
         client.connect(clean_host, port_num)
     except TypeError:
@@ -751,6 +806,7 @@ def connect_network_client(client: Any, host: str, port: int | str = 5840) -> An
 
 
 _BATCH_UNSAFE_CHARS_RE = re.compile(r'[\r\n&|<>^"%`]')
+_BATCH_UNSAFE_HOST_CHARS_RE = re.compile(r'[\r\n\s&|<>^"%`]')
 
 
 def generate_worker_bat_content(
@@ -761,14 +817,14 @@ def generate_worker_bat_content(
     gpu_mask: str | int | None = None,
 ) -> str:
     """Generate self-contained Windows batch file content for remote LAN worker nodes."""
-    target_host = host.strip() if host and host.strip() else get_primary_lan_ip()
-    if _BATCH_UNSAFE_CHARS_RE.search(target_host):
-        raise ValueError(f"Unsafe characters in worker host: {target_host!r}")
+    raw_host = host.strip() if host and host.strip() else get_primary_lan_ip()
+    if _BATCH_UNSAFE_HOST_CHARS_RE.search(raw_host):
+        raise ValueError(f"Unsafe characters in worker host: {raw_host!r}")
     target_port = str(port).strip() if port is not None else "5840"
     target_port = target_port or "5840"
     if not target_port.isdigit() or not (1 <= int(target_port) <= 65535):
         raise ValueError(f"Invalid worker port: {target_port!r}")
-    host_port = format_host_port(target_host, target_port)
+    host_port = format_host_port(raw_host, target_port)
     cpu_flag_val = 1 if int(cpu_enable) else 0
     target_root = root_path.strip()
     if _BATCH_UNSAFE_CHARS_RE.search(target_root):
@@ -844,12 +900,12 @@ if "%METASHAPE_EXE%"=="" (
 )
 
 set "CLI_ROOT=%TARGET_ROOT%"
-if "%CLI_ROOT:~-1%"=="\\" goto :fix_root_slash
-goto :root_ready
 :fix_root_slash
+if not "%CLI_ROOT:~-1%"=="\\" goto :root_ready
+if "%CLI_ROOT%"=="\\" goto :root_ready
 if "%CLI_ROOT:~1,2%"==":\\" if "%CLI_ROOT:~3%"=="" goto :double_drive_slash
 set "CLI_ROOT=%CLI_ROOT:~0,-1%"
-goto :root_ready
+goto :fix_root_slash
 :double_drive_slash
 set "CLI_ROOT=%CLI_ROOT%\\"
 :root_ready
@@ -896,7 +952,10 @@ def normalize_unicode_path(path: str) -> str:
 def test_tcp_connection(host: str, port: int, timeout: float = 3.0) -> bool:
     """Test TCP socket reachability to target cluster host and port (IPv4/IPv6 safe)."""
     try:
-        with socket.create_connection((host, int(port)), timeout=timeout):
+        port_num = int(port)
+        clean_host, parsed_port = split_host_port(str(host or "").strip(), default_port=port_num)
+        eff_port = port_num if port_num else parsed_port
+        with socket.create_connection((clean_host, eff_port), timeout=timeout):
             return True
     except (socket.timeout, OSError, ValueError):
         return False
@@ -924,11 +983,38 @@ def test_unc_path(root_path: str) -> tuple[bool, str]:
         return False, f"Access denied to shared storage path '{norm_path}': {e}"
 
 
+_POSIX_UNC_GUARD_DIRS = frozenset(
+    {
+        "mnt",
+        "tmp",
+        "var",
+        "home",
+        "users",
+        "volumes",
+        "opt",
+        "etc",
+        "media",
+        "data",
+        "workspace",
+        "root",
+        "private",
+        "dev",
+        "proc",
+        "sys",
+        "run",
+        "lib",
+        "usr",
+        "bin",
+    }
+)
+
+
 def extract_unc_root(path: str) -> str:
     """Extracts UNC share root (\\\\server\\share) if path is a UNC path.
 
     Handles Win32 extended-length UNC prefixes (``\\\\?\\UNC\\server\\share\\...``)
-    while rejecting extended local drive paths (``\\\\?\\C:\\...``).
+    while rejecting extended local drive paths (``\\\\?\\C:\\...``) and POSIX
+    double-slash paths (e.g. ``//mnt/nfs/...`` or ``//Volumes/NAS/...``).
 
     Args:
         path: Path string to inspect.
@@ -938,7 +1024,19 @@ def extract_unc_root(path: str) -> str:
     """
     if not path or not isinstance(path, str):
         return ""
-    norm = path.strip().replace("/", "\\")
+    raw = path.strip()
+    if raw.startswith("//") and not raw.lower().startswith("//?/unc/"):
+        if raw.lower().startswith(("//?/", "//./")):
+            return ""
+        fwd_parts = [p for p in raw[2:].split("/") if p]
+        if not fwd_parts:
+            return ""
+        first_seg = fwd_parts[0].lower()
+        if first_seg in _POSIX_UNC_GUARD_DIRS:
+            return ""
+        if sys.platform != "win32" and (first_seg == "srv" or os.path.exists("/" + raw.lstrip("/"))):
+            return ""
+    norm = raw.replace("/", "\\")
     if norm.lower().startswith("\\\\?\\unc\\"):
         parts = [p for p in norm[8:].split("\\") if p]
         if len(parts) >= 2:

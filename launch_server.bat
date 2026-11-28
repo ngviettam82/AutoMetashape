@@ -52,22 +52,20 @@ set "IS_HEADLESS="
 call :detect_headless %*
 
 :: 3. Launch Server Script via Python (Strictly no unmanaged binary fallback)
-if defined PYTHON_EXE (
-    "%PYTHON_EXE%" %PYTHON_ARGS% "%LAUNCHER_PY%" %*
-    set "LAUNCH_EXIT=%ERRORLEVEL%"
-    if not "%LAUNCH_EXIT%"=="0" (
-        echo.
-        echo [EXIT] Server launcher terminated with exit code %LAUNCH_EXIT%.
-        if not defined IS_HEADLESS pause
-        exit /b %LAUNCH_EXIT%
-    )
-    exit /b 0
-) else (
-    echo [ERROR] Python runtime was not found.
-    echo Please install Agisoft Metashape Pro or Python 3.9+ to run the cluster server daemon.
-    if not defined IS_HEADLESS pause
-    exit /b 1
-)
+if not defined PYTHON_EXE goto :no_python
+"%PYTHON_EXE%" %PYTHON_ARGS% "%LAUNCHER_PY%" %*
+set "LAUNCH_EXIT=%ERRORLEVEL%"
+if "%LAUNCH_EXIT%"=="0" exit /b 0
+echo.
+echo [EXIT] Server launcher terminated with exit code %LAUNCH_EXIT%.
+if not defined IS_HEADLESS pause
+exit /b %LAUNCH_EXIT%
+
+:no_python
+echo [ERROR] Python runtime was not found.
+echo Please install Agisoft Metashape Pro or Python 3.9+ to run the cluster server daemon.
+if not defined IS_HEADLESS pause
+exit /b 1
 
 :detect_headless
 if [%1]==[] goto :eof

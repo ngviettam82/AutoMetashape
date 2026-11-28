@@ -45,17 +45,15 @@ if not defined PYTHON_EXE (
 )
 
 :: 2. Launch Fleet Updater
-if defined PYTHON_EXE (
-    "%PYTHON_EXE%" %PYTHON_ARGS% "%UPDATER_PY%" %*
-    set "EXIT_CODE=%ERRORLEVEL%"
-    if not "%EXIT_CODE%"=="0" (
-        echo.
-        echo [EXIT] Fleet updater terminated with exit code %EXIT_CODE%.
-        exit /b %EXIT_CODE%
-    )
-    exit /b 0
-) else (
-    echo [ERROR] Python runtime was not found.
-    echo Please install Agisoft Metashape Pro or Python 3.9+ to run the fleet updater.
-    exit /b 1
-)
+if not defined PYTHON_EXE goto :no_python
+"%PYTHON_EXE%" %PYTHON_ARGS% "%UPDATER_PY%" %*
+set "EXIT_CODE=%ERRORLEVEL%"
+if "%EXIT_CODE%"=="0" exit /b 0
+echo.
+echo [EXIT] Fleet updater terminated with exit code %EXIT_CODE%.
+exit /b %EXIT_CODE%
+
+:no_python
+echo [ERROR] Python runtime was not found.
+echo Please install Agisoft Metashape Pro or Python 3.9+ to run the fleet updater.
+exit /b 1

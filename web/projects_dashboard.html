@@ -469,7 +469,8 @@
       background: var(--pill-info-bg);
       color: var(--pill-info-ink);
     }
-    .pill-ready {
+    .pill-ready,
+    .pill-attention {
       background: var(--pill-warning-bg);
       color: var(--pill-warning-ink);
     }
@@ -746,6 +747,7 @@
         <div class="filter-tabs">
           <button class="tab-btn active" data-filter="all">All (<span id="count-all">0</span>)</button>
           <button class="tab-btn" data-filter="completed">Completed (<span id="count-completed">0</span>)</button>
+          <button class="tab-btn" data-filter="attention">Attention (<span id="count-attention">0</span>)</button>
           <button class="tab-btn" data-filter="queued">Queued (<span id="count-queued">0</span>)</button>
           <button class="tab-btn" data-filter="processing">Processing (<span id="count-processing">0</span>)</button>
         </div>
@@ -869,7 +871,7 @@
       </div>
       <div class="batch-actions">
         <button class="btn-batch-secondary" id="btn-copy-cli">Copy Batch CLI</button>
-        <button class="btn-batch-primary" id="btn-execute-batch">Copy Supervisor CLI</button>
+        <button class="btn-batch-primary" id="btn-execute-batch">Copy Cluster Batch CLI</button>
       </div>
     </div>
   </div>
@@ -897,18 +899,26 @@
     }
 
     function shellQuote(val, mode) {
-      const s = String(val ?? "");
+      let s = String(val ?? "").replace(/[\r\n\0]+/g, " ");
       if (mode === "bash") {
         return "'" + s.replace(/'/g, "'\"'\"'") + "'";
       }
       if (mode === "cmd") {
-        return '"' + s.replace(/"/g, '""') + '"';
+        s = s.replace(/%/g, "^%").replace(/"/g, '""');
+        if (s.endsWith("\\")) {
+          if (/^[a-zA-Z]:\\$/.test(s)) {
+            s = s + "\\";
+          } else {
+            s = s.replace(/\\+$/, "");
+          }
+        }
+        return '"' + s + '"';
       }
       return "'" + s.replace(/'/g, "''") + "'";
     }
 
     function safeStatusClass(status) {
-      const allowed = new Set(["completed", "processing", "ready", "queued", "unaligned"]);
+      const allowed = new Set(["completed", "processing", "ready", "attention", "queued", "unaligned"]);
       const s = String(status || "unaligned").toLowerCase();
       return allowed.has(s) ? s : "unaligned";
     }
@@ -957,6 +967,7 @@
       const totalAligned = projects.reduce((acc, p) => acc + (parseInt(p.aligned) || 0), 0);
       const regPct = totalPhotos > 0 ? ((totalAligned / totalPhotos) * 100).toFixed(1) + "%" : "0.0%";
       const completedCount = projects.filter(p => p.status === 'completed').length;
+      const attentionCount = projects.filter(p => p.status === 'attention').length;
       const queuedCount = projects.filter(p => p.status === 'queued').length;
       const activeCount = projects.filter(p => p.status === 'processing').length;
 
@@ -969,7 +980,10 @@
       const elProjects = document.getElementById("kpi-projects");
       if (elProjects) elProjects.textContent = allCount;
       const elProjMeta = document.getElementById("kpi-projects-meta");
-      if (elProjMeta) elProjMeta.textContent = `${completedCount} completed · ${queuedCount} queued · ${activeCount} active`;
+      if (elProjMeta) {
+        const attnTxt = attentionCount > 0 ? ` · ${attentionCount} attention` : "";
+        elProjMeta.textContent = `${completedCount} completed${attnTxt} · ${queuedCount} queued · ${activeCount} active`;
+      }
 
       const elBadgeTotal = document.getElementById("badge-total");
       if (elBadgeTotal) elBadgeTotal.textContent = allCount;
@@ -980,6 +994,8 @@
       if (elCountAll) elCountAll.textContent = allCount;
       const elCountCompleted = document.getElementById("count-completed");
       if (elCountCompleted) elCountCompleted.textContent = completedCount;
+      const elCountAttention = document.getElementById("count-attention");
+      if (elCountAttention) elCountAttention.textContent = attentionCount;
       const elCountQueued = document.getElementById("count-queued");
       if (elCountQueued) elCountQueued.textContent = queuedCount;
       const elCountProcessing = document.getElementById("count-processing");
@@ -1027,9 +1043,14 @@
 
       let totalAtlasPages = 0;
       projects.forEach(p => {
-        if (p.meshDefault && String(p.meshDefault).includes("8K")) {
+        if (typeof p.texturesCount === 'number' && Number.isFinite(p.texturesCount) && p.texturesCount > 0) {
+          totalAtlasPages += p.texturesCount;
+        } else if (p.texMem && /(\d+)\s*files?/i.test(String(p.texMem))) {
+          const mt = String(p.texMem).match(/(\d+)\s*files?/i);
+          if (mt) totalAtlasPages += parseInt(mt[1], 10);
+        } else if (p.meshDefault && String(p.meshDefault).includes("8K")) {
           const m = String(p.meshDefault).match(/(\d+)x\s*8K/i);
-          totalAtlasPages += m ? parseInt(m[1]) : 8;
+          totalAtlasPages += m ? parseInt(m[1], 10) : 8;
         }
       });
       const elTextures = document.getElementById("kpi-textures");
@@ -1124,12 +1145,10 @@
       }
     }
 
-    function renderTable() {
-      const tbody = document.getElementById("projects-table-body");
-      tbody.replaceChildren();
-
-      const query = (document.getElementById("search-input").value || "").toLowerCase();
-      const filtered = projects.filter(p => {
+    function getFilteredProjects() {
+      const searchEl = document.getElementById("search-input");
+      const query = (searchEl ? searchEl.value : "").toLowerCase();
+      return projects.filter(p => {
         const matchesFilter = activeFilter === "all" || p.status === activeFilter;
         const matchesQuery = !query ||
           (p.name && String(p.name).toLowerCase().includes(query)) ||
@@ -1137,6 +1156,13 @@
           (p.path && String(p.path).toLowerCase().includes(query));
         return matchesFilter && matchesQuery;
       });
+    }
+
+    function renderTable() {
+      const tbody = document.getElementById("projects-table-body");
+      tbody.replaceChildren();
+
+      const filtered = getFilteredProjects();
 
       if (filtered.length === 0) {
         const tr = document.createElement("tr");
@@ -1278,9 +1304,18 @@
 
       const checkAll = document.getElementById("check-all");
       if (checkAll) {
-        checkAll.checked = (projects.length > 0 && count === projects.length);
-        checkAll.indeterminate = count > 0 && count < projects.length;
+        const visible = getFilteredProjects();
+        const visSel = visible.filter(p => p.selected).length;
+        checkAll.checked = (visible.length > 0 && visSel === visible.length);
+        checkAll.indeterminate = visSel > 0 && visSel < visible.length;
       }
+    }
+
+    function _projectCliPaths(p) {
+      const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
+      const outDir = p.outputDir || p.path || "";
+      const imgDir = p.sourcePath || (!p.outputDir && !p.psxPath ? (p.path || "<SOURCE_IMAGES_DIR>") : "<SOURCE_IMAGES_DIR>");
+      return { projName, imgDir, outDir };
     }
 
     async function copySelectedBatchCli() {
@@ -1292,15 +1327,16 @@
       const mode = getShellMode();
       const pyBin = mode === "bash" ? "python3" : "python";
       const cmds = selected.map(p => {
-        const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
-        return `${pyBin} scripts/metashape_reconstruction.py --images ${shellQuote(p.path, mode)} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
+        const { projName, imgDir, outDir } = _projectCliPaths(p);
+        const outArg = outDir ? ` --output ${shellQuote(outDir, mode)}` : "";
+        return `${pyBin} scripts/metashape_reconstruction.py --images ${shellQuote(imgDir, mode)}${outArg} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
       }).join("\n");
       await copyToClipboard(cmds, `Copied batch reconstruction commands (${mode}) for ${selected.length} project(s)!`);
     }
 
     document.getElementById("check-all").addEventListener("change", (e) => {
       const isChecked = e.target.checked;
-      projects.forEach(p => p.selected = isChecked);
+      getFilteredProjects().forEach(p => p.selected = isChecked);
       renderTable();
     });
 
@@ -1345,8 +1381,9 @@
       const mode = getShellMode();
       const pyBin = mode === "bash" ? "python3" : "python";
       const cmds = selected.map(p => {
-        const projName = (p.name || "").includes("/") ? p.name.split("/").pop().trim() : (p.name || "Project");
-        return `${pyBin} scripts/submit_cluster_batch.py --images ${shellQuote(p.path, mode)} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
+        const { projName, imgDir, outDir } = _projectCliPaths(p);
+        const outArg = outDir ? ` --output ${shellQuote(outDir, mode)}` : "";
+        return `${pyBin} scripts/submit_cluster_batch.py --images ${shellQuote(imgDir, mode)}${outArg} --project-name ${shellQuote(projName, mode)} --preset ${shellQuote(activePreset, mode)}`;
       }).join("\n");
       await copyToClipboard(cmds, `Copied cluster submit CLI (${mode}) for ${selected.length} project(s)!`);
     });

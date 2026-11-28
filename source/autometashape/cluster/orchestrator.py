@@ -15,6 +15,7 @@ import sys
 import time
 import uuid
 import zipfile
+from typing import Any
 
 try:
     import Metashape
@@ -345,7 +346,7 @@ def build_monolithic_runscript_task(
     texture_pages: int | None = 16,
     crop_method: str | None = "gps-square",
     texture_format: str = "png",
-    ortho_resolution: float = 0.05,
+    ortho_resolution: float | None = 0.05,
     align_photos: bool = True,
     build_depth_maps: bool = True,
     build_mesh: bool = True,
@@ -409,6 +410,17 @@ def build_monolithic_runscript_task(
     report_title: str | None = None,
     scratch_dir: str | None = None,
     min_scratch_free_gb: float | None = None,
+    multi_chunk: str | None = None,
+    chunk_align_method: str | None = None,
+    ground_cell_size: float | None = None,
+    ground_max_angle: float | None = None,
+    ground_max_distance: float | None = None,
+    photo_layout: str | None = None,
+    reference_columns: str | None = None,
+    reference_delimiter: str | None = None,
+    reference_crs: str | None = None,
+    reference_skip_rows: int | None = None,
+    source_share: str | None = None,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
@@ -417,10 +429,12 @@ def build_monolithic_runscript_task(
     # Standard relative entry point on worker local repository
     rel_script = "scripts/metashape_reconstruction.py"
     norm_net = normalize_share_path(network_path) if network_path and network_path.strip() else ""
+    norm_src = normalize_share_path(source_share) if source_share and source_share.strip() else ""
 
     rel_images = (
         relpath_under(images_dir, norm_net, case_insensitive=True) if norm_net else None
     ) or images_dir.replace("\\", "/")
+    rel_source_images = relpath_under(images_dir, norm_src, case_insensitive=True) if norm_src else None
     rel_output = (
         relpath_under(output_dir, norm_net, case_insensitive=True) if norm_net else None
     ) or output_dir.replace("\\", "/")
@@ -443,8 +457,11 @@ def build_monolithic_runscript_task(
     _append_flag(worker_args, "--align-quality", align_quality)
     _append_flag(worker_args, "--depth-quality", depth_quality)
     _append_flag(worker_args, "--texture-format", texture_format)
-    _append_flag(worker_args, "--ortho-resolution", str(ortho_resolution if ortho_resolution is not None else 0.05))
+    if ortho_resolution is not None:
+        _append_flag(worker_args, "--ortho-resolution", str(ortho_resolution))
     _append_flag(worker_args, "--status-file", rel_status)
+    if rel_source_images:
+        _append_flag(worker_args, "--source-rel", rel_source_images)
 
     if depth_filtering is not None:
         worker_args.extend(["--depth-filtering", depth_filtering])
@@ -508,6 +525,26 @@ def build_monolithic_runscript_task(
         worker_args.append("--no-ortho-cull-faces")
     if report_title:
         _append_flag(worker_args, "--report-title", report_title)
+    if multi_chunk:
+        _append_flag(worker_args, "--multi-chunk", multi_chunk)
+    if chunk_align_method:
+        _append_flag(worker_args, "--chunk-align-method", chunk_align_method)
+    if ground_cell_size is not None:
+        worker_args.extend(["--ground-cell-size", str(ground_cell_size)])
+    if ground_max_angle is not None:
+        worker_args.extend(["--ground-max-angle", str(ground_max_angle)])
+    if ground_max_distance is not None:
+        worker_args.extend(["--ground-max-distance", str(ground_max_distance)])
+    if photo_layout:
+        _append_flag(worker_args, "--photo-layout", photo_layout)
+    if reference_columns:
+        _append_flag(worker_args, "--reference-columns", reference_columns)
+    if reference_delimiter:
+        _append_flag(worker_args, "--reference-delimiter", reference_delimiter)
+    if reference_crs:
+        _append_flag(worker_args, "--reference-crs", reference_crs)
+    if reference_skip_rows is not None and reference_skip_rows > 0:
+        worker_args.extend(["--reference-skip-rows", str(reference_skip_rows)])
     if scratch_dir:
         _append_flag(worker_args, "--scratch-dir", scratch_dir)
     if min_scratch_free_gb is not None:
@@ -1343,7 +1380,7 @@ def _reap_holding_workers(net_client, batch_ids: set[int], shared_root: str) -> 
     reaped_hosts: list[str] = []
     try:
         from autometashape.cluster.abort import dispatch_abort_signal
-        from autometashape.cluster.hardware import is_healthy_online_worker
+        from autometashape.cluster.hardware import is_healthy_online_worker, normalize_rpc_list_response
 
         holding_worker_ids: set[int] = set()
         if hasattr(net_client, "batchInfo"):
@@ -1358,9 +1395,7 @@ def _reap_holding_workers(net_client, batch_ids: set[int], shared_root: str) -> 
                     pass
 
         raw_w = net_client.workerList() if hasattr(net_client, "workerList") else {}
-        workers = (
-            raw_w.get("workers", []) if isinstance(raw_w, dict) else (raw_w if isinstance(raw_w, (list, tuple)) else [])
-        )
+        workers = normalize_rpc_list_response(raw_w, "workers")
         seen_nodes: set[str] = set()
         for w in workers:
             if not is_healthy_online_worker(w):
@@ -1376,7 +1411,9 @@ def _reap_holding_workers(net_client, batch_ids: set[int], shared_root: str) -> 
                     seen_nodes.add(key)
                     try:
                         dispatch_abort_signal(
-                            node_name=hname, batch_id=w_bid or next(iter(batch_ids)), shared_root=shared_root
+                            node_name=hname,
+                            batch_id=w_bid if w_bid is not None else next(iter(batch_ids)),
+                            shared_root=shared_root,
                         )
                         reaped_hosts.append(hname)
                     except Exception:
