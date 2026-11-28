@@ -19,6 +19,7 @@ except ImportError:
 from autometashape.cluster.dual_share import extract_path_leaf_name
 from autometashape.core.crs_utils import (
     crs_linear_unit_to_meters,
+    crs_vertical_unit_to_meters,
     is_linear_crs,
     is_local_or_engineering_crs,
 )
@@ -208,7 +209,36 @@ def _build_metric_ortho_projection(chunk):
                 lons.append(lon)
                 lats.append(lat)
         if not lons:
-            # GCP-only georeferenced fallback: derive lon/lat from estimated camera centers
+            try:
+                wgs84 = Metashape.CoordinateSystem("EPSG::4326")
+            except Exception:
+                wgs84 = None
+            for marker in getattr(chunk, "markers", None) or []:
+                mref = getattr(marker, "reference", None)
+                mloc = getattr(mref, "location", None) if mref is not None else None
+                if mloc is None or not getattr(mref, "enabled", True):
+                    continue
+                pt = mloc
+                if wgs84 is not None and target_crs is not None:
+                    try:
+                        pt = Metashape.CoordinateSystem.transform(mloc, target_crs, wgs84)
+                    except Exception:
+                        pt = mloc
+                try:
+                    lon, lat = float(pt.x), float(pt.y)
+                    if (
+                        math.isfinite(lon)
+                        and math.isfinite(lat)
+                        and abs(lon) <= 180.0
+                        and abs(lat) <= 90.0
+                        and (abs(lon) > 1e-4 or abs(lat) > 1e-4)
+                    ):
+                        lons.append(lon)
+                        lats.append(lat)
+                except Exception:
+                    pass
+        if not lons:
+            # Estimated camera center fallback when neither GPS priors nor markers exist
             mat = getattr(getattr(chunk, "transform", None), "matrix", None)
             if mat is not None:
                 try:
@@ -731,8 +761,7 @@ def _export_opened_document(
                     surf_data = Metashape.DataSource.ElevationData
                 ortho_kwargs = {"surface_data": surf_data}
                 if eff_ortho_res > 0 and ortho_crs_is_metric:
-                    unit_m = crs_linear_unit_to_meters(proj_om_crs)
-                    ortho_kwargs["resolution"] = eff_ortho_res / unit_m if unit_m > 0.0 else eff_ortho_res
+                    ortho_kwargs["resolution"] = eff_ortho_res
                 if proj_om is not None:
                     ortho_kwargs["projection"] = proj_om
                 chunk.buildOrthomosaic(**ortho_kwargs)
@@ -769,8 +798,7 @@ def _export_opened_document(
                 "save_alpha": True,
             }
             if eff_ortho_res > 0 and om_is_metric:
-                unit_m = crs_linear_unit_to_meters(om_crs)
-                export_ortho_kwargs["resolution"] = eff_ortho_res / unit_m if unit_m > 0.0 else eff_ortho_res
+                export_ortho_kwargs["resolution"] = eff_ortho_res
             chunk.exportRaster(**export_ortho_kwargs)
             print(f"  Saved Orthomosaic: {ortho_out} ({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)", flush=True)
         else:
@@ -895,10 +923,16 @@ def _export_opened_document(
 
         if has_dem:
             try:
+                vert_unit_m = crs_vertical_unit_to_meters(getattr(chunk, "crs", None))
+                interval_crs = (
+                    contour_interval / vert_unit_m
+                    if vert_unit_m > 0.0 and contour_interval > 0.0
+                    else contour_interval
+                )
                 print(f"\n[Contours] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
                 chunk.buildContours(
                     source_data=Metashape.DataSource.ElevationData,
-                    interval=contour_interval,
+                    interval=interval_crs,
                     prevent_intersections=True,
                 )
                 cnt_fmt_key = (contours_format or "shp").lower()

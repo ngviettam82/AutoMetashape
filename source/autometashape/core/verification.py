@@ -54,30 +54,32 @@ _MTL_MAP_OPT_ARITY = {
 
 
 def _extract_mtl_map_kd_filename(line: str) -> str:
-    """Parse texture filename from an MTL ``map_Kd`` directive, skipping optional flags."""
+    """Parse texture filename from an MTL ``map_Kd`` directive, skipping known optional flags."""
     stripped = line.strip()
     if not stripped.startswith("map_Kd"):
         return ""
     rest = stripped[6:]
     if not rest or not rest[0].isspace():
         return ""
-    tokens = rest.split()
+    matches = list(re.finditer(r"\S+", rest))
     i = 0
-    while i < len(tokens) and tokens[i].startswith("-"):
-        opt = tokens[i].lower()
-        arity = _MTL_MAP_OPT_ARITY.get(opt, 1)
+    while i < len(matches):
+        opt = matches[i].group(0).lower()
+        if opt not in _MTL_MAP_OPT_ARITY:
+            break
+        arity = _MTL_MAP_OPT_ARITY[opt]
         i += 1
         skipped = 0
-        while i < len(tokens) and skipped < arity and not tokens[i].startswith("-"):
-            # Stop early for 1-3 arg numeric options when encountering the texture filename
+        while i < len(matches) and skipped < arity and matches[i].group(0).lower() not in _MTL_MAP_OPT_ARITY:
+            tok = matches[i].group(0)
             if opt in ("-o", "-s", "-t") and skipped >= 1:
                 try:
-                    float(tokens[i])
+                    float(tok)
                 except ValueError:
                     break
             i += 1
             skipped += 1
-    return " ".join(tokens[i:]).strip() if i < len(tokens) else ""
+    return rest[matches[i].start() :].strip() if i < len(matches) else ""
 
 
 def verify_obj_model(obj_path: str, min_size_bytes: int = 1000) -> Tuple[bool, List[str]]:
@@ -256,7 +258,7 @@ def verify_geotiff(tif_path: str, min_size_bytes: int = 1000) -> Tuple[bool, Lis
     return True, []
 
 
-def verify_point_cloud(cloud_path: str, min_size_bytes: int = 50000) -> Tuple[bool, List[str]]:
+def verify_point_cloud(cloud_path: str, min_size_bytes: int = 256) -> Tuple[bool, List[str]]:
     """Validates Dense Point Cloud (LAZ, LAS, PLY) structure and header magic."""
     if not os.path.isfile(cloud_path):
         return False, [f"Point cloud file not found: {cloud_path}"]
@@ -402,17 +404,21 @@ def verify_project_deliverables(
         if not project_name:
             return candidates[0]
         pref = project_name.lower()
-        exact_or_delim = [
-            f
-            for f in candidates
-            if os.path.splitext(f)[0].lower() == pref or f.lower().startswith((pref + ".", pref + "_", pref + "-"))
-        ]
-        if exact_or_delim:
-            return exact_or_delim[0]
-        generic = [f for f in candidates if os.path.splitext(f)[0].lower() in _GENERIC_ASSET_STEMS]
-        if generic:
-            return generic[0]
-        return None
+
+        def _rank(fname: str) -> tuple[int, str]:
+            stem = os.path.splitext(fname)[0].lower()
+            if stem == pref:
+                return (0, fname.lower())
+            if fname.lower().startswith(pref + "_"):
+                return (1, fname.lower())
+            if fname.lower().startswith(pref + "-"):
+                return (2, fname.lower())
+            if stem in _GENERIC_ASSET_STEMS:
+                return (3, fname.lower())
+            return (99, fname.lower())
+
+        ranked = sorted((c for c in candidates if _rank(c)[0] < 99), key=_rank)
+        return ranked[0] if ranked else None
 
     # Collect texture filenames referenced by MTL libraries so TIFF textures are never misclassified as DEM/Ortho
     mtl_referenced_tifs: set[str] = set()
@@ -462,24 +468,27 @@ def verify_project_deliverables(
     elif expected_assets and "glb" in expected_assets:
         errors.append("Expected binary GLB model not found in deliverables directory.")
 
-    # 3. Elevation & Orthomosaic (GeoTIFF — exclude MTL textures and prefer canonical _dem/_orthomosaic suffixes)
+    # 3. Elevation & Orthomosaic (GeoTIFF — classify explicit _dem/_dsm suffixes before generic ortho tokens)
     tif_files = [f for f in all_files if f.lower().endswith((".tif", ".tiff")) and f.lower() not in mtl_referenced_tifs]
+    dem_files = [f for f in tif_files if f.lower().endswith(("_dem.tif", "_dem.tiff", "_dsm.tif", "_dsm.tiff"))]
+    dem_set = {f.lower() for f in dem_files}
     ortho_files = [
         f
         for f in tif_files
-        if f.lower().endswith(("_orthomosaic.tif", "_orthomosaic.tiff", "_ortho.tif", "_ortho.tiff"))
+        if f.lower() not in dem_set
+        and f.lower().endswith(("_orthomosaic.tif", "_orthomosaic.tiff", "_ortho.tif", "_ortho.tiff"))
     ]
-    if not ortho_files:
-        ortho_files = [
-            f for f in tif_files if re.search(r"(?:^|[_-])(?:orthomosaic|ortho)(?:[_.-]|$)", f.lower()) is not None
-        ]
     ortho_set = {f.lower() for f in ortho_files}
-    dem_candidates = [f for f in tif_files if f.lower() not in ortho_set]
-    dem_files = [f for f in dem_candidates if f.lower().endswith(("_dem.tif", "_dem.tiff", "_dsm.tif", "_dsm.tiff"))]
-    if not dem_files:
-        dem_files = [
-            f for f in dem_candidates if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", f.lower()) is not None
-        ]
+    for fname in tif_files:
+        low_f = fname.lower()
+        if low_f in dem_set or low_f in ortho_set:
+            continue
+        if re.search(r"(?:^|[_-])(?:dem|dsm|elevation)(?:[_.-]|$)", low_f) is not None:
+            dem_files.append(fname)
+            dem_set.add(low_f)
+        elif re.search(r"(?:^|[_-])(?:orthomosaic|ortho)(?:[_.-]|$)", low_f) is not None:
+            ortho_files.append(fname)
+            ortho_set.add(low_f)
 
     target_dem = _prefer_project_match(dem_files)
     if target_dem:

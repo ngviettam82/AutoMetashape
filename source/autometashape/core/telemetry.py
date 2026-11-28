@@ -11,6 +11,7 @@ import hashlib
 import math
 import os
 import re
+import struct
 import sys
 
 from autometashape.core.crs_utils import classify_crs, compute_metric_epsg
@@ -716,7 +717,37 @@ def analyze_radiometry(image_paths: list, sample_count: int = 15) -> dict:
                         if isinstance(raw, str):
                             raw = raw.encode("latin1")
                         total_bytes = len(raw)
-                        if total_bytes >= 3 and total_bytes % 3 == 0:
+                        n_pixels = 256 * 256
+                        dt = str(getattr(thumb, "data_type", "") or "").upper()
+                        is_u16 = ("16" in dt) or (total_bytes in (n_pixels * 2, n_pixels * 6))
+                        if is_u16 and total_bytes == n_pixels * 6:
+                            vals = struct.unpack(f"<{n_pixels * 3}H", raw)
+                            sh_cnt = 0
+                            hi_cnt = 0
+                            for idx in range(0, len(vals), 3):
+                                luma = ((vals[idx] * 77 + vals[idx + 1] * 150 + vals[idx + 2] * 29) >> 8) / 257.0
+                                if luma < 20.0:
+                                    sh_cnt += 1
+                                elif luma > 235.0:
+                                    hi_cnt += 1
+                            shadow_counts.append(sh_cnt / n_pixels)
+                            highlight_counts.append(hi_cnt / n_pixels)
+                        elif is_u16 and total_bytes == n_pixels * 2:
+                            vals = struct.unpack(f"<{n_pixels}H", raw)
+                            shadow_counts.append(sum(1 for v in vals if (v / 257.0) < 20.0) / n_pixels)
+                            highlight_counts.append(sum(1 for v in vals if (v / 257.0) > 235.0) / n_pixels)
+                        elif total_bytes == n_pixels * 4:
+                            sh_cnt = 0
+                            hi_cnt = 0
+                            for idx in range(0, total_bytes, 4):
+                                luma = (raw[idx] * 77 + raw[idx + 1] * 150 + raw[idx + 2] * 29) >> 8
+                                if luma < 20:
+                                    sh_cnt += 1
+                                elif luma > 235:
+                                    hi_cnt += 1
+                            shadow_counts.append(sh_cnt / n_pixels)
+                            highlight_counts.append(hi_cnt / n_pixels)
+                        elif total_bytes >= 3 and total_bytes % 3 == 0:
                             n_px = total_bytes // 3
                             sh_cnt = 0
                             hi_cnt = 0
@@ -1070,7 +1101,7 @@ def classify_sensor_shutter(
         if any(k in combined_name for k in ["fc6310", "m3e", "m4e", "p1", "x7", "x4s", "zenmuse l2", "m3m"]):
             return "mechanical"
         return "rolling"
-    if any(k in combined_name for k in ["mavic", "mini", "air", "smartphone", "iphone", "gopro"]):
+    if re.search(r"\b(?:mavic|mini|air|smartphone|iphone|gopro)\b", combined_name):
         return "rolling"
     return "mechanical"
 
@@ -1101,6 +1132,7 @@ def analyze_survey_physics(
     widths, heights = [], []
     focal_lengths = []
     focal_35mms = []
+    per_model_optics: dict[str, dict[str, list[float]]] = {}
     makes = []
     models = []
     coords = []
@@ -1127,6 +1159,7 @@ def analyze_survey_physics(
                 xmp_shutter = meta["DJI/ShutterType"] if "DJI/ShutterType" in meta else None
                 cam_path = c.photo.path if getattr(c, "photo", None) else None
                 cam_label = f"{make} {model}".strip()
+                m_opt = per_model_optics.setdefault(model, {"w": [], "h": [], "fl": [], "f35": []})
                 if model:
                     cameras_detected.add(cam_label)
                     models.append(model)
@@ -1139,14 +1172,22 @@ def analyze_survey_physics(
                 if w > 0:
                     widths.append(w)
                     heights.append(h)
+                    m_opt["w"].append(w)
+                    m_opt["h"].append(h)
                 if "Exif/FocalLength" in meta:
                     try:
-                        focal_lengths.append(float(meta["Exif/FocalLength"]))
+                        fl_val = float(meta["Exif/FocalLength"])
+                        if math.isfinite(fl_val) and fl_val > 0.0:
+                            focal_lengths.append(fl_val)
+                            m_opt["fl"].append(fl_val)
                     except (ValueError, TypeError):
                         pass
                 if "Exif/FocalLengthIn35mmFilm" in meta:
                     try:
-                        focal_35mms.append(float(meta["Exif/FocalLengthIn35mmFilm"]))
+                        f35_val = float(meta["Exif/FocalLengthIn35mmFilm"])
+                        if math.isfinite(f35_val) and f35_val > 0.0:
+                            focal_35mms.append(f35_val)
+                            m_opt["f35"].append(f35_val)
                     except (ValueError, TypeError):
                         pass
                 if c.reference and getattr(c.reference, "enabled", True) and c.reference.location:
@@ -1180,6 +1221,7 @@ def analyze_survey_physics(
             heights.clear()
             focal_lengths.clear()
             focal_35mms.clear()
+            per_model_optics.clear()
             makes.clear()
             models.clear()
             coords.clear()
@@ -1205,6 +1247,7 @@ def analyze_survey_physics(
             mk = t.get("make", "")
             md = t.get("model", "")
             cam_label = f"{mk} {md}".strip()
+            m_opt = per_model_optics.setdefault(md, {"w": [], "h": [], "fl": [], "f35": []})
             if md:
                 cameras_detected.add(cam_label)
                 models.append(md)
@@ -1215,10 +1258,16 @@ def analyze_survey_physics(
             if t["width"] > 0:
                 widths.append(t["width"])
                 heights.append(t["height"])
-            if t.get("focal_length") is not None:
-                focal_lengths.append(t["focal_length"])
-            if t.get("focal_35mm") is not None:
-                focal_35mms.append(t["focal_35mm"])
+                m_opt["w"].append(t["width"])
+                m_opt["h"].append(t["height"])
+            fl_raw = t.get("focal_length")
+            if fl_raw is not None and math.isfinite(float(fl_raw)) and float(fl_raw) > 0.0:
+                focal_lengths.append(float(fl_raw))
+                m_opt["fl"].append(float(fl_raw))
+            f35_raw = t.get("focal_35mm")
+            if f35_raw is not None and math.isfinite(float(f35_raw)) and float(f35_raw) > 0.0:
+                focal_35mms.append(float(f35_raw))
+                m_opt["f35"].append(float(f35_raw))
 
     gps_count = len(lats)
     gps_ratio = gps_count / len(sampled) if sampled else 0.0
@@ -1236,10 +1285,15 @@ def analyze_survey_physics(
     primary_make = max(set(makes), key=makes.count) if makes else ""
     matched_hardware = _match_camera_hardware(make=primary_make, model=primary_model)
 
-    avg_w = sum(widths) / len(widths) if widths else 4000
-    avg_h = sum(heights) / len(heights) if heights else 3000
-    avg_f = sum(focal_lengths) / len(focal_lengths) if focal_lengths else None
-    avg_f35 = sum(focal_35mms) / len(focal_35mms) if focal_35mms else None
+    p_opt = per_model_optics.get(primary_model, {}) if primary_model else {}
+    p_widths = p_opt.get("w") or widths
+    p_heights = p_opt.get("h") or heights
+    p_focals = p_opt.get("fl") or focal_lengths
+    p_f35s = p_opt.get("f35") or focal_35mms
+    avg_w = sum(p_widths) / len(p_widths) if p_widths else 4000
+    avg_h = sum(p_heights) / len(p_heights) if p_heights else 3000
+    avg_f = sum(p_focals) / len(p_focals) if p_focals else None
+    avg_f35 = sum(p_f35s) / len(p_f35s) if p_f35s else None
 
     if matched_hardware:
         sensor_name = matched_hardware["name"]
@@ -1277,7 +1331,7 @@ def analyze_survey_physics(
             flight_height_m = sum(valid_rel) / len(valid_rel)
     if flight_height_m is None and alts and len(alts) >= 2:
         alt_range = max(alts) - min(alts)
-        if alt_range > 10.0:
+        if 10.0 < alt_range <= 250.0:
             flight_height_m = alt_range
         elif 5.0 <= min(alts) <= 400.0:
             # Only treat MSL min(alts) as plausible AGL when near sea level; highland plateaus (e.g. 1500m MSL)

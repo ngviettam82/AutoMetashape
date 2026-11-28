@@ -12,6 +12,7 @@ surface meshing, texture baking, DEM, orthomosaics, and cluster batch orchestrat
 
 from __future__ import annotations
 
+from contextlib import contextmanager
 import os
 import subprocess
 import sys
@@ -217,74 +218,121 @@ def _sync_state() -> None:
             _staging_mod.check_scratch_disk_headroom = _cu.check_scratch_disk_headroom
 
 
-def auto_crop_camera_gps_square(*args, **kwargs):
+@contextmanager
+def _synced_state():
+    """Synchronize test mocks for one wrapper call and restore module globals on exit."""
+    snap = (
+        _pipeline_mod.Metashape,
+        _orchestrator_mod.Metashape,
+        _filtering_mod.Metashape,
+        _hygiene_mod.Metashape,
+        _icp_bridge_mod.Metashape,
+        _export_mod.Metashape,
+        _ipc_mod._ACTIVE_STATUS_FILE,
+        _orchestrator_mod.DEPTH_FILTER_MAP,
+        _orchestrator_mod.POINT_CLOUD_FORMAT_MAP,
+        _export_mod.POINT_CLOUD_FORMAT_MAP,
+        _pipeline_mod.get_optimal_local_scratch_dir,
+        _staging_mod.get_optimal_local_scratch_dir,
+        _pipeline_mod.check_scratch_disk_headroom,
+        _staging_mod.check_scratch_disk_headroom,
+        globals().get("DEPTH_FILTER_MAP"),
+        globals().get("POINT_CLOUD_FORMAT_MAP"),
+    )
     _sync_state()
-    return _impl_auto_crop_camera_gps_square(*args, **kwargs)
+    try:
+        yield
+    finally:
+        (
+            _pipeline_mod.Metashape,
+            _orchestrator_mod.Metashape,
+            _filtering_mod.Metashape,
+            _hygiene_mod.Metashape,
+            _icp_bridge_mod.Metashape,
+            _export_mod.Metashape,
+            _ipc_mod._ACTIVE_STATUS_FILE,
+            _orchestrator_mod.DEPTH_FILTER_MAP,
+            _orchestrator_mod.POINT_CLOUD_FORMAT_MAP,
+            _export_mod.POINT_CLOUD_FORMAT_MAP,
+            _pipeline_mod.get_optimal_local_scratch_dir,
+            _staging_mod.get_optimal_local_scratch_dir,
+            _pipeline_mod.check_scratch_disk_headroom,
+            _staging_mod.check_scratch_disk_headroom,
+            _g_dfm,
+            _g_pcfm,
+        ) = snap
+        globals()["DEPTH_FILTER_MAP"] = _g_dfm
+        globals()["POINT_CLOUD_FORMAT_MAP"] = _g_pcfm
+
+
+def auto_crop_camera_gps_square(*args, **kwargs):
+    with _synced_state():
+        return _impl_auto_crop_camera_gps_square(*args, **kwargs)
 
 
 def auto_crop_to_main_structure(*args, **kwargs):
-    _sync_state()
-    return _impl_auto_crop_to_main_structure(*args, **kwargs)
+    with _synced_state():
+        return _impl_auto_crop_to_main_structure(*args, **kwargs)
 
 
 def execute_usgs_gradual_selection(*args, **kwargs):
-    _sync_state()
-    return _impl_execute_usgs_gradual_selection(*args, **kwargs)
+    with _synced_state():
+        return _impl_execute_usgs_gradual_selection(*args, **kwargs)
 
 
 def filter_tie_points(*args, **kwargs):
-    _sync_state()
-    return _impl_filter_tie_points(*args, **kwargs)
+    with _synced_state():
+        return _impl_filter_tie_points(*args, **kwargs)
 
 
 def filter_image_quality(*args, **kwargs):
-    _sync_state()
-    return _impl_filter_image_quality(*args, **kwargs)
+    with _synced_state():
+        return _impl_filter_image_quality(*args, **kwargs)
 
 
 def safe_create_cluster_batch(*args, **kwargs):
-    _sync_state()
-    return _impl_safe_create_cluster_batch(*args, **kwargs)
+    with _synced_state():
+        return _impl_safe_create_cluster_batch(*args, **kwargs)
 
 
 def build_cluster_crop_task(*args, **kwargs):
-    _sync_state()
-    return _impl_build_cluster_crop_task(*args, **kwargs)
+    with _synced_state():
+        return _impl_build_cluster_crop_task(*args, **kwargs)
 
 
 def build_cluster_gradual_selection_tasks(*args, **kwargs):
-    _sync_state()
-    return _impl_build_cluster_gradual_selection_tasks(*args, **kwargs)
+    with _synced_state():
+        return _impl_build_cluster_gradual_selection_tasks(*args, **kwargs)
 
 
 def build_monolithic_runscript_task(*args, **kwargs):
-    _sync_state()
-    return _impl_build_monolithic_runscript_task(*args, **kwargs)
+    with _synced_state():
+        return _impl_build_monolithic_runscript_task(*args, **kwargs)
 
 
 def build_unified_cluster_pipeline_tasks(*args, **kwargs):
-    _sync_state()
-    return _impl_build_unified_cluster_pipeline_tasks(*args, **kwargs)
+    with _synced_state():
+        return _impl_build_unified_cluster_pipeline_tasks(*args, **kwargs)
 
 
 def resolve_checkpoint_chunk(*args, **kwargs):
-    _sync_state()
-    return _impl_resolve_checkpoint_chunk(*args, **kwargs)
+    with _synced_state():
+        return _impl_resolve_checkpoint_chunk(*args, **kwargs)
 
 
 def save_checkpoint(*args, **kwargs):
-    _sync_state()
-    return _impl_save_checkpoint(*args, **kwargs)
+    with _synced_state():
+        return _impl_save_checkpoint(*args, **kwargs)
 
 
 def wait_for_user_resume(*args, **kwargs):
-    _sync_state()
-    return _impl_wait_for_user_resume(*args, **kwargs)
+    with _synced_state():
+        return _impl_wait_for_user_resume(*args, **kwargs)
 
 
 def run_reconstruction(*args, **kwargs):
-    _sync_state()
-    return _impl_run_reconstruction(*args, **kwargs)
+    with _synced_state():
+        return _impl_run_reconstruction(*args, **kwargs)
 
 
 if __name__ == "__main__" and not _DELEGATED:
@@ -419,6 +467,13 @@ if __name__ == "__main__" and not _DELEGATED:
                 scratch_dir=args.scratch_dir,
                 min_scratch_free_gb=args.min_scratch_free_gb,
                 project_name=args.project_name,
+                photo_layout=getattr(args, "photo_layout", "auto"),
+                reference_columns=getattr(args, "reference_columns", ""),
+                reference_delimiter=getattr(args, "reference_delimiter", ""),
+                reference_skip_rows=getattr(args, "reference_skip_rows", 0),
+                reference_crs=getattr(args, "reference_crs", ""),
+                create_markers=getattr(args, "create_markers", False),
+                source_rel=getattr(args, "source_rel", ""),
                 exclude_folders=getattr(args, "exclude_folders", ""),
                 status_file=getattr(args, "status_file", None),
                 resume=getattr(args, "resume", True),

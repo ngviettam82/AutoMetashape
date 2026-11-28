@@ -421,6 +421,8 @@ def build_monolithic_runscript_task(
     reference_crs: str | None = None,
     reference_skip_rows: int | None = None,
     source_share: str | None = None,
+    create_markers: bool = False,
+    source_rel: str | None = None,
 ) -> tuple:
     """Constructs an atomic monolithic Metashape.Tasks.RunScript NetworkTask."""
     if not status_file:
@@ -434,7 +436,12 @@ def build_monolithic_runscript_task(
     rel_images = (
         relpath_under(images_dir, norm_net, case_insensitive=True) if norm_net else None
     ) or images_dir.replace("\\", "/")
-    rel_source_images = relpath_under(images_dir, norm_src, case_insensitive=True) if norm_src else None
+    explicit_src_rel = (
+        source_rel.strip().replace("\\", "/") if isinstance(source_rel, str) and source_rel.strip() else None
+    )
+    rel_source_images = explicit_src_rel or (
+        relpath_under(images_dir, norm_src, case_insensitive=True) if norm_src else None
+    )
     rel_output = (
         relpath_under(output_dir, norm_net, case_insensitive=True) if norm_net else None
     ) or output_dir.replace("\\", "/")
@@ -629,6 +636,8 @@ def build_monolithic_runscript_task(
             relpath_under(import_reference, norm_net, case_insensitive=True) if norm_net else None
         ) or import_reference.replace("\\", "/")
         _append_flag(worker_args, "--import-reference", rel_ref)
+    if create_markers:
+        worker_args.append("--create-markers")
     if smooth_mesh:
         worker_args.extend(["--smooth-mesh", "--smooth-strength", str(smooth_strength)])
     if decimate_mesh and decimate_mesh > 0:

@@ -65,6 +65,7 @@ from autometashape.core.alignment_hygiene import (
 )
 from autometashape.core.crs_utils import (
     crs_linear_unit_to_meters,
+    crs_vertical_unit_to_meters,
     is_georeferenced_crs,
     is_linear_crs,
     is_local_or_engineering_crs,
@@ -157,7 +158,7 @@ def _is_metric_raster_crs(crs: Any) -> bool:
 
 
 def _scale_resolution_to_crs_units(resolution_m: float, crs: Any) -> float:
-    """Convert a meter-denominated raster resolution into the target CRS linear units."""
+    """Convert a meter value into target CRS linear units (e.g. contours or projected units)."""
     if resolution_m <= 0.0:
         return 0.0
     unit_m = crs_linear_unit_to_meters(crs)
@@ -279,6 +280,23 @@ def _select_metric_projection(chunk: Any, asset_label: str) -> tuple[Any, Any, b
                 ):
                     lons.append(lon)
                     lats.append(lat)
+        if not lons:
+            mat = getattr(getattr(chunk, "transform", None), "matrix", None)
+            if mat is not None and wgs84 is not None:
+                try:
+                    for cam in getattr(chunk, "cameras", None) or []:
+                        if (
+                            getattr(cam, "transform", None)
+                            and getattr(cam, "enabled", True)
+                            and getattr(cam, "center", None) is not None
+                        ):
+                            pt = wgs84.project(mat.mulp(cam.center))
+                            lon, lat = float(pt.x), float(pt.y)
+                            if math.isfinite(lon) and math.isfinite(lat) and abs(lon) <= 180.0 and abs(lat) <= 90.0:
+                                lons.append(lon)
+                                lats.append(lat)
+                except Exception:
+                    pass
         if lons and lats:
             lats.sort()
             med_lat = lats[len(lats) // 2]
@@ -351,11 +369,16 @@ def _apply_rolling_shutter_to_chunk(
     if not sensors:
         return 0, 0
 
-    sensor_cam_map: dict[int, Any] = {}
+    sensor_cam_map: dict[Any, Any] = {}
     for cam in getattr(chunk, "cameras", None) or []:
         c_sensor = getattr(cam, "sensor", None)
-        if c_sensor is not None and id(c_sensor) not in sensor_cam_map:
-            sensor_cam_map[id(c_sensor)] = cam
+        if c_sensor is None:
+            continue
+        s_key = getattr(c_sensor, "key", None)
+        if s_key is None:
+            s_key = id(c_sensor)
+        if s_key not in sensor_cam_map:
+            sensor_cam_map[s_key] = cam
 
     enabled_cnt = 0
     mech_cnt = 0
@@ -364,7 +387,10 @@ def _apply_rolling_shutter_to_chunk(
             target_is_rs = bool(rolling_shutter)
         else:
             s_meta = getattr(s, "meta", None)
-            cam = sensor_cam_map.get(id(s))
+            s_key = getattr(s, "key", None)
+            if s_key is None:
+                s_key = id(s)
+            cam = sensor_cam_map.get(s_key)
             cam_photo = getattr(cam, "photo", None) if cam is not None else None
             cam_meta = getattr(cam_photo, "meta", None) if cam_photo is not None else None
             make = _extract_meta_str(s_meta, "Exif/Make") or _extract_meta_str(cam_meta, "Exif/Make")
@@ -479,35 +505,196 @@ def _has_valid_mesh(chunk: Any) -> bool:
     return True
 
 
-def _chunks_share_camera_labels(chunks: list[Any]) -> bool:
-    """Return True if at least two chunks share a camera label at compatible positions."""
-    label_maps: list[dict[str, tuple[float, float] | None]] = []
-    for c in chunks:
-        cur: dict[str, tuple[float, float] | None] = {}
-        for cam in getattr(c, "cameras", None) or []:
-            raw_lbl = getattr(cam, "label", None)
-            if not isinstance(raw_lbl, str) or not raw_lbl.strip():
-                continue
-            lbl = raw_lbl.strip()
-            ref = getattr(cam, "reference", None)
-            loc = getattr(ref, "location", None) if ref is not None else None
-            gps = None
-            if loc is not None and isinstance(getattr(loc, "x", None), (int, float)):
-                lx, ly = float(loc.x), float(loc.y)
-                if math.isfinite(lx) and math.isfinite(ly) and (abs(lx) > 0.001 or abs(ly) > 0.001):
-                    gps = (ly, lx)
-            cur[lbl] = gps
-        label_maps.append(cur)
+_REF_COLUMN_ALIASES: dict[str, str] = {
+    "n": "n",
+    "name": "n",
+    "label": "n",
+    "id": "n",
+    "point": "n",
+    "gcp": "n",
+    "marker": "n",
+    "target": "n",
+    "photo": "n",
+    "camera": "n",
+    "file": "n",
+    "filename": "n",
+    "o": "o",
+    "enable": "o",
+    "enabled": "o",
+    "x": "x",
+    "lon": "x",
+    "long": "x",
+    "longitude": "x",
+    "east": "x",
+    "easting": "x",
+    "e": "x",
+    "y": "y",
+    "lat": "y",
+    "latitude": "y",
+    "north": "y",
+    "northing": "y",
+    "n_coord": "y",
+    "z": "z",
+    "alt": "z",
+    "altitude": "z",
+    "elev": "z",
+    "elevation": "z",
+    "height": "z",
+    "h": "z",
+    "acc_x": "X",
+    "err_x": "X",
+    "sx": "X",
+    "sigma_x": "X",
+    "acc_y": "Y",
+    "err_y": "Y",
+    "sy": "Y",
+    "sigma_y": "Y",
+    "acc_z": "Z",
+    "err_z": "Z",
+    "sz": "Z",
+    "sigma_z": "Z",
+    "yaw": "a",
+    "omega": "a",
+    "heading": "a",
+    "pitch": "b",
+    "phi": "b",
+    "roll": "c",
+    "kappa": "c",
+}
 
-    for i in range(len(label_maps)):
-        for j in range(i + 1, len(label_maps)):
-            shared = set(label_maps[i].keys()) & set(label_maps[j].keys())
-            for lbl in shared:
-                g1 = label_maps[i][lbl]
-                g2 = label_maps[j][lbl]
-                if g1 is not None and g2 is not None:
-                    if abs(g1[0] - g2[0]) > 0.001 or abs(g1[1] - g2[1]) > 0.001:
-                        continue
+
+def _infer_reference_csv_format(ref_path: str) -> tuple[str, str, int]:
+    """Infer Metashape ``(columns, delimiter, skip_rows)`` from an unambiguous CSV/TXT header row."""
+    with open(ref_path, "r", encoding="utf-8-sig", errors="replace") as f:
+        header_line = ""
+        for raw_line in f:
+            stripped = raw_line.strip()
+            if stripped and not stripped.startswith(("#", "//")):
+                header_line = stripped
+                break
+    if not header_line:
+        raise ValueError(
+            f"Reference file '{ref_path}' has no header row; pass --reference-columns explicitly."
+        )
+
+    delimiter = ""
+    parts: list[str] = []
+    for cand_delim in ("\t", ",", ";"):
+        if cand_delim in header_line:
+            delimiter = cand_delim
+            parts = [p.strip() for p in header_line.split(cand_delim)]
+            break
+    if not parts:
+        parts = [p.strip() for p in header_line.split()]
+        delimiter = " "
+    if len(parts) < 3:
+        raise ValueError(
+            f"Reference header in '{ref_path}' is ambiguous ({header_line!r}); pass --reference-columns."
+        )
+
+    cols: list[str] = []
+    seen_codes: set[str] = set()
+    for token in parts:
+        norm_tok = token.strip().strip('"').strip("'").lower().replace(" ", "_").replace("-", "_")
+        code = _REF_COLUMN_ALIASES.get(norm_tok)
+        if code is None or code in seen_codes:
+            raise ValueError(
+                f"Reference file '{ref_path}' header column '{token}' is unrecognized or duplicate; "
+                "pass --reference-columns (e.g. 'nxyz') explicitly."
+            )
+        seen_codes.add(code)
+        cols.append(code)
+
+    if "n" not in seen_codes or "x" not in seen_codes or "y" not in seen_codes:
+        raise ValueError(
+            f"Reference file '{ref_path}' must contain name/label, X/lon, and Y/lat columns; "
+            "pass --reference-columns explicitly."
+        )
+    return "".join(cols), delimiter, 1
+
+
+def _import_reference_safely(
+    chunk: Any,
+    ref_path: str,
+    columns: str = "",
+    delimiter: str = "",
+    skip_rows: int = 0,
+    crs_str: str = "",
+    create_markers: bool = False,
+) -> None:
+    """Import XML or delimited CSV/TXT GCP/camera references without silently guessing column layout."""
+    ext = os.path.splitext(ref_path)[1].lower()
+    if ext == ".xml" and hasattr(getattr(Metashape, "ReferenceFormat", None), "ReferenceFormatXML"):
+        chunk.importReference(path=ref_path, format=Metashape.ReferenceFormat.ReferenceFormatXML)
+        return
+
+    fmt_csv = getattr(getattr(Metashape, "ReferenceFormat", None), "ReferenceFormatCSV", None)
+    eff_cols = columns.strip() if isinstance(columns, str) else ""
+    eff_delim = delimiter if isinstance(delimiter, str) else ""
+    eff_skip = int(skip_rows or 0)
+    if not eff_cols:
+        inferred_cols, inferred_delim, inferred_skip = _infer_reference_csv_format(ref_path)
+        eff_cols = inferred_cols
+        if not eff_delim:
+            eff_delim = inferred_delim
+        if eff_skip == 0:
+            eff_skip = inferred_skip
+
+    imp_kwargs: dict[str, Any] = {
+        "path": ref_path,
+        "format": fmt_csv,
+        "columns": eff_cols,
+        "skip_rows": eff_skip,
+    }
+    if eff_delim:
+        imp_kwargs["delimiter"] = eff_delim
+    if crs_str and str(crs_str).strip() and hasattr(Metashape, "CoordinateSystem"):
+        imp_kwargs["crs"] = Metashape.CoordinateSystem(str(crs_str).strip())
+    if create_markers:
+        imp_kwargs["create_markers"] = True
+
+    try:
+        chunk.importReference(**imp_kwargs)
+    except TypeError:
+        chunk.importReference(path=ref_path, format=fmt_csv)
+
+    for cam in getattr(chunk, "cameras", None) or []:
+        ref = getattr(cam, "reference", None)
+        if ref is not None and getattr(ref, "location", None) is not None and hasattr(cam, "meta"):
+            try:
+                cam.meta["_autometashape_external_ref"] = "1"
+            except Exception:
+                pass
+
+
+def _chunks_share_camera_labels(chunks: list[Any], min_shared: int = 3) -> bool:
+    """Return True if at least two chunks share ``>= min_shared`` verified camera identities."""
+
+    def _cam_identities(cam: Any) -> set[tuple[Any, ...]]:
+        ids: set[tuple[Any, ...]] = set()
+        photo = getattr(cam, "photo", None)
+        path = getattr(photo, "path", "") if photo is not None else ""
+        if isinstance(path, str) and path.strip():
+            ids.add(("path", os.path.normcase(os.path.abspath(path))))
+        raw_lbl = getattr(cam, "label", None)
+        lbl = raw_lbl.strip() if isinstance(raw_lbl, str) and raw_lbl.strip() else ""
+        meta = getattr(photo, "meta", None) if photo is not None else None
+        dt = _extract_meta_str(meta, "Exif/DateTimeOriginal")
+        body = _extract_meta_str(meta, "Exif/BodySerialNumber") or _extract_meta_str(meta, "Exif/Model")
+        if lbl and dt and body:
+            ids.add(("exif", lbl, dt, body))
+        return ids
+
+    chunk_sets: list[set[tuple[Any, ...]]] = []
+    for c in chunks:
+        c_ids: set[tuple[Any, ...]] = set()
+        for cam in getattr(c, "cameras", None) or []:
+            c_ids.update(_cam_identities(cam))
+        chunk_sets.append(c_ids)
+
+    for i in range(len(chunk_sets)):
+        for j in range(i + 1, len(chunk_sets)):
+            if len(chunk_sets[i] & chunk_sets[j]) >= min_shared:
                 return True
     return False
 
@@ -847,6 +1034,13 @@ def run_reconstruction(
     scratch_dir: str = "",
     min_scratch_free_gb: float = 100.0,
     exclude_folders: str | list[str] | tuple[str, ...] | None = None,
+    photo_layout: str = "auto",
+    reference_columns: str = "",
+    reference_delimiter: str = "",
+    reference_skip_rows: int = 0,
+    reference_crs: str = "",
+    create_markers: bool = False,
+    source_rel: str = "",
     **kwargs: Any,
 ):
     """Executes the complete AutoMetashape photogrammetry reconstruction pipeline.
@@ -949,6 +1143,15 @@ def run_reconstruction(
         project_name: Custom base name for project files and deliverables.
     """
     t_start = time.time()
+    # When running locally on a cluster worker (not coordinator), prefer the worker's own
+    # configured local network_path root over any coordinator drive/UNC string passed on CLI.
+    if not network_enable and Metashape is not None:
+        app_obj = getattr(Metashape, "app", None)
+        settings_obj = getattr(app_obj, "settings", None) if app_obj is not None else None
+        local_np = getattr(settings_obj, "network_path", None) if settings_obj is not None else None
+        if isinstance(local_np, str) and local_np.strip() and os.path.isdir(local_np.strip()):
+            network_path = os.path.normpath(local_np.strip())
+
     # Normalize paths and resolve relative paths against network_path if running on worker node
     if network_path:
         network_path = os.path.normpath(network_path.strip())
@@ -960,6 +1163,31 @@ def run_reconstruction(
             status_file = os.path.normpath(os.path.join(network_path, status_file))
         if import_reference and not os.path.isabs(import_reference):
             import_reference = os.path.normpath(os.path.join(network_path, import_reference))
+
+    if source_rel and (not images_dir or not os.path.isdir(images_dir)):
+        clean_rel = source_rel.strip().lstrip("\\/")
+        src_candidates: list[str] = []
+        env_src = os.environ.get("AUTOMETASHAPE_SOURCE_ROOT", "").strip()
+        if env_src:
+            src_candidates.append(env_src)
+        try:
+            from autometashape.cluster.config import get_default_config_path
+
+            wcfg_p = get_default_config_path("worker_config.json", for_write=False)
+            if wcfg_p and os.path.isfile(wcfg_p):
+                with open(wcfg_p, "r", encoding="utf-8") as wcf:
+                    wcfg = json.load(wcf)
+                if isinstance(wcfg, dict) and isinstance(wcfg.get("source_root"), str) and wcfg["source_root"].strip():
+                    src_candidates.append(wcfg["source_root"].strip())
+        except Exception:
+            pass
+        if network_path:
+            src_candidates.append(network_path)
+        for sroot in src_candidates:
+            cand_dir = os.path.normpath(os.path.join(sroot, clean_rel))
+            if os.path.isdir(cand_dir):
+                images_dir = cand_dir
+                break
 
     if not project_name:
         project_name = infer_project_name(images_dir=images_dir, output_dir=output_dir)
@@ -1568,6 +1796,11 @@ def run_reconstruction(
             clean_net = network_path.strip().replace("\\", "/").rstrip("/")
             if is_unc:
                 clean_net = "//" + clean_net.lstrip("/")
+            if target_file.strip().startswith((r"\\", "//")) and is_unc:
+                net_parts = [p for p in clean_net.split("/") if p]
+                tgt_parts = [p for p in norm_tgt.split("/") if p]
+                if len(net_parts) >= 2 and len(tgt_parts) >= 2 and net_parts[1].lower() != tgt_parts[1].lower():
+                    return norm_tgt
             rel = get_cluster_rel_path(target_file)
             if rel and rel.lower() != norm_tgt.lower() and not rel.lower().startswith(clean_net.lower()):
                 return f"{clean_net}/{rel}"
@@ -1913,244 +2146,378 @@ def run_reconstruction(
         chunk = doc.addChunk()
         chunk.label = "Production_Reconstruction"
 
+    def _add_photos_with_layout(target_chunk: Any, paths: list[str]) -> None:
+        lay_str = (photo_layout or "auto").strip().lower()
+        img_layout_cls = getattr(Metashape, "ImageLayout", None) if Metashape is not None else None
+        lay_enum = None
+        if img_layout_cls is not None and lay_str != "auto":
+            if lay_str == "flat":
+                lay_enum = getattr(img_layout_cls, "FlatLayout", None)
+            elif lay_str == "multiplane":
+                lay_enum = getattr(img_layout_cls, "MultiplaneLayout", None)
+        if lay_enum is not None:
+            try:
+                target_chunk.addPhotos(paths, layout=lay_enum)
+                return
+            except TypeError:
+                pass
+        target_chunk.addPhotos(paths)
+
+    def _run_markers_and_reference(target_chunk: Any) -> None:
+        if detect_markers:
+            print(
+                f"\n[Target Detection] Detecting target markers (Type: {target_type}, "
+                f"Tolerance: {marker_tolerance})...",
+                flush=True,
+            )
+            try:
+                tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
+                target_chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
+                print(f"  Target detection completed! Found {len(target_chunk.markers)} markers.", flush=True)
+            except Exception as e_mk:
+                print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
+
+        if import_reference and os.path.isfile(import_reference):
+            print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
+            try:
+                _import_reference_safely(
+                    target_chunk,
+                    import_reference,
+                    columns=reference_columns,
+                    delimiter=reference_delimiter,
+                    skip_rows=reference_skip_rows,
+                    crs_str=reference_crs,
+                    create_markers=create_markers,
+                )
+                target_chunk.updateTransform()
+                print("  Reference import and georeferencing transform updated.", flush=True)
+            except ValueError:
+                raise
+            except Exception as e_ref:
+                print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
+
     use_multi_chunk = False
     hygiene_z0_info: dict[str, Any] = {"skipped": True, "anchor_z0": None}
     if not resumed:
-        # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
-        if exclude_folders:
-            groups = discover_image_subfolder_groups(
-                images_dir, output_dir=target_network_output or output_dir, exclude_folders=exclude_folders
-            )
-        else:
-            groups = discover_image_subfolder_groups(images_dir, output_dir=target_network_output or output_dir)
-        total_photos = sum(len(imgs) for imgs in groups.values())
-        if total_photos == 0:
-            raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
-
         align_downscale = ALIGN_DOWNSCALE_MAP.get(align_quality.lower(), 2)
+        _default_presel = getattr(
+            getattr(Metashape, "ReferencePreselectionMode", None),
+            "ReferencePreselectionEstimated",
+            None,
+        )
         presel_mode_enum = PRESEL_MODE_MAP.get(
             (reference_preselection_mode or "estimated").lower(),
-            Metashape.ReferencePreselectionMode.ReferencePreselectionEstimated,
+            _default_presel,
         )
 
-        if multi_chunk == "force" and len(groups) >= 1:
-            use_multi_chunk = True
-        elif multi_chunk == "auto" and len(groups) > 1:
-            use_multi_chunk = True
-        elif multi_chunk == "disable":
-            use_multi_chunk = False
-
-        if use_multi_chunk:
+        if cluster_enabled and network_independent_workers:
+            if survey_physics and int(survey_physics.get("photo_count") or 0) > 0:
+                total_photos = int(survey_physics["photo_count"])
+            else:
+                if exclude_folders:
+                    groups = discover_image_subfolder_groups(
+                        images_dir, output_dir=target_network_output or output_dir, exclude_folders=exclude_folders
+                    )
+                else:
+                    groups = discover_image_subfolder_groups(images_dir, output_dir=target_network_output or output_dir)
+                total_photos = sum(len(imgs) for imgs in groups.values())
+            if total_photos == 0:
+                raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
+            emit_ipc_stage("ingest", f"Staging lightweight coordinator stub ({total_photos:,} photos)")
             print(
-                f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos total).",
+                f"\n[Cluster Coordinator] Skipping coordinator addPhotos/quality/alignment ({total_photos:,} photos); "
+                "dedicated worker will ingest & process once.",
                 flush=True,
             )
-            print(
-                "  Ingesting each subfolder into an independent chunk for drift-free camera alignment and point-based RANSAC ICP registration...",
-                flush=True,
-            )
-
-            for c in list(doc.chunks):
-                if len(c.cameras) == 0:
-                    doc.remove(c)
-
-            created_chunks = []
-            for idx, (grp_name, filepaths) in enumerate(groups.items()):
-                sub_chunk = doc.addChunk()
-                sub_chunk.label = f"Flight_{idx + 1}_{grp_name}"
-                emit_ipc_stage(
-                    "ingest",
-                    f"Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos",
+        else:
+            # Step 1: Discover Images (Single-folder or Multi-Subfolder Chunks)
+            if exclude_folders:
+                groups = discover_image_subfolder_groups(
+                    images_dir, output_dir=target_network_output or output_dir, exclude_folders=exclude_folders
                 )
+            else:
+                groups = discover_image_subfolder_groups(images_dir, output_dir=target_network_output or output_dir)
+            total_photos = sum(len(imgs) for imgs in groups.values())
+            if total_photos == 0:
+                raise ValueError(f"No valid image files found recursively in '{images_dir}'!")
+
+            if multi_chunk == "force" and len(groups) >= 1:
+                use_multi_chunk = True
+            elif multi_chunk == "auto" and len(groups) > 1:
+                use_multi_chunk = True
+            elif multi_chunk == "disable":
+                use_multi_chunk = False
+
+            if use_multi_chunk:
                 print(
-                    f"\n[1/7] Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): "
-                    f"{len(filepaths):,} photos...",
+                    f"\n[Multi-Chunk Mode] Detected {len(groups)} distinct image subfolders ({total_photos:,} photos).",
                     flush=True,
                 )
-                sub_chunk.addPhotos(filepaths)
-                print(f"  Loaded {len(sub_chunk.cameras):,} cameras into '{sub_chunk.label}'.", flush=True)
-
-                if min_quality > 0.0:
-                    filter_image_quality(sub_chunk, min_quality=min_quality)
-
-                _apply_rolling_shutter_to_chunk(
-                    sub_chunk,
-                    bool(rolling_shutter),
-                    explicit_override=rolling_shutter_explicit,
-                    chunk_label=sub_chunk.label,
-                )
-
-                if alignment_hygiene:
-                    sanitize_camera_gps(sub_chunk)
-
-                created_chunks.append(sub_chunk)
-
-            if alignment_hygiene and created_chunks:
-                z0_anchor_chunk = max(
-                    created_chunks,
-                    key=lambda c: (
-                        compute_block_backbone_score(
-                            list(getattr(c, "cameras", None) or []),
-                            metric_crs=_is_metric_crs(getattr(c, "crs", None)),
-                        )[0],
-                        len(getattr(c, "cameras", None) or []),
-                    ),
-                )
-                anchor_res = normalize_flight_takeoff_z0(z0_anchor_chunk)
-                shared_anchor_z0: float | None = (
-                    float(anchor_res["anchor_z0"]) if anchor_res.get("anchor_z0") is not None else None
-                )
-                for sub_chunk in created_chunks:
-                    if sub_chunk is not z0_anchor_chunk:
-                        normalize_flight_takeoff_z0(sub_chunk, anchor_z0_override=shared_anchor_z0)
-
-            # Step 2: Feature Detection & Matching per chunk
-            for idx, c in enumerate(created_chunks):
-                emit_ipc_stage("match", f"GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)}")
                 print(
-                    f"\n[2/7] GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)} "
-                    f"('{c.label}', {len(c.cameras):,} cameras)...",
-                    flush=True,
-                )
-                t_match = time.time()
-                c.matchPhotos(
-                    downscale=align_downscale,
-                    generic_preselection=True,
-                    reference_preselection=True,
-                    reference_preselection_mode=presel_mode_enum,
-                    keypoint_limit=keypoint_limit,
-                    keypoint_limit_per_mpx=keypoint_limit_per_mpx,
-                    tiepoint_limit=tiepoint_limit,
-                    mask_tiepoints=False,
-                    filter_stationary_points=filter_stationary_points,
-                    guided_matching=guided_matching,
-                )
-                print(f"  Matching finished for '{c.label}' in {(time.time() - t_match) / 60:.2f} min.", flush=True)
-
-            # Step 3: Camera Alignment per chunk
-            for idx, c in enumerate(created_chunks):
-                emit_ipc_stage("align", f"Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)}")
-                print(
-                    f"\n[3/7] Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)} "
-                    f"('{c.label}', Adaptive Fitting: {adaptive_fitting})...",
-                    flush=True,
-                )
-                t_align = time.time()
-                c.alignCameras(adaptive_fitting=adaptive_fitting)
-                aligned_count = sum(1 for cam in c.cameras if cam.transform and cam.enabled)
-                enabled_count = sum(1 for cam in c.cameras if cam.enabled)
-                print(
-                    f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align) / 60:.2f} min. "
-                    f"Aligned: {aligned_count}/{enabled_count} active cameras.",
+                    "  Ingesting each subfolder into an independent chunk for drift-free alignment...",
                     flush=True,
                 )
 
-                if filter_tiepoints:
-                    usgs_stats = filter_tie_points(c)
+                for c in list(doc.chunks):
+                    if len(c.cameras) == 0:
+                        doc.remove(c)
 
-                try:
-                    c.updateTransform()
-                except Exception:
-                    pass
-
-            aligned_chunks = [
-                c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2
-            ]
-            if len(aligned_chunks) == 0:
-                raise RuntimeError(
-                    "No cameras could be aligned across any flight subfolder! Please verify photo quality and overlap."
-                )
-
-            anchor_chunk = max(
-                aligned_chunks,
-                key=lambda c: (
-                    compute_block_backbone_score(
-                        [cam for cam in c.cameras if cam.transform and cam.enabled],
-                        metric_crs=_is_metric_crs(getattr(c, "crs", None)),
-                    )[0],
-                    sum(1 for cam in c.cameras if cam.transform and cam.enabled),
-                ),
-            )
-            ref_key = anchor_chunk.key
-            merge_chunk_keys = [c.key for c in aligned_chunks]
-            align_chunk_keys = [c.key for c in aligned_chunks]
-            if len(aligned_chunks) < len(created_chunks):
-                skipped_labels = [c.label for c in created_chunks if c not in aligned_chunks]
-                print(
-                    f"  [Multi-Chunk] Skipping {len(skipped_labels)} unaligned chunk(s) from merge: {skipped_labels}",
-                    flush=True,
-                )
-
-            if len(aligned_chunks) >= 2:
-                align_mode = chunk_align_method.lower() if chunk_align_method else "camera"
-                has_shared_cams = _chunks_share_camera_labels(aligned_chunks)
-                has_shared_markers = _chunks_share_marker_labels(aligned_chunks)
-                chunks_georef = _chunks_are_georeferenced(aligned_chunks)
-                if align_mode == "point":
+                created_chunks = []
+                for idx, (grp_name, filepaths) in enumerate(groups.items()):
+                    sub_chunk = doc.addChunk()
+                    sub_chunk.label = f"Flight_{idx + 1}_{grp_name}"
+                    emit_ipc_stage(
+                        "ingest",
+                        f"Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): {len(filepaths):,} photos",
+                    )
                     print(
-                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor "
-                        f"'{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...",
+                        f"\n[1/7] Ingesting Chunk {idx + 1}/{len(groups)} ('{sub_chunk.label}'): "
+                        f"{len(filepaths):,} photos...",
                         flush=True,
                     )
+                    _add_photos_with_layout(sub_chunk, filepaths)
+                    print(f"  Loaded {len(sub_chunk.cameras):,} cameras into '{sub_chunk.label}'.", flush=True)
+
+                    if min_quality > 0.0:
+                        filter_image_quality(sub_chunk, min_quality=min_quality)
+
+                    _apply_rolling_shutter_to_chunk(
+                        sub_chunk,
+                        bool(rolling_shutter),
+                        explicit_override=rolling_shutter_explicit,
+                        chunk_label=sub_chunk.label,
+                    )
+
+                    _run_markers_and_reference(sub_chunk)
+
+                    if alignment_hygiene:
+                        sanitize_camera_gps(sub_chunk)
+
+                    created_chunks.append(sub_chunk)
+
+                if alignment_hygiene and created_chunks:
+                    z0_anchor_chunk = max(
+                        created_chunks,
+                        key=lambda c: (
+                            compute_block_backbone_score(
+                                list(getattr(c, "cameras", None) or []),
+                                metric_crs=_is_metric_crs(getattr(c, "crs", None)),
+                            )[0],
+                            len(getattr(c, "cameras", None) or []),
+                        ),
+                    )
+                    anchor_res = normalize_flight_takeoff_z0(z0_anchor_chunk)
+                    shared_anchor_z0: float | None = (
+                        float(anchor_res["anchor_z0"]) if anchor_res.get("anchor_z0") is not None else None
+                    )
+                    for sub_chunk in created_chunks:
+                        if sub_chunk is not z0_anchor_chunk:
+                            normalize_flight_takeoff_z0(sub_chunk, anchor_z0_override=shared_anchor_z0)
+
+                # Step 2: Feature Detection & Matching per chunk
+                for idx, c in enumerate(created_chunks):
+                    emit_ipc_stage("match", f"GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)}")
+                    print(
+                        f"\n[2/7] GPU Feature Matching for Chunk {idx + 1}/{len(created_chunks)} "
+                        f"('{c.label}', {len(c.cameras):,} cameras)...",
+                        flush=True,
+                    )
+                    t_match = time.time()
+                    c.matchPhotos(
+                        downscale=align_downscale,
+                        generic_preselection=True,
+                        reference_preselection=True,
+                        reference_preselection_mode=presel_mode_enum,
+                        keypoint_limit=keypoint_limit,
+                        keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                        tiepoint_limit=tiepoint_limit,
+                        mask_tiepoints=False,
+                        filter_stationary_points=filter_stationary_points,
+                        guided_matching=guided_matching,
+                    )
+                    print(
+                        f"  Matching finished for '{c.label}' in {(time.time() - t_match) / 60:.2f} min.", flush=True
+                    )
+
+                # Step 3: Camera Alignment per chunk
+                for idx, c in enumerate(created_chunks):
+                    emit_ipc_stage("align", f"Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)}")
+                    print(
+                        f"\n[3/7] Aligning Cameras for Chunk {idx + 1}/{len(created_chunks)} "
+                        f"('{c.label}', Adaptive Fitting: {adaptive_fitting})...",
+                        flush=True,
+                    )
+                    t_align = time.time()
+                    c.alignCameras(adaptive_fitting=adaptive_fitting)
+                    aligned_count = sum(1 for cam in c.cameras if cam.transform and cam.enabled)
+                    enabled_count = sum(1 for cam in c.cameras if cam.enabled)
+                    print(
+                        f"  Chunk '{c.label}' alignment finished in {(time.time() - t_align) / 60:.2f} min. "
+                        f"Aligned: {aligned_count}/{enabled_count} active cameras.",
+                        flush=True,
+                    )
+
+                    if filter_tiepoints:
+                        usgs_stats = filter_tie_points(c, adaptive_fitting=adaptive_fitting)
+
                     try:
-                        doc.alignChunks(
-                            chunks=align_chunk_keys,
-                            reference=ref_key,
-                            method=0,
-                            fit_scale=True,
-                            downscale=align_downscale,
-                            keypoint_limit=keypoint_limit,
+                        c.updateTransform()
+                    except Exception:
+                        pass
+
+                aligned_chunks = [
+                    c for c in created_chunks if sum(1 for cam in c.cameras if cam.transform and cam.enabled) >= 2
+                ]
+                if len(aligned_chunks) == 0:
+                    raise RuntimeError(
+                        "No cameras could be aligned across any flight subfolder! "
+                        "Please verify photo quality and overlap."
+                    )
+
+                anchor_chunk = max(
+                    aligned_chunks,
+                    key=lambda c: (
+                        compute_block_backbone_score(
+                            [cam for cam in c.cameras if cam.transform and cam.enabled],
+                            metric_crs=_is_metric_crs(getattr(c, "crs", None)),
+                        )[0],
+                        sum(1 for cam in c.cameras if cam.transform and cam.enabled),
+                    ),
+                )
+                ref_key = anchor_chunk.key
+                merge_chunk_keys = [c.key for c in aligned_chunks]
+                align_chunk_keys = [c.key for c in aligned_chunks]
+                if len(aligned_chunks) < len(created_chunks):
+                    skipped_labels = [c.label for c in created_chunks if c not in aligned_chunks]
+                    print(
+                        f"  [Multi-Chunk] Skipping {len(skipped_labels)} unaligned chunk(s) "
+                        f"from merge: {skipped_labels}",
+                        flush=True,
+                    )
+
+                if len(aligned_chunks) >= 2:
+                    align_mode = chunk_align_method.lower() if chunk_align_method else "camera"
+                    has_shared_cams = _chunks_share_camera_labels(aligned_chunks)
+                    has_shared_markers = _chunks_share_marker_labels(aligned_chunks)
+                    chunks_georef = _chunks_are_georeferenced(aligned_chunks)
+                    if align_mode == "point":
+                        print(
+                            f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks onto anchor "
+                            f"'{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...",
+                            flush=True,
                         )
-                        print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
-                    except Exception as e_align:
-                        fb_method = 1 if has_shared_markers else (2 if has_shared_cams else None)
-                        if fb_method is not None:
+                        try:
+                            doc.alignChunks(
+                                chunks=align_chunk_keys,
+                                reference=ref_key,
+                                method=0,
+                                fit_scale=True,
+                                downscale=align_downscale,
+                                keypoint_limit=keypoint_limit,
+                            )
+                            print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
+                        except Exception as e_align:
+                            fb_method = 1 if has_shared_markers else (2 if has_shared_cams else None)
+                            if fb_method is not None:
+                                print(
+                                    f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; "
+                                    f"falling back to method={fb_method}...",
+                                    flush=True,
+                                )
+                                try:
+                                    doc.alignChunks(
+                                        chunks=align_chunk_keys,
+                                        reference=ref_key,
+                                        method=fb_method,
+                                        fit_scale=False,
+                                    )
+                                    print(
+                                        f"  [Chunk Alignment] Fallback chunk alignment (method={fb_method}) succeeded!",
+                                        flush=True,
+                                    )
+                                except Exception as e_cam:
+                                    print(
+                                        f"  [Chunk Alignment] Fallback alignment raised '{e_cam}'; "
+                                        "proceeding with native camera transforms.",
+                                        flush=True,
+                                    )
+                            else:
+                                print(
+                                    f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; "
+                                    "proceeding with native camera transforms.",
+                                    flush=True,
+                                )
+                    elif has_shared_cams:
+                        print(
+                            f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks sharing camera "
+                            f"labels onto '{anchor_chunk.label}' (method=2)...",
+                            flush=True,
+                        )
+                        try:
+                            doc.alignChunks(
+                                chunks=align_chunk_keys,
+                                reference=ref_key,
+                                method=2,
+                                fit_scale=False,
+                            )
                             print(
-                                f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; "
-                                f"falling back to method={fb_method}...",
+                                "  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True
+                            )
+                        except Exception as e_cam:
+                            print(
+                                f"  [Chunk Alignment] Camera-based registration raised '{e_cam}'; "
+                                "falling back to Point-Based RANSAC ICP (method=0)...",
                                 flush=True,
                             )
                             try:
                                 doc.alignChunks(
                                     chunks=align_chunk_keys,
                                     reference=ref_key,
-                                    method=fb_method,
-                                    fit_scale=False,
+                                    method=0,
+                                    fit_scale=True,
+                                    downscale=align_downscale,
+                                    keypoint_limit=keypoint_limit,
                                 )
                                 print(
-                                    f"  [Chunk Alignment] Fallback chunk alignment (method={fb_method}) succeeded!",
+                                    "  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!",
                                     flush=True,
                                 )
-                            except Exception as e_cam:
+                            except Exception as e_align:
                                 print(
-                                    f"  [Chunk Alignment] Fallback alignment raised '{e_cam}'; "
+                                    f"  [Chunk Alignment] Point-based alignment raised '{e_align}'; "
                                     "proceeding with native camera transforms.",
                                     flush=True,
                                 )
-                        else:
+                    elif has_shared_markers:
+                        print(
+                            f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks via shared "
+                            f"markers onto '{anchor_chunk.label}' (method=1)...",
+                            flush=True,
+                        )
+                        try:
+                            doc.alignChunks(
+                                chunks=align_chunk_keys,
+                                reference=ref_key,
+                                method=1,
+                                fit_scale=False,
+                            )
+                            print("  [Chunk Alignment] Marker-based chunk alignment (method=1) succeeded!", flush=True)
+                        except Exception as e_mk:
                             print(
-                                f"  [Chunk Alignment] Point-based ICP raised '{e_align}'; "
+                                f"  [Chunk Alignment] Marker-based registration raised '{e_mk}'; "
                                 "proceeding with native camera transforms.",
                                 flush=True,
                             )
-                elif has_shared_cams:
-                    print(
-                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks sharing camera "
-                        f"labels onto '{anchor_chunk.label}' (method=2)...",
-                        flush=True,
-                    )
-                    try:
-                        doc.alignChunks(
-                            chunks=align_chunk_keys,
-                            reference=ref_key,
-                            method=2,
-                            fit_scale=False,
-                        )
-                        print("  [Chunk Alignment] Camera/GPS-based chunk alignment (method=2) succeeded!", flush=True)
-                    except Exception as e_cam:
+                    elif chunks_georef:
                         print(
-                            f"  [Chunk Alignment] Camera-based registration raised '{e_cam}'; "
-                            "falling back to Point-Based RANSAC ICP (method=0)...",
+                            f"\n[Chunk Alignment] {len(align_chunk_keys)} disjoint georeferenced chunks detected; "
+                            "preserving native georeferenced transforms for merge.",
+                            flush=True,
+                        )
+                    else:
+                        print(
+                            f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} unreferenced chunks onto anchor "
+                            f"'{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...",
                             flush=True,
                         )
                         try:
@@ -2169,165 +2536,76 @@ def run_reconstruction(
                                 "proceeding with native camera transforms.",
                                 flush=True,
                             )
-                elif has_shared_markers:
-                    print(
-                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} aligned chunks via shared "
-                        f"markers onto '{anchor_chunk.label}' (method=1)...",
-                        flush=True,
-                    )
-                    try:
-                        doc.alignChunks(
-                            chunks=align_chunk_keys,
-                            reference=ref_key,
-                            method=1,
-                            fit_scale=False,
-                        )
-                        print("  [Chunk Alignment] Marker-based chunk alignment (method=1) succeeded!", flush=True)
-                    except Exception as e_mk:
-                        print(
-                            f"  [Chunk Alignment] Marker-based registration raised '{e_mk}'; "
-                            "proceeding with native camera transforms.",
-                            flush=True,
-                        )
-                elif chunks_georef:
-                    print(
-                        f"\n[Chunk Alignment] {len(align_chunk_keys)} disjoint georeferenced chunks detected; "
-                        "preserving native georeferenced transforms for merge.",
-                        flush=True,
-                    )
                 else:
                     print(
-                        f"\n[Chunk Alignment] Registering {len(align_chunk_keys)} unreferenced chunks onto anchor "
-                        f"'{anchor_chunk.label}' using Point-Based RANSAC ICP (method=0, fit_scale=True)...",
+                        f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned "
+                        "cameras; skipping chunk registration.",
                         flush=True,
                     )
-                    try:
-                        doc.alignChunks(
-                            chunks=align_chunk_keys,
-                            reference=ref_key,
-                            method=0,
-                            fit_scale=True,
-                            downscale=align_downscale,
-                            keypoint_limit=keypoint_limit,
-                        )
-                        print("  [Chunk Alignment] Point-Based RANSAC ICP chunk alignment succeeded!", flush=True)
-                    except Exception as e_align:
-                        print(
-                            f"  [Chunk Alignment] Point-based alignment raised '{e_align}'; "
-                            "proceeding with native camera transforms.",
-                            flush=True,
-                        )
-            else:
-                print(
-                    f"\n[Chunk Alignment] Anchor chunk '{anchor_chunk.label}' is the only flight with aligned "
-                    "cameras; skipping chunk registration.",
-                    flush=True,
-                )
 
-            print(
-                f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks into unified production reconstruction...",
-                flush=True,
-            )
-            try:
-                doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=True)
-            except Exception as e_merge:
                 print(
-                    f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging camera transforms...",
-                    flush=True,
-                )
-                doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=False)
-
-            doc.chunk = doc.chunks[-1]
-            chunk = doc.chunk
-            chunk.label = "Production_Reconstruction"
-            for old_c in list(created_chunks):
-                if old_c != chunk:
-                    try:
-                        doc.remove(old_c)
-                    except Exception:
-                        pass
-            try:
-                chunk.updateTransform()
-            except Exception:
-                pass
-            aligned_total = sum(1 for cam in chunk.cameras if cam.transform and cam.enabled)
-            enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
-            print(
-                f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, "
-                f"{aligned_total}/{enabled_total} aligned).",
-                flush=True,
-            )
-
-            if detect_markers:
-                print(
-                    f"\n[Target Detection] Detecting target markers (Type: {target_type}, "
-                    f"Tolerance: {marker_tolerance})...",
+                    f"\n[Chunk Merging] Merging {len(merge_chunk_keys)} chunks "
+                    "into unified production reconstruction...",
                     flush=True,
                 )
                 try:
-                    tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
-                    chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
-                    print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
-                except Exception as e_mk:
-                    print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
+                    doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=True)
+                except Exception as e_merge:
+                    print(
+                        f"  [Chunk Merging] Note: merge_tiepoints raised '{e_merge}'; merging camera transforms...",
+                        flush=True,
+                    )
+                    doc.mergeChunks(chunks=merge_chunk_keys, merge_tiepoints=False)
 
-            if import_reference and os.path.isfile(import_reference):
-                print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
+                doc.chunk = doc.chunks[-1]
+                chunk = doc.chunk
+                chunk.label = "Production_Reconstruction"
+                for old_c in list(created_chunks):
+                    if old_c != chunk:
+                        try:
+                            doc.remove(old_c)
+                        except Exception:
+                            pass
                 try:
-                    chunk.importReference(path=import_reference, format=Metashape.ReferenceFormat.ReferenceFormatCSV)
                     chunk.updateTransform()
-                    print("  Reference import and georeferencing transform updated.", flush=True)
-                except Exception as e_ref:
-                    print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
-
-        else:
-            all_imgs = []
-            for imgs in groups.values():
-                all_imgs.extend(imgs)
-            all_imgs = sorted(all_imgs)
-
-            emit_ipc_stage("ingest", f"Ingesting {len(all_imgs)} images across: {images_dir}")
-            print(f"\n[1/7] Ingesting {len(all_imgs)} images found across: {images_dir}", flush=True)
-            chunk.addPhotos(all_imgs)
-            print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
-
-            if min_quality > 0.0:
-                filter_image_quality(chunk, min_quality=min_quality)
-
-            _apply_rolling_shutter_to_chunk(
-                chunk,
-                bool(rolling_shutter),
-                explicit_override=rolling_shutter_explicit,
-                chunk_label=getattr(chunk, "label", ""),
-            )
-
-            if alignment_hygiene:
-                sanitize_camera_gps(chunk)
-                hygiene_z0_info = normalize_flight_takeoff_z0(chunk)
-            else:
-                hygiene_z0_info = {"skipped": True, "anchor_z0": None}
-
-            if detect_markers:
+                except Exception:
+                    pass
+                aligned_total = sum(1 for cam in chunk.cameras if cam.transform and cam.enabled)
+                enabled_total = sum(1 for cam in chunk.cameras if cam.enabled)
                 print(
-                    f"\n[Target Detection] Detecting target markers (Type: {target_type}, "
-                    f"Tolerance: {marker_tolerance})...",
+                    f"  Successfully merged into '{chunk.label}' ({len(chunk.cameras)} cameras, "
+                    f"{aligned_total}/{enabled_total} aligned).",
                     flush=True,
                 )
-                try:
-                    tt_enum = TARGET_TYPE_MAP.get(target_type.lower(), Metashape.TargetType.CircularTarget12bit)
-                    chunk.detectMarkers(target_type=tt_enum, tolerance=marker_tolerance)
-                    print(f"  Target detection completed! Found {len(chunk.markers)} markers.", flush=True)
-                except Exception as e_mk:
-                    print(f"  [WARNING] Marker detection issue: {e_mk}. Continuing...", flush=True)
 
-            if import_reference and os.path.isfile(import_reference):
-                print(f"\n[GCP Reference] Importing ground control points from: {import_reference}...", flush=True)
-                try:
-                    chunk.importReference(path=import_reference, format=Metashape.ReferenceFormat.ReferenceFormatCSV)
-                    chunk.updateTransform()
-                    print("  Reference import and georeferencing transform updated.", flush=True)
-                except Exception as e_ref:
-                    print(f"  [WARNING] Reference import issue: {e_ref}. Continuing...", flush=True)
+            else:
+                all_imgs = []
+                for imgs in groups.values():
+                    all_imgs.extend(imgs)
+                all_imgs = sorted(all_imgs)
+
+                emit_ipc_stage("ingest", f"Ingesting {len(all_imgs)} images across: {images_dir}")
+                print(f"\n[1/7] Ingesting {len(all_imgs)} images found across: {images_dir}", flush=True)
+                _add_photos_with_layout(chunk, all_imgs)
+                print(f"  Successfully loaded {len(chunk.cameras)} cameras.", flush=True)
+
+                if min_quality > 0.0:
+                    filter_image_quality(chunk, min_quality=min_quality)
+
+                _apply_rolling_shutter_to_chunk(
+                    chunk,
+                    bool(rolling_shutter),
+                    explicit_override=rolling_shutter_explicit,
+                    chunk_label=getattr(chunk, "label", ""),
+                )
+
+                _run_markers_and_reference(chunk)
+
+                if alignment_hygiene:
+                    sanitize_camera_gps(chunk)
+                    hygiene_z0_info = normalize_flight_takeoff_z0(chunk)
+                else:
+                    hygiene_z0_info = {"skipped": True, "anchor_z0": None}
 
     # -------------------------------------------------------------
     # Autonomous Unified Project Batch (Independent Project Mode)
@@ -2471,7 +2749,7 @@ def run_reconstruction(
                     min_scratch_free_gb=min_scratch_free_gb,
                     network_path=network_path,
                     surface_type=surface_type,
-                    rolling_shutter=rolling_shutter,
+                    rolling_shutter=rolling_shutter if rolling_shutter_explicit else None,
                     close_holes=close_holes,
                     fill_holes=fill_holes,
                     ghosting_filter=ghosting_filter,
@@ -2487,6 +2765,9 @@ def run_reconstruction(
                     tile_size=tile_size,
                     classify_ground=classify_ground,
                     classify_points=classify_points,
+                    ground_cell_size=ground_cell_size,
+                    ground_max_angle=ground_max_angle,
+                    ground_max_distance=ground_max_distance,
                     remove_lighting=remove_lighting,
                     delighting_color_mode=delighting_color_mode,
                     calibrate_colors=calibrate_colors,
@@ -2494,6 +2775,16 @@ def run_reconstruction(
                     target_type=target_type,
                     marker_tolerance=marker_tolerance,
                     import_reference=import_reference,
+                    photo_layout=photo_layout,
+                    reference_columns=reference_columns,
+                    reference_delimiter=reference_delimiter,
+                    reference_skip_rows=reference_skip_rows,
+                    reference_crs=reference_crs,
+                    create_markers=create_markers,
+                    source_share=kwargs.get("source_share"),
+                    source_rel=source_rel,
+                    multi_chunk=multi_chunk,
+                    chunk_align_method=chunk_align_method,
                     smooth_mesh=smooth_mesh,
                     smooth_strength=smooth_strength,
                     decimate_mesh=decimate_mesh,
@@ -2963,6 +3254,11 @@ def run_reconstruction(
                     f"  Alignment finished in {(time.time() - t_align) / 60:.2f} min. Aligned: {aligned_count}/{enabled_count} active cameras.",
                     flush=True,
                 )
+                if aligned_count < 2:
+                    raise RuntimeError(
+                        f"Camera alignment failed: only {aligned_count}/{enabled_count} "
+                        "active cameras aligned (< 2 required)."
+                    )
 
                 _apply_rolling_shutter_to_chunk(
                     chunk,
@@ -2994,7 +3290,7 @@ def run_reconstruction(
                             cleaned_on_cluster = False
 
                     if not cleaned_on_cluster:
-                        usgs_stats = filter_tie_points(chunk)
+                        usgs_stats = filter_tie_points(chunk, adaptive_fitting=adaptive_fitting)
                 else:
                     print(
                         "  [Gradual Selection] Tie-point cleaning and camera re-optimization skipped (--no-filter-tiepoints).",
@@ -3024,6 +3320,9 @@ def run_reconstruction(
                             filter_stationary_points=filter_stationary_points,
                             guided_matching=guided_matching,
                             scratch_root=resolved_scratch or None,
+                            keypoint_limit=keypoint_limit,
+                            keypoint_limit_per_mpx=keypoint_limit_per_mpx,
+                            tiepoint_limit=tiepoint_limit,
                         )
                     elif audit_res.get("bridge_candidates"):
                         # If ICP bridge is explicitly disabled, quarantine unbridged overlapping islands cleanly
@@ -3149,6 +3448,114 @@ def run_reconstruction(
             chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved depth maps checkpoint to: {psx_out}", flush=True)
 
+    def _chunk_op_done(target_ch: Any, op_key: str) -> bool:
+        try:
+            meta_obj = getattr(target_ch, "meta", None)
+            if meta_obj is not None and op_key in meta_obj:
+                return str(meta_obj[op_key]).strip() == "1"
+        except Exception:
+            pass
+        return False
+
+    def _mark_chunk_op_done(target_ch: Any, op_key: str) -> None:
+        try:
+            meta_obj = getattr(target_ch, "meta", None)
+            if meta_obj is not None:
+                meta_obj[op_key] = "1"
+        except Exception:
+            pass
+
+    def _apply_point_cloud_postprocess(target_ch: Any, only_pending: bool = False) -> bool:
+        changed = False
+        if not target_ch or not target_ch.point_cloud:
+            return False
+        if filter_point_confidence and filter_point_confidence > 0 and (
+            not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_pc_conf")
+        ):
+            print(f"  Filtering low-confidence points (< {filter_point_confidence})...", flush=True)
+            try:
+                if hasattr(target_ch, "cleanPointCloud") and hasattr(Metashape.PointCloud, "Criterion"):
+                    target_ch.cleanPointCloud(
+                        criterion=Metashape.PointCloud.Criterion.Confidence,
+                        threshold=int(filter_point_confidence),
+                    )
+                else:
+                    target_ch.point_cloud.setConfidenceFilter(0, max(0, int(filter_point_confidence) - 1))
+                    all_classes = (
+                        list(Metashape.PointClass.values.values())
+                        if hasattr(Metashape, "PointClass") and hasattr(Metashape.PointClass, "values")
+                        else list(range(128))
+                    )
+                    target_ch.point_cloud.removePoints(all_classes)
+                    target_ch.point_cloud.resetFilters()
+                _mark_chunk_op_done(target_ch, "_autometashape_done_pc_conf")
+                changed = True
+            except Exception as e_conf:
+                print(f"  [WARNING] Point confidence filtering skipped: {e_conf}", flush=True)
+                try:
+                    target_ch.point_cloud.resetFilters()
+                except Exception:
+                    pass
+
+        if classify_ground and (
+            not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_classify_ground")
+        ):
+            c_size = ground_cell_size if ground_cell_size is not None else 50.0
+            m_ang = ground_max_angle if ground_max_angle is not None else 15.0
+            m_dist = ground_max_distance if ground_max_distance is not None else 1.0
+            print(
+                f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, "
+                f"max_angle={m_ang:.1f} deg, max_distance={m_dist:.2f}m)...",
+                flush=True,
+            )
+            target_ch.point_cloud.classifyGroundPoints(cell_size=c_size, max_angle=m_ang, max_distance=m_dist)
+            _mark_chunk_op_done(target_ch, "_autometashape_done_classify_ground")
+            changed = True
+            print("  Ground classification completed.", flush=True)
+
+        if classify_points and (
+            not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_classify_points")
+        ):
+            print("  Executing multiclass AI semantic point classification...", flush=True)
+            target_ch.point_cloud.classifyPoints()
+            _mark_chunk_op_done(target_ch, "_autometashape_done_classify_points")
+            changed = True
+            print("  Multiclass point classification completed.", flush=True)
+        return changed
+
+    def _apply_mesh_postprocess(target_ch: Any, only_pending: bool = False) -> bool:
+        changed = False
+        if not target_ch or not target_ch.model:
+            return False
+        if close_holes and (not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_close_holes")):
+            target_ch.model.closeHoles(level=30)
+            _mark_chunk_op_done(target_ch, "_autometashape_done_close_holes")
+            changed = True
+            print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
+        if smooth_mesh and (not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_smooth_mesh")):
+            print(f"  Applying Laplacian mesh smoothing (strength: {smooth_strength})...", flush=True)
+            try:
+                target_ch.smoothModel(
+                    strength=smooth_strength, fix_borders=True, preserve_edges=True, replace_asset=True
+                )
+            except TypeError:
+                target_ch.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
+            _mark_chunk_op_done(target_ch, "_autometashape_done_smooth_mesh")
+            changed = True
+        if (
+            decimate_mesh
+            and decimate_mesh > 0
+            and (not only_pending or not _chunk_op_done(target_ch, "_autometashape_done_decimate_mesh"))
+        ):
+            print(f"  Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
+            try:
+                target_ch.decimateModel(face_count=decimate_mesh, replace_asset=True)
+            except TypeError:
+                target_ch.decimateModel(face_count=decimate_mesh)
+            _mark_chunk_op_done(target_ch, "_autometashape_done_decimate_mesh")
+            changed = True
+        return changed
+
     # Step 4b: Dense Point Cloud Generation & Classification
     if build_point_cloud:
         has_point_cloud = _has_dense_points(chunk)
@@ -3160,6 +3567,8 @@ def run_reconstruction(
                 f"\n[4b/7] Reusing existing Dense Point Cloud from checkpoint ({chunk.point_cloud.point_count:,} points).",
                 flush=True,
             )
+            if _apply_point_cloud_postprocess(chunk, only_pending=True):
+                chunk = _save_stage_checkpoint(psx_out)
         else:
             emit_ipc_stage("point_cloud", "Generating Dense Point Cloud from Depth Maps")
             print("\n[4b/7] Generating Dense Point Cloud from Depth Maps (RGB Colors + Confidence)...", flush=True)
@@ -3204,45 +3613,7 @@ def run_reconstruction(
                 flush=True,
             )
 
-            if filter_point_confidence and filter_point_confidence > 0 and chunk.point_cloud:
-                print(f"  Filtering low-confidence points (< {filter_point_confidence})...", flush=True)
-                try:
-                    if hasattr(chunk, "cleanPointCloud") and hasattr(Metashape.PointCloud, "Criterion"):
-                        chunk.cleanPointCloud(
-                            criterion=Metashape.PointCloud.Criterion.Confidence,
-                            threshold=int(filter_point_confidence),
-                        )
-                    else:
-                        chunk.point_cloud.setConfidenceFilter(0, max(0, int(filter_point_confidence) - 1))
-                        all_classes = (
-                            list(Metashape.PointClass.values.values())
-                            if hasattr(Metashape, "PointClass") and hasattr(Metashape.PointClass, "values")
-                            else list(range(128))
-                        )
-                        chunk.point_cloud.removePoints(all_classes)
-                        chunk.point_cloud.resetFilters()
-                except Exception as e_conf:
-                    print(f"  [WARNING] Point confidence filtering skipped: {e_conf}", flush=True)
-                    try:
-                        chunk.point_cloud.resetFilters()
-                    except Exception:
-                        pass
-
-            if classify_ground and chunk.point_cloud:
-                c_size = ground_cell_size if ground_cell_size is not None else 50.0
-                m_ang = ground_max_angle if ground_max_angle is not None else 15.0
-                m_dist = ground_max_distance if ground_max_distance is not None else 1.0
-                print(
-                    f"  Executing slope-adaptive ground point classification (cell_size={c_size:.1f}m, max_angle={m_ang:.1f} deg, max_distance={m_dist:.2f}m)...",
-                    flush=True,
-                )
-                chunk.point_cloud.classifyGroundPoints(cell_size=c_size, max_angle=m_ang, max_distance=m_dist)
-                print("  Ground classification completed.", flush=True)
-
-            if classify_points and chunk.point_cloud:
-                print("  Executing multiclass AI semantic point classification...", flush=True)
-                chunk.point_cloud.classifyPoints()
-                print("  Multiclass point classification completed.", flush=True)
+            _apply_point_cloud_postprocess(chunk, only_pending=False)
 
             chunk = _save_stage_checkpoint(psx_out)
             print(f"[CHECKPOINT] Saved dense point cloud checkpoint to: {psx_out}", flush=True)
@@ -3287,6 +3658,8 @@ def run_reconstruction(
                 f"\n[5/7] Reusing existing Surface Mesh from checkpoint ({len(chunk.model.vertices):,} vertices, {len(chunk.model.faces):,} faces).",
                 flush=True,
             )
+            if _apply_mesh_postprocess(chunk, only_pending=True):
+                chunk = _save_stage_checkpoint(psx_out)
         else:
             emit_ipc_stage("mesh", f"Reconstructing Arbitrary Surface Mesh (Target: {custom_faces:,} faces)")
             print(
@@ -3361,23 +3734,7 @@ def run_reconstruction(
                     finally:
                         Metashape.app.gpu_mask = restore_mask
                         print("  [Hardware] Restored GPU acceleration for texture baking.", flush=True)
-            if close_holes and chunk.model:
-                chunk.model.closeHoles(level=30)
-                print("  Applied planar hole closing across window and surface voids (level 30%).", flush=True)
-            if smooth_mesh and chunk.model:
-                print(f"  Applying Laplacian mesh smoothing (strength: {smooth_strength})...", flush=True)
-                try:
-                    chunk.smoothModel(
-                        strength=smooth_strength, fix_borders=True, preserve_edges=True, replace_asset=True
-                    )
-                except TypeError:
-                    chunk.smoothModel(strength=smooth_strength, fix_borders=True, preserve_edges=True)
-            if decimate_mesh and chunk.model and decimate_mesh > 0:
-                print(f"  Decimating surface mesh to {decimate_mesh:,} faces...", flush=True)
-                try:
-                    chunk.decimateModel(face_count=decimate_mesh, replace_asset=True)
-                except TypeError:
-                    chunk.decimateModel(face_count=decimate_mesh)
+            _apply_mesh_postprocess(chunk, only_pending=False)
 
             if chunk.model is not None:
                 mesh_verts = len(chunk.model.vertices)
@@ -3404,6 +3761,18 @@ def run_reconstruction(
     elif current_pages == texture_pages and not rebake_texture:
         emit_ipc_stage("texture", f"Reusing existing Texture Atlas ({current_pages} pages)")
         print(f"\n[6/7] Reusing existing Texture Atlas from checkpoint ({current_pages} pages).", flush=True)
+        if remove_lighting and chunk.model and not _chunk_op_done(chunk, "_autometashape_done_remove_lighting"):
+            print(
+                "\n[Delighting] Removing harsh ambient shadows and illumination to recover diffuse albedo...",
+                flush=True,
+            )
+            try:
+                chunk.removeLighting(color_mode=delighting_color_mode)
+                _mark_chunk_op_done(chunk, "_autometashape_done_remove_lighting")
+                chunk = _save_stage_checkpoint(psx_out)
+                print("  Texture delighting completed.", flush=True)
+            except Exception as e_lt:
+                print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
     else:
         if current_pages > 0 and current_pages != texture_pages:
             emit_ipc_stage("texture", f"Re-baking Texture Atlas to requested {texture_pages} pages")
@@ -3484,6 +3853,7 @@ def run_reconstruction(
             )
             try:
                 chunk.removeLighting(color_mode=delighting_color_mode)
+                _mark_chunk_op_done(chunk, "_autometashape_done_remove_lighting")
                 print("  Texture delighting completed.", flush=True)
             except Exception as e_lt:
                 print(f"  [WARNING] Texture delighting issue: {e_lt}. Continuing...", flush=True)
@@ -3491,6 +3861,8 @@ def run_reconstruction(
         print(f"[CHECKPOINT] Saved textured model checkpoint to: {psx_out}", flush=True)
 
     # Step 6b: Hierarchical 3D Tiled Model (LOD / Cesium 3D Tiles)
+    tiled_exported_ok = False
+    tiled_export_err = ""
     if build_tiled_model:
         try:
             has_tiled = getattr(chunk, "tiled_model", None) is not None
@@ -3498,12 +3870,21 @@ def run_reconstruction(
                 emit_ipc_stage("tiled_model", f"Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})")
                 print(f"\n[6b/7] Building Hierarchical 3D Tiled Model (Tile Size: {tile_size})...", flush=True)
                 t_tile = time.time()
+                tile_src = (
+                    Metashape.DataSource.DepthMapsData
+                    if _has_complete_depth_maps(chunk)[0]
+                    else (
+                        Metashape.DataSource.ModelData
+                        if _has_valid_mesh(chunk)
+                        else Metashape.DataSource.DepthMapsData
+                    )
+                )
                 tiled_computed = False
                 if cluster_enabled:
                     try:
                         t_tl = Metashape.Tasks.BuildTiledModel()
                         t_tl.tile_size = tile_size
-                        t_tl.source_data = Metashape.DataSource.DepthMapsData
+                        t_tl.source_data = tile_src
                         t_tl.replace_asset = True
                         tiled_computed = dispatch_cluster_task(
                             t_tl, f"Building 3D Tiled Model (Tile Size: {tile_size})", "tiled_model"
@@ -3520,7 +3901,7 @@ def run_reconstruction(
                 if not tiled_computed:
                     chunk.buildTiledModel(
                         tile_size=tile_size,
-                        source_data=Metashape.DataSource.DepthMapsData,
+                        source_data=tile_src,
                     )
                 print(f"  3D Tiled model completed in {(time.time() - t_tile) / 60:.2f} min.", flush=True)
                 chunk = _save_stage_checkpoint(psx_out)
@@ -3543,8 +3924,10 @@ def run_reconstruction(
                 path=tiled_out,
                 format=tiled_fmt,
             )
+            tiled_exported_ok = True
             print(f"  [6b/7] [EXPORT] Saved 3D Tiled Model: {tiled_out}", flush=True)
         except Exception as e_tile:
+            tiled_export_err = f"TiledModel:{e_tile}"
             print(f"  [6b/7] [WARNING] 3D Tiled Model generation/export issue: {e_tile}. Continuing...", flush=True)
 
     # Step 7b: Digital Elevation Model (DEM) Generation & GeoTIFF Export
@@ -3557,11 +3940,14 @@ def run_reconstruction(
                 print("\n[7b/7] Building Digital Elevation Model (DEM/DSM)...", flush=True)
                 t_dem = time.time()
                 proj, target_crs, _ = _select_metric_projection(chunk, "DEM")
-                dem_source = (
-                    Metashape.DataSource.PointCloudData
-                    if _has_dense_points(chunk)
-                    else Metashape.DataSource.DepthMapsData
-                )
+                if _has_dense_points(chunk):
+                    dem_source = Metashape.DataSource.PointCloudData
+                elif _has_complete_depth_maps(chunk)[0]:
+                    dem_source = Metashape.DataSource.DepthMapsData
+                elif _has_valid_mesh(chunk):
+                    dem_source = Metashape.DataSource.ModelData
+                else:
+                    dem_source = Metashape.DataSource.DepthMapsData
                 dem_computed = False
                 if cluster_enabled:
                     try:
@@ -3618,13 +4004,21 @@ def run_reconstruction(
             print(f"  [7b/7] [WARNING] DEM generation/export encountered an issue: {e_dem}. Continuing...", flush=True)
 
     # Step 7b2: Topographic Contour Vectors
+    contours_exported_ok = False
+    contours_export_err = ""
     if build_contours and getattr(chunk, "elevation", None) is not None:
         try:
+            vert_unit_m = crs_vertical_unit_to_meters(getattr(chunk, "crs", None))
+            interval_crs = (
+                contour_interval / vert_unit_m
+                if (vert_unit_m > 0.0 and contour_interval > 0.0)
+                else contour_interval
+            )
             print(f"\n[7b2/7] Generating Topographic Contours (Interval: {contour_interval}m)...", flush=True)
             t_cnt = time.time()
             chunk.buildContours(
                 source_data=Metashape.DataSource.ElevationData,
-                interval=contour_interval,
+                interval=interval_crs,
                 prevent_intersections=True,
             )
             print(f"  Contour lines generated in {(time.time() - t_cnt) / 60:.2f} min.", flush=True)
@@ -3641,8 +4035,10 @@ def run_reconstruction(
                 save_elevation=True,
                 save_attributes=True,
             )
+            contours_exported_ok = True
             print(f"  [7b2/7] [EXPORT] Saved Topographic Contours: {cnt_out}", flush=True)
         except Exception as e_cnt:
+            contours_export_err = f"Contours:{e_cnt}"
             print(f"  [7b2/7] [WARNING] Topographic contours issue: {e_cnt}. Continuing...", flush=True)
 
     # Step 7c: Orthomosaic Generation & GeoTIFF Export
@@ -3668,11 +4064,7 @@ def run_reconstruction(
                 t_ortho = time.time()
                 proj, target_crs, ortho_crs_is_metric = _select_metric_projection(chunk, "Orthomosaic")
                 ortho_target_crs = target_crs
-                applied_ortho_res = (
-                    _scale_resolution_to_crs_units(eff_ortho_res, target_crs)
-                    if (eff_ortho_res > 0 and ortho_crs_is_metric)
-                    else 0.0
-                )
+                applied_ortho_res = eff_ortho_res if (eff_ortho_res > 0 and ortho_crs_is_metric) else 0.0
                 ortho_computed = False
                 surf_data = (
                     Metashape.DataSource.ElevationData
@@ -3743,11 +4135,7 @@ def run_reconstruction(
                 or getattr(chunk, "crs", None)
             )
             ortho_crs_is_metric = _is_metric_raster_crs(active_om_crs)
-            export_ortho_res = (
-                _scale_resolution_to_crs_units(eff_ortho_res, active_om_crs)
-                if (eff_ortho_res > 0 and ortho_crs_is_metric)
-                else 0.0
-            )
+            export_ortho_res = eff_ortho_res if (eff_ortho_res > 0 and ortho_crs_is_metric) else 0.0
             if (not cluster_enabled) and export_ortho:
                 ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
                 res_label = (
@@ -3807,11 +4195,7 @@ def run_reconstruction(
         or getattr(chunk, "crs", None)
     )
     export_ortho_crs_is_metric = _is_metric_raster_crs(active_om_crs)
-    export_ortho_res = (
-        _scale_resolution_to_crs_units(eff_ortho_res, active_om_crs)
-        if (eff_ortho_res > 0 and export_ortho_crs_is_metric)
-        else 0.0
-    )
+    export_ortho_res = eff_ortho_res if (eff_ortho_res > 0 and export_ortho_crs_is_metric) else 0.0
 
     cluster_exported = False
     if cluster_enabled:
@@ -3957,7 +4341,30 @@ def run_reconstruction(
             )
             cluster_exported = False
 
+    export_attempted = 0
+    export_succeeded = 0
+    export_errors: list[str] = []
+    if tiled_exported_ok:
+        export_attempted += 1
+        export_succeeded += 1
+    elif tiled_export_err:
+        export_attempted += 1
+        export_errors.append(tiled_export_err)
+    if contours_exported_ok:
+        export_attempted += 1
+        export_succeeded += 1
+    elif contours_export_err:
+        export_attempted += 1
+        export_errors.append(contours_export_err)
+    if dem_exported_locally:
+        export_attempted += 1
+        export_succeeded += 1
+    if ortho_exported_locally:
+        export_attempted += 1
+        export_succeeded += 1
+
     if (not cluster_exported) and export_glb and chunk.model:
+        export_attempted += 1
         try:
             chunk.exportModel(
                 glb_out,
@@ -3967,14 +4374,17 @@ def run_reconstruction(
                 save_normals=True,
                 save_colors=True,
             )
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved binary GLB: {glb_out} ({os.path.getsize(glb_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_glb:
+            export_errors.append(f"GLB:{e_glb}")
             print(f"  [7/7] [WARNING] GLB export issue: {e_glb}", flush=True)
 
     if (not cluster_exported) and export_obj and chunk.model:
+        export_attempted += 1
         fmt_lower = (texture_format or "png").lower()
         if fmt_lower in ("tiff", "tif"):
             tex_image_fmt = Metashape.ImageFormat.ImageFormatTIFF
@@ -3991,12 +4401,14 @@ def run_reconstruction(
                 save_normals=True,
                 save_colors=True,
             )
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved Wavefront OBJ ({fmt_lower.upper()} textures): "
                 f"{obj_out} ({os.path.getsize(obj_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_obj:
+            export_errors.append(f"OBJ:{e_obj}")
             print(f"  [7/7] [WARNING] OBJ export issue: {e_obj}", flush=True)
 
     if (
@@ -4005,6 +4417,7 @@ def run_reconstruction(
         and export_dem
         and getattr(chunk, "elevation", None) is not None
     ):
+        export_attempted += 1
         try:
             dem_out = os.path.join(output_dir, f"{project_name}_dem.tif")
             comp = Metashape.ImageCompression()
@@ -4017,14 +4430,17 @@ def run_reconstruction(
                 image_compression=comp,
                 save_world=True,
             )
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved GeoTIFF DEM: {dem_out} ({os.path.getsize(dem_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_dem:
+            export_errors.append(f"DEM:{e_dem}")
             print(f"  [7/7] [WARNING] DEM fallback export issue: {e_dem}", flush=True)
 
     if (not cluster_exported) and (not ortho_exported_locally) and export_ortho and chunk.orthomosaic is not None:
+        export_attempted += 1
         try:
             ortho_out = os.path.join(output_dir, f"{project_name}_orthomosaic.tif")
             comp = Metashape.ImageCompression()
@@ -4041,12 +4457,14 @@ def run_reconstruction(
             if export_ortho_res > 0:
                 fb_ortho_kwargs["resolution"] = export_ortho_res
             chunk.exportRaster(**fb_ortho_kwargs)
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved GeoTIFF Orthomosaic: {ortho_out} "
                 f"({os.path.getsize(ortho_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_ortho:
+            export_errors.append(f"Ortho:{e_ortho}")
             print(f"  [7/7] [WARNING] Orthomosaic fallback export issue: {e_ortho}", flush=True)
 
     has_any_export = any(
@@ -4072,6 +4490,7 @@ def run_reconstruction(
         )
 
     if (not cluster_exported) and export_fbx and chunk.model:
+        export_attempted += 1
         fbx_out = os.path.join(output_dir, f"{project_name}.fbx")
         print(f"  [7/7] [EXPORT] Exporting Autodesk FBX to: {fbx_out}...", flush=True)
         try:
@@ -4082,35 +4501,44 @@ def run_reconstruction(
                 save_normals=True,
                 save_colors=True,
             )
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved FBX: {fbx_out} ({os.path.getsize(fbx_out) / (1024 * 1024):.2f} MB)", flush=True
             )
         except Exception as e_fbx:
+            export_errors.append(f"FBX:{e_fbx}")
             print(f"  [7/7] [WARNING] FBX export issue: {e_fbx}", flush=True)
 
     if (not cluster_exported) and export_ply and chunk.model:
+        export_attempted += 1
         ply_out = os.path.join(output_dir, f"{project_name}_mesh.ply")
         print(f"  [7/7] [EXPORT] Exporting Stanford PLY to: {ply_out}...", flush=True)
         try:
             chunk.exportModel(ply_out, format=Metashape.ModelFormat.ModelFormatPLY, save_normals=True, save_colors=True)
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved PLY: {ply_out} ({os.path.getsize(ply_out) / (1024 * 1024):.2f} MB)", flush=True
             )
         except Exception as e_ply:
+            export_errors.append(f"PLY:{e_ply}")
             print(f"  [7/7] [WARNING] PLY export issue: {e_ply}", flush=True)
 
     if (not cluster_exported) and export_dxf and chunk.model:
+        export_attempted += 1
         dxf_out = os.path.join(output_dir, f"{project_name}.dxf")
         print(f"  [7/7] [EXPORT] Exporting AutoCAD DXF to: {dxf_out}...", flush=True)
         try:
             chunk.exportModel(dxf_out, format=Metashape.ModelFormat.ModelFormatDXF, save_normals=True)
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved DXF: {dxf_out} ({os.path.getsize(dxf_out) / (1024 * 1024):.2f} MB)", flush=True
             )
         except Exception as e_dxf:
+            export_errors.append(f"DXF:{e_dxf}")
             print(f"  [7/7] [WARNING] DXF export issue: {e_dxf}", flush=True)
 
     if (not cluster_exported) and export_tie_points and chunk.tie_points:
+        export_attempted += 1
         tp_out = os.path.join(output_dir, f"{project_name}_tie_points.ply")
         print(f"  [7/7] [EXPORT] Exporting Sparse Tie Points to: {tp_out}...", flush=True)
         try:
@@ -4122,16 +4550,19 @@ def run_reconstruction(
             if pc_export_crs is not None:
                 tp_kwargs["crs"] = pc_export_crs
             chunk.exportPointCloud(**tp_kwargs)
+            export_succeeded += 1
             print(
                 f"  [7/7] [EXPORT] Saved Tie Points: {tp_out} ({os.path.getsize(tp_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_tp:
+            export_errors.append(f"TiePoints:{e_tp}")
             print(f"  [7/7] [WARNING] Tie points export issue: {e_tp}", flush=True)
 
     # Step 7d: Dense Point Cloud Export
     if (not cluster_exported) and export_point_cloud:
         if _has_dense_points(chunk):
+            export_attempted += 1
             pc_format_ext = point_cloud_format.lower() if point_cloud_format else "laz"
             pc_fmt, pc_ext = POINT_CLOUD_FORMAT_MAP.get(
                 pc_format_ext,
@@ -4152,12 +4583,14 @@ def run_reconstruction(
                 if pc_export_crs is not None:
                     pc_kwargs["crs"] = pc_export_crs
                 chunk.exportPointCloud(**pc_kwargs)
+                export_succeeded += 1
                 print(
                     f"  [7d/7] [EXPORT] Saved Dense Point Cloud: {pc_out} "
                     f"({os.path.getsize(pc_out) / (1024 * 1024):.2f} MB)",
                     flush=True,
                 )
             except Exception as e_pc:
+                export_errors.append(f"PointCloud:{e_pc}")
                 print(f"  [7d/7] [WARNING] Dense point cloud export issue: {e_pc}. Continuing...", flush=True)
     elif build_point_cloud and (not cluster_exported):
         print(
@@ -4167,6 +4600,7 @@ def run_reconstruction(
 
     # Step 7e: Executive PDF Quality & Calibration Report
     if (not cluster_exported) and export_report:
+        export_attempted += 1
         try:
             report_out = os.path.join(output_dir, f"{project_name}_report.pdf")
             print(
@@ -4178,12 +4612,17 @@ def run_reconstruction(
                 title=rep_title,
                 description="AutoMetashape Autonomous Photogrammetry Pipeline",
             )
+            export_succeeded += 1
             print(
                 f"  [7e/7] [EXPORT] Saved Quality Report: {report_out} ({os.path.getsize(report_out) / (1024 * 1024):.2f} MB)",
                 flush=True,
             )
         except Exception as e_rep:
+            export_errors.append(f"Report:{e_rep}")
             print(f"  [7e/7] [WARNING] PDF Report export encountered an issue: {e_rep}. Continuing...", flush=True)
+
+    if has_any_export and (not cluster_exported) and export_attempted > 0 and export_succeeded == 0:
+        raise RuntimeError(f"All requested local deliverable exports failed: {'; '.join(export_errors)}")
 
     chunk = _save_stage_checkpoint(psx_out)
     print(f"  [7/7] [EXPORT] Saved Metashape Pro Native Project: {psx_out}", flush=True)
@@ -4671,8 +5110,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--ortho-resolution",
         type=float,
-        default=0.05,
-        help="Orthomosaic pixel size in meters for build and GeoTIFF export (default: 0.05 = 5 cm/px; 0 = native GSD)",
+        default=None,
+        help="Orthomosaic pixel size in meters (default: auto from GSD / 0.05m; 0 = native GSD)",
     )
     parser.add_argument(
         "--no-ortho-cull-faces",
@@ -4721,6 +5160,44 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--import-reference", default=None, help="Path to ground control points (GCP) reference CSV/TXT file"
+    )
+    parser.add_argument(
+        "--photo-layout",
+        choices=["auto", "flat", "multiplane"],
+        default="auto",
+        help="Camera sensor layout for addPhotos (default: auto)",
+    )
+    parser.add_argument(
+        "--reference-columns",
+        default="",
+        help="Explicit Metashape importReference column format string (e.g. 'nxyz')",
+    )
+    parser.add_argument(
+        "--reference-delimiter",
+        default="",
+        help="Delimiter for CSV/TXT reference import (default: auto-detect)",
+    )
+    parser.add_argument(
+        "--reference-skip-rows",
+        type=int,
+        default=0,
+        help="Header rows to skip when importing CSV/TXT reference (default: 0/auto)",
+    )
+    parser.add_argument(
+        "--reference-crs",
+        default="",
+        help="Coordinate system string for reference file (e.g. 'EPSG::4326')",
+    )
+    parser.add_argument(
+        "--create-markers",
+        action="store_true",
+        default=False,
+        help="Allow importReference to create missing marker instances",
+    )
+    parser.add_argument(
+        "--source-rel",
+        default="",
+        help="Relative source photo path for dual-share worker resolution",
     )
     parser.add_argument(
         "--calibrate-colors",

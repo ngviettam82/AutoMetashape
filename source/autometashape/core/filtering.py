@@ -32,64 +32,79 @@ def filter_image_quality(chunk, min_quality: float = 0.5) -> int:
     )
 
     disabled_count = 0
-    scored_enabled = []
-    regular_enabled_count = 0
+    per_sensor: dict[Any, list[Any]] = defaultdict(list)
+    sensor_keep_alive: list[Any] = []
     for cam in chunk.cameras:
         if not getattr(cam, "enabled", True):
             continue
         if regular_type is not None and getattr(cam, "type", regular_type) != regular_type:
             continue
-        regular_enabled_count += 1
-        if "Image/Quality" in cam.meta:
-            try:
-                qual_val = float(cam.meta["Image/Quality"])
-                if math.isfinite(qual_val):
-                    scored_enabled.append((qual_val, cam))
-            except (ValueError, TypeError):
-                pass
+        s_obj = getattr(cam, "sensor", None)
+        if s_obj is not None:
+            sensor_keep_alive.append(s_obj)
+            s_key: Any = getattr(s_obj, "key", None)
+            if s_key is None:
+                s_key = id(s_obj)
+        else:
+            s_key = None
+        per_sensor[s_key].append(cam)
 
-    eff_min_quality = float(min_quality)
-    below = [(q, c) for q, c in scored_enabled if q < eff_min_quality]
-    if len(scored_enabled) >= 6 and (len(below) / len(scored_enabled)) > 0.80:
-        sorted_q = sorted(q for q, _c in scored_enabled)
-        med_q = sorted_q[len(sorted_q) // 2]
-        eff_min_quality = min(eff_min_quality, max(0.15, med_q * 0.65))
-        print(
-            f"  [Quality Filter] Uniformly low-contrast/hazy dataset detected "
-            f"({len(below)}/{len(scored_enabled)} < {min_quality:.2f}); "
-            f"adapting quality cutoff to {eff_min_quality:.2f}.",
-            flush=True,
-        )
+    eff_cutoffs: list[float] = []
+    for _s_key, grp_cams in per_sensor.items():
+        scored_enabled = []
+        for cam in grp_cams:
+            if "Image/Quality" in cam.meta:
+                try:
+                    qual_val = float(cam.meta["Image/Quality"])
+                    if math.isfinite(qual_val):
+                        scored_enabled.append((qual_val, cam))
+                except (ValueError, TypeError):
+                    pass
+
+        eff_min_quality = float(min_quality)
         below = [(q, c) for q, c in scored_enabled if q < eff_min_quality]
+        if len(scored_enabled) >= 6 and (len(below) / len(scored_enabled)) > 0.80:
+            sorted_q = sorted(q for q, _c in scored_enabled)
+            med_q = sorted_q[len(sorted_q) // 2]
+            eff_min_quality = min(eff_min_quality, max(0.15, med_q * 0.65))
+            print(
+                f"  [Quality Filter] Uniformly low-contrast/hazy sensor group detected "
+                f"({len(below)}/{len(scored_enabled)} < {min_quality:.2f}); "
+                f"adapting quality cutoff to {eff_min_quality:.2f}.",
+                flush=True,
+            )
+            below = [(q, c) for q, c in scored_enabled if q < eff_min_quality]
+        eff_cutoffs.append(eff_min_quality)
 
-    # Never disable cameras down to < 2 remaining (protects extreme low-contrast scenes from total collapse)
-    max_disable = max(0, regular_enabled_count - 2)
-    if len(below) > max_disable and regular_enabled_count >= 2:
-        below.sort(key=lambda item: item[0])
-        to_disable = [c for _q, c in below[:max_disable]]
-        print(
-            f"  [Quality Filter] Guard: clamping disable count from {len(below)} to {len(to_disable)} "
-            f"to retain at least 2 sharpest cameras.",
-            flush=True,
-        )
-    else:
-        to_disable = [c for _q, c in below]
+        # Never disable cameras down to < 2 remaining per sensor group
+        max_disable = max(0, len(grp_cams) - 2)
+        if len(below) > max_disable and len(grp_cams) >= 2:
+            below.sort(key=lambda item: item[0])
+            to_disable = [c for _q, c in below[:max_disable]]
+            print(
+                f"  [Quality Filter] Guard: clamping disable count from {len(below)} to {len(to_disable)} "
+                f"to retain at least 2 sharpest cameras.",
+                flush=True,
+            )
+        else:
+            to_disable = [c for _q, c in below]
 
-    for cam in to_disable:
-        cam.enabled = False
-        disabled_count += 1
+        for cam in to_disable:
+            cam.enabled = False
+            disabled_count += 1
 
     active_count = sum(1 for c in chunk.cameras if c.enabled)
     t_elapsed = time.time() - t_qual
+    shown_cutoff = min(eff_cutoffs) if eff_cutoffs else float(min_quality)
     print(
         f"  [Quality Filter] Analyzed in {t_elapsed:.1f}s: "
-        f"{active_count}/{len(chunk.cameras)} sharp images passed (Quality >= {eff_min_quality:.2f}).",
+        f"{active_count}/{len(chunk.cameras)} sharp images passed (Quality >= {shown_cutoff:.2f}).",
         flush=True,
     )
     if disabled_count > 0:
         print(
             f"  [Quality Filter] Automatically disabled {disabled_count} blurry/defocused images "
-            f"(< {eff_min_quality:.2f}) to protect alignment accuracy.",
+            f"(< {shown_cutoff:.2f}) to protect alignment accuracy.",
             flush=True,
         )
     return disabled_count
@@ -384,16 +399,28 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     n_cams = len(cam_locs)
     if n_cams >= 3:
         nn_dists: list[float] = []
-        for i in range(n_cams):
-            best_d2 = float("inf")
-            for j in range(n_cams):
-                if i == j:
-                    continue
-                d2 = (xs[i] - xs[j]) ** 2 + (ys[i] - ys[j]) ** 2
-                if d2 < best_d2:
-                    best_d2 = d2
-            nn_dists.append(math.sqrt(best_d2))
-        med_nn = sorted(nn_dists)[len(nn_dists) // 2]
+        try:
+            from scipy.spatial import cKDTree
+
+            coords_2d = list(zip(xs, ys))
+            dists_2d, _ = cKDTree(coords_2d).query(coords_2d, k=2)
+            nn_dists = [float(row[1]) for row in dists_2d if math.isfinite(float(row[1]))]
+        except Exception:
+            nn_dists = []
+        if not nn_dists:
+            step_s = max(1, n_cams // 500)
+            sample_idx = list(range(0, n_cams, step_s))[:500]
+            for i in sample_idx:
+                best_d2 = float("inf")
+                for j in sample_idx:
+                    if i == j:
+                        continue
+                    d2 = (xs[i] - xs[j]) ** 2 + (ys[i] - ys[j]) ** 2
+                    if d2 < best_d2:
+                        best_d2 = d2
+                if math.isfinite(best_d2):
+                    nn_dists.append(math.sqrt(best_d2))
+        med_nn = sorted(nn_dists)[len(nn_dists) // 2] if nn_dists else 100.0 / scale
         conn_thresh = max(1000.0 / scale, 10.0 * med_nn)
         step_g = max(1e-3, conn_thresh)
         r2_g = conn_thresh * conn_thresh
@@ -456,16 +483,38 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
     span_x = max_rx - min_rx
     span_y = max_ry - min_ry
 
-    pts = (
-        [p for p in chunk.tie_points.points if p.valid and abs(getattr(p.coord, "w", 1.0)) > 1e-12]
-        if chunk.tie_points
-        else []
-    )
+    raw_pts = getattr(chunk.tie_points, "points", None) if chunk.tie_points else None
+    pts = []
+    if raw_pts:
+        n_tp = len(raw_pts) if hasattr(raw_pts, "__len__") else 0
+        if n_tp > 50000 and hasattr(raw_pts, "__getitem__"):
+            tp_step = max(1, n_tp // 50000)
+            tp_iter = (raw_pts[idx] for idx in range(0, n_tp, tp_step))
+        else:
+            tp_iter = iter(raw_pts)
+        for p in tp_iter:
+            if p.valid and abs(getattr(p.coord, "w", 1.0)) > 1e-12:
+                pts.append(p)
+
+    orig_size_x = None
+    orig_size_y = None
+    orig_local_center = None
+    try:
+        raw_sz = getattr(getattr(chunk, "region", None), "size", None)
+        if raw_sz is not None:
+            if isinstance(getattr(raw_sz, "x", None), (int, float)):
+                orig_size_x = float(raw_sz.x)
+            if isinstance(getattr(raw_sz, "y", None), (int, float)):
+                orig_size_y = float(raw_sz.y)
+        orig_local_center = rot_t * chunk.region.center
+    except Exception:
+        pass
+
     pt_locals: list = []
     if pts:
-        pt_locals = [
-            rot_t * Metashape.Vector([p.coord.x / p.coord.w, p.coord.y / p.coord.w, p.coord.z / p.coord.w]) for p in pts
-        ]
+        for p in pts:
+            wc = getattr(p.coord, "w", 1.0)
+            pt_locals.append(rot_t * Metashape.Vector([p.coord.x / wc, p.coord.y / wc, p.coord.z / wc]))
         pt_zs = sorted([v.z for v in pt_locals])
         med_pz = pt_zs[len(pt_zs) // 2]
         devs_pz = sorted([abs(z - med_pz) for z in pt_zs])
@@ -548,6 +597,38 @@ def auto_crop_camera_gps_square(chunk, padding: float = 0.05) -> bool:
 
     mid_rx = (exp_min_rx + exp_max_rx) * 0.5
     mid_ry = (exp_min_ry + exp_max_ry) * 0.5
+    if not pts:
+        raw_span_rx = exp_max_rx - exp_min_rx
+        raw_span_ry = exp_max_ry - exp_min_ry
+        if (
+            raw_span_rx < (2.0 / scale)
+            and orig_size_x is not None
+            and math.isfinite(orig_size_x)
+            and orig_size_x > side_x
+        ):
+            side_x = orig_size_x
+            if orig_local_center is not None:
+                try:
+                    orig_rx = float(orig_local_center.x) * cos_t + float(orig_local_center.y) * sin_t
+                    if math.isfinite(orig_rx):
+                        mid_rx = orig_rx
+                except Exception:
+                    pass
+        if (
+            raw_span_ry < (2.0 / scale)
+            and orig_size_y is not None
+            and math.isfinite(orig_size_y)
+            and orig_size_y > side_y
+        ):
+            side_y = orig_size_y
+            if orig_local_center is not None:
+                try:
+                    orig_ry = -float(orig_local_center.x) * sin_t + float(orig_local_center.y) * cos_t
+                    if math.isfinite(orig_ry):
+                        mid_ry = orig_ry
+                except Exception:
+                    pass
+
     mid_x = mid_rx * cos_t - mid_ry * sin_t
     mid_y = mid_rx * sin_t + mid_ry * cos_t
 
@@ -815,6 +896,7 @@ def filter_tie_points(
     pa_thresh: float = 3.0,
     min_rays: int = 2,
     max_removal_ratio: float = 0.10,
+    adaptive_fitting: bool = False,
 ) -> dict:
     """Filters low-confidence tie points using gentle architectural-grade gradual selection."""
     return execute_usgs_gradual_selection(
@@ -824,4 +906,5 @@ def filter_tie_points(
         re_thresh=max_reproj_error,
         min_rays=min_rays,
         max_removal_ratio=max_removal_ratio,
+        adaptive_fitting=bool(adaptive_fitting),
     )

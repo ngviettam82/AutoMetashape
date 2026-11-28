@@ -255,12 +255,9 @@ def run_icp(
 
     step_xy_1a = 2.0 * grid_scale
     step_z_1a = 1.5 * grid_scale
-    cutoff_1a = 1.75 * grid_scale
+    yaw_step_1a = 5.0
     half_1b = 1.5 * grid_scale
     cutoff_1b = 0.55 * grid_scale
-
-    yaw_grid = np.arange(-search_yaw_deg, search_yaw_deg + 0.1, 5.0)
-    xy_grid = np.arange(-search_xy_m, search_xy_m + 1e-4, step_xy_1a)
 
     # Auto-detect large vertical barometer drift (> 4m) strictly inside the mutual XY overlap mask
     s_xy_mask = (
@@ -279,18 +276,42 @@ def run_icp(
     if int(np.sum(t_xy_mask)) >= 50 and int(np.sum(s_xy_mask)) >= 50:
         dz_est = float(np.median(tgt_c[t_xy_mask, 2]) - np.median(src_c[s_xy_mask, 2]))
         if 4.0 < abs(dz_est) <= 40.0:
-            dz_center = round(dz_est / step_z_1a) * step_z_1a
+            dz_center = dz_est
             print(
                 f"[ICP] Detected vertical Z median offset ({dz_est:+.1f}m); "
                 f"searching both 0.0m and {dz_center:+.1f}m Z bands.",
                 flush=True,
             )
-    z_zero_band = np.arange(-search_z_m, search_z_m + 1e-4, step_z_1a)
-    if dz_center != 0.0:
-        z_shift_band = np.arange(dz_center - search_z_m, dz_center + search_z_m + 1e-4, step_z_1a)
-        z_grid = np.unique(np.round(np.concatenate([z_zero_band, z_shift_band]), 4))
-    else:
-        z_grid = z_zero_band
+
+    def _build_stage1a_grids(s_xy: float, s_z: float, s_yaw: float) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        y_g = np.arange(-search_yaw_deg, search_yaw_deg + 0.1, s_yaw) if search_yaw_deg > 0 else np.array([0.0])
+        if 0.0 not in y_g:
+            y_g = np.unique(np.append(y_g, 0.0))
+        x_g = np.arange(-search_xy_m, search_xy_m + 1e-4, s_xy) if search_xy_m > 0 else np.array([0.0])
+        if 0.0 not in x_g:
+            x_g = np.unique(np.append(x_g, 0.0))
+        z_zero = np.arange(-search_z_m, search_z_m + 1e-4, s_z) if search_z_m > 0 else np.array([0.0])
+        if dz_center != 0.0:
+            dz_c = round(dz_center / s_z) * s_z
+            z_sh = np.arange(dz_c - search_z_m, dz_c + search_z_m + 1e-4, s_z)
+            z_g = np.unique(np.round(np.concatenate([z_zero, z_sh]), 4))
+        else:
+            z_g = z_zero
+        if 0.0 not in z_g:
+            z_g = np.unique(np.append(z_g, 0.0))
+        return y_g, x_g, z_g
+
+    eff_step_xy, eff_step_z, eff_yaw_step = step_xy_1a, step_z_1a, yaw_step_1a
+    yaw_grid, xy_grid, z_grid = _build_stage1a_grids(eff_step_xy, eff_step_z, eff_yaw_step)
+    coarsened = False
+    while len(yaw_grid) * (len(xy_grid) ** 2) * len(z_grid) > 6000:
+        coarsened = True
+        eff_step_xy *= 1.25
+        eff_step_z *= 1.25
+        if search_yaw_deg > 0 and eff_yaw_step < max(10.0, search_yaw_deg):
+            eff_yaw_step = min(max(10.0, search_yaw_deg), eff_yaw_step * 1.25)
+        yaw_grid, xy_grid, z_grid = _build_stage1a_grids(eff_step_xy, eff_step_z, eff_yaw_step)
+    cutoff_1a = max(1.75 * grid_scale, 0.85 * max(eff_step_xy, eff_step_z))
 
     # Deterministically cap Stage-1a query points to <= 3,500
     if len(src_c) > 3500:
@@ -298,6 +319,7 @@ def run_icp(
         src_q_rel = src_rel[::stride]
     else:
         src_q_rel = src_rel
+    q_workers = -1 if len(src_q_rel) >= 500 else 1
 
     for dyaw in yaw_grid:
         rz_mat = _rot_z(float(dyaw))
@@ -306,31 +328,41 @@ def run_icp(
             for dy in xy_grid:
                 for dz in z_grid:
                     shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=cutoff_1a, workers=1)
+                    dists, _ = tree.query(shifted, distance_upper_bound=cutoff_1a, workers=q_workers)
                     inl = dists < cutoff_1a
                     score = float(np.sum(1.0 - (dists[inl] / cutoff_1a) ** 2))
                     if score > best_score:
                         best_score = score
                         best_params = (float(dx), float(dy), float(dz), float(dyaw))
 
-    # Pass 1b: Refine around best coarse peak with half-diagonal-safe cutoff
-    bx, by, bz, byaw = best_params
-    best_score_1b = 0.0
-    for dyaw in np.linspace(byaw - 3.0, byaw + 3.0, 7):
-        rz_mat = _rot_z(float(dyaw))
-        rot_pts = (src_q_rel @ rz_mat.T) + yaw_pivot
-        for dx in np.linspace(bx - half_1b, bx + half_1b, 7):
-            for dy in np.linspace(by - half_1b, by + half_1b, 7):
-                for dz in np.linspace(bz - half_1b, bz + half_1b, 7):
-                    shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
-                    dists, _ = tree.query(shifted, distance_upper_bound=cutoff_1b, workers=1)
-                    inl = dists < cutoff_1b
-                    score = float(np.sum(1.0 - (dists[inl] / cutoff_1b) ** 2))
-                    if score > best_score_1b:
-                        best_score_1b = score
-                        best_params = (float(dx), float(dy), float(dz), float(dyaw))
-    if best_score_1b > 0.0:
-        best_score = best_score_1b
+    # Pass 1b (+ medium pyramid level when Stage 1a was broadened to cap <= 6000 poses)
+    pyramid_levels = (
+        (
+            (max(half_1b, eff_step_xy), max(half_1b, eff_step_z), max(3.0, 0.7 * eff_yaw_step),
+             max(cutoff_1b, 0.45 * eff_step_xy), 5),
+            (half_1b, half_1b, 3.0, cutoff_1b, 7),
+        )
+        if coarsened
+        else ((half_1b, half_1b, 3.0, cutoff_1b, 7),)
+    )
+    for h_xy, h_z, h_yaw, cut_ref, n_steps in pyramid_levels:
+        bx, by, bz, byaw = best_params
+        best_score_ref = 0.0
+        for dyaw in np.linspace(byaw - h_yaw, byaw + h_yaw, n_steps):
+            rz_mat = _rot_z(float(dyaw))
+            rot_pts = (src_q_rel @ rz_mat.T) + yaw_pivot
+            for dx in np.linspace(bx - h_xy, bx + h_xy, n_steps):
+                for dy in np.linspace(by - h_xy, by + h_xy, n_steps):
+                    for dz in np.linspace(bz - h_z, bz + h_z, n_steps):
+                        shifted = rot_pts + np.array([dx, dy, dz], dtype=np.float64)
+                        dists, _ = tree.query(shifted, distance_upper_bound=cut_ref, workers=q_workers)
+                        inl = dists < cut_ref
+                        score = float(np.sum(1.0 - (dists[inl] / cut_ref) ** 2))
+                        if score > best_score_ref:
+                            best_score_ref = score
+                            best_params = (float(dx), float(dy), float(dz), float(dyaw))
+        if best_score_ref > 0.0:
+            best_score = best_score_ref
 
     bx, by, bz, byaw = best_params
     rz_mat = _rot_z(byaw)
@@ -483,7 +515,9 @@ def run_icp(
                 fit_cur, fit_cnd = float(np.mean(v_cur)), float(np.mean(v_cnd))
                 r_cnd = t_cand[:3, :3] / scale_curr
                 tilt_cnd = float(np.degrees(np.arccos(np.clip(r_cnd[2, 2], -1.0, 1.0))))
-                shift_m = float(np.linalg.norm(t_cand[:3, 3] - t_curr[:3, 3]))
+                p_cur = (t_curr[:3, :3] @ yaw_pivot) + t_curr[:3, 3]
+                p_cnd = (t_cand[:3, :3] @ yaw_pivot) + t_cand[:3, 3]
+                shift_m = float(np.linalg.norm(p_cnd - p_cur))
                 print(
                     f"  [Colored ICP Check] P2L: fit={fit_cur * 100:.1f}% rmse={rmse_cur * 100:.2f}cm -> "
                     f"Colored: fit={fit_cnd * 100:.1f}% rmse={rmse_cnd * 100:.2f}cm "

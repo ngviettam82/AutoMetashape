@@ -15,12 +15,18 @@ dependencies. Defends multi-flight, non-RTK, and close-range UAV reconstructions
 
 from __future__ import annotations
 
+import json
 import math
 import os
 from collections import defaultdict, deque
 from typing import Any
 
-from autometashape.core.crs_utils import crs_linear_unit_to_meters, is_linear_crs
+from autometashape.core.crs_utils import (
+    classify_crs,
+    crs_linear_unit_to_meters,
+    crs_vertical_unit_to_meters,
+    is_linear_crs,
+)
 from autometashape.core.telemetry import calculate_haversine_meters
 
 try:
@@ -207,16 +213,18 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
     """Disable Null-Island (0, 0), non-finite, and disconnected > max_jump_m GPS outlier references.
 
     Camera photos remain enabled for visual matching; only their corrupted GPS prior is disabled.
-    Handles geographic (WGS84), projected (meters/feet), and local engineering CRS cleanly without
-    amputating long (>10 km) linear corridors.
+    Handles geographic (WGS84), geocentric (ECEF), projected (meters/feet), and local engineering
+    CRS cleanly without amputating long (>10 km) linear corridors.
     """
     cameras = getattr(chunk, "cameras", None) or []
     crs = getattr(chunk, "crs", None)
+    crs_kind = classify_crs(crs)
+    is_geocentric = crs_kind == "geocentric"
     metric_crs = _is_metric_crs(crs)
     unit_scale = crs_linear_unit_to_meters(crs) if metric_crs else 1.0
     null_disabled = 0
     outlier_disabled = 0
-    valid_cams: list[tuple[Any, float, float]] = []
+    valid_cams: list[tuple[Any, float, float, float]] = []
 
     for cam in cameras:
         ref = getattr(cam, "reference", None)
@@ -228,7 +236,14 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
         x_val = _parse_float(getattr(loc, "x", None))
         y_val = _parse_float(getattr(loc, "y", None))
         z_val = _parse_float(getattr(loc, "z", None))
-        if metric_crs:
+        if is_geocentric:
+            is_invalid = (
+                x_val is None
+                or y_val is None
+                or z_val is None
+                or math.sqrt(x_val * x_val + y_val * y_val + z_val * z_val) < 1000.0
+            )
+        elif metric_crs:
             is_invalid = x_val is None or y_val is None or z_val is None
         else:
             is_invalid = (
@@ -243,13 +258,32 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
             ref.enabled = False
             null_disabled += 1
         else:
-            valid_cams.append((cam, x_val, y_val))
+            valid_cams.append((cam, x_val, y_val, z_val))
 
     if len(valid_cams) >= 3 and max_jump_m > 0.0:
-        if metric_crs:
+        if is_geocentric:
             med_x = _median([x[1] for x in valid_cams])
             med_y = _median([x[2] for x in valid_cams])
-            pts_m = [((xv - med_x) * unit_scale, (yv - med_y) * unit_scale) for _c, xv, yv in valid_cams]
+            med_z = _median([x[3] for x in valid_cams])
+            r_med = math.sqrt(med_x * med_x + med_y * med_y + med_z * med_z)
+            h_xy = math.hypot(med_x, med_y)
+            if r_med > 1000.0 and h_xy > 1e-6:
+                ex, ey = -med_y / h_xy, med_x / h_xy
+                uz = med_z / r_med
+                nx, ny, nz = -uz * ey, uz * ex, (med_x / r_med) * ey - (med_y / r_med) * ex
+                pts_m = [
+                    (
+                        (xv - med_x) * ex + (yv - med_y) * ey,
+                        (xv - med_x) * nx + (yv - med_y) * ny + (zv - med_z) * nz,
+                    )
+                    for _c, xv, yv, zv in valid_cams
+                ]
+            else:
+                pts_m = [(xv - med_x, yv - med_y) for _c, xv, yv, _zv in valid_cams]
+        elif metric_crs:
+            med_x = _median([x[1] for x in valid_cams])
+            med_y = _median([x[2] for x in valid_cams])
+            pts_m = [((xv - med_x) * unit_scale, (yv - med_y) * unit_scale) for _c, xv, yv, _zv in valid_cams]
         else:
             ref_lon_rad = math.atan2(
                 sum(math.sin(math.radians(x[1])) for x in valid_cams),
@@ -262,17 +296,17 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
             cos_lat = max(1e-3, math.cos(math.radians(med_y)))
             pts_m = [
                 ((((xv - med_x + 180.0) % 360.0) - 180.0) * 111320.0 * cos_lat, (yv - med_y) * 111320.0)
-                for _c, xv, yv in valid_cams
+                for _c, xv, yv, _zv in valid_cams
             ]
 
         keep_mask = _inlier_spatial_mask(pts_m, max_jump_m=max_jump_m, keep_secondary_components=True)
-        kept: list[tuple[Any, float, float]] = []
-        for (cam, xv, yv), is_inlier in zip(valid_cams, keep_mask):
+        kept: list[tuple[Any, float, float, float]] = []
+        for (cam, xv, yv, zv), is_inlier in zip(valid_cams, keep_mask):
             if not is_inlier:
                 cam.reference.enabled = False
                 outlier_disabled += 1
             else:
-                kept.append((cam, xv, yv))
+                kept.append((cam, xv, yv, zv))
         valid_cams = kept
 
     if null_disabled or outlier_disabled:
@@ -290,10 +324,35 @@ def sanitize_camera_gps(chunk: Any, max_jump_m: float = 5000.0) -> dict[str, int
     }
 
 
-def _is_rtk_fixed_survey(cameras: list[Any]) -> bool:
+def _is_camera_rtk_or_high_precision(
+    cam: Any,
+    vert_unit_m: float = 1.0,
+    horiz_unit_m: float = 1.0,
+) -> bool:
+    """Return True if an enabled camera carries an RTK Fixed flag or sub-meter reference accuracy."""
+    if not getattr(cam, "enabled", True):
+        return False
+    photo = getattr(cam, "photo", None)
+    meta = getattr(photo, "meta", None) if photo else None
+    flag = get_camera_meta(meta, "DJI/RtkFlag")
+    if flag is not None and str(flag).strip() in _RTK_FIXED_FLAGS:
+        return True
+    ref = getattr(cam, "reference", None)
+    acc = getattr(ref, "accuracy", None) if ref is not None else None
+    if acc is not None:
+        ax = _parse_float(getattr(acc, "x", None))
+        az = _parse_float(getattr(acc, "z", None))
+        if ax is not None and az is not None and (ax * horiz_unit_m) <= 0.5 and (az * vert_unit_m) <= 1.0:
+            return True
+    return False
+
+
+def _is_rtk_fixed_survey(cameras: list[Any], crs: Any = None) -> bool:
     """Return True only if the majority of all enabled cameras hold RTK/PPK high-precision priors."""
     enabled_cams = [cam for cam in cameras if getattr(cam, "enabled", True)]
     total_enabled = max(1, len(enabled_cams))
+    vert_unit_m = crs_vertical_unit_to_meters(crs) if crs is not None else 1.0
+    horiz_unit_m = crs_linear_unit_to_meters(crs) if (crs is not None and _is_metric_crs(crs)) else 1.0
     rtk_tagged = 0
     rtk_fixed = 0
     high_prec_acc = 0
@@ -313,7 +372,7 @@ def _is_rtk_fixed_survey(cameras: list[Any]) -> bool:
             az = _parse_float(getattr(acc, "z", None))
             if ax is not None and az is not None:
                 acc_checked += 1
-                if ax <= 0.5 and az <= 1.0:
+                if _is_camera_rtk_or_high_precision(cam, vert_unit_m=vert_unit_m, horiz_unit_m=horiz_unit_m):
                     high_prec_acc += 1
     if rtk_tagged >= 5 and (rtk_fixed / total_enabled) >= 0.5:
         return True
@@ -592,6 +651,56 @@ def _dominant_display_label(cams: list[Any]) -> str:
     return max(counts.items(), key=lambda kv: (kv[1], kv[0]))[0]
 
 
+def _set_accuracy_vec(target: Any, attr: str, ax: float, az: float) -> None:
+    """Assign an anisotropic ``(x, y, z)`` accuracy vector using ``Metashape.Vector`` when available."""
+    try:
+        if Metashape is not None and hasattr(Metashape, "Vector"):
+            setattr(target, attr, Metashape.Vector([float(ax), float(ax), float(az)]))
+        else:
+            setattr(target, attr, (float(ax), float(ax), float(az)))
+    except Exception:
+        pass
+
+
+def _cam_z0_state_key(cam: Any) -> str:
+    """Return stable per-camera identifier for tracking idempotent TakeoffZ0 deltas."""
+    photo = getattr(cam, "photo", None)
+    path = getattr(photo, "path", "") if photo else ""
+    if isinstance(path, str) and path.strip():
+        return os.path.normcase(os.path.abspath(path))
+    return f"k:{getattr(cam, 'key', id(cam))}:{getattr(cam, 'label', '')}"
+
+
+def _read_z0_applied_map(chunk: Any) -> dict[str, float]:
+    """Read previously applied TakeoffZ0 vertical deltas (in meters) from chunk metadata."""
+    in_mem = getattr(chunk, "_autometashape_z0_applied_map", None)
+    if isinstance(in_mem, dict):
+        return {str(k): float(v) for k, v in in_mem.items()}
+    raw = get_camera_meta(getattr(chunk, "meta", None), "_autometashape_z0_applied")
+    if isinstance(raw, str) and raw.strip():
+        try:
+            loaded = json.loads(raw)
+            if isinstance(loaded, dict):
+                return {str(k): float(v) for k, v in loaded.items()}
+        except Exception:
+            pass
+    return {}
+
+
+def _write_z0_applied_map(chunk: Any, applied_map: dict[str, float]) -> None:
+    """Persist applied TakeoffZ0 vertical deltas on chunk object and persistent metadata."""
+    try:
+        setattr(chunk, "_autometashape_z0_applied_map", dict(applied_map))
+    except Exception:
+        pass
+    c_meta = getattr(chunk, "meta", None)
+    if c_meta is not None:
+        try:
+            c_meta["_autometashape_z0_applied"] = json.dumps(applied_map)
+        except Exception:
+            pass
+
+
 def normalize_flight_takeoff_z0(
     chunk: Any,
     set_anisotropic_accuracy: bool = True,
@@ -603,23 +712,34 @@ def normalize_flight_takeoff_z0(
 
     For non-RTK DJI/consumer UAVs, ``AbsoluteAltitude`` suffers 5-40 m barometer/GPS datum offsets
     between batteries, drones, or days while ``RelativeAltitude`` stays consistent above takeoff.
-    Follows Agisoft's official ``Z = anchor_z0 + RelativeAltitude`` workflow per camera (100%
-    idempotent, zero reliance on folder structure, timestamps, or EXIF body serial numbers), so
-    even two simultaneous drones mixed into one flat directory align cleanly to one datum.
+    Applies idempotent relative deltas in native CRS vertical units while preserving RTK cameras,
+    externally imported GCP/camera references, geoid undulations, and spatially disjoint corridors.
     """
     cameras = list(getattr(chunk, "cameras", None) or [])
     if not cameras:
         return {"skipped": True, "reason": "no_cameras", "shifts": {}}
 
-    if _is_rtk_fixed_survey(cameras):
+    crs = getattr(chunk, "crs", None)
+    crs_kind = classify_crs(crs)
+    if crs is not None and crs_kind in ("local", "geocentric"):
+        return {"skipped": True, "reason": f"{crs_kind}_crs", "shifts": {}}
+
+    if _is_rtk_fixed_survey(cameras, crs=crs):
         print(
             "  [Alignment Hygiene] RTK Fixed survey detected — preserving native RTK altitudes and accuracy.",
             flush=True,
         )
         return {"skipped": True, "reason": "rtk_fixed", "shifts": {}}
 
-    # Collect (cam, aa, ra, z0) strictly from EXIF/XMP physics (no folder/time assumptions)
+    metric_crs = _is_metric_crs(crs)
+    horiz_unit_m = crs_linear_unit_to_meters(crs) if (crs is not None and metric_crs) else 1.0
+    vert_unit_m = crs_vertical_unit_to_meters(crs) if crs is not None else 1.0
+
+    # Collect shiftable (cam, aa, ra, z0) entries plus any high-precision RTK anchor cameras
     z0_entries: list[tuple[Any, float, float, float]] = []
+    rtk_z0s: list[float] = []
+    rtk_cams: list[Any] = []
+    has_any_rtk = False
     for cam in cameras:
         ref = getattr(cam, "reference", None)
         if ref is not None and not getattr(ref, "enabled", True):
@@ -628,12 +748,23 @@ def normalize_flight_takeoff_z0(
         meta = getattr(photo, "meta", None) if photo else None
         aa = _parse_float(get_camera_meta(meta, "DJI/AbsoluteAltitude"))
         ra = _parse_float(get_camera_meta(meta, "DJI/RelativeAltitude"))
+        if _is_camera_rtk_or_high_precision(cam, vert_unit_m=vert_unit_m, horiz_unit_m=horiz_unit_m):
+            has_any_rtk = True
+            rtk_cams.append(cam)
+            if aa is not None and ra is not None:
+                rtk_z0s.append(aa - ra)
+            continue
+        if str(get_camera_meta(getattr(cam, "meta", None), "_autometashape_external_ref", "")) == "1":
+            continue
         if aa is not None and ra is not None:
             z0_entries.append((cam, aa, ra, aa - ra))
 
     shifts: dict[str, float] = {}
     anchor_label = ""
     ref_z0 = anchor_z0_override
+    skipped_clusters: list[tuple[dict[str, Any], float]] = []
+    eligible_cams: list[Any] = []
+    eligible_cam_ids: set[int] = set()
 
     if z0_entries:
         clusters = _cluster_z0_entries(z0_entries, gap_threshold_m=1.0)
@@ -653,34 +784,50 @@ def normalize_flight_takeoff_z0(
                 }
             )
 
+        anchor_cs: dict[str, Any] | None = None
+        anchor_cams_xy: list[Any] = []
         if ref_z0 is None:
-            # Pure geometry/physics anchor selection: prefer multi-camera aerial flights (RA >= 25m),
-            # ranking by spatial backbone score (coverage * sqrt(count)) with altitude as tie-breaker.
-            crs = getattr(chunk, "crs", None)
-            metric_crs = _is_metric_crs(crs)
-            unit_scale = crs_linear_unit_to_meters(crs) if metric_crs else 1.0
-            min_anchor_cams = min(5, max(2, len(z0_entries) // 10)) if len(z0_entries) >= 6 else 1
-            high_alt = [
-                cs for cs in cluster_stats if cs["med_ra"] >= 25.0 and cs["count"] >= min_anchor_cams
-            ]
-            min_count_pool = [cs for cs in cluster_stats if cs["count"] >= min_anchor_cams]
-            pool = high_alt if high_alt else (min_count_pool if min_count_pool else cluster_stats)
-            anchor_cs = max(
-                pool,
-                key=lambda cs: (
-                    compute_block_backbone_score(
-                        cs["cams"], metric_crs=metric_crs, unit_to_m=unit_scale
-                    )[0],
-                    round(cs["med_ra"] / 5.0),
-                ),
-            )
-            ref_z0 = anchor_cs["med_z0"]
-            anchor_label = anchor_cs["label"]
+            if rtk_z0s:
+                ref_z0 = _median(rtk_z0s)
+                anchor_label = "rtk_anchor"
+                anchor_cams_xy = rtk_cams
+            else:
+                min_anchor_cams = min(5, max(2, len(z0_entries) // 10)) if len(z0_entries) >= 6 else 1
+                high_alt = [
+                    cs for cs in cluster_stats if cs["med_ra"] >= 25.0 and cs["count"] >= min_anchor_cams
+                ]
+                min_count_pool = [cs for cs in cluster_stats if cs["count"] >= min_anchor_cams]
+                pool = high_alt if high_alt else (min_count_pool if min_count_pool else cluster_stats)
+                anchor_cs = max(
+                    pool,
+                    key=lambda cs: (
+                        compute_block_backbone_score(
+                            cs["cams"], metric_crs=metric_crs, unit_to_m=horiz_unit_m
+                        )[0],
+                        round(cs["med_ra"] / 5.0),
+                    ),
+                )
+                ref_z0 = anchor_cs["med_z0"]
+                anchor_label = anchor_cs["label"]
+                anchor_cams_xy = anchor_cs["cams"]
         else:
             anchor_label = "external_anchor"
 
+        anchor_xy_bounds: tuple[float, float, float, float, float, float] | None = None
+        ov_margin_m = 200.0
+        if anchor_z0_override is None and anchor_cams_xy:
+            proj_a = _project_cams_xy_meters(anchor_cams_xy, metric_crs=metric_crs, unit_to_m=horiz_unit_m)
+            if proj_a is not None:
+                a_rx, a_ry, a_pts = proj_a
+                a_xs = [p[1] for p in a_pts]
+                a_ys = [p[2] for p in a_pts]
+                a_min_x, a_max_x = min(a_xs), max(a_xs)
+                a_min_y, a_max_y = min(a_ys), max(a_ys)
+                anchor_diag_m = math.hypot(a_max_x - a_min_x, a_max_y - a_min_y)
+                ov_margin_m = max(200.0, 2.0 * anchor_diag_m)
+                anchor_xy_bounds = (a_rx, a_ry, a_min_x, a_max_x, a_min_y, a_max_y)
+
         shifted_cams = 0
-        eligible_cam_ids: set[int] = set()
         for idx, cs in enumerate(cluster_stats, 1):
             dz_med = ref_z0 - cs["med_z0"]
             if anchor_z0_override is None and abs(dz_med) > 60.0:
@@ -689,29 +836,66 @@ def normalize_flight_takeoff_z0(
                     f"(|dz0|={abs(dz_med):.1f}m > 60m — likely distinct terrain/rooftop launch).",
                     flush=True,
                 )
+                skipped_clusters.append((cs, dz_med))
                 continue
+            if anchor_z0_override is None and cs is not anchor_cs and anchor_xy_bounds is not None:
+                a_rx, a_ry, a_min_x, a_max_x, a_min_y, a_max_y = anchor_xy_bounds
+                c_xys = [
+                    xy
+                    for cl_cam in cs["cams"]
+                    if (xy := _cam_xy_meters(cl_cam, a_rx, a_ry, metric_crs=metric_crs, unit_to_m=horiz_unit_m))
+                    is not None
+                ]
+                if c_xys:
+                    c_min_x = min(p[0] for p in c_xys)
+                    c_max_x = max(p[0] for p in c_xys)
+                    c_min_y = min(p[1] for p in c_xys)
+                    c_max_y = max(p[1] for p in c_xys)
+                    overlaps_xy = (
+                        c_max_x >= a_min_x - ov_margin_m
+                        and c_min_x <= a_max_x + ov_margin_m
+                        and c_max_y >= a_min_y - ov_margin_m
+                        and c_min_y <= a_max_y + ov_margin_m
+                    )
+                    if not overlaps_xy:
+                        print(
+                            f"  [Alignment Hygiene] [WARNING] Skipping TakeoffZ0 shift on '{cs['label']}' "
+                            f"(zero XY overlap within {ov_margin_m:.0f}m of anchor — likely distant launch).",
+                            flush=True,
+                        )
+                        skipped_clusters.append((cs, dz_med))
+                        continue
             for cl_cam in cs["cams"]:
                 eligible_cam_ids.add(id(cl_cam))
+                eligible_cams.append(cl_cam)
             key_label = f"{cs['label']}[z0={cs['med_z0']:.1f}m]"
             if key_label in shifts:
                 key_label = f"{cs['label']}#{idx}[z0={cs['med_z0']:.1f}m]"
             shifts[key_label] = dz_med
 
-        # Apply exact idempotent per-camera normalization: Z_new = ref_z0 + RelativeAltitude
-        for cam, _aa, ra, _z0 in z0_entries:
+        # Apply exact idempotent relative delta in native CRS vertical units (preserves geoid/datum)
+        applied_map = _read_z0_applied_map(chunk)
+        safe_vert_m = vert_unit_m if vert_unit_m > 0.0 else 1.0
+        for cam, _aa, _ra, cam_z0 in z0_entries:
             if id(cam) not in eligible_cam_ids:
                 continue
             ref = getattr(cam, "reference", None)
             if ref is None or not getattr(ref, "enabled", True) or getattr(ref, "location", None) is None:
                 continue
             loc = ref.location
-            target_z = ref_z0 + ra
-            if abs(float(loc.z) - target_z) > 0.01:
+            c_state_key = _cam_z0_state_key(cam)
+            target_delta_m = ref_z0 - cam_z0
+            prev_dz_m = float(applied_map.get(c_state_key, 0.0))
+            step_dz_m = target_delta_m - prev_dz_m
+            if abs(step_dz_m) > 0.01:
+                new_z = float(loc.z) + (step_dz_m / safe_vert_m)
                 if Metashape is not None and hasattr(Metashape, "Vector"):
-                    ref.location = Metashape.Vector([loc.x, loc.y, target_z])
+                    ref.location = Metashape.Vector([loc.x, loc.y, new_z])
                 else:
-                    loc.z = target_z
+                    loc.z = new_z
                 shifted_cams += 1
+            applied_map[c_state_key] = target_delta_m
+        _write_z0_applied_map(chunk, applied_map)
 
         max_shift = max((abs(v) for v in shifts.values()), default=0.0)
         if len(shifts) > 1 or max_shift > 0.05:
@@ -723,13 +907,27 @@ def normalize_flight_takeoff_z0(
             )
 
     if set_anisotropic_accuracy:
-        try:
-            if Metashape is not None and hasattr(Metashape, "Vector"):
-                chunk.camera_location_accuracy = Metashape.Vector([xy_accuracy_m, xy_accuracy_m, z_accuracy_m])
-            else:
-                chunk.camera_location_accuracy = (xy_accuracy_m, xy_accuracy_m, z_accuracy_m)
-        except Exception:
-            pass
+        scale_xy = horiz_unit_m if (crs is not None and metric_crs and horiz_unit_m > 0.0) else 1.0
+        scale_z = vert_unit_m if (crs is not None and metric_crs and vert_unit_m > 0.0) else 1.0
+        xy_set = xy_accuracy_m / scale_xy
+        z_set = z_accuracy_m / scale_z
+        if has_any_rtk:
+            for e_cam in eligible_cams:
+                e_ref = getattr(e_cam, "reference", None)
+                if e_ref is not None:
+                    _set_accuracy_vec(e_ref, "accuracy", xy_set, z_set)
+        else:
+            _set_accuracy_vec(chunk, "camera_location_accuracy", xy_set, z_set)
+
+        for sk_cs, sk_dz in skipped_clusters:
+            if abs(sk_dz) > z_accuracy_m:
+                loosen_z = max(z_accuracy_m, abs(sk_dz)) / scale_z
+                for sk_cam in sk_cs["cams"]:
+                    if _is_camera_rtk_or_high_precision(sk_cam, vert_unit_m=vert_unit_m, horiz_unit_m=horiz_unit_m):
+                        continue
+                    sk_ref = getattr(sk_cam, "reference", None)
+                    if sk_ref is not None:
+                        _set_accuracy_vec(sk_ref, "accuracy", xy_set, loosen_z)
 
     return {
         "skipped": False,
@@ -754,13 +952,18 @@ def _compute_camera_gps_residual_vec(chunk: Any, camera: Any) -> tuple[float, fl
     try:
         ref_loc = ref.location
         est = crs.project(matrix.mulp(camera.center))
-        if _is_metric_crs(crs):
+        vert_scale = crs_vertical_unit_to_meters(crs)
+        if classify_crs(crs) == "geocentric":
+            dx = float(est.x - ref_loc.x)
+            dy = float(est.y - ref_loc.y)
+            dz = float(est.z - ref_loc.z)
+        elif _is_metric_crs(crs):
             unit_scale = crs_linear_unit_to_meters(crs)
             dx = float(est.x - ref_loc.x) * unit_scale
             dy = float(est.y - ref_loc.y) * unit_scale
-            dz = float(est.z - ref_loc.z) * unit_scale
+            dz = float(est.z - ref_loc.z) * vert_scale
         else:
-            dz = float(est.z - ref_loc.z)
+            dz = float(est.z - ref_loc.z) * vert_scale
             dy = float(est.y - ref_loc.y) * 111320.0
             dlon = ((float(est.x) - float(ref_loc.x) + 180.0) % 360.0) - 180.0
             dx = dlon * 111320.0 * max(1e-3, math.cos(math.radians(float(ref_loc.y))))
@@ -779,7 +982,7 @@ def compute_camera_gps_residual(chunk: Any, camera: Any) -> tuple[float, float] 
     return vec[2], vec[3]
 
 
-def _camera_altitude_with_frame(cam: Any) -> tuple[float, str] | None:
+def _camera_altitude_with_frame(cam: Any, vert_unit_m: float = 1.0) -> tuple[float, str] | None:
     """Return ``(altitude_m, frame)`` where ``frame`` is ``'agl'`` (RelativeAltitude) or ``'msl'``."""
     photo = getattr(cam, "photo", None)
     meta = getattr(photo, "meta", None) if photo else None
@@ -790,7 +993,7 @@ def _camera_altitude_with_frame(cam: Any) -> tuple[float, str] | None:
     loc = getattr(ref, "location", None) if ref is not None else None
     zv = _parse_float(getattr(loc, "z", None)) if loc is not None else None
     if zv is not None:
-        return (zv, "msl")
+        return (zv * vert_unit_m, "msl")
     return None
 
 
@@ -898,7 +1101,10 @@ def _side_has_regime_discontinuity(
     altitude_diff_m: float = 15.0,
     gps_jump_m: float = 3.0,
 ) -> str | None:
-    """Return discontinuity reason if two sizable sub-blocks across a 1-bridge differ physically."""
+    """Return discontinuity reason if two sizable sub-blocks across a weak 1-bridge differ physically."""
+    if bridge_weight >= 80:
+        return None
+
     # 1. Zoom / calibrated focal-length discontinuity (e.g. 1x Manual vs 2x Aerial)
     fa = [v for k in side_a if (v := _camera_focal_px(by_key[k])) is not None]
     fb = [v for k in side_b if (v := _camera_focal_px(by_key[k])) is not None]
@@ -927,8 +1133,13 @@ def _side_has_regime_discontinuity(
                 return f"sensor_mismatch({dom_a}!={dom_b},w={bridge_weight})"
 
     # 3. Altitude regime jump (compare strictly within matching AGL or MSL frame)
-    za_pairs = [res for k in side_a if (res := _camera_altitude_with_frame(by_key[k])) is not None]
-    zb_pairs = [res for k in side_b if (res := _camera_altitude_with_frame(by_key[k])) is not None]
+    vert_unit_m = crs_vertical_unit_to_meters(getattr(chunk, "crs", None))
+    za_pairs = [
+        res for k in side_a if (res := _camera_altitude_with_frame(by_key[k], vert_unit_m=vert_unit_m)) is not None
+    ]
+    zb_pairs = [
+        res for k in side_b if (res := _camera_altitude_with_frame(by_key[k], vert_unit_m=vert_unit_m)) is not None
+    ]
     za_agl = [v for v, fr in za_pairs if fr == "agl"]
     zb_agl = [v for v, fr in zb_pairs if fr == "agl"]
     za_msl = [v for v, fr in za_pairs if fr == "msl"]
@@ -1010,25 +1221,24 @@ def _build_tie_point_graph_and_islands(
                             adj_i[kj] += 1
                             adj[kj][ki] += 1
                 elif n_k > max_track_len:
-                    # Preserve dense close-range and cross-flight anchor tracks in O(n_k) without O(n_k^2) blowup
+                    # Preserve dense close-range and cross-flight anchor tracks in O(n_k) without double-counting
                     ordered = sorted(ckeys)
                     window = min(4, n_k - 1)
                     stride = max(1, n_k // 5)
+                    seen_pairs: set[tuple[int, int]] = set()
                     for i in range(n_k):
                         ki = ordered[i]
-                        adj_i = adj[ki]
-                        nbrs: set[int] = set()
                         for step in range(1, window + 1):
                             kj = ordered[(i + step) % n_k]
                             if kj != ki:
-                                nbrs.add(kj)
+                                seen_pairs.add((ki, kj) if ki < kj else (kj, ki))
                         for jump in range(1, 5):
                             kj = ordered[(i + jump * stride) % n_k]
                             if kj != ki:
-                                nbrs.add(kj)
-                        for kj in nbrs:
-                            adj_i[kj] += 1
-                            adj[kj][ki] += 1
+                                seen_pairs.add((ki, kj) if ki < kj else (kj, ki))
+                    for u_k, v_k in seen_pairs:
+                        adj[u_k][v_k] += 1
+                        adj[v_k][u_k] += 1
 
     strong_adj: dict[int, list[int]] = {
         cam.key: [v for v, w in adj[cam.key].items() if w >= edge_min] for cam in aligned
@@ -1432,6 +1642,7 @@ def classify_and_quarantine_islands(
             main_res[k] = vec
 
     spike_keys: list[int] = []
+    gps_only_disabled: set[int] = set()
     if len(main_res) >= 5:
         main_med_dz = _median([v[2] for v in main_res.values()])
         main_med_dxy = _median([v[3] for v in main_res.values()])
@@ -1441,21 +1652,33 @@ def classify_and_quarantine_islands(
                 if not exceeds_global:
                     continue
                 is_catastrophic = abs(dz - main_med_dz) > max_catastrophic_dz_m or dxy > max_catastrophic_dxy_m
-                if not is_catastrophic:
-                    nbr_vecs = [main_res[nb] for nb in strong_adj.get(k, ()) if nb in main_res]
-                    if nbr_vecs:
-                        nbr_med_dx = _median([v[0] for v in nbr_vecs])
-                        nbr_med_dy = _median([v[1] for v in nbr_vecs])
-                        nbr_med_dz = _median([v[2] for v in nbr_vecs])
-                        nbr_xy_jump = math.hypot(dx - nbr_med_dx, dy - nbr_med_dy)
+                nbr_vecs = [main_res[nb] for nb in strong_adj.get(k, ()) if nb in main_res]
+                if nbr_vecs:
+                    nbr_med_dx = _median([v[0] for v in nbr_vecs])
+                    nbr_med_dy = _median([v[1] for v in nbr_vecs])
+                    nbr_med_dz = _median([v[2] for v in nbr_vecs])
+                    nbr_xy_jump = math.hypot(dx - nbr_med_dx, dy - nbr_med_dy)
+                    if not is_catastrophic:
                         if abs(dz - nbr_med_dz) <= max_neighbor_dz_jump_m and nbr_xy_jump <= max_neighbor_dxy_jump_m:
                             continue
+                    elif abs(dz - nbr_med_dz) <= 3.0 and nbr_xy_jump <= 5.0:
+                        gps_only_disabled.add(k)
+                        continue
                 quarantined.add(k)
                 spike_keys.append(k)
                 print(
                     f"    Quarantining main-block GPS-spike camera {by_key[k].label} (dZ={dz:+.2f}m, dXY={dxy:.2f}m).",
                     flush=True,
                 )
+
+    for k in gps_only_disabled:
+        cam = by_key[k]
+        if getattr(cam, "reference", None) is not None:
+            cam.reference.enabled = False
+        print(
+            f"    Disabling drifted GPS prior on visually consistent camera {cam.label} (pose kept).",
+            flush=True,
+        )
 
     for k in quarantined:
         cam = by_key[k]
@@ -1467,7 +1690,7 @@ def classify_and_quarantine_islands(
     clean_main = [k for k in main_keys if k not in quarantined]
 
     # Only re-optimize here if no bridge candidates remain (when bridging, Stage 4 optimizes ch_main cleanly)
-    if quarantined and reoptimize and not bridge_candidates:
+    if (quarantined or gps_only_disabled) and reoptimize and not bridge_candidates:
         try:
             optimize_cameras_no_k4(chunk, tiepoint_covariance=True)
         except Exception as exc:
@@ -1484,10 +1707,11 @@ def classify_and_quarantine_islands(
         "kept_distant": kept_distant,
         "quarantined_keys": sorted(quarantined),
         "spike_keys": sorted(spike_keys),
+        "gps_only_disabled_keys": sorted(gps_only_disabled),
     }
 
 
-def _camera_physical_band(cam: Any) -> tuple[Any, int, int, str]:
+def _camera_physical_band(cam: Any, vert_unit_m: float = 1.0) -> tuple[Any, int, int, str]:
     """Return folder- and timestamp-agnostic physical flight signature ``(sensor_id, alt_15m, z0_2m, alt_frame)``.
 
     Separating ``alt_frame`` (``'agl'`` vs ``'msl'``) ensures DJI RelativeAltitude flights and
@@ -1505,8 +1729,9 @@ def _camera_physical_band(cam: Any) -> tuple[Any, int, int, str]:
         ref = getattr(cam, "reference", None)
         loc = getattr(ref, "location", None) if ref is not None else None
         zv = _parse_float(getattr(loc, "z", None)) if loc is not None else None
-        alt_band = int(round(zv / 15.0)) if zv is not None else 0
-        alt_frame = "msl" if zv is not None else "none"
+        alt_m = zv * vert_unit_m if zv is not None else None
+        alt_band = int(round(alt_m / 15.0)) if alt_m is not None else 0
+        alt_frame = "msl" if alt_m is not None else "none"
     z0_band = int(round((aa - ra) / 2.0)) if (aa is not None and ra is not None) else 0
     return (sensor_id, alt_band, z0_band, alt_frame)
 
@@ -1534,6 +1759,7 @@ def find_unaligned_overlapping_groups(
     crs = getattr(chunk, "crs", None)
     metric_crs = _is_metric_crs(crs)
     unit_scale = crs_linear_unit_to_meters(crs) if metric_crs else 1.0
+    vert_unit_m = crs_vertical_unit_to_meters(crs)
     main_cams = [by_key[k] for k in main_keys if k in by_key]
     main_bounds = _compute_main_xy_bounds(main_cams, metric_crs=metric_crs, unit_to_m=unit_scale)
     if main_bounds is None:
@@ -1545,7 +1771,7 @@ def find_unaligned_overlapping_groups(
     for cam in cameras:
         if not getattr(cam, "enabled", True):
             continue
-        band = _camera_physical_band(cam)
+        band = _camera_physical_band(cam, vert_unit_m=vert_unit_m)
         band_total[band] += 1
         if cam.key in main_keys:
             band_in_main[band] += 1
@@ -1562,7 +1788,7 @@ def find_unaligned_overlapping_groups(
             continue
         if not getattr(cam, "enabled", True) or getattr(cam, "transform", None) is not None:
             continue
-        band = _camera_physical_band(cam)
+        band = _camera_physical_band(cam, vert_unit_m=vert_unit_m)
         b_tot = band_total.get(band, 0)
         b_al = band_in_main.get(band, 0)
         b_unal = b_tot - b_al
@@ -1573,8 +1799,11 @@ def find_unaligned_overlapping_groups(
             continue
         ref = getattr(cam, "reference", None)
         loc = getattr(ref, "location", None) if ref is not None else None
-        msl_z = _parse_float(getattr(loc, "z", None)) if loc is not None else None
-        raw_unaligned.append((cam.key, xy[0], xy[1], _camera_altitude_with_frame(cam), msl_z))
+        raw_z = _parse_float(getattr(loc, "z", None)) if loc is not None else None
+        msl_z = raw_z * vert_unit_m if raw_z is not None else None
+        raw_unaligned.append(
+            (cam.key, xy[0], xy[1], _camera_altitude_with_frame(cam, vert_unit_m=vert_unit_m), msl_z)
+        )
 
     if len(raw_unaligned) < min_cams:
         return []

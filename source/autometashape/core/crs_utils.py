@@ -76,6 +76,24 @@ _STRIP_NESTED_CRS_KEYWORDS = (
     "TARGETCRS",
     "ABRIDGEDTRANSFORMATION",
     "DERIVINGCONVERSION",
+    "USAGE",
+    "EXTENT",
+    "VERTICALEXTENT",
+    "BBOX",
+)
+
+_VERT_CRS_KEYWORDS = ("VERT_CS", "VERTCRS", "VERTICALCRS")
+
+_GEOID_CRS_MARKERS = (
+    "COMPD_CS",
+    "COMPOUNDCRS",
+    "VERT_CS",
+    "VERTCRS",
+    "VERTICALCRS",
+    "GEOID",
+    "EGM",
+    "NAVD",
+    "GEOGTRAN",
 )
 
 _UNIT_BLOCK_RE = re.compile(
@@ -94,31 +112,29 @@ def _crs_name_upper(crs: Any) -> str:
     return name.strip().upper() if isinstance(name, str) else ""
 
 
-def _strip_wkt_blocks(wkt: str, keywords: tuple[str, ...]) -> str:
-    """Remove bracket-balanced nested WKT blocks whose header keyword matches ``keywords``."""
-    out: list[str] = []
+def _scan_wkt_blocks(wkt: str, keywords: tuple[str, ...]) -> list[tuple[int, int]]:
+    """Return sorted ``(start, end)`` spans of top-level WKT blocks matching ``keywords``."""
+    spans: list[tuple[int, int]] = []
     idx = 0
     n_len = len(wkt)
     upper = wkt.upper()
     sorted_kw = sorted(keywords, key=len, reverse=True)
     while idx < n_len:
-        matched_kw = None
+        matched_pos = None
         for kw in sorted_kw:
             if upper.startswith(kw, idx):
                 prev_ok = idx == 0 or not (upper[idx - 1].isalnum() or upper[idx - 1] == "_")
-                after = idx + len(kw)
-                pos = after
+                pos = idx + len(kw)
                 while pos < n_len and wkt[pos].isspace():
                     pos += 1
                 if prev_ok and pos < n_len and wkt[pos] == "[":
-                    matched_kw = (kw, pos)
+                    matched_pos = pos
                     break
-        if matched_kw is None:
-            out.append(wkt[idx])
+        if matched_pos is None:
             idx += 1
             continue
         depth = 0
-        pos = matched_kw[1]
+        pos = matched_pos
         in_quotes = False
         while pos < n_len:
             ch = wkt[pos]
@@ -133,12 +149,44 @@ def _strip_wkt_blocks(wkt: str, keywords: tuple[str, ...]) -> str:
                         pos += 1
                         break
             pos += 1
+        spans.append((idx, pos))
         idx = pos
+    return spans
+
+
+def _strip_wkt_blocks(wkt: str, keywords: tuple[str, ...]) -> str:
+    """Remove bracket-balanced nested WKT blocks whose header keyword matches ``keywords``."""
+    spans = _scan_wkt_blocks(wkt, keywords)
+    if not spans:
+        return wkt
+    out: list[str] = []
+    last = 0
+    for start, end in spans:
+        out.append(wkt[last:start])
+        last = end
+    out.append(wkt[last:])
     return "".join(out)
 
 
+def _extract_wkt_blocks(wkt: str, keywords: tuple[str, ...]) -> str:
+    """Extract concatenated bracket-balanced WKT blocks matching ``keywords``."""
+    spans = _scan_wkt_blocks(wkt, keywords)
+    return "\n".join(wkt[start:end] for start, end in spans)
+
+
+def is_compound_or_geoid_crs(crs: Any) -> bool:
+    """Return True when ``crs`` specifies a compound vertical/geoid/transformation CRS."""
+    if crs is None:
+        return False
+    wkt = _crs_wkt_upper(crs)
+    name = _crs_name_upper(crs)
+    if any(tok in wkt for tok in _GEOID_CRS_MARKERS):
+        return True
+    return any(tok in name for tok in ("GEOID", "EGM", "NAVD"))
+
+
 def classify_crs(crs: Any) -> str:
-    """Classify a Metashape/mock CRS object as ``'local'``, ``'projected'``, or ``'geographic'``."""
+    """Classify a CRS as ``'local'``, ``'projected'``, ``'geocentric'``, or ``'geographic'``."""
     if crs is None:
         return "local"
     wkt = _crs_wkt_upper(crs)
@@ -148,31 +196,23 @@ def classify_crs(crs: Any) -> str:
         or "ENGCRS" in wkt
         or "ENGINEERINGCRS" in wkt
         or "LOCAL COORDINATES" in name
-        or "ENGINEERING" in name
     ):
         return "local"
     raw_projcs = getattr(crs, "projcs", None)
     has_projcs = bool(raw_projcs) and not hasattr(raw_projcs, "assert_called")
     if has_projcs or "PROJCS" in wkt or "PROJCRS" in wkt:
         return "projected"
-    if "GEOGCS" in wkt or "GEOGCRS" in wkt or "GEODCRS" in wkt or "GEOCCS" in wkt:
+    if "GEOCCS" in wkt or "GEOCENTRIC" in wkt or "GEOCENTRIC" in name:
+        return "geocentric"
+    if "LOCAL" in name or "ENGINEERING" in name:
+        return "local"
+    if "GEOGCS" in wkt or "GEOGCRS" in wkt or "GEODCRS" in wkt:
         return "geographic"
     return "geographic"
 
 
-def crs_linear_unit_to_meters(crs: Any) -> float:
-    """Return horizontal linear unit scale factor to meters for ``crs`` (default ``1.0``)."""
-    if crs is None:
-        return 1.0
-    wkt_raw = getattr(crs, "wkt", None)
-    if not isinstance(wkt_raw, str) or not wkt_raw.strip():
-        return 1.0
-
-    stripped = _strip_wkt_blocks(wkt_raw, _STRIP_NESTED_CRS_KEYWORDS)
-    candidates = list(_UNIT_BLOCK_RE.finditer(stripped))
-    if not candidates:
-        candidates = list(_UNIT_BLOCK_RE.finditer(wkt_raw))
-
+def _parse_unit_matches(candidates: list[re.Match[str]]) -> float | None:
+    """Extract last valid linear unit factor (in meters) from matched WKT unit blocks."""
     for match in reversed(candidates):
         raw_name = match.group(1).strip().lower()
         norm_name = re.sub(r"\s+", " ", raw_name)
@@ -190,6 +230,39 @@ def crs_linear_unit_to_meters(crs: Any) -> float:
             return _KNOWN_LINEAR_UNIT_FACTORS[norm_name]
         if raw_name in _KNOWN_LINEAR_UNIT_FACTORS:
             return _KNOWN_LINEAR_UNIT_FACTORS[raw_name]
+    return None
+
+
+def crs_linear_unit_to_meters(crs: Any) -> float:
+    """Return horizontal linear unit scale factor to meters for ``crs`` (default ``1.0``)."""
+    if crs is None:
+        return 1.0
+    wkt_raw = getattr(crs, "wkt", None)
+    if not isinstance(wkt_raw, str) or not wkt_raw.strip():
+        return 1.0
+
+    stripped = _strip_wkt_blocks(wkt_raw, _STRIP_NESTED_CRS_KEYWORDS)
+    candidates = list(_UNIT_BLOCK_RE.finditer(stripped))
+    if not candidates:
+        candidates = list(_UNIT_BLOCK_RE.finditer(wkt_raw))
+    parsed = _parse_unit_matches(candidates)
+    return parsed if parsed is not None else 1.0
+
+
+def crs_vertical_unit_to_meters(crs: Any) -> float:
+    """Return vertical linear unit scale factor to meters for ``crs`` (default ``1.0``)."""
+    if crs is None:
+        return 1.0
+    wkt_raw = getattr(crs, "wkt", None)
+    if isinstance(wkt_raw, str) and wkt_raw.strip():
+        vert_wkt = _extract_wkt_blocks(wkt_raw, _VERT_CRS_KEYWORDS)
+        if vert_wkt:
+            parsed = _parse_unit_matches(list(_UNIT_BLOCK_RE.finditer(vert_wkt)))
+            if parsed is not None:
+                return parsed
+    kind = classify_crs(crs)
+    if kind in ("projected", "local"):
+        return crs_linear_unit_to_meters(crs)
     return 1.0
 
 
@@ -206,8 +279,8 @@ def is_local_or_engineering_crs(crs: Any) -> bool:
 
 
 def is_georeferenced_crs(crs: Any) -> bool:
-    """Return True if ``crs`` is a georeferenced geographic or projected coordinate system."""
-    return crs is not None and classify_crs(crs) in ("projected", "geographic")
+    """Return True if ``crs`` is geographic, projected, or geocentric."""
+    return crs is not None and classify_crs(crs) in ("projected", "geographic", "geocentric")
 
 
 def compute_metric_epsg(lon: float, lat: float) -> int:
@@ -242,7 +315,7 @@ def transform_wgs84_location_to_crs(
         return None
 
     wkt_upper = _crs_wkt_upper(target_crs)
-    if classify_crs(target_crs) == "geographic":
+    if classify_crs(target_crs) == "geographic" and not is_compound_or_geoid_crs(target_crs):
         if "4326" in wkt_upper or "WGS 84" in wkt_upper or "WGS_1984" in wkt_upper or not wkt_upper:
             return (x_in, y_in, z_in)
 

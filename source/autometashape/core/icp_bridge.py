@@ -17,6 +17,7 @@ via ``mergeChunks(merge_tiepoints=False)``.
 from __future__ import annotations
 
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -29,10 +30,13 @@ import zipfile
 from typing import Any
 
 from autometashape.core.alignment_hygiene import (
+    _build_tie_point_graph_and_islands,
     _camera_altitude_with_frame,
+    _compute_main_xy_bounds,
     _evaluate_island_rigidity,
     _is_metric_crs,
     _median,
+    _symmetric_bounds_overlap_ratio,
     build_tie_point_islands,
     compute_block_backbone_score,
     normalize_flight_takeoff_z0,
@@ -43,9 +47,11 @@ from autometashape.core.crs_utils import (
     classify_crs,
     compute_metric_epsg,
     crs_linear_unit_to_meters,
+    crs_vertical_unit_to_meters,
     is_local_or_engineering_crs,
     transform_wgs84_location_to_crs,
 )
+from autometashape.core.telemetry import classify_sensor_shutter, parse_xmp_telemetry
 
 try:
     import Metashape
@@ -319,6 +325,8 @@ def evaluate_icp_quality_gate(
     max_tilt_deg: float = 5.0,
     max_allowed_k4: float = 0.05,
     require_transform: bool = False,
+    stage0_spacing_m: float = 0.04,
+    min_normal_eig_ratio: float = 0.0,
 ) -> tuple[bool, list[str]]:
     """Evaluate strict Pre-MVS acceptance thresholds for a registered secondary island."""
     reasons: list[str] = []
@@ -341,6 +349,12 @@ def evaluate_icp_quality_gate(
     scale = _safe_finite(metrics.get("scale"))
     tilt_deg = _safe_finite(metrics.get("tilt_deg", metrics.get("rotation_deg")))
     k4_val = _safe_finite(max_abs_k4)
+    spacing_f = _safe_finite(stage0_spacing_m)
+    eff_max_median = (
+        max(max_median_15cm_m, 1.5 * spacing_f)
+        if (spacing_f is not None and spacing_f > 0.05)
+        else max_median_15cm_m
+    )
 
     if fitness is None:
         reasons.append("fitness_15cm=non_finite")
@@ -360,10 +374,21 @@ def evaluate_icp_quality_gate(
         if not partial_ok:
             reasons.append(f"fitness_15cm={fitness * 100:.1f}% < {min_fitness_15cm * 100:.0f}%")
 
+    if "normal_min_eig_ratio" in metrics:
+        eig_ratio = _safe_finite(metrics.get("normal_min_eig_ratio"))
+        if eig_ratio is None:
+            reasons.append("normal_min_eig_ratio=non_finite")
+        else:
+            ov_frac_v = _safe_finite(metrics.get("overlap_fraction"))
+            if min_normal_eig_ratio > 0.0 and eig_ratio < min_normal_eig_ratio:
+                reasons.append(f"normal_min_eig_ratio={eig_ratio:.4f} < {min_normal_eig_ratio:.4f}")
+            elif eig_ratio < 0.005 and ov_frac_v is not None and ov_frac_v < 0.35:
+                reasons.append(f"planar_degenerate_overlap(normal_min_eig_ratio={eig_ratio:.4f})")
+
     if med_err is None:
         reasons.append("median_15cm=non_finite")
-    elif med_err > max_median_15cm_m:
-        reasons.append(f"median_15cm={med_err * 100:.2f}cm > {max_median_15cm_m * 100:.0f}cm")
+    elif med_err > eff_max_median:
+        reasons.append(f"median_15cm={med_err * 100:.2f}cm > {eff_max_median * 100:.0f}cm")
 
     if scale is None:
         reasons.append("scale=non_finite")
@@ -1027,10 +1052,15 @@ def _should_disable_island_rolling_shutter(chunk_obj: Any, global_rolling_shutte
         t_mat = getattr(getattr(chunk_obj, "transform", None), "matrix", None)
         if pts_obj and crs is not None and t_mat is not None and hasattr(crs, "project"):
             try:
-                pts_list = list(pts_obj)
-                step = max(1, len(pts_list) // 500)
+                vert_scale = crs_vertical_unit_to_meters(crs)
+                n_pts = len(pts_obj) if hasattr(pts_obj, "__len__") else 0
+                if n_pts > 0 and hasattr(pts_obj, "__getitem__"):
+                    step = max(1, n_pts // 500)
+                    sample_iter = (pts_obj[idx] for idx in range(0, n_pts, step))
+                else:
+                    sample_iter = itertools.islice(pts_obj, 0, 50000, 100)
                 tie_zs: list[float] = []
-                for pt in pts_list[::step]:
+                for pt in sample_iter:
                     if not getattr(pt, "valid", True):
                         continue
                     coord = getattr(pt, "coord", None)
@@ -1042,9 +1072,10 @@ def _should_disable_island_rolling_shutter(chunk_obj: Any, global_rolling_shutte
                     pz = float(p_crs.z)
                     if math.isfinite(pz):
                         tie_zs.append(pz)
+                    if len(tie_zs) >= 500:
+                        break
                 if len(tie_zs) >= 20:
-                    unit_scale = crs_linear_unit_to_meters(crs) if _is_metric_crs(crs) else 1.0
-                    rel_h = (_median(msl_vals) - _median(tie_zs)) * unit_scale
+                    rel_h = (_median(msl_vals) - _median(tie_zs)) * vert_scale
                     return rel_h < 25.0
             except Exception:
                 pass
@@ -1052,17 +1083,74 @@ def _should_disable_island_rolling_shutter(chunk_obj: Any, global_rolling_shutte
     return True
 
 
+def _extract_island_meta_str(meta_obj: Any, key: str) -> str:
+    if meta_obj is None:
+        return ""
+    try:
+        val = meta_obj.get(key) if hasattr(meta_obj, "get") else meta_obj[key]
+    except Exception:
+        return ""
+    return val.strip() if isinstance(val, str) else ""
+
+
 def _apply_island_rolling_shutter_policy(chunk_obj: Any, global_rolling_shutter: bool) -> None:
     if Metashape is None or not hasattr(Metashape, "Shutter"):
         return
-    mode = (
-        Metashape.Shutter.Model.Disabled
-        if _should_disable_island_rolling_shutter(chunk_obj, global_rolling_shutter)
-        else Metashape.Shutter.Model.Regularized
-    )
-    for sensor in getattr(chunk_obj, "sensors", None) or []:
+    shutter_model = getattr(Metashape.Shutter, "Model", None)
+    if shutter_model is None:
+        return
+    dis_val = getattr(shutter_model, "Disabled", None)
+    reg_val = getattr(shutter_model, "Regularized", None)
+    sensors = list(getattr(chunk_obj, "sensors", None) or [])
+    if not sensors:
+        return
+    if _should_disable_island_rolling_shutter(chunk_obj, global_rolling_shutter):
+        for sensor in sensors:
+            try:
+                sensor.rolling_shutter = dis_val
+            except Exception:
+                pass
+        return
+
+    sensor_cam_map: dict[Any, Any] = {}
+    for cam in getattr(chunk_obj, "cameras", None) or []:
+        c_sensor = getattr(cam, "sensor", None)
+        if c_sensor is None:
+            continue
+        s_key = getattr(c_sensor, "key", None)
+        if s_key is None:
+            s_key = id(c_sensor)
+        if s_key not in sensor_cam_map:
+            sensor_cam_map[s_key] = cam
+
+    for sensor in sensors:
+        s_key = getattr(sensor, "key", None)
+        if s_key is None:
+            s_key = id(sensor)
+        cam = sensor_cam_map.get(s_key)
+        s_meta = getattr(sensor, "meta", None)
+        cam_photo = getattr(cam, "photo", None) if cam is not None else None
+        cam_meta = getattr(cam_photo, "meta", None) if cam_photo is not None else None
+        make = _extract_island_meta_str(s_meta, "Exif/Make") or _extract_island_meta_str(cam_meta, "Exif/Make")
+        model = _extract_island_meta_str(s_meta, "Exif/Model") or _extract_island_meta_str(cam_meta, "Exif/Model")
+        xmp_shutter = (
+            _extract_island_meta_str(s_meta, "DJI/ShutterType")
+            or _extract_island_meta_str(cam_meta, "DJI/ShutterType")
+            or None
+        )
+        cam_path = getattr(cam_photo, "path", None) if cam_photo is not None else None
+        if not xmp_shutter and isinstance(cam_path, str) and os.path.isfile(cam_path):
+            xmp_shutter = parse_xmp_telemetry(cam_path).get("shutter_type")
+        raw_label = getattr(sensor, "label", None)
+        s_label = raw_label.strip() if isinstance(raw_label, str) else ""
+        if make or model or xmp_shutter or s_label:
+            is_rolling = (
+                classify_sensor_shutter(make=make, model=model, xmp_shutter=xmp_shutter, label=s_label) == "rolling"
+            )
+        else:
+            is_rolling = bool(global_rolling_shutter)
         try:
-            sensor.rolling_shutter = mode
+            sensor.rolling_shutter = reg_val if is_rolling else dis_val
         except Exception:
             pass
 
@@ -1378,15 +1466,7 @@ def bridge_disconnected_islands(
                 if norm_p in orig_cam_refs_by_path:
                     orig_loc_xyz, orig_ref_en, orig_acc_xyz = orig_cam_refs_by_path[norm_p]
                     if orig_loc_xyz is not None:
-                        if (
-                            orig_crs_kind == "projected"
-                            and abs(orig_loc_xyz[0]) <= 180.0
-                            and abs(orig_loc_xyz[1]) <= 90.0
-                        ):
-                            conv = transform_wgs84_location_to_crs(orig_loc_xyz, orig_crs_ref, metashape_mod=Metashape)
-                            _set_cam_ref_vec(c_ref, "location", conv if conv is not None else orig_loc_xyz)
-                        else:
-                            _set_cam_ref_vec(c_ref, "location", orig_loc_xyz)
+                        _set_cam_ref_vec(c_ref, "location", orig_loc_xyz)
                     c_ref.enabled = orig_ref_en
                     if orig_acc_xyz is not None:
                         _set_cam_ref_vec(c_ref, "accuracy", orig_acc_xyz)
@@ -1472,7 +1552,13 @@ def bridge_disconnected_islands(
                     )
                     if not c_has_sp:
                         continue
-                    rig = _evaluate_island_rigidity(ch_cand, [c.key for c in cand_al], {c.key: c for c in cand_al})
+                    _, cand_strong_adj = _build_tie_point_graph_and_islands(ch_cand, cut_weak_hinges=False)
+                    rig = _evaluate_island_rigidity(
+                        ch_cand,
+                        [c.key for c in cand_al],
+                        {c.key: c for c in cand_al},
+                        strong_adj=cand_strong_adj,
+                    )
                     if not rig["is_rigid"]:
                         continue
                     if c_cells >= max(2 * main_cells, main_cells + 3) and c_score > 1.25 * main_score:
@@ -1502,6 +1588,11 @@ def bridge_disconnected_islands(
                     orig_markers = list(getattr(orig_chunk, "markers", None) or [])
                     has_no_markers = not list(getattr(ch_main, "markers", None) or [])
                     if orig_markers and has_no_markers and hasattr(ch_main, "addMarker"):
+                        new_cam_by_path: dict[str, Any] = {}
+                        for nc in getattr(ch_main, "cameras", None) or []:
+                            np_path = getattr(getattr(nc, "photo", None), "path", "") or ""
+                            if np_path:
+                                new_cam_by_path[os.path.normcase(os.path.abspath(np_path))] = nc
                         for mk in orig_markers:
                             try:
                                 new_mk = ch_main.addMarker()
@@ -1510,7 +1601,24 @@ def bridge_disconnected_islands(
                                 if hasattr(mk, "reference") and hasattr(new_mk, "reference"):
                                     if getattr(mk.reference, "location", None) is not None:
                                         new_mk.reference.location = mk.reference.location
+                                    if getattr(mk.reference, "accuracy", None) is not None:
+                                        new_mk.reference.accuracy = mk.reference.accuracy
                                     new_mk.reference.enabled = getattr(mk.reference, "enabled", True)
+                                old_projs = getattr(mk, "projections", None)
+                                new_projs = getattr(new_mk, "projections", None)
+                                if old_projs is not None and new_projs is not None and hasattr(old_projs, "keys"):
+                                    for old_cam in old_projs.keys():
+                                        op = getattr(getattr(old_cam, "photo", None), "path", "") or ""
+                                        if not op:
+                                            continue
+                                        mapped_cam = new_cam_by_path.get(os.path.normcase(os.path.abspath(op)))
+                                        if mapped_cam is not None:
+                                            new_projs[mapped_cam] = old_projs[old_cam]
+                            except Exception:
+                                pass
+                        if hasattr(ch_main, "updateTransform"):
+                            try:
+                                ch_main.updateTransform()
                             except Exception:
                                 pass
                     if len(main_al) >= eff_min_cams:
@@ -1518,8 +1626,11 @@ def bridge_disconnected_islands(
                     else:
                         candidate_chunks.pop(b_idx)
 
+        _stage0_spacings: dict[int, float] = {}
+
         def _run_stage0(target_chunk: Any) -> bool:
             spacing = _adaptive_stage0_spacing(target_chunk)
+            _stage0_spacings[getattr(target_chunk, "key", id(target_chunk))] = spacing
             if spacing > 0.041:
                 try:
                     return bool(_build_stage0_cloud(target_chunk, points_spacing=spacing))
@@ -1569,125 +1680,210 @@ def bridge_disconnected_islands(
             doc.chunk = fallback_chunk
             return fallback_chunk, {"triggered": True, "accepted": 0, "rejected": len(candidate_chunks)}
 
-        # 3. Register each candidate independently via CPU Open3D Sim(3) ICP + Quality Gate
-        for isl_id, ch_isl in candidate_chunks:
-            al_cams = [c for c in ch_isl.cameras if c.transform and c.enabled]
-            print(
-                f"  [ICP Bridge] Registering {isl_id} ({len(al_cams)} aligned cameras)...",
-                flush=True,
+        # 3. Register candidates in BFS frontier waves against accepted pool (main + stitched transitive blocks)
+        target_ply_cache: dict[tuple[Any, int, tuple[float, float, float]], str] = {}
+        stage0_built: dict[str, bool] = {}
+        attempted_targets: dict[str, set[Any]] = {isl_id: set() for isl_id, _ch in candidate_chunks}
+        last_failure_reasons: dict[str, list[str]] = {}
+        accepted_pool: list[Any] = [ch_main]
+        main_spacing = _stage0_spacings.get(getattr(ch_main, "key", id(ch_main)), 0.04)
+
+        def _chunk_overlap_with(ch_a: Any, ch_b: Any) -> float | None:
+            b_crs = getattr(ch_a, "crs", None) or getattr(ch_b, "crs", None)
+            m_crs = _is_metric_crs(b_crs)
+            u_m = crs_linear_unit_to_meters(b_crs) if m_crs else 1.0
+            cams_a = [c for c in getattr(ch_a, "cameras", None) or [] if c.transform and c.enabled]
+            cams_b = [c for c in getattr(ch_b, "cameras", None) or [] if c.transform and c.enabled]
+            bounds_a = _compute_main_xy_bounds(cams_a, metric_crs=m_crs, unit_to_m=u_m)
+            bounds_b = _compute_main_xy_bounds(cams_b, metric_crs=m_crs, unit_to_m=u_m)
+            if bounds_a is None or bounds_b is None:
+                return None
+            return _symmetric_bounds_overlap_ratio(
+                cams_a, bounds_a, cams_b, bounds_b, metric_crs=m_crs, overlap_margin_m=35.0, unit_to_m=u_m
             )
-            if not _run_stage0(ch_isl):
-                island_reports.append({"id": isl_id, "passed": False, "reasons": ["stage0_cloud_failed"]})
-                continue
 
-            utm_info = _compute_island_utm_frame(ch_isl, ch_main)
-            if utm_info is None:
-                island_reports.append({"id": isl_id, "passed": False, "reasons": ["no_utm_frame"]})
-                continue
-            utm_crs, shift_xyz, epsg = utm_info
-            shift_vec = Metashape.Vector(list(shift_xyz))
-
-            mis_ply = os.path.join(tmp_icp_dir, f"{isl_id}_target_utm.ply")
-            isl_ply = os.path.join(tmp_icp_dir, f"{isl_id}_source_utm.ply")
-            res_json = os.path.join(tmp_icp_dir, f"{isl_id}_result.json")
-
-            try:
-                ch_main.exportPointCloud(
-                    path=mis_ply,
-                    source_data=Metashape.DataSource.PointCloudData,
-                    format=Metashape.PointCloudFormat.PointCloudFormatPLY,
-                    crs=utm_crs,
-                    shift=shift_vec,
-                    save_point_normal=True,
-                    save_point_color=True,
-                    binary=True,
-                )
-                ch_isl.exportPointCloud(
-                    path=isl_ply,
-                    source_data=Metashape.DataSource.PointCloudData,
-                    format=Metashape.PointCloudFormat.PointCloudFormatPLY,
-                    crs=utm_crs,
-                    shift=shift_vec,
-                    save_point_normal=True,
-                    save_point_color=True,
-                    binary=True,
-                )
-            except Exception as exc:
-                print(f"  [ICP Bridge] PLY export failed for {isl_id}: {exc}", flush=True)
-                island_reports.append({"id": isl_id, "passed": False, "reasons": [f"ply_export:{exc}"]})
-                continue
-
-            try:
-                proc = subprocess.run(
-                    [
-                        bridge_py,
-                        "-s",
-                        _ICP_WORKER_SCRIPT,
-                        "--target",
-                        mis_ply,
-                        "--source",
-                        isl_ply,
-                        "--output",
-                        res_json,
-                        "--colored-refine",
-                    ],
-                    env=_clean_bridge_env(),
-                    timeout=icp_timeout_s,
-                )
-                if proc.returncode != 0 or not os.path.isfile(res_json):
-                    island_reports.append({"id": isl_id, "passed": False, "reasons": [f"worker_rc={proc.returncode}"]})
+        def _pick_target_for(isl_id: str, ch_isl: Any) -> Any | None:
+            tried = attempted_targets.setdefault(isl_id, set())
+            best_target: Any | None = None
+            best_ov = -1.0
+            for pool_ch in accepted_pool:
+                p_key = getattr(pool_ch, "key", id(pool_ch))
+                if p_key in tried:
                     continue
-                with open(res_json, "r", encoding="utf-8") as f:
-                    metrics = json.load(f)
-            except Exception as exc:
-                print(f"  [ICP Bridge] Worker failed for {isl_id}: {exc}", flush=True)
-                island_reports.append({"id": isl_id, "passed": False, "reasons": [f"worker_exc:{exc}"]})
-                continue
-            finally:
-                # Immediately delete per-island temp PLYs to keep disk usage tiny on multi-building projects
-                for p in (mis_ply, isl_ply):
-                    if os.path.isfile(p):
+                ov = _chunk_overlap_with(pool_ch, ch_isl)
+                if ov is None:
+                    if pool_ch is ch_main:
+                        return pool_ch
+                    continue
+                if pool_ch is ch_main and ov >= 0.30:
+                    return pool_ch
+                if ov >= 0.30 and ov > best_ov:
+                    best_ov = ov
+                    best_target = pool_ch
+            return best_target
+
+        pending = list(candidate_chunks)
+        while pending:
+            next_pending: list[tuple[str, Any]] = []
+            accepted_in_pass = 0
+            for isl_id, ch_isl in pending:
+                tgt_ch = _pick_target_for(isl_id, ch_isl)
+                if tgt_ch is None:
+                    next_pending.append((isl_id, ch_isl))
+                    continue
+                attempted_targets[isl_id].add(getattr(tgt_ch, "key", id(tgt_ch)))
+                al_cams = [c for c in ch_isl.cameras if c.transform and c.enabled]
+                print(
+                    f"  [ICP Bridge] Registering {isl_id} ({len(al_cams)} aligned cameras)...",
+                    flush=True,
+                )
+                if isl_id not in stage0_built:
+                    stage0_built[isl_id] = _run_stage0(ch_isl)
+                if not stage0_built[isl_id]:
+                    island_reports.append({"id": isl_id, "passed": False, "reasons": ["stage0_cloud_failed"]})
+                    continue
+
+                utm_info = _compute_island_utm_frame(ch_isl, tgt_ch)
+                if utm_info is None:
+                    island_reports.append({"id": isl_id, "passed": False, "reasons": ["no_utm_frame"]})
+                    continue
+                utm_crs, shift_xyz, epsg = utm_info
+                shift_vec = Metashape.Vector(list(shift_xyz))
+
+                tgt_cache_key = (getattr(tgt_ch, "key", id(tgt_ch)), epsg, shift_xyz)
+                mis_ply = target_ply_cache.get(tgt_cache_key)
+                if mis_ply is None or not os.path.isfile(mis_ply):
+                    tgt_tag = str(getattr(tgt_ch, "key", id(tgt_ch))).replace("-", "_")
+                    mis_ply = os.path.join(tmp_icp_dir, f"target_{tgt_tag}_{epsg}_{len(target_ply_cache)}_utm.ply")
+                    try:
+                        tgt_ch.exportPointCloud(
+                            path=mis_ply,
+                            source_data=Metashape.DataSource.PointCloudData,
+                            format=Metashape.PointCloudFormat.PointCloudFormatPLY,
+                            crs=utm_crs,
+                            shift=shift_vec,
+                            save_point_normal=True,
+                            save_point_color=True,
+                            binary=True,
+                        )
+                        target_ply_cache[tgt_cache_key] = mis_ply
+                    except Exception as exc:
+                        print(f"  [ICP Bridge] Target PLY export failed for {isl_id}: {exc}", flush=True)
+                        island_reports.append({"id": isl_id, "passed": False, "reasons": [f"ply_export:{exc}"]})
+                        continue
+
+                isl_ply = os.path.join(tmp_icp_dir, f"{isl_id}_source_utm.ply")
+                res_json = os.path.join(tmp_icp_dir, f"{isl_id}_result.json")
+
+                try:
+                    ch_isl.exportPointCloud(
+                        path=isl_ply,
+                        source_data=Metashape.DataSource.PointCloudData,
+                        format=Metashape.PointCloudFormat.PointCloudFormatPLY,
+                        crs=utm_crs,
+                        shift=shift_vec,
+                        save_point_normal=True,
+                        save_point_color=True,
+                        binary=True,
+                    )
+                except Exception as exc:
+                    print(f"  [ICP Bridge] PLY export failed for {isl_id}: {exc}", flush=True)
+                    island_reports.append({"id": isl_id, "passed": False, "reasons": [f"ply_export:{exc}"]})
+                    continue
+
+                try:
+                    proc = subprocess.run(
+                        [
+                            bridge_py,
+                            "-s",
+                            _ICP_WORKER_SCRIPT,
+                            "--target",
+                            mis_ply,
+                            "--source",
+                            isl_ply,
+                            "--output",
+                            res_json,
+                            "--colored-refine",
+                        ],
+                        env=_clean_bridge_env(),
+                        timeout=icp_timeout_s,
+                    )
+                    if proc.returncode != 0 or not os.path.isfile(res_json):
+                        last_failure_reasons[isl_id] = [f"worker_rc_{proc.returncode}"]
+                        next_pending.append((isl_id, ch_isl))
+                        continue
+                    with open(res_json, "r", encoding="utf-8") as f:
+                        metrics = json.load(f)
+                except Exception as exc:
+                    print(f"  [ICP Bridge] Worker failed for {isl_id}: {exc}", flush=True)
+                    last_failure_reasons[isl_id] = [f"worker_error:{exc}"]
+                    next_pending.append((isl_id, ch_isl))
+                    continue
+                finally:
+                    if os.path.isfile(isl_ply):
                         try:
-                            os.remove(p)
+                            os.remove(isl_ply)
                         except OSError:
                             pass
 
-            max_k4 = _max_chunk_abs_k4(ch_isl)
-            passed, reasons = evaluate_icp_quality_gate(metrics, max_abs_k4=max_k4, require_transform=True)
-            if not passed:
-                print(
-                    f"  [ICP Quality Gate] REJECTED & QUARANTINED {isl_id}: {', '.join(reasons)}",
-                    flush=True,
+                max_k4 = _max_chunk_abs_k4(ch_isl)
+                passed, reasons = evaluate_icp_quality_gate(
+                    metrics,
+                    max_abs_k4=max_k4,
+                    require_transform=True,
+                    stage0_spacing_m=main_spacing,
                 )
-                island_reports.append({"id": isl_id, "passed": False, "reasons": reasons, "metrics": metrics})
-                continue
+                if not passed:
+                    print(
+                        f"  [ICP Quality Gate] Deferred/Rejected {isl_id} vs target: {', '.join(reasons)}",
+                        flush=True,
+                    )
+                    last_failure_reasons[isl_id] = list(reasons) if reasons else ["quality_gate_failed"]
+                    next_pending.append((isl_id, ch_isl))
+                    continue
 
-            isl_probe_span = _compute_island_probe_span(ch_isl)
-            t_ecef_list, fit_mm = convert_utm_transform_to_ecef(
-                metrics["T_enu"], utm_crs, shift_xyz, probe_span_m=isl_probe_span
-            )
-            if not math.isfinite(fit_mm) or fit_mm > 50.0:
+                isl_probe_span = _compute_island_probe_span(ch_isl)
+                t_ecef_list, fit_mm = convert_utm_transform_to_ecef(
+                    metrics["T_enu"], utm_crs, shift_xyz, probe_span_m=isl_probe_span
+                )
+                if not math.isfinite(fit_mm) or fit_mm > 50.0:
+                    print(
+                        f"  [ICP Quality Gate] REJECTED {isl_id}: UTM->ECEF fit error {fit_mm:.2f}mm > 50.0mm.",
+                        flush=True,
+                    )
+                    last_failure_reasons[isl_id] = [f"utm_ecef_fit:{fit_mm:.2f}mm"]
+                    next_pending.append((isl_id, ch_isl))
+                    continue
                 print(
-                    f"  [ICP Quality Gate] REJECTED {isl_id}: UTM->ECEF fit error {fit_mm:.2f}mm > 50.0mm.",
+                    f"  [ICP Quality Gate] PASSED {isl_id} (EPSG::{epsg}, UTM->ECEF={fit_mm:.3f}mm): "
+                    f"fit(<15cm)={metrics['fitness_15cm'] * 100:.1f}%, "
+                    f"MedErr={metrics['median_15cm_m'] * 100:.2f}cm, "
+                    f"scale={metrics['scale']:.5f}, tilt={metrics.get('tilt_deg', 0.0):.2f}deg.",
                     flush=True,
                 )
-                island_reports.append(
-                    {"id": isl_id, "passed": False, "reasons": [f"utm_to_ecef_fit_mm={fit_mm:.2f}"], "metrics": metrics}
-                )
-                continue
-            print(
-                f"  [ICP Quality Gate] PASSED {isl_id} (EPSG::{epsg}, UTM->ECEF={fit_mm:.3f}mm): "
-                f"fit(<15cm)={metrics['fitness_15cm'] * 100:.1f}%, "
-                f"MedErr={metrics['median_15cm_m'] * 100:.2f}cm, "
-                f"scale={metrics['scale']:.5f}, tilt={metrics.get('tilt_deg', 0.0):.2f}deg.",
-                flush=True,
-            )
-            ch_isl.transform.matrix = Metashape.Matrix(t_ecef_list) * ch_isl.transform.matrix
-            accepted_chunks.append(ch_isl)
-            for cam in ch_isl.cameras:
-                if getattr(cam, "photo", None) and cam.photo.path:
-                    bridged_cam_paths.add(os.path.normcase(os.path.abspath(cam.photo.path)))
-            island_reports.append({"id": isl_id, "passed": True, "fit_mm": fit_mm, "metrics": metrics})
+                ch_isl.transform.matrix = Metashape.Matrix(t_ecef_list) * ch_isl.transform.matrix
+                accepted_chunks.append(ch_isl)
+                accepted_pool.append(ch_isl)
+                accepted_in_pass += 1
+                for cam in ch_isl.cameras:
+                    if getattr(cam, "photo", None) and cam.photo.path:
+                        bridged_cam_paths.add(os.path.normcase(os.path.abspath(cam.photo.path)))
+                island_reports.append({"id": isl_id, "passed": True, "fit_mm": fit_mm, "metrics": metrics})
+
+            if not next_pending:
+                break
+            if accepted_in_pass == 0:
+                for rem_id, _rem_ch in next_pending:
+                    if not any(rep.get("id") == rem_id for rep in island_reports):
+                        island_reports.append(
+                            {
+                                "id": rem_id,
+                                "passed": False,
+                                "reasons": last_failure_reasons.get(rem_id, ["no_passing_icp_target"]),
+                            }
+                        )
+                break
+            pending = next_pending
 
         # 4. Merge accepted & distant chunks with ch_main (or keep clean ch_main alone) and clean up temp chunks
         merge_sources = accepted_chunks + distant_chunks
